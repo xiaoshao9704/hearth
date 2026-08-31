@@ -3,6 +3,7 @@
 // 设置改为全屏浮层（不断开通话），偏好改动经 prefsBus 热应用。
 import {
   ConnectionState,
+  DisconnectReason,
   Participant,
   RemoteParticipant,
   RemoteTrack,
@@ -11,7 +12,7 @@ import {
   Track,
 } from 'livekit-client';
 import type { AudioCaptureOptions, ScreenShareCaptureOptions, TrackPublishOptions } from 'livekit-client';
-import { LIVEKIT_URL_FALLBACK, fetchLiveKitToken, getUser, listChannels } from '../api';
+import { LIVEKIT_URL_FALLBACK, clearSession, fetchLiveKitToken, getUser, listChannels } from '../api';
 import { connectChat } from '../chat';
 import type { ChatMessage } from '../chat';
 import { RnnoisePipeline } from '../audio';
@@ -109,7 +110,6 @@ export async function renderRoom(root: HTMLElement, channel: string) {
 
   // ---- LiveKit ----
   const room = new Room();
-  let roomDisconnected = false;
   let leaving = false;
   const tiles = new Map<string, HTMLDivElement>(); // `${identity}:${source}` -> 视频卡片
   const audioTiles = new Map<string, HTMLDivElement>(); // identity -> 无视频参与者的音频块
@@ -476,11 +476,138 @@ export async function renderRoom(root: HTMLElement, channel: string) {
       refreshMembers();
       refreshMeta();
     })
-    .on(RoomEvent.Disconnected, () => {
-      roomDisconnected = true;
-      statusEl.textContent = '连接已断开';
-      shell.setConn(false, '连接已断开');
+    .on(RoomEvent.Reconnecting, () => {
+      statusEl.textContent = '连接不稳定，正在恢复…';
+      shell.setConn(false, '正在恢复连接…');
+    })
+    .on(RoomEvent.Reconnected, () => {
+      statusEl.textContent = '';
+      shell.setConn(true, connMeta);
+      syncAudioTiles();
+      refreshMembers();
+      refreshMeta();
+    })
+    .on(RoomEvent.Disconnected, (reason) => {
+      if (leaving) return;
+      clearAllTiles();
+      // 被移出类的断开是终态，不重连
+      if (reason === DisconnectReason.PARTICIPANT_REMOVED || reason === DisconnectReason.ROOM_DELETED) {
+        bounce(reason === DisconnectReason.ROOM_DELETED ? '频道已删除' : '你已被移出该频道');
+        return;
+      }
+      if (reason === DisconnectReason.DUPLICATE_IDENTITY) {
+        bounce('该设备在其他页面进入了房间');
+        return;
+      }
+      scheduleRejoin(0);
     });
+
+  // ---- 断线自动重连：SDK 自身恢复失败（Disconnected）后拿新 token 重新入会 ----
+  let connMeta = '';
+  let rejoinTimer = 0;
+  let rejoinAttempts = 0;
+  let rejoinInFlight = false;
+  let bounced = false;
+
+  function bounce(msg: string) {
+    if (bounced) return;
+    bounced = true;
+    statusEl.textContent = msg;
+    toast(msg, 'bad');
+    setTimeout(() => {
+      location.hash = '#/lobby';
+    }, 1500);
+  }
+
+  // Disconnected 后 SDK 已解绑全部 track，把可能残留的卡片清干净
+  function clearAllTiles() {
+    speakingSet.clear();
+    tiles.forEach((tile) => tile.remove());
+    tiles.clear();
+    audioTiles.forEach((tile) => tile.remove());
+    audioTiles.clear();
+    audioEls.forEach((set) => set.forEach((el) => el.remove()));
+    audioEls.clear();
+    pinnedKey = null;
+    refreshMembers();
+    refreshMeta();
+  }
+
+  function scheduleRejoin(delay?: number) {
+    if (leaving || bounced) return;
+    clearTimeout(rejoinTimer);
+    const wait = delay ?? Math.min(30000, 2000 * 2 ** Math.min(rejoinAttempts, 4)) * (0.7 + Math.random() * 0.6);
+    statusEl.textContent = rejoinAttempts === 0 ? '连接断开，正在重连…' : `连接断开，正在重连…（第 ${rejoinAttempts + 1} 次）`;
+    shell.setConn(false, '正在重连…');
+    rejoinTimer = window.setTimeout(() => void rejoin(), wait);
+  }
+
+  async function rejoin() {
+    if (leaving || bounced || rejoinInFlight || room.state === ConnectionState.Connected) return;
+    rejoinInFlight = true;
+    rejoinAttempts++;
+    try {
+      const cred = await fetchLiveKitToken(channel);
+      await room.connect(cred.url || LIVEKIT_URL_FALLBACK, cred.token);
+      rejoinAttempts = 0;
+      statusEl.textContent = '';
+      shell.setConn(true, connMeta);
+      toast('已重新连接', 'ok', 1800);
+      // 恢复发布状态：麦克风/摄像头按断线前的开关重开；投屏需要用户手势，不自动恢复
+      if (micOn) {
+        try {
+          await enableMic();
+        } catch {
+          micOn = false;
+        }
+      }
+      if (cameraOn) {
+        try {
+          const p = loadPrefs();
+          await room.localParticipant.setCameraEnabled(true, p.camDeviceId ? { deviceId: { ideal: p.camDeviceId } } : undefined);
+        } catch {
+          cameraOn = false;
+        }
+      }
+      if (screenOn) {
+        screenOn = false;
+        toast('重连后投屏需要重新发起', '', 4000);
+      }
+      refreshButtons();
+      syncAudioTiles();
+      refreshMembers();
+      refreshMeta();
+    } catch (err) {
+      const msg = (err as Error).message ?? '';
+      // 令牌被拒是终态：封禁/白名单/会话失效不该无限重试
+      if (msg.includes('封禁') || msg.includes('邀请制')) {
+        bounce(msg);
+      } else if (msg.includes('登录已失效') || msg.includes('登录凭证')) {
+        bounced = true;
+        clearSession(); // 带着失效 token 去登录页会被路由守卫弹回，先清掉
+        location.hash = '#/login';
+      } else {
+        scheduleRejoin();
+      }
+    } finally {
+      rejoinInFlight = false;
+    }
+  }
+
+  // 回前台 / 网络恢复：跳过退避立即重连（iOS 切后台回来最常见）
+  const retryNow = () => {
+    if (leaving || bounced) return;
+    if (room.state === ConnectionState.Disconnected) {
+      clearTimeout(rejoinTimer);
+      rejoinAttempts = 0;
+      void rejoin();
+    }
+  };
+  const onVisible = () => {
+    if (document.visibilityState === 'visible') retryNow();
+  };
+  document.addEventListener('visibilitychange', onVisible);
+  window.addEventListener('online', retryNow);
 
   // ---- 麦克风采集与发布 ----
   const rnnoisePipe = new RnnoisePipeline();
@@ -768,17 +895,13 @@ export async function renderRoom(root: HTMLElement, channel: string) {
       badgeEl.classList.add('hidden');
     },
     onMessage: appendMsg,
-    onClose: () => {
+    onKicked: (code) => {
       if (leaving) return;
-      if (roomDisconnected) {
-        statusEl.textContent = '你已被移出该频道';
-        toast('你已被移出该频道', 'bad');
-        setTimeout(() => {
-          location.hash = '#/lobby';
-        }, 1500);
-      } else {
-        statusEl.textContent = '聊天连接已断开';
-      }
+      bounce(code === 1001 ? '频道已删除' : '你已被移出该频道');
+    },
+    onState: (state) => {
+      // 聊天断连自己会重连；只在输入框上给个轻提示
+      chatInput.placeholder = state === 'open' ? `发消息到 #${channel}` : '聊天重连中…';
     },
   });
 
@@ -829,7 +952,8 @@ export async function renderRoom(root: HTMLElement, channel: string) {
     statusEl.textContent = '正在加入房间…';
     await room.connect(cred.url || LIVEKIT_URL_FALLBACK, cred.token);
     statusEl.textContent = room.state === ConnectionState.Connected ? '' : '连接中…';
-    shell.setConn(true, `LiveKit · ${new URL(cred.url || LIVEKIT_URL_FALLBACK).host}`);
+    connMeta = `LiveKit · ${new URL(cred.url || LIVEKIT_URL_FALLBACK).host}`;
+    shell.setConn(true, connMeta);
     syncAudioTiles();
     refreshMembers();
     refreshMeta();
@@ -855,8 +979,19 @@ export async function renderRoom(root: HTMLElement, channel: string) {
     }
     refreshButtons();
   } catch (err) {
-    statusEl.textContent = `连接失败：${(err as Error).message}`;
+    const msg = (err as Error).message ?? '';
+    statusEl.textContent = `连接失败：${msg}`;
     shell.setConn(false, '连接失败');
+    // 权限类失败是终态；其余（服务暂不可达等）走自动重连
+    if (msg.includes('封禁') || msg.includes('邀请制')) {
+      bounce(msg);
+    } else if (msg.includes('登录已失效') || msg.includes('登录凭证')) {
+      bounced = true;
+      clearSession();
+      location.hash = '#/login';
+    } else {
+      scheduleRejoin();
+    }
   }
 
   const myHash = location.hash;
@@ -865,7 +1000,10 @@ export async function renderRoom(root: HTMLElement, channel: string) {
       window.removeEventListener('hashchange', onHashChange);
       prefsBus.removeEventListener('prefs', onPrefs);
       navigator.mediaDevices?.removeEventListener?.('devicechange', onDeviceChange);
+      document.removeEventListener('visibilitychange', onVisible);
+      window.removeEventListener('online', retryNow);
       leaving = true;
+      clearTimeout(rejoinTimer);
       chat.close();
       void rnnoisePipe.stop();
       room.disconnect();
