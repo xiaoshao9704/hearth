@@ -208,9 +208,9 @@ func (a *API) adminOverview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	online := 0
-	livekitOK := false
+	rtcOK := false
 	if counts, err := a.roomCounts(r.Context()); err == nil {
-		livekitOK = true
+		rtcOK = true
 		for _, n := range counts {
 			online += n
 		}
@@ -223,9 +223,11 @@ func (a *API) adminOverview(w http.ResponseWriter, r *http.Request) {
 		"go_version":     runtime.Version(),
 		"policy":         a.regPolicy(r),
 		"services": map[string]any{
-			"livekit": map[string]any{"ok": livekitOK, "url": a.dynVal(r.Context(), "livekit_api_url")},
-			"ingress": map[string]any{"ok": a.dynVal(r.Context(), "ingress_upstream_url") != "", "url": a.dynVal(r.Context(), "ingress_upstream_url")},
-			"db":      map[string]any{"ok": true, "url": dbLabel(a.cfg.DatabaseDSN())},
+			"rtc": map[string]any{"name": a.rtcProvider(r.Context()).Name(), "ok": rtcOK,
+				"url": a.rtcProvider(r.Context()).SignalProxyUpstream(r.Context())},
+			"ingest": map[string]any{"name": a.ingestProvider(r.Context()).Name(), "ok": a.ingestProvider(r.Context()).Enabled(r.Context()),
+				"url": a.ingestProvider(r.Context()).ProxyUpstream(r.Context())},
+			"db": map[string]any{"ok": true, "url": dbLabel(a.cfg.DatabaseDSN())},
 		},
 		"resources": hostResources(),
 	})
@@ -455,10 +457,9 @@ func (a *API) adminSetPolicy(w http.ResponseWriter, r *http.Request) {
 
 func (a *API) channelParticipants(w http.ResponseWriter, r *http.Request) {
 	c := channelFrom(r)
-	_, rooms := a.lkClients(r.Context())
-	ps, err := rooms.ListParticipants(r.Context(), c.Name)
+	ps, err := a.rtcProvider(r.Context()).ListParticipants(r.Context(), c.Name)
 	if err != nil {
-		// LiveKit 房间不存在（没人）时按空列表处理
+		// 内核侧房间不存在（没人）时按空列表处理
 		writeJSON(w, http.StatusOK, map[string]any{"participants": []any{}})
 		return
 	}

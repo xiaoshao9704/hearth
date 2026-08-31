@@ -126,12 +126,17 @@ async function paintStatus(body: HTMLElement) {
   ];
   const services = [
     { name: 'hearth-server', meta: `Go 单体 · ${esc(ov.go_version)} · 已运行 ${fmtUptime(ov.uptime_seconds)}`, ok: true, state: 'running' },
-    { name: 'LiveKit', meta: esc(ov.services.livekit?.url ?? ''), ok: ov.services.livekit?.ok ?? false, state: ov.services.livekit?.ok ? 'running' : 'unreachable' },
     {
-      name: 'Ingress（OBS 推流）',
-      meta: ov.services.ingress?.ok ? esc(ov.services.ingress.url) : '未配置 INGRESS_UPSTREAM_URL',
-      ok: ov.services.ingress?.ok ?? false,
-      state: ov.services.ingress?.ok ? 'running' : 'off',
+      name: `房间内核 · ${esc(ov.services.rtc?.name ?? '?')}`,
+      meta: esc(ov.services.rtc?.url ?? ''),
+      ok: ov.services.rtc?.ok ?? false,
+      state: ov.services.rtc?.ok ? 'running' : 'unreachable',
+    },
+    {
+      name: `推流入口 · ${esc(ov.services.ingest?.name ?? '?')}`,
+      meta: ov.services.ingest?.ok ? esc(ov.services.ingest.url) : '未启用（服务参数里配置上游地址）',
+      ok: ov.services.ingest?.ok ?? false,
+      state: ov.services.ingest?.ok ? 'running' : 'off',
     },
     { name: '数据库', meta: esc(ov.services.db?.url ?? ''), ok: true, state: 'ok' },
   ];
@@ -242,8 +247,17 @@ async function paintConfig(body: HTMLElement) {
     ];
     body.innerHTML = `
       <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:16px">
-        ${groupCard('livekit', 'LiveKit', '信令与令牌签发')}
-        ${groupCard('ingress', 'Ingress（OBS 推流）', 'WHIP 上游与公开地址')}
+        ${[...new Set(items.map((it) => it.group))]
+          .map((g) => {
+            const meta: Record<string, [string, string]> = {
+              core: ['内核选择', '换实现只改这里，各实现的配置互不干扰'],
+              livekit: ['LiveKit', '信令与令牌签发'],
+              ingress: ['推流入口（OBS）', 'WHIP 上游与公开地址'],
+            };
+            const [title, sub] = meta[g] ?? [g, ''];
+            return groupCard(g, title, sub);
+          })
+          .join('')}
         <div class="card">
           <div style="font-size:13px;font-weight:600;margin-bottom:5px">注册策略</div>
           <div style="font-size:11.5px;color:var(--text-2);margin-bottom:13px">决定新账号怎么来，改动立即生效</div>

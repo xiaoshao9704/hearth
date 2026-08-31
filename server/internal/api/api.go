@@ -1,4 +1,4 @@
-// REST API：注册/登录/频道/LiveKit 令牌/频道管理。路由用 chi，鉴权用 Bearer token。
+// REST API：注册/登录/频道/进房令牌/频道管理。路由用 chi，鉴权用 Bearer token。
 package api
 
 import (
@@ -13,9 +13,8 @@ import (
 
 	"hearth/server/internal/chat"
 	"hearth/server/internal/config"
-	"hearth/server/internal/lkingress"
-	"hearth/server/internal/lkroom"
-	"hearth/server/internal/lktoken"
+	"hearth/server/internal/rtc"
+	"hearth/server/internal/rtc/livekitrtc"
 	"hearth/server/internal/store"
 
 	"crypto/rand"
@@ -31,20 +30,25 @@ type API struct {
 	cfg config.Config
 	hub *chat.Hub
 
-	// LiveKit 客户端按生效配置（环境变量 / 后台设置）动态构建，见 dyncfg.go
-	lkMu                            sync.Mutex
-	ing                             *lkingress.Client
-	rooms                           *lkroom.Client
-	lkCurURL, lkCurKey, lkCurSecret string
+	// 内核注册表：接入层只依赖 rtc 接口，具体实现按选择器配置取（见 dyncfg.go）
+	rtcKernels    map[string]rtc.Provider
+	ingestKernels map[string]rtc.IngestProvider
+	kernelKeys    []rtc.ConfigKey // 各实现自带的配置键汇总
 
-	// LiveKit 在房人数缓存（大厅频道列表用，避免每次列表都打 LiveKit）
+	// 在房人数缓存（大厅频道列表用，避免每次列表都打内核）
 	countsMu sync.Mutex
 	counts   map[string]int
 	countsAt time.Time
 }
 
 func New(st *store.Store, cfg config.Config, hub *chat.Hub) *API {
-	return &API{st: st, cfg: cfg, hub: hub}
+	a := &API{st: st, cfg: cfg, hub: hub}
+	// 注册内核实现：LiveKit 同时提供房间内核与推流入口
+	lk := livekitrtc.New(a.dynVal)
+	a.rtcKernels = map[string]rtc.Provider{"livekit": lk}
+	a.ingestKernels = map[string]rtc.IngestProvider{"livekit": lk}
+	a.kernelKeys = livekitrtc.ConfigKeys()
+	return a
 }
 
 // Router 构建 chi 路由：CORS 全局挂载，认证/房主校验为分组中间件。
@@ -63,7 +67,7 @@ func (a *API) Router() *chi.Mux {
 		r.Get("/api/me", a.me)
 		r.Get("/api/channels", a.listChannels)
 		r.Post("/api/channels", a.createChannel)
-		r.Post("/api/token", a.livekitToken)
+		r.Post("/api/token", a.joinToken)
 		r.Post("/api/ingress", a.getIngress)
 		r.Post("/api/ingress/reset", a.resetIngress)
 
@@ -115,8 +119,7 @@ func (a *API) roomCounts(ctx context.Context) (map[string]int, error) {
 	if a.counts != nil && time.Since(a.countsAt) < 3*time.Second {
 		return a.counts, nil
 	}
-	_, rooms := a.lkClients(ctx)
-	counts, err := rooms.RoomCounts(ctx)
+	counts, err := a.rtcProvider(ctx).RoomCounts(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -294,9 +297,9 @@ func (a *API) createChannel(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, c)
 }
 
-// ---- LiveKit 令牌 ----
+// ---- 进房令牌 ----
 
-func (a *API) livekitToken(w http.ResponseWriter, r *http.Request) {
+func (a *API) joinToken(w http.ResponseWriter, r *http.Request) {
 	u := userFrom(r)
 	var req struct {
 		Channel  string `json:"channel"`
@@ -335,20 +338,21 @@ func (a *API) livekitToken(w http.ResponseWriter, r *http.Request) {
 	} else {
 		tag += "-" + randHex(2)
 	}
-	// 频道名即 LiveKit room 名，一一映射
-	tok, err := lktoken.Sign(a.dynVal(r.Context(), "livekit_api_key"), a.dynVal(r.Context(), "livekit_api_secret"), c.Name, u.Username, tag)
+	// 频道名即内核房间名，一一映射
+	creds, err := a.rtcProvider(r.Context()).JoinCredentials(r.Context(), c.Name, u.Username, tag)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "签发令牌失败")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"token": tok, "url": a.livekitURL(r)})
+	url := creds.URL
+	if url == "" {
+		url = a.signalURL(r) // 内核未声明浏览器地址时走同源信令代理
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"token": creds.Token, "url": url})
 }
 
-// livekitURL 返回给前端的 LiveKit WSS 地址：未配置时按请求推导同源 /lk 代理地址。
-func (a *API) livekitURL(r *http.Request) string {
-	if v := a.dynVal(r.Context(), "livekit_url"); v != "" {
-		return v
-	}
+// signalURL 按请求推导同源信令代理地址（/lk 路由）。
+func (a *API) signalURL(r *http.Request) string {
 	scheme := "ws"
 	if requestScheme(r) == "https" {
 		scheme = "wss"
@@ -416,7 +420,7 @@ type ingressResp struct {
 }
 
 func (a *API) ingressURL(r *http.Request, streamKey string) string {
-	base := a.dynVal(r.Context(), "ingress_public_url")
+	base := a.ingestProvider(r.Context()).PublicBase(r.Context())
 	if base == "" {
 		// 未配置时按请求推导同源 /w/ 代理地址
 		base = requestScheme(r) + "://" + r.Host + "/w/"
@@ -447,8 +451,8 @@ func (a *API) resolveIngressChannel(w http.ResponseWriter, r *http.Request) *sto
 // getIngress 返回当前用户在该频道的推流地址；没有则调 LiveKit 创建并落库。
 func (a *API) getIngress(w http.ResponseWriter, r *http.Request) {
 	u := userFrom(r)
-	if a.dynVal(r.Context(), "ingress_upstream_url") == "" {
-		writeErr(w, http.StatusServiceUnavailable, "Ingress 未启用（未配置 WHIP 上游地址）")
+	if !a.ingestProvider(r.Context()).Enabled(r.Context()) {
+		writeErr(w, http.StatusServiceUnavailable, "推流入口未启用（未配置上游地址）")
 		return
 	}
 	c := a.resolveIngressChannel(w, r)
@@ -469,17 +473,16 @@ func (a *API) getIngress(w http.ResponseWriter, r *http.Request) {
 // resetIngress 删除旧 ingress（LiveKit 侧 + 库记录）后重建，旧地址随之失效。
 func (a *API) resetIngress(w http.ResponseWriter, r *http.Request) {
 	u := userFrom(r)
-	if a.dynVal(r.Context(), "ingress_upstream_url") == "" {
-		writeErr(w, http.StatusServiceUnavailable, "Ingress 未启用（未配置 WHIP 上游地址）")
+	if !a.ingestProvider(r.Context()).Enabled(r.Context()) {
+		writeErr(w, http.StatusServiceUnavailable, "推流入口未启用（未配置上游地址）")
 		return
 	}
 	c := a.resolveIngressChannel(w, r)
 	if c == nil {
 		return
 	}
-	ing, _ := a.lkClients(r.Context())
 	if rec, err := a.st.IngressByUserChannel(r.Context(), u.ID, c.ID); err == nil {
-		if derr := ing.Delete(r.Context(), rec.IngressID); derr != nil {
+		if derr := a.ingestProvider(r.Context()).DeleteEndpoint(r.Context(), rec.IngressID); derr != nil {
 			// LiveKit 侧删不掉不阻塞重建（记录可能已是残缺的）
 			log.Printf("删除旧 ingress %s 失败: %v", rec.IngressID, derr)
 		}
@@ -493,10 +496,9 @@ func (a *API) resetIngress(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, ingressResp{URL: a.ingressURL(r, rec.StreamKey), StreamKey: rec.StreamKey})
 }
 
-// createIngress 调 LiveKit 创建 ingress 并落库。
+// createIngress 调推流入口内核创建端点并落库。
 func (a *API) createIngress(r *http.Request, u *store.User, c *store.Channel) (*store.Ingress, error) {
-	ing, _ := a.lkClients(r.Context())
-	ingressID, streamKey, err := ing.Create(r.Context(), c.Name, u.Username)
+	ingressID, streamKey, err := a.ingestProvider(r.Context()).CreateEndpoint(r.Context(), c.Name, u.Username)
 	if err != nil {
 		log.Printf("创建 ingress 失败: %v", err)
 		return nil, err
@@ -528,10 +530,9 @@ func (a *API) resolveTargetUser(w http.ResponseWriter, r *http.Request, u *store
 
 // evict 把用户从频道现场移除：LiveKit 侧踢全部设备 + 断开聊天 WS。
 func (a *API) evict(r *http.Request, c *store.Channel, t *store.User) (int, error) {
-	_, rooms := a.lkClients(r.Context())
-	n, err := rooms.RemoveParticipantsOf(r.Context(), c.Name, t.Username)
+	n, err := a.rtcProvider(r.Context()).RemoveParticipantsOf(r.Context(), c.Name, t.Username)
 	if err != nil {
-		log.Printf("LiveKit 踢出 %s 失败: %v", t.Username, err)
+		log.Printf("内核踢出 %s 失败: %v", t.Username, err)
 	}
 	a.hub.CloseUserChannel(t.ID, c.ID)
 	return n, err

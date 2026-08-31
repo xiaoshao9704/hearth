@@ -259,7 +259,7 @@ export interface AdminOverview {
   uptime_seconds: number;
   go_version: string;
   policy: string;
-  services: Record<string, { ok: boolean; url: string }>;
+  services: Record<string, { name?: string; ok: boolean; url: string }>;
   resources: {
     load: number | null;
     cpus: number;
