@@ -17,19 +17,18 @@ WORKDIR /build
 COPY server/go.mod server/go.sum ./
 RUN go mod download
 COPY server/ ./
-RUN CGO_ENABLED=0 go build -o /hearth ./cmd/server
+RUN CGO_ENABLED=0 go build -o /hearth ./cmd/server \
+  && mkdir -p /data # distroless 无 shell，/data 在构建阶段备好
 
-# ---- 运行时 ----
-FROM alpine:3.21
-RUN apk add --no-cache ca-certificates \
-  && adduser -D -u 10001 hearth \
-  && mkdir -p /data && chown hearth:hearth /data
+# ---- 运行时（distroless/static：仅二进制 + CA 证书 + nonroot 用户，无 shell）----
+FROM gcr.io/distroless/static-debian12:nonroot
 COPY --from=server /hearth /app/hearth
 COPY --from=web /build/dist /app/web
+COPY --from=server --chown=65532:65532 /data /data
 ENV ADDR=:8080 \
     DB_PATH=/data/hearth.db \
     STATIC_DIR=/app/web
 VOLUME /data
-USER hearth
+USER 65532
 EXPOSE 8080
 ENTRYPOINT ["/app/hearth"]

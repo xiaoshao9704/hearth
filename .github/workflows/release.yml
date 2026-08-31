@@ -1,0 +1,112 @@
+# 发布流水线：打 tag（v*）或手动触发
+# - artifacts 作业：交叉编译 linux/amd64 + linux/arm64 静态二进制，与前端 dist 打成 tar.gz；
+#   tag 触发时作为 GitHub Release 资产发布，手动触发时作为 workflow artifacts 保留
+# - image 作业：多架构 OCI 镜像推送 ghcr.io（运行时基于 distroless/static，见根 Dockerfile）
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write # 创建 Release
+  packages: write # 推送 ghcr.io
+
+env:
+  VERSION: ${{ github.ref_type == 'tag' && github.ref_name || format('sha-{0}', github.sha) }}
+
+jobs:
+  artifacts:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - { goos: linux, goarch: amd64 }
+          - { goos: linux, goarch: arm64 }
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: 构建前端（同源部署，API 走相对路径）
+        working-directory: web
+        env:
+          VITE_SERVER_URL: ""
+          VITE_LIVEKIT_URL: ""
+        run: |
+          npm ci
+          npm run build
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: server/go.mod
+          cache-dependency-path: server/go.sum
+
+      - name: 交叉编译静态二进制
+        working-directory: server
+        env:
+          CGO_ENABLED: 0
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/out"
+          go build -ldflags "-s -w" -o "$GITHUB_WORKSPACE/out/hearth" ./cmd/server
+
+      - name: 打包产物
+        run: |
+          pkg="hearth_${VERSION}_${{ matrix.goos }}_${{ matrix.goarch }}"
+          mkdir -p "$pkg"
+          cp out/hearth "$pkg/hearth"
+          cp -r web/dist "$pkg/web"
+          tar -czf "$pkg.tar.gz" "$pkg"
+          echo "PKG=$pkg.tar.gz" >> "$GITHUB_ENV"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.PKG }}
+          path: ${{ env.PKG }}
+          retention-days: 14
+
+      - name: 发布 Release 资产
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ env.PKG }}
+
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/metadata-action@v5
+        id: meta
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable=${{ github.ref_type == 'tag' }}
+            type=raw,value=edge,enable=${{ github.ref_type != 'tag' }}
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

@@ -1,0 +1,10 @@
+# Docker 构建上下文只需要 server/ 源码与 web/ 源码
+.git
+.github
+.claude
+deploy
+docs
+web/node_modules
+web/dist
+server/.env
+**/.env
