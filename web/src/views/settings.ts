@@ -70,7 +70,15 @@ function renderFrame(root: HTMLDivElement, pane: Pane, backLabel: string) {
           </button>`,
         ).join('')}
       </div>
-      <div class="nav-foot">
+      <div class="nav-foot" style="display:flex;flex-direction:column;gap:8px">
+        ${
+          getUser()?.is_admin
+            ? `<button class="hit back-row" id="settings-admin" style="width:100%;border-color:var(--ember-line);background:var(--ember-weak)">
+                 ${icon('shield', 15, 'var(--ember)', 1.6)}
+                 <span class="back-label" style="flex-grow:1;text-align:left;color:var(--ember)">管理后台</span>
+               </button>`
+            : ''
+        }
         <button class="hit back-row" id="settings-back" style="width:100%">
           ${icon('back', 15, 'var(--text-1)')}
           <span class="back-label" style="flex-grow:1;text-align:left">${esc(backLabel)}</span>
@@ -97,6 +105,10 @@ function renderFrame(root: HTMLDivElement, pane: Pane, backLabel: string) {
   });
   root.querySelector('#settings-back')!.addEventListener('click', closeSettings);
   root.querySelector('#settings-close')!.addEventListener('click', closeSettings);
+  root.querySelector('#settings-admin')?.addEventListener('click', () => {
+    closeSettings();
+    location.hash = '#/admin';
+  });
 
   const body = root.querySelector<HTMLDivElement>('#pane-body')!;
   switch (pane) {

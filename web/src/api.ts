@@ -329,6 +329,27 @@ export function adminGetPolicy(): Promise<{ policy: string }> {
   return req('/api/admin/policy');
 }
 
+export interface ConfigItem {
+  name: string;
+  env: string;
+  label: string;
+  hint: string;
+  secret: boolean;
+  group: string;
+  value: string;
+  set: boolean;
+  locked: boolean;
+}
+
+export async function adminGetConfig(): Promise<ConfigItem[]> {
+  const data = await req<{ items: ConfigItem[] | null }>('/api/admin/config');
+  return data.items ?? [];
+}
+
+export function adminSetConfig(values: Record<string, string>): Promise<void> {
+  return req('/api/admin/config', { method: 'POST', body: { values } });
+}
+
 export function adminSetPolicy(policy: string): Promise<{ policy: string }> {
   return req('/api/admin/policy', { method: 'POST', body: { policy } });
 }

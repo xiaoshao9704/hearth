@@ -64,7 +64,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
               <button class="hit ctl-square" id="btn-deaf" title="全体静音（只影响自己）"></button>
               <button class="hit ctl-square" id="btn-camera" title="摄像头"></button>
               <button class="hit ctl-pill ${canScreenShare ? '' : 'hidden'}" id="btn-screen"></button>
-              <button class="hit ctl-square" id="btn-quality" title="投屏画质">${icon('chevDown', 16, 'var(--text-1)', 1.8)}</button>
+              <button class="hit ctl-square" id="btn-quality" title="投屏画质">${icon('sliders', 16, 'var(--text-1)', 1.6)}</button>
             </div>
             <div class="spacer"></div>
             <div class="group">
@@ -328,6 +328,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
         ${p.identity.endsWith('-obs') ? '<div style="position:absolute;top:12px;right:12px" class="tag tag-ember mono">OBS 推流</div>' : ''}`;
     }
     statusEl.textContent = '';
+    applyLayout(); // 聚焦布局下新建的块要归位（焦点/缩略轨），否则会被 CSS 隐藏
   }
 
   // ---- 成员面板 ----

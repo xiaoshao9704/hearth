@@ -27,11 +27,15 @@ import (
 )
 
 type API struct {
-	st    *store.Store
-	cfg   config.Config
-	ing   *lkingress.Client
-	rooms *lkroom.Client
-	hub   *chat.Hub
+	st  *store.Store
+	cfg config.Config
+	hub *chat.Hub
+
+	// LiveKit 客户端按生效配置（环境变量 / 后台设置）动态构建，见 dyncfg.go
+	lkMu                            sync.Mutex
+	ing                             *lkingress.Client
+	rooms                           *lkroom.Client
+	lkCurURL, lkCurKey, lkCurSecret string
 
 	// LiveKit 在房人数缓存（大厅频道列表用，避免每次列表都打 LiveKit）
 	countsMu sync.Mutex
@@ -40,13 +44,7 @@ type API struct {
 }
 
 func New(st *store.Store, cfg config.Config, hub *chat.Hub) *API {
-	return &API{
-		st:    st,
-		cfg:   cfg,
-		ing:   lkingress.NewClient(cfg.LiveKitAPIURL, cfg.LiveKitKey, cfg.LiveKitSecret),
-		rooms: lkroom.NewClient(cfg.LiveKitAPIURL, cfg.LiveKitKey, cfg.LiveKitSecret),
-		hub:   hub,
-	}
+	return &API{st: st, cfg: cfg, hub: hub}
 }
 
 // Router 构建 chi 路由：CORS 全局挂载，认证/房主校验为分组中间件。
@@ -95,6 +93,8 @@ func (a *API) Router() *chi.Mux {
 			r.Get("/overview", a.adminOverview)
 			r.Get("/policy", a.adminGetPolicy)
 			r.Post("/policy", a.adminSetPolicy)
+			r.Get("/config", a.adminGetConfig)
+			r.Post("/config", a.adminSetConfig)
 			r.Get("/users", a.adminListUsers)
 			r.Post("/users/{id}/disable", a.adminSetUserDisabled(true))
 			r.Post("/users/{id}/enable", a.adminSetUserDisabled(false))
@@ -115,7 +115,8 @@ func (a *API) roomCounts(ctx context.Context) (map[string]int, error) {
 	if a.counts != nil && time.Since(a.countsAt) < 3*time.Second {
 		return a.counts, nil
 	}
-	counts, err := a.rooms.RoomCounts(ctx)
+	_, rooms := a.lkClients(ctx)
+	counts, err := rooms.RoomCounts(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -335,7 +336,7 @@ func (a *API) livekitToken(w http.ResponseWriter, r *http.Request) {
 		tag += "-" + randHex(2)
 	}
 	// 频道名即 LiveKit room 名，一一映射
-	tok, err := lktoken.Sign(a.cfg.LiveKitKey, a.cfg.LiveKitSecret, c.Name, u.Username, tag)
+	tok, err := lktoken.Sign(a.dynVal(r.Context(), "livekit_api_key"), a.dynVal(r.Context(), "livekit_api_secret"), c.Name, u.Username, tag)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "签发令牌失败")
 		return
@@ -345,8 +346,8 @@ func (a *API) livekitToken(w http.ResponseWriter, r *http.Request) {
 
 // livekitURL 返回给前端的 LiveKit WSS 地址：未配置时按请求推导同源 /lk 代理地址。
 func (a *API) livekitURL(r *http.Request) string {
-	if a.cfg.LiveKitURL != "" {
-		return a.cfg.LiveKitURL
+	if v := a.dynVal(r.Context(), "livekit_url"); v != "" {
+		return v
 	}
 	scheme := "ws"
 	if requestScheme(r) == "https" {
@@ -415,7 +416,7 @@ type ingressResp struct {
 }
 
 func (a *API) ingressURL(r *http.Request, streamKey string) string {
-	base := a.cfg.IngressPublicURL
+	base := a.dynVal(r.Context(), "ingress_public_url")
 	if base == "" {
 		// 未配置时按请求推导同源 /w/ 代理地址
 		base = requestScheme(r) + "://" + r.Host + "/w/"
@@ -446,8 +447,8 @@ func (a *API) resolveIngressChannel(w http.ResponseWriter, r *http.Request) *sto
 // getIngress 返回当前用户在该频道的推流地址；没有则调 LiveKit 创建并落库。
 func (a *API) getIngress(w http.ResponseWriter, r *http.Request) {
 	u := userFrom(r)
-	if a.cfg.IngressUpstreamURL == "" {
-		writeErr(w, http.StatusServiceUnavailable, "Ingress 未启用（未配置 INGRESS_UPSTREAM_URL）")
+	if a.dynVal(r.Context(), "ingress_upstream_url") == "" {
+		writeErr(w, http.StatusServiceUnavailable, "Ingress 未启用（未配置 WHIP 上游地址）")
 		return
 	}
 	c := a.resolveIngressChannel(w, r)
@@ -468,16 +469,17 @@ func (a *API) getIngress(w http.ResponseWriter, r *http.Request) {
 // resetIngress 删除旧 ingress（LiveKit 侧 + 库记录）后重建，旧地址随之失效。
 func (a *API) resetIngress(w http.ResponseWriter, r *http.Request) {
 	u := userFrom(r)
-	if a.cfg.IngressUpstreamURL == "" {
-		writeErr(w, http.StatusServiceUnavailable, "Ingress 未启用（未配置 INGRESS_UPSTREAM_URL）")
+	if a.dynVal(r.Context(), "ingress_upstream_url") == "" {
+		writeErr(w, http.StatusServiceUnavailable, "Ingress 未启用（未配置 WHIP 上游地址）")
 		return
 	}
 	c := a.resolveIngressChannel(w, r)
 	if c == nil {
 		return
 	}
+	ing, _ := a.lkClients(r.Context())
 	if rec, err := a.st.IngressByUserChannel(r.Context(), u.ID, c.ID); err == nil {
-		if derr := a.ing.Delete(r.Context(), rec.IngressID); derr != nil {
+		if derr := ing.Delete(r.Context(), rec.IngressID); derr != nil {
 			// LiveKit 侧删不掉不阻塞重建（记录可能已是残缺的）
 			log.Printf("删除旧 ingress %s 失败: %v", rec.IngressID, derr)
 		}
@@ -493,7 +495,8 @@ func (a *API) resetIngress(w http.ResponseWriter, r *http.Request) {
 
 // createIngress 调 LiveKit 创建 ingress 并落库。
 func (a *API) createIngress(r *http.Request, u *store.User, c *store.Channel) (*store.Ingress, error) {
-	ingressID, streamKey, err := a.ing.Create(r.Context(), c.Name, u.Username)
+	ing, _ := a.lkClients(r.Context())
+	ingressID, streamKey, err := ing.Create(r.Context(), c.Name, u.Username)
 	if err != nil {
 		log.Printf("创建 ingress 失败: %v", err)
 		return nil, err
@@ -525,7 +528,8 @@ func (a *API) resolveTargetUser(w http.ResponseWriter, r *http.Request, u *store
 
 // evict 把用户从频道现场移除：LiveKit 侧踢全部设备 + 断开聊天 WS。
 func (a *API) evict(r *http.Request, c *store.Channel, t *store.User) (int, error) {
-	n, err := a.rooms.RemoveParticipantsOf(r.Context(), c.Name, t.Username)
+	_, rooms := a.lkClients(r.Context())
+	n, err := rooms.RemoveParticipantsOf(r.Context(), c.Name, t.Username)
 	if err != nil {
 		log.Printf("LiveKit 踢出 %s 失败: %v", t.Username, err)
 	}

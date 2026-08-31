@@ -223,8 +223,8 @@ func (a *API) adminOverview(w http.ResponseWriter, r *http.Request) {
 		"go_version":     runtime.Version(),
 		"policy":         a.regPolicy(r),
 		"services": map[string]any{
-			"livekit": map[string]any{"ok": livekitOK, "url": a.cfg.LiveKitAPIURL},
-			"ingress": map[string]any{"ok": a.cfg.IngressUpstreamURL != "", "url": a.cfg.IngressUpstreamURL},
+			"livekit": map[string]any{"ok": livekitOK, "url": a.dynVal(r.Context(), "livekit_api_url")},
+			"ingress": map[string]any{"ok": a.dynVal(r.Context(), "ingress_upstream_url") != "", "url": a.dynVal(r.Context(), "ingress_upstream_url")},
 			"db":      map[string]any{"ok": true, "url": dbLabel(a.cfg.DatabaseDSN())},
 		},
 		"resources": hostResources(),
@@ -455,7 +455,8 @@ func (a *API) adminSetPolicy(w http.ResponseWriter, r *http.Request) {
 
 func (a *API) channelParticipants(w http.ResponseWriter, r *http.Request) {
 	c := channelFrom(r)
-	ps, err := a.rooms.ListParticipants(r.Context(), c.Name)
+	_, rooms := a.lkClients(r.Context())
+	ps, err := rooms.ListParticipants(r.Context(), c.Name)
 	if err != nil {
 		// LiveKit 房间不存在（没人）时按空列表处理
 		writeJSON(w, http.StatusOK, map[string]any{"participants": []any{}})

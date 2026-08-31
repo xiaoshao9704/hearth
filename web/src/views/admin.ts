@@ -4,15 +4,17 @@ import {
   adminDeleteChannel,
   adminDeleteInvite,
   adminDeleteUser,
+  adminGetConfig,
   adminListInvites,
   adminListUsers,
   adminOverview,
+  adminSetConfig,
   adminSetPolicy,
   adminSetUserDisabled,
   getUser,
   listChannels,
 } from '../api';
-import type { AdminOverview, AdminUser, Channel, Invite } from '../api';
+import type { AdminOverview, AdminUser, Channel, ConfigItem, Invite } from '../api';
 import { avatarHtml, copyText, esc, icon, timeAgo, toast } from '../ui';
 
 type Tab = 'status' | 'config' | 'users' | 'rooms' | 'invites';
@@ -182,13 +184,55 @@ async function paintStatus(body: HTMLElement) {
 
 async function paintConfig(body: HTMLElement) {
   let ov: AdminOverview;
+  let items: ConfigItem[] = [];
   try {
-    ov = await adminOverview();
+    [ov, items] = await Promise.all([adminOverview(), adminGetConfig()]);
   } catch (err) {
     body.innerHTML = `<div class="error-text">${esc((err as Error).message)}</div>`;
     return;
   }
   let policy = ov.policy;
+
+  // 依赖服务配置卡片：环境变量固定的只读展示；未固定的可编辑，保存落库即时生效
+  const groupCard = (group: string, title: string, sub: string) => {
+    const list = items.filter((it) => it.group === group);
+    const anyEditable = list.some((it) => !it.locked);
+    return `
+      <div class="card" data-group="${group}">
+        <div style="display:flex;align-items:baseline;gap:9px;margin-bottom:4px">
+          <div style="font-size:13px;font-weight:600">${title}</div>
+          <div style="font-size:11px;color:var(--text-2)">${sub}</div>
+        </div>
+        <div style="display:flex;flex-direction:column;gap:11px;margin-top:11px">
+          ${list
+            .map((it) => {
+              const placeholder = it.secret && it.set ? '已设置（输入新值覆盖）' : it.hint;
+              return `
+            <div>
+              <div style="display:flex;align-items:baseline;gap:8px;margin-bottom:6px">
+                <span style="font-size:11px;color:var(--text-2)">${esc(it.label)}</span>
+                <span class="mono" style="font-size:10px;color:var(--text-3)">${esc(it.env)}</span>
+                ${it.locked ? '<span class="tag" title="部署侧 .env / compose 里改，重启生效">环境变量固定</span>' : ''}
+              </div>
+              ${
+                it.locked
+                  ? `<div class="mono" style="padding:9px 12px;border-radius:8px;background:var(--bg-2);border:1px solid var(--line);font-size:12px;color:var(--text-1);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(it.secret ? '••••••••' : it.value || '（空）')}</div>`
+                  : `<div class="field" style="height:38px;background:var(--bg-2)"><input class="mono" style="font-size:12px" data-cfg="${it.name}" value="${esc(it.value)}" placeholder="${esc(placeholder)}" ${it.secret ? 'autocomplete="off"' : ''} /></div>`
+              }
+            </div>`;
+            })
+            .join('')}
+        </div>
+        ${
+          anyEditable
+            ? `<div style="display:flex;align-items:center;gap:10px;margin-top:13px">
+                 <span style="font-size:11px;color:var(--text-3);flex-grow:1">保存后立即生效，无需重启</span>
+                 <button class="hit btn btn-sm btn-primary" data-save="${group}">保存并生效</button>
+               </div>`
+            : ''
+        }
+      </div>`;
+  };
 
   const paint = () => {
     const policies = [
@@ -197,7 +241,9 @@ async function paintConfig(body: HTMLElement) {
       { id: 'open', label: '开放注册', desc: '任何人都能注册——公网上不建议' },
     ];
     body.innerHTML = `
-      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:16px">
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:16px">
+        ${groupCard('livekit', 'LiveKit', '信令与令牌签发')}
+        ${groupCard('ingress', 'Ingress（OBS 推流）', 'WHIP 上游与公开地址')}
         <div class="card">
           <div style="font-size:13px;font-weight:600;margin-bottom:5px">注册策略</div>
           <div style="font-size:11.5px;color:var(--text-2);margin-bottom:13px">决定新账号怎么来，改动立即生效</div>
@@ -216,27 +262,32 @@ async function paintConfig(body: HTMLElement) {
               })
               .join('')}
           </div>
-        </div>
-        <div class="card">
-          <div style="font-size:13px;font-weight:600;margin-bottom:13px">组件地址（只读）</div>
-          <div style="display:flex;flex-direction:column;gap:11px">
-            ${[
-              ['LiveKit Twirp', ov.services.livekit?.url ?? ''],
-              ['Ingress WHIP 上游', ov.services.ingress?.ok ? ov.services.ingress.url : '未启用'],
-              ['数据库', ov.services.db?.url ?? ''],
-            ]
-              .map(
-                ([k, v]) => `
-              <div>
-                <div style="font-size:11px;color:var(--text-2);margin-bottom:6px">${k}</div>
-                <div class="mono" style="padding:9px 12px;border-radius:8px;background:var(--bg-2);border:1px solid var(--line);font-size:12px;color:var(--text-1);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(v)}</div>
-              </div>`,
-              )
-              .join('')}
-          </div>
-          <div style="margin-top:13px;font-size:11px;line-height:1.6;color:var(--text-3)">端口、域名与 ICE 在部署侧（.env / compose）改，改完重启容器生效——正在通话的人会掉线一次。</div>
+          <div style="margin-top:13px;font-size:11px;line-height:1.6;color:var(--text-3)">数据库：<span class="mono">${esc(ov.services.db?.url ?? '')}</span><br>媒体端口与域名在部署侧（.env / compose）改，改完重启容器生效。</div>
         </div>
       </div>`;
+
+    body.querySelectorAll<HTMLButtonElement>('[data-save]').forEach((btn) => {
+      btn.addEventListener('click', async () => {
+        const group = btn.dataset.save!;
+        const values: Record<string, string> = {};
+        body
+          .querySelectorAll<HTMLInputElement>(`[data-group="${group}"] input[data-cfg]`)
+          .forEach((input) => {
+            const item = items.find((it) => it.name === input.dataset.cfg);
+            // 密钥留空表示保持不变，不提交
+            if (item?.secret && item.set && input.value.trim() === '') return;
+            values[input.dataset.cfg!] = input.value.trim();
+          });
+        try {
+          await adminSetConfig(values);
+          toast('已保存并生效', 'ok');
+          items = await adminGetConfig();
+          paint();
+        } catch (err) {
+          toast((err as Error).message, 'bad');
+        }
+      });
+    });
     body.querySelectorAll<HTMLButtonElement>('[data-policy]').forEach((btn) => {
       btn.addEventListener('click', async () => {
         try {
