@@ -1,0 +1,189 @@
+// 与 server 交互的 REST 客户端，会话 token 存 localStorage（MVP 简化处理）。
+const SERVER_URL: string = import.meta.env.VITE_SERVER_URL ?? 'http://localhost:8080';
+export const LIVEKIT_URL_FALLBACK: string =
+  import.meta.env.VITE_LIVEKIT_URL ?? 'ws://localhost:7880';
+
+const TOKEN_KEY = 'hearth_token';
+const USER_KEY = 'hearth_user';
+
+export interface User {
+  id: number;
+  username: string;
+}
+
+export interface Channel {
+  id: number;
+  name: string;
+  created_by: string;
+  created_at: string;
+  invite_only: boolean;
+  is_owner: boolean;
+}
+
+export function getToken(): string | null {
+  return localStorage.getItem(TOKEN_KEY);
+}
+
+export function getUser(): User | null {
+  const raw = localStorage.getItem(USER_KEY);
+  return raw ? (JSON.parse(raw) as User) : null;
+}
+
+function saveSession(token: string, user: User) {
+  localStorage.setItem(TOKEN_KEY, token);
+  localStorage.setItem(USER_KEY, JSON.stringify(user));
+}
+
+export function clearSession() {
+  localStorage.removeItem(TOKEN_KEY);
+  localStorage.removeItem(USER_KEY);
+}
+
+export function wsBase(): string {
+  return SERVER_URL.replace(/^http/, 'ws');
+}
+
+async function req<T>(path: string, options: { method?: string; body?: unknown } = {}): Promise<T> {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  const token = getToken();
+  if (token) headers['Authorization'] = `Bearer ${token}`;
+  const res = await fetch(`${SERVER_URL}${path}`, {
+    method: options.method ?? 'GET',
+    headers,
+    body: options.body === undefined ? undefined : JSON.stringify(options.body),
+  });
+  if (!res.ok) {
+    const data = (await res.json().catch(() => null)) as { error?: string } | null;
+    throw new Error(data?.error ?? `请求失败 (${res.status})`);
+  }
+  if (res.status === 204) return undefined as T;
+  return (await res.json()) as T;
+}
+
+export async function register(username: string, password: string): Promise<User> {
+  const data = await req<{ token: string; user: User }>('/api/register', {
+    method: 'POST',
+    body: { username, password },
+  });
+  saveSession(data.token, data.user);
+  return data.user;
+}
+
+export async function login(username: string, password: string): Promise<User> {
+  const data = await req<{ token: string; user: User }>('/api/login', {
+    method: 'POST',
+    body: { username, password },
+  });
+  saveSession(data.token, data.user);
+  return data.user;
+}
+
+export async function logout(): Promise<void> {
+  try {
+    await req('/api/logout', { method: 'POST' });
+  } finally {
+    clearSession();
+  }
+}
+
+export async function listChannels(): Promise<Channel[]> {
+  const data = await req<{ channels: Channel[] | null }>('/api/channels');
+  return data.channels ?? [];
+}
+
+export async function createChannel(name: string): Promise<Channel> {
+  return req<Channel>('/api/channels', { method: 'POST', body: { name } });
+}
+
+export interface LiveKitCredentials {
+  token: string;
+  url: string;
+}
+
+// 持久设备 ID：首次访问生成并存 localStorage，用于区分同一账号的多设备
+export function deviceId(): string {
+  let id = localStorage.getItem('hearth_device_id');
+  if (!id) {
+    const rand = new Uint8Array(4);
+    const c = globalThis.crypto as Crypto | undefined;
+    if (c?.getRandomValues) {
+      c.getRandomValues(rand);
+    } else {
+      for (let i = 0; i < rand.length; i++) rand[i] = Math.floor(Math.random() * 256);
+    }
+    id = Array.from(rand, (b) => b.toString(16).padStart(2, '0')).join('');
+    localStorage.setItem('hearth_device_id', id);
+  }
+  return id;
+}
+
+export function fetchLiveKitToken(channel: string): Promise<LiveKitCredentials> {
+  return req<LiveKitCredentials>('/api/token', {
+    method: 'POST',
+    body: { channel, device_id: deviceId() },
+  });
+}
+
+// ---- OBS WHIP 推流端点（每用户每频道一个）----
+
+export interface IngressInfo {
+  url: string;
+  stream_key: string;
+}
+
+// 获取（首次自动创建）当前用户在该频道的推流地址
+export function getIngress(channel: string): Promise<IngressInfo> {
+  return req<IngressInfo>('/api/ingress', { method: 'POST', body: { channel } });
+}
+
+// 重置推流地址（旧地址立即失效）
+export function resetIngress(channel: string): Promise<IngressInfo> {
+  return req<IngressInfo>('/api/ingress/reset', { method: 'POST', body: { channel } });
+}
+
+// ---- 频道管理（房主）----
+
+export function kickUser(channel: string, username: string): Promise<{ kicked: number }> {
+  return req(`/api/channels/${encodeURIComponent(channel)}/kick`, { method: 'POST', body: { username } });
+}
+
+export function banUser(channel: string, username: string): Promise<void> {
+  return req(`/api/channels/${encodeURIComponent(channel)}/ban`, { method: 'POST', body: { username } });
+}
+
+export function unbanUser(channel: string, username: string): Promise<void> {
+  return req(`/api/channels/${encodeURIComponent(channel)}/unban`, { method: 'POST', body: { username } });
+}
+
+export async function listBans(channel: string): Promise<string[]> {
+  const data = await req<{ bans: string[] | null }>(`/api/channels/${encodeURIComponent(channel)}/bans`);
+  return data.bans ?? [];
+}
+
+export function setInviteOnly(channel: string, enabled: boolean): Promise<{ invite_only: boolean }> {
+  return req(`/api/channels/${encodeURIComponent(channel)}/invite-only`, {
+    method: 'POST',
+    body: { enabled },
+  });
+}
+
+export async function listMembers(channel: string): Promise<string[]> {
+  const data = await req<{ members: string[] | null }>(
+    `/api/channels/${encodeURIComponent(channel)}/members`,
+  );
+  return data.members ?? [];
+}
+
+export function addMember(channel: string, username: string): Promise<void> {
+  return req(`/api/channels/${encodeURIComponent(channel)}/members`, {
+    method: 'POST',
+    body: { username },
+  });
+}
+
+export function removeMember(channel: string, username: string): Promise<void> {
+  return req(`/api/channels/${encodeURIComponent(channel)}/members`, {
+    method: 'DELETE',
+    body: { username },
+  });
+}

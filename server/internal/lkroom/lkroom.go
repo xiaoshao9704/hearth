@@ -1,0 +1,68 @@
+// LiveKit RoomService 管理：走 LiveKit server 的 Twirp HTTP API 移除房间参与者。
+// 鉴权：每个请求注入带 RoomAdmin grant 的短时效 JWT（模式同 internal/lkingress）。
+package lkroom
+
+import (
+	"context"
+	"fmt"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/livekit/protocol/auth"
+	"github.com/livekit/protocol/livekit"
+)
+
+type Client struct {
+	api    livekit.RoomService
+	key    string
+	secret string
+	room   string // 当前操作的房间(LiveKit 要求 RoomAdmin grant 的 Room 与请求房间一致)
+}
+
+// NewClient apiURL 是 LiveKit server 的 Twirp 地址（与 Ingress 管理同一个）。
+func NewClient(apiURL, key, secret string) *Client {
+	c := &Client{key: key, secret: secret}
+	c.api = livekit.NewRoomServiceJSONClient(apiURL, &http.Client{
+		Timeout:   10 * time.Second,
+		Transport: c, // 逐请求注入鉴权头
+	})
+	return c
+}
+
+// RoundTrip 为 Twirp 请求注入 RoomAdmin JWT（5 分钟时效，随用随签）。
+// LiveKit 校验管理员 grant 时要求 Room 与请求的房间一致，随请求体里的 room 签发。
+func (c *Client) RoundTrip(req *http.Request) (*http.Response, error) {
+	at := auth.NewAccessToken(c.key, c.secret)
+	at.SetVideoGrant(&auth.VideoGrant{RoomAdmin: true, Room: c.room}).SetValidFor(5 * time.Minute)
+	tok, err := at.ToJWT()
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+tok)
+	return http.DefaultTransport.RoundTrip(req)
+}
+
+// RemoveParticipantsOf 把 room 里 identity 属于 username 的参与者全部移除
+// （identity 规则：{用户名}-{设备标签} 或 {用户名}-obs），返回移除数量。
+func (c *Client) RemoveParticipantsOf(ctx context.Context, room, username string) (int, error) {
+	c.room = room
+	defer func() { c.room = "" }()
+	resp, err := c.api.ListParticipants(ctx, &livekit.ListParticipantsRequest{Room: room})
+	if err != nil {
+		return 0, fmt.Errorf("列出参与者失败: %w", err)
+	}
+	n := 0
+	for _, p := range resp.Participants {
+		if p.Identity == username || strings.HasPrefix(p.Identity, username+"-") {
+			if _, err := c.api.RemoveParticipant(ctx, &livekit.RoomParticipantIdentity{
+				Room:     room,
+				Identity: p.Identity,
+			}); err != nil {
+				return n, fmt.Errorf("移除参与者 %s 失败: %w", p.Identity, err)
+			}
+			n++
+		}
+	}
+	return n, nil
+}

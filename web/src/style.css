@@ -1,0 +1,365 @@
+/* FlashCast 极简暗色样式 */
+:root {
+  color-scheme: dark;
+  --bg: #1e1f24;
+  --bg-2: #26272e;
+  --bg-3: #2f313a;
+  --fg: #e6e6ea;
+  --muted: #9a9ca6;
+  --accent: #5865f2;
+  --error: #f26d6d;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: -apple-system, 'PingFang SC', 'Helvetica Neue', sans-serif;
+  font-size: 14px;
+}
+
+h1 { font-size: 18px; margin: 0; }
+h2 { font-size: 14px; margin: 0 0 8px; }
+a { color: var(--accent); text-decoration: none; }
+
+.muted { color: var(--muted); }
+.error { color: var(--error); min-height: 1em; }
+
+.row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+input {
+  flex: 1;
+  padding: 8px 10px;
+  border: 1px solid var(--bg-3);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--fg);
+}
+
+button {
+  padding: 8px 14px;
+  border: 1px solid var(--bg-3);
+  border-radius: 6px;
+  background: var(--bg-3);
+  color: var(--fg);
+  cursor: pointer;
+  white-space: nowrap;
+}
+button:hover { filter: brightness(1.15); }
+button.primary { background: var(--accent); border-color: var(--accent); }
+
+.card {
+  background: var(--bg-2);
+  border-radius: 10px;
+  padding: 20px;
+}
+
+/* 登录页 */
+.center-page {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+}
+.center-page .card { width: 320px; }
+.center-page form { display: flex; flex-direction: column; gap: 10px; margin-top: 12px; }
+
+/* 列表页 */
+.page {
+  max-width: 640px;
+  margin: 0 auto;
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.topbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px 16px;
+  background: var(--bg-2);
+  gap: 12px;
+}
+
+.channel-list {
+  list-style: none;
+  padding: 0;
+  margin: 12px 0 0;
+}
+.channel-list li {
+  display: flex;
+  justify-content: space-between;
+  padding: 10px 8px;
+  border-top: 1px solid var(--bg-3);
+}
+
+/* 房间页 */
+.room {
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+.room-body {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+.stage {
+  flex: 1;
+  padding: 12px;
+  overflow-y: auto;
+}
+.video-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 10px;
+}
+.tile {
+  position: relative;
+  background: #000;
+  border-radius: 8px;
+  overflow: hidden;
+  aspect-ratio: 16 / 9;
+}
+.tile-screen { grid-column: span 2; }
+.tile video {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+.tile-label {
+  position: absolute;
+  left: 8px;
+  bottom: 6px;
+  font-size: 12px;
+  background: rgba(0, 0, 0, 0.55);
+  padding: 2px 8px;
+  border-radius: 4px;
+}
+
+/* 侧边栏：参与者 + 聊天 */
+.sidebar {
+  width: 300px;
+  border-left: 1px solid var(--bg-3);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.participants {
+  padding: 12px;
+  border-bottom: 1px solid var(--bg-3);
+  max-height: 30%;
+  overflow-y: auto;
+}
+.participant-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+.participant-list li { padding: 4px 0; }
+
+.chat {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  padding: 12px;
+  min-height: 0;
+}
+.chat-log {
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-bottom: 8px;
+  word-break: break-word;
+}
+.chat-msg { line-height: 1.4; }
+
+.back { color: var(--muted); }
+
+/* 未读角标 */
+.badge {
+  display: inline-block;
+  margin-left: 4px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--error);
+  color: #fff;
+  font-size: 11px;
+  line-height: 16px;
+  vertical-align: 2px;
+}
+
+/* 单窗口全屏按钮 */
+.tile-fs {
+  position: absolute;
+  right: 6px;
+  bottom: 6px;
+  padding: 2px 8px;
+  font-size: 12px;
+  background: rgba(0, 0, 0, 0.55);
+  border: none;
+}
+
+/* 参与者列表麦克风图标 */
+.participant-list .mic { font-size: 12px; }
+
+/* 桌面端：聊天面板收起时视频区占满 */
+.room.chat-collapsed .sidebar { display: none; }
+
+/* 移动端 / 平板（<1024px）：视频区在上，聊天为底部抽屉 */
+@media (max-width: 1023px) {
+  .room { height: 100dvh; }
+
+  .topbar {
+    flex-wrap: wrap;
+    gap: 6px;
+    padding: 8px 10px;
+  }
+  .topbar h1 { font-size: 15px; }
+  .topbar button { padding: 6px 8px; font-size: 12px; }
+  .topbar .back { font-size: 12px; white-space: nowrap; }
+
+  .video-grid {
+    grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  }
+  /* 单列网格下投屏不再跨列，避免撑出横向滚动 */
+  .tile-screen { grid-column: span 1; }
+
+  .sidebar {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 20;
+    width: auto;
+    height: 65dvh;
+    background: var(--bg-2);
+    border-left: none;
+    border-top: 1px solid var(--bg-3);
+    transform: translateY(100%);
+    transition: transform 0.2s ease;
+  }
+  .room.chat-open .sidebar { transform: translateY(0); }
+  /* 移动端收起即抽屉隐藏，覆盖桌面那条 display:none 之外的场景 */
+  .room.chat-collapsed .sidebar { display: flex; }
+
+  .participants { max-height: 35%; }
+}
+
+/* 画质下拉框：与按钮同风格 */
+select {
+  padding: 8px 10px;
+  border: 1px solid var(--bg-3);
+  border-radius: 6px;
+  background: var(--bg-3);
+  color: var(--fg);
+  font-size: inherit;
+}
+
+/* pin 状态图标：默认隐藏，.pinned 时显示在左上角 */
+.tile-pin {
+  display: none;
+  position: absolute;
+  left: 8px;
+  top: 6px;
+  font-size: 13px;
+  background: rgba(0, 0, 0, 0.55);
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+.tile.pinned .tile-pin { display: block; }
+.tile.pinned { outline: 2px solid var(--accent); }
+.tile { cursor: pointer; }
+
+/* 聚焦布局（N对1）：焦点画面独占一行大区域，其余小窗排在下方 */
+.video-grid.spotlight {
+  display: flex;
+  flex-wrap: wrap;
+  align-content: flex-start;
+}
+.video-grid.spotlight .tile {
+  width: 160px;
+  flex: none;
+}
+.video-grid.spotlight .tile.featured {
+  order: -1;
+  width: 100%;
+  max-height: 72vh;
+}
+/* 聚焦模式下投屏小窗不再跨列（网格已变 flex，跨列无意义） */
+.video-grid.spotlight .tile-screen { grid-column: auto; }
+
+@media (max-width: 1023px) {
+  select { padding: 6px 8px; font-size: 12px; }
+  .video-grid.spotlight .tile { width: 120px; }
+}
+
+/* 浮层面板（OBS 推流 / 设置）：顶栏下方浮层 */
+.float-panel {
+  position: absolute;
+  top: 56px;
+  right: 12px;
+  z-index: 30;
+  width: min(360px, calc(100vw - 24px));
+  max-height: calc(100dvh - 72px);
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+}
+.float-panel h2:not(:first-child) { margin-top: 6px; }
+.float-panel label { white-space: nowrap; color: var(--muted); }
+.obs-hint { margin: 0; font-size: 12px; line-height: 1.5; }
+.room { position: relative; }
+
+/* 小按钮（本地静音、回自动等） */
+button.mini {
+  padding: 2px 8px;
+  font-size: 12px;
+  margin-left: 8px;
+}
+
+/* 复选框行 */
+.check {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--fg) !important;
+  font-weight: normal;
+}
+.check input { flex: none; }
+
+/* 码率滑块 */
+input[type='range'] { flex: 1; padding: 0; }
+
+/* 参与者列表标记（已本地静音等） */
+.tag {
+  margin-left: 6px;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+/* 频道设置里的成员/黑名单列表 */
+.manage-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+.manage-list li {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 4px 0;
+}

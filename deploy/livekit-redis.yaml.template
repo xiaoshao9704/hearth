@@ -1,0 +1,15 @@
+# LiveKit server 配置（含 redis，由 init.sh 从 deploy/.env 生成，勿手改 generated/ 产物）
+# 启用 ingress profile 时使用（Ingress 与 LiveKit 之间经 redis 做 PSRPC 协调）：
+# deploy/.env 里设 LIVEKIT_CONFIG=livekit-redis.yaml 后重新 up
+port: ${LIVEKIT_PORT}
+rtc:
+  udp_port: ${RTC_UDP_PORT}
+  tcp_port: ${RTC_TCP_PORT}
+  use_external_ip: true # 经 STUN 探测宿主机公网 IP；云主机网卡直通公网时可改 false
+  # STUN 服务器：默认公共服务器；国内部署推荐 stun.miwifi.com:3478
+  stun_servers:
+    - ${STUN_SERVER}
+keys:
+  ${LIVEKIT_API_KEY}: ${LIVEKIT_API_SECRET}
+redis:
+  address: redis:6379

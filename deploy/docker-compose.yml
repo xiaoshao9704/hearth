@@ -1,0 +1,79 @@
+# Hearth 一键部署：默认 hearth + livekit 两服务；
+# 可选 profile：caddy（TLS 终结）、ingress（OBS WHIP 推流，含 redis）
+# 用法见根 README「自托管快速开始」；compose 自动读取同目录 .env
+name: hearth
+
+services:
+  hearth:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "${HEARTH_PORT:-8080}:8080" # hearth 一个 HTTP 端口承载 Web/API/信令/WHIP 代理
+    environment:
+      ADDR: ":8080"
+      DATABASE_URL: ${DATABASE_URL:-} # 空 = sqlite（/data 卷）；mysql:// 或 postgres:// 切换
+      DB_PATH: /data/hearth.db
+      STATIC_DIR: /app/web
+      # 空 = 按请求推导同源地址（/lk、/w/ 经 hearth 内置反代），一般无需设置
+      LIVEKIT_URL: ${LIVEKIT_URL:-}
+      INGRESS_PUBLIC_URL: ${INGRESS_PUBLIC_URL:-}
+      INGRESS_UPSTREAM_URL: ${INGRESS_UPSTREAM_URL:-} # 空 = Ingress 未启用
+      LIVEKIT_API_KEY: ${LIVEKIT_API_KEY}
+      LIVEKIT_API_SECRET: ${LIVEKIT_API_SECRET}
+      LIVEKIT_API_URL: http://livekit:7880 # 容器网络内直连 Twirp（也是 /lk/ 代理上游）
+      CORS_ORIGIN: "*" # 同源部署，宽放即可
+    volumes:
+      - hearth-data:/data
+    depends_on:
+      - livekit
+
+  livekit:
+    image: livekit/livekit-server:latest
+    restart: unless-stopped
+    # 默认单节点配置；启用 ingress profile 时在 .env 设 LIVEKIT_CONFIG=livekit-redis.yaml
+    command: --config /etc/livekit.yaml
+    volumes:
+      - ./generated/${LIVEKIT_CONFIG:-livekit.yaml}:/etc/livekit.yaml:ro
+    ports:
+      # WebRTC 媒体端口必须直达宿主机（不经过反代）
+      - "${RTC_UDP_PORT}:${RTC_UDP_PORT}/udp"
+      - "${RTC_TCP_PORT}:${RTC_TCP_PORT}"
+
+  # ---- 可选：OBS WHIP 推流（docker compose --profile ingress up -d）----
+  ingress:
+    image: livekit/ingress:latest
+    restart: unless-stopped
+    profiles: ["ingress"]
+    command: --config /etc/ingress.yaml
+    volumes:
+      - ./generated/ingress.yaml:/etc/ingress.yaml:ro
+    depends_on:
+      - redis
+      - livekit
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    profiles: ["ingress"] # 仅 Ingress 协调需要
+
+  # ---- 可选：Caddy TLS 终结（docker compose --profile caddy up -d）----
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    profiles: ["caddy"]
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./generated/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data # LE 证书持久化
+      - caddy-config:/config
+    depends_on:
+      - hearth
+
+volumes:
+  hearth-data:
+  caddy-data:
+  caddy-config:

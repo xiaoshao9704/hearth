@@ -1,0 +1,10 @@
+# Caddy 反向代理（由 init.sh 从 deploy/.env 生成，勿手改 generated/ 产物）
+# 自动 HTTPS：Caddy 申请/续期 Let's Encrypt 证书，需 80/443 公网可达且域名已解析到本机。
+# 注：hearth-server 已内置 /lk（信令）与 /w（WHIP）反代，Caddy 只需转发到 hearth。
+${DOMAIN} {
+	reverse_proxy hearth:${HEARTH_PORT}
+}
+
+# 可选：使用自有证书而非自动 LE —— 在站点块首行下加：
+# 	tls /etc/certs/fullchain.cer /etc/certs/privkey.key
+# 并把证书目录挂进 caddy 容器

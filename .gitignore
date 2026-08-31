@@ -1,0 +1,27 @@
+# Dependencies
+node_modules/
+
+# Builds
+dist/
+build/
+
+# Env / secrets
+.env
+.env.local
+
+# OS / editor
+.DS_Store
+*.swp
+.idea/
+.vscode/
+
+# Logs
+*.log
+
+# sqlite 数据文件
+*.db
+*.db-wal
+*.db-shm
+
+# 部署生成物（由 deploy/init.sh 生成，含密钥）
+deploy/generated/
