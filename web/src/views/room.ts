@@ -487,6 +487,54 @@ export async function renderRoom(root: HTMLElement, channel: string) {
   let rnnoiseBroken = false;
   document.addEventListener('pointerdown', () => void rnnoisePipe.resume(), false);
 
+  // 采集失败的人话提示（Mac mini 无内置麦，iPhone 连续互通断开就会 NotFound）
+  function captureErrorMsg(kind: '麦克风' | '摄像头', err: unknown): string {
+    const name = (err as DOMException)?.name ?? '';
+    if (name === 'NotFoundError' || name === 'DevicesNotFoundError')
+      return `没有可用的${kind}设备——iPhone 连续互通断开、或没接外设时会这样，接上后再点一次`;
+    if (name === 'NotAllowedError' || name === 'PermissionDeniedError')
+      return `${kind}权限被拒绝，点地址栏右侧的图标允许后重试`;
+    if (name === 'NotReadableError') return `${kind}被其他应用占用`;
+    return `${kind}启动失败：${(err as Error)?.message ?? name}`;
+  }
+
+  // 设备中途断开（连续互通相机/拔线）：闭麦收摄像头 + 提示，而不是无声哑掉
+  function watchTrackEnded(kind: 'mic' | 'cam', track: MediaStreamTrack | undefined) {
+    track?.addEventListener(
+      'ended',
+      () => {
+        if (kind === 'mic' && micOn) {
+          micOn = false;
+          void disableMic().catch(() => {});
+          toast('麦克风设备断开了（iPhone 连续互通断开会这样），已自动闭麦', 'bad');
+        }
+        if (kind === 'cam' && cameraOn) {
+          cameraOn = false;
+          void room.localParticipant.setCameraEnabled(false).catch(() => {});
+          toast('摄像头设备断开了，已自动关闭', 'bad');
+        }
+        refreshButtons();
+        syncAudioTiles();
+        refreshMembers();
+      },
+      { once: true },
+    );
+  }
+
+  // 设备失而复得（iPhone 靠近重连/插上耳机）时提醒一声
+  let hadAudioInput = true;
+  const onDeviceChange = async () => {
+    try {
+      const n = (await navigator.mediaDevices.enumerateDevices()).filter((d) => d.kind === 'audioinput').length;
+      if (n > 0 && !hadAudioInput) toast('检测到麦克风设备，可以重新开麦了', 'ok');
+      hadAudioInput = n > 0;
+    } catch {
+      // 枚举失败忽略
+    }
+  };
+  navigator.mediaDevices?.addEventListener?.('devicechange', onDeviceChange);
+  void onDeviceChange();
+
   function micCaptureOptions(): AudioCaptureOptions {
     const p = loadPrefs();
     const music = p.musicMode;
@@ -505,21 +553,25 @@ export async function renderRoom(root: HTMLElement, channel: string) {
   async function enableMic() {
     const p = loadPrefs();
     if (p.denoise === 'rnnoise' && !p.musicMode && !rnnoiseBroken) {
+      const raw = await navigator.mediaDevices.getUserMedia({ audio: micCaptureOptions() });
       try {
-        const raw = await navigator.mediaDevices.getUserMedia({ audio: micCaptureOptions() });
         const processed = await rnnoisePipe.start(raw);
         await room.localParticipant.publishTrack(processed, {
           ...micPublishOptions(),
           source: Track.Source.Microphone,
         });
+        watchTrackEnded('mic', raw.getAudioTracks()[0]);
         return;
       } catch (err) {
+        // RNNoise 管线不可用（wasm/worklet）：置灰回退；设备类错误在上面 getUserMedia 已抛给调用方
         console.warn('RNNoise 不可用，回退浏览器内置处理:', err);
         rnnoiseBroken = true;
+        raw.getTracks().forEach((t) => t.stop());
         await rnnoisePipe.stop();
       }
     }
     await room.localParticipant.setMicrophoneEnabled(true, micCaptureOptions(), micPublishOptions());
+    watchTrackEnded('mic', room.localParticipant.getTrackPublication(Track.Source.Microphone)?.track?.mediaStreamTrack);
   }
 
   async function disableMic() {
@@ -559,7 +611,8 @@ export async function renderRoom(root: HTMLElement, channel: string) {
       const p = loadPrefs();
       p.mic = micOn;
       savePrefs(p);
-    } catch {
+    } catch (err) {
+      if (micOn) toast(captureErrorMsg('麦克风', err), 'bad');
       micOn = !micOn;
       refreshButtons();
     }
@@ -582,9 +635,13 @@ export async function renderRoom(root: HTMLElement, channel: string) {
         cameraOn,
         cameraOn && p.camDeviceId ? { deviceId: { ideal: p.camDeviceId } } : undefined,
       );
+      if (cameraOn) {
+        watchTrackEnded('cam', room.localParticipant.getTrackPublication(Track.Source.Camera)?.track?.mediaStreamTrack);
+      }
       p.camera = cameraOn;
       savePrefs(p);
-    } catch {
+    } catch (err) {
+      if (cameraOn) toast(captureErrorMsg('摄像头', err), 'bad');
       cameraOn = !cameraOn;
       refreshButtons();
     }
@@ -807,6 +864,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
     if (location.hash !== myHash) {
       window.removeEventListener('hashchange', onHashChange);
       prefsBus.removeEventListener('prefs', onPrefs);
+      navigator.mediaDevices?.removeEventListener?.('devicechange', onDeviceChange);
       leaving = true;
       chat.close();
       void rnnoisePipe.stop();
