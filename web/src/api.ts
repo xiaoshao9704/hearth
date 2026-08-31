@@ -9,6 +9,7 @@ const USER_KEY = 'hearth_user';
 export interface User {
   id: number;
   username: string;
+  is_admin: boolean;
 }
 
 export interface Channel {
@@ -18,6 +19,7 @@ export interface Channel {
   created_at: string;
   invite_only: boolean;
   is_owner: boolean;
+  online: number;
 }
 
 export function getToken(): string | null {
@@ -60,13 +62,20 @@ async function req<T>(path: string, options: { method?: string; body?: unknown }
   return (await res.json()) as T;
 }
 
-export async function register(username: string, password: string): Promise<User> {
+export async function register(username: string, password: string, invite?: string): Promise<User> {
   const data = await req<{ token: string; user: User }>('/api/register', {
     method: 'POST',
-    body: { username, password },
+    body: { username, password, invite },
   });
   saveSession(data.token, data.user);
   return data.user;
+}
+
+// 会话过期后本地信息可能陈旧，进应用时拉一次 /api/me 校准
+export async function fetchMe(): Promise<User> {
+  const me = await req<User>('/api/me');
+  localStorage.setItem(USER_KEY, JSON.stringify(me));
+  return me;
 }
 
 export async function login(username: string, password: string): Promise<User> {
@@ -186,4 +195,140 @@ export function removeMember(channel: string, username: string): Promise<void> {
     method: 'DELETE',
     body: { username },
   });
+}
+
+export interface RoomParticipant {
+  identity: string;
+  name: string;
+  joined_at: number;
+}
+
+export async function listParticipants(channel: string): Promise<RoomParticipant[]> {
+  const data = await req<{ participants: RoomParticipant[] | null }>(
+    `/api/channels/${encodeURIComponent(channel)}/participants`,
+  );
+  return data.participants ?? [];
+}
+
+// ---- 账户 ----
+
+export async function updateUsername(username: string): Promise<User> {
+  const u = await req<User>('/api/account/username', { method: 'POST', body: { username } });
+  localStorage.setItem(USER_KEY, JSON.stringify(u));
+  return u;
+}
+
+export function updatePassword(current: string, next: string): Promise<void> {
+  return req('/api/account/password', { method: 'POST', body: { current, new: next } });
+}
+
+export interface DeviceRecord {
+  device_id: string;
+  tag: string;
+  first_seen: string;
+  last_seen: string;
+}
+
+export async function listMyDevices(): Promise<DeviceRecord[]> {
+  const data = await req<{ devices: DeviceRecord[] | null }>('/api/account/devices');
+  return data.devices ?? [];
+}
+
+export function deleteMyDevice(deviceID: string): Promise<void> {
+  return req(`/api/account/devices/${encodeURIComponent(deviceID)}`, { method: 'DELETE' });
+}
+
+// ---- 邀请 ----
+
+export interface InviteInfo {
+  inviter: string;
+  expires_at: string;
+  alive: boolean;
+}
+
+export function inviteInfo(code: string): Promise<InviteInfo> {
+  return req(`/api/invites/${encodeURIComponent(code)}`);
+}
+
+// ---- 管理后台 ----
+
+export interface AdminOverview {
+  users: number;
+  channels: number;
+  online: number;
+  uptime_seconds: number;
+  go_version: string;
+  policy: string;
+  services: Record<string, { ok: boolean; url: string }>;
+  resources: {
+    load: number | null;
+    cpus: number;
+    mem_used_mb: number | null;
+    mem_total_mb: number | null;
+    temp_c: number | null;
+  };
+}
+
+export function adminOverview(): Promise<AdminOverview> {
+  return req('/api/admin/overview');
+}
+
+export interface AdminUser {
+  id: number;
+  username: string;
+  is_admin: boolean;
+  disabled: boolean;
+  created_at: string;
+  devices: number;
+  last_seen: string | null;
+}
+
+export async function adminListUsers(): Promise<AdminUser[]> {
+  const data = await req<{ users: AdminUser[] | null }>('/api/admin/users');
+  return data.users ?? [];
+}
+
+export function adminSetUserDisabled(id: number, disabled: boolean): Promise<void> {
+  return req(`/api/admin/users/${id}/${disabled ? 'disable' : 'enable'}`, { method: 'POST', body: {} });
+}
+
+export function adminDeleteUser(id: number): Promise<void> {
+  return req(`/api/admin/users/${id}`, { method: 'DELETE' });
+}
+
+export function adminDeleteChannel(id: number): Promise<void> {
+  return req(`/api/admin/channels/${id}`, { method: 'DELETE' });
+}
+
+export interface Invite {
+  id: number;
+  code: string;
+  note: string;
+  max_uses: number;
+  used: number;
+  revoked: boolean;
+  created_by: string;
+  created_at: string;
+  expires_at: string;
+}
+
+export async function adminListInvites(): Promise<{ invites: Invite[]; base: string }> {
+  const data = await req<{ invites: Invite[] | null; base: string }>('/api/admin/invites');
+  return { invites: data.invites ?? [], base: data.base };
+}
+
+export function adminCreateInvite(note: string, maxUses: number, ttl: string): Promise<{ invite: Invite; url: string }> {
+  return req('/api/admin/invites', { method: 'POST', body: { note, max_uses: maxUses, ttl } });
+}
+
+export function adminDeleteInvite(id: number): Promise<void> {
+  return req(`/api/admin/invites/${id}`, { method: 'DELETE' });
+}
+
+export function adminGetPolicy(): Promise<{ policy: string }> {
+  return req('/api/admin/policy');
+}
+
+export function adminSetPolicy(policy: string): Promise<{ policy: string }> {
+  return req('/api/admin/policy', { method: 'POST', body: { policy } });
 }

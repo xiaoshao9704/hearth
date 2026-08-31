@@ -151,11 +151,18 @@ func (s *Store) migrate() error {
 			return fmt.Errorf("建表失败: %w\nSQL: %s", err, stmt)
 		}
 	}
-	// 老库兼容加列（sqlite 时代 channels 无 invite_only）：重复列则忽略
-	if _, err := s.db.Exec(`ALTER TABLE channels ADD COLUMN invite_only INTEGER NOT NULL DEFAULT 0`); err != nil {
-		msg := strings.ToLower(err.Error())
-		if !strings.Contains(msg, "duplicate column") && !strings.Contains(msg, "already exists") {
-			return err
+	// 老库兼容加列：重复列则忽略
+	compat := []string{
+		`ALTER TABLE channels ADD COLUMN invite_only INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE users ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE users ADD COLUMN disabled INTEGER NOT NULL DEFAULT 0`,
+	}
+	for _, stmt := range compat {
+		if _, err := s.db.Exec(stmt); err != nil {
+			msg := strings.ToLower(err.Error())
+			if !strings.Contains(msg, "duplicate column") && !strings.Contains(msg, "already exists") {
+				return err
+			}
 		}
 	}
 	return nil
@@ -219,6 +226,21 @@ var sqliteDDL = []string{
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
   UNIQUE(channel_id, user_id)
 )`,
+	`CREATE TABLE IF NOT EXISTS invites (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  code TEXT UNIQUE NOT NULL,
+  note TEXT NOT NULL DEFAULT '',
+  max_uses INTEGER NOT NULL DEFAULT 1,
+  used INTEGER NOT NULL DEFAULT 0,
+  revoked INTEGER NOT NULL DEFAULT 0,
+  created_by INTEGER NOT NULL REFERENCES users(id),
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  expires_at DATETIME NOT NULL
+)`,
+	`CREATE TABLE IF NOT EXISTS settings (
+  k TEXT PRIMARY KEY,
+  v TEXT NOT NULL
+)`,
 }
 
 var mysqlDDL = []string{
@@ -278,6 +300,21 @@ var mysqlDDL = []string{
   user_id BIGINT NOT NULL,
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
   UNIQUE KEY uk_channel_members (channel_id, user_id)
+)`,
+	`CREATE TABLE IF NOT EXISTS invites (
+  id BIGINT PRIMARY KEY AUTO_INCREMENT,
+  code VARCHAR(32) UNIQUE NOT NULL,
+  note VARCHAR(255) NOT NULL DEFAULT '',
+  max_uses INT NOT NULL DEFAULT 1,
+  used INT NOT NULL DEFAULT 0,
+  revoked TINYINT NOT NULL DEFAULT 0,
+  created_by BIGINT NOT NULL,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  expires_at DATETIME NOT NULL
+)`,
+	`CREATE TABLE IF NOT EXISTS settings (
+  k VARCHAR(64) PRIMARY KEY,
+  v TEXT NOT NULL
 )`,
 }
 
@@ -339,11 +376,28 @@ var pgDDL = []string{
   created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
   UNIQUE(channel_id, user_id)
 )`,
+	`CREATE TABLE IF NOT EXISTS invites (
+  id BIGSERIAL PRIMARY KEY,
+  code TEXT UNIQUE NOT NULL,
+  note TEXT NOT NULL DEFAULT '',
+  max_uses INTEGER NOT NULL DEFAULT 1,
+  used INTEGER NOT NULL DEFAULT 0,
+  revoked INTEGER NOT NULL DEFAULT 0,
+  created_by BIGINT NOT NULL REFERENCES users(id),
+  created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+  expires_at TIMESTAMPTZ NOT NULL
+)`,
+	`CREATE TABLE IF NOT EXISTS settings (
+  k TEXT PRIMARY KEY,
+  v TEXT NOT NULL
+)`,
 }
 
 type User struct {
 	ID       int64  `json:"id"`
 	Username string `json:"username"`
+	IsAdmin  bool   `json:"is_admin"`
+	Disabled bool   `json:"-"` // 停用账号（管理后台用，登录/会话校验时拦截）
 }
 
 type Channel struct {
@@ -353,6 +407,7 @@ type Channel struct {
 	CreatedAt  time.Time `json:"created_at"`
 	InviteOnly bool      `json:"invite_only"`
 	IsOwner    bool      `json:"is_owner"` // 对当前请求用户是否房主（接口层填充）
+	Online     int       `json:"online"`   // 当前在房人数（接口层从 LiveKit 填充）
 	OwnerID    int64     `json:"-"`        // 房主用户 ID（内部用）
 }
 
@@ -424,22 +479,36 @@ func (s *Store) DeleteIngress(ctx context.Context, userID, channelID int64) erro
 
 // ---- 用户 ----
 
+// CreateUser 创建用户；服务器上的第一个账号自动成为管理员。
 func (s *Store) CreateUser(ctx context.Context, username, passwordHash string) (*User, error) {
-	id, err := s.insertID(ctx, "INSERT INTO users (username, password_hash) VALUES (?, ?)", username, passwordHash)
+	var n int
+	if err := s.db.QueryRowContext(ctx, "SELECT COUNT(1) FROM users").Scan(&n); err != nil {
+		return nil, err
+	}
+	isAdmin := 0
+	if n == 0 {
+		isAdmin = 1
+	}
+	id, err := s.insertID(ctx, "INSERT INTO users (username, password_hash, is_admin) VALUES (?, ?, ?)",
+		username, passwordHash, isAdmin)
 	if err != nil {
 		return nil, err
 	}
-	return &User{ID: id, Username: username}, nil
+	return &User{ID: id, Username: username, IsAdmin: isAdmin == 1}, nil
 }
 
 func (s *Store) UserByName(ctx context.Context, username string) (*User, string, error) {
 	var u User
 	var hash string
-	err := s.db.QueryRowContext(ctx, s.q("SELECT id, username, password_hash FROM users WHERE username = ?"), username).
-		Scan(&u.ID, &u.Username, &hash)
+	var isAdmin, disabled int64
+	err := s.db.QueryRowContext(ctx, s.q(
+		"SELECT id, username, password_hash, is_admin, disabled FROM users WHERE username = ?"), username).
+		Scan(&u.ID, &u.Username, &hash, &isAdmin, &disabled)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, "", ErrNotFound
 	}
+	u.IsAdmin = isAdmin != 0
+	u.Disabled = disabled != 0
 	return &u, hash, err
 }
 
@@ -459,15 +528,18 @@ func (s *Store) CreateSession(ctx context.Context, userID int64) (string, error)
 	return token, err
 }
 
-// UserByToken 校验会话 token，过期或不存在返回 ErrNotFound。
+// UserByToken 校验会话 token，过期、不存在或账号已停用返回 ErrNotFound。
 func (s *Store) UserByToken(ctx context.Context, token string) (*User, error) {
 	var u User
+	var isAdmin int64
 	err := s.db.QueryRowContext(ctx, s.q(`
-SELECT u.id, u.username FROM sessions s JOIN users u ON u.id = s.user_id
-WHERE s.token = ? AND s.expires_at > ?`), token, time.Now()).Scan(&u.ID, &u.Username)
+SELECT u.id, u.username, u.is_admin FROM sessions s JOIN users u ON u.id = s.user_id
+WHERE s.token = ? AND s.expires_at > ? AND u.disabled = 0`), token, time.Now()).
+		Scan(&u.ID, &u.Username, &isAdmin)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
+	u.IsAdmin = isAdmin != 0
 	return &u, err
 }
 

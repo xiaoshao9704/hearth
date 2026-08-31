@@ -164,6 +164,15 @@ func (h *Hub) broadcast(channelID int64, m serverMsg) {
 	}
 }
 
+// CloseChannel 断开某频道的全部聊天连接（频道被删除时调用）。
+func (h *Hub) CloseChannel(channelID int64) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for c := range h.rooms[channelID] {
+		c.conn.Close(websocket.StatusGoingAway, "频道已删除")
+	}
+}
+
 // CloseUserChannel 断开某用户在某频道的全部聊天连接（踢出/封禁时调用）。
 func (h *Hub) CloseUserChannel(userID, channelID int64) {
 	h.mu.Lock()

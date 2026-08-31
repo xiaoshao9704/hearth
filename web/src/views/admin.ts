@@ -1,0 +1,554 @@
+// 管理后台（服务器级，仅管理员）：服务状态 / 服务参数 / 用户 / 房间 / 邀请。
+import {
+  adminCreateInvite,
+  adminDeleteChannel,
+  adminDeleteInvite,
+  adminDeleteUser,
+  adminListInvites,
+  adminListUsers,
+  adminOverview,
+  adminSetPolicy,
+  adminSetUserDisabled,
+  getUser,
+  listChannels,
+} from '../api';
+import type { AdminOverview, AdminUser, Channel, Invite } from '../api';
+import { avatarHtml, copyText, esc, icon, timeAgo, toast } from '../ui';
+
+type Tab = 'status' | 'config' | 'users' | 'rooms' | 'invites';
+
+const NAV: { id: Tab; label: string; icon: string; sub: string }[] = [
+  { id: 'status', label: '服务状态', icon: 'pulse', sub: '常驻进程与宿主资源' },
+  { id: 'config', label: '服务参数', icon: 'gear', sub: '组件地址与注册策略' },
+  { id: 'users', label: '用户', icon: 'users', sub: '账号、设备与启停' },
+  { id: 'rooms', label: '房间', icon: 'volume', sub: '频道、房主与可见性' },
+  { id: 'invites', label: '邀请', icon: 'mail', sub: '生成有时效的注册链接' },
+];
+
+export async function renderAdmin(root: HTMLElement, tab: Tab) {
+  const me = getUser();
+  if (!me?.is_admin) {
+    location.hash = '#/lobby';
+    return;
+  }
+  if (!NAV.some((n) => n.id === tab)) tab = 'status';
+  const meta = NAV.find((n) => n.id === tab)!;
+
+  root.innerHTML = `
+    <div class="app-frame">
+      <aside class="sidebar" style="width:210px;background-image:none">
+        <div class="sidebar-head">
+          ${icon('shield', 17, 'var(--ember)')}
+          <div style="display:flex;flex-direction:column;gap:1px">
+            <div style="font-size:13.5px;font-weight:700;letter-spacing:0.04em">管理后台</div>
+            <div class="mono" style="font-size:9.5px;color:var(--text-2)">${esc(location.host)}</div>
+          </div>
+        </div>
+        <div class="sidebar-body" style="gap:2px" id="admin-nav">
+          ${NAV.map(
+            (n) => `
+            <a class="hit nav-row ${n.id === tab ? 'on' : ''}" href="#/admin/${n.id}">
+              ${icon(n.icon, 16, n.id === tab ? 'var(--ember)' : 'var(--text-2)', 1.6)}
+              <span style="flex-grow:1">${n.label}</span>
+              <span class="badge-n mono" data-badge="${n.id}"></span>
+            </a>`,
+          ).join('')}
+        </div>
+        <div style="padding:10px;border-top:1px solid var(--line-soft)">
+          <a class="hit back-row" href="#/lobby">${icon('back', 16, 'var(--text-2)', 1.6)}<span style="flex-grow:1">返回 Hearth</span></a>
+        </div>
+      </aside>
+      <div class="content">
+        <header class="topbar" style="height:62px;padding:0 24px">
+          <h1 style="font-size:16px">${meta.label}</h1>
+          <span class="sub" style="color:var(--text-2)">${meta.sub}</span>
+          <div class="spacer"></div>
+          <div style="display:flex;align-items:center;gap:8px;padding:5px 10px 5px 5px;border-radius:8px;background:var(--bg-3);border:1px solid var(--line)">
+            ${avatarHtml(me.username, 'avatar avatar-sm')}
+            <span style="font-size:12px;color:var(--text-1)">${esc(me.username)} · 管理员</span>
+          </div>
+        </header>
+        <div style="flex-grow:1;padding:22px 24px;overflow-y:auto;display:flex;flex-direction:column;gap:18px" id="admin-body"><div class="muted">加载中…</div></div>
+      </div>
+    </div>
+  `;
+
+  const body = root.querySelector<HTMLDivElement>('#admin-body')!;
+  switch (tab) {
+    case 'status':
+      await paintStatus(body);
+      break;
+    case 'config':
+      await paintConfig(body);
+      break;
+    case 'users':
+      await paintUsers(body);
+      break;
+    case 'rooms':
+      await paintRooms(body);
+      break;
+    case 'invites':
+      await paintInvites(body);
+      break;
+  }
+}
+
+function fmtUptime(s: number): string {
+  if (s < 3600) return `${Math.floor(s / 60)} 分钟`;
+  if (s < 86400) return `${Math.floor(s / 3600)} 小时`;
+  return `${Math.floor(s / 86400)} 天`;
+}
+
+// ---- 服务状态 ----
+
+async function paintStatus(body: HTMLElement) {
+  let ov: AdminOverview;
+  try {
+    ov = await adminOverview();
+  } catch (err) {
+    body.innerHTML = `<div class="error-text">${esc((err as Error).message)}</div>`;
+    return;
+  }
+  const r = ov.resources;
+  const loadPct = r.load !== null ? Math.min(100, Math.round((r.load / Math.max(1, r.cpus)) * 100)) : null;
+  const memPct =
+    r.mem_used_mb !== null && r.mem_total_mb ? Math.round((r.mem_used_mb / r.mem_total_mb) * 100) : null;
+  const resources: { label: string; value: string; pct: number | null }[] = [
+    { label: `负载（${r.cpus} 核）`, value: r.load !== null ? r.load.toFixed(2) : '不可用', pct: loadPct },
+    {
+      label: '内存',
+      value: r.mem_used_mb !== null ? `${((r.mem_used_mb ?? 0) / 1024).toFixed(1)} / ${((r.mem_total_mb ?? 0) / 1024).toFixed(1)} GB` : '不可用',
+      pct: memPct,
+    },
+    { label: '温度', value: r.temp_c !== null ? `${r.temp_c.toFixed(0)} °C` : '不可用', pct: r.temp_c },
+  ];
+  const services = [
+    { name: 'hearth-server', meta: `Go 单体 · ${esc(ov.go_version)} · 已运行 ${fmtUptime(ov.uptime_seconds)}`, ok: true, state: 'running' },
+    { name: 'LiveKit', meta: esc(ov.services.livekit?.url ?? ''), ok: ov.services.livekit?.ok ?? false, state: ov.services.livekit?.ok ? 'running' : 'unreachable' },
+    {
+      name: 'Ingress（OBS 推流）',
+      meta: ov.services.ingress?.ok ? esc(ov.services.ingress.url) : '未配置 INGRESS_UPSTREAM_URL',
+      ok: ov.services.ingress?.ok ?? false,
+      state: ov.services.ingress?.ok ? 'running' : 'off',
+    },
+    { name: '数据库', meta: esc(ov.services.db?.url ?? ''), ok: true, state: 'ok' },
+  ];
+  body.innerHTML = `
+    <div class="stat-cards">
+      <div class="stat-card"><div class="s-label">注册用户</div><div class="s-value"><span class="n">${ov.users}</span><span class="u mono">个</span></div></div>
+      <div class="stat-card"><div class="s-label">在房人数</div><div class="s-value"><span class="n">${ov.online}</span><span class="u mono">人</span></div></div>
+      <div class="stat-card"><div class="s-label">频道</div><div class="s-value"><span class="n">${ov.channels}</span><span class="u mono">个</span></div></div>
+      <div class="stat-card"><div class="s-label">运行时长</div><div class="s-value"><span class="n" style="font-size:20px">${fmtUptime(ov.uptime_seconds)}</span></div></div>
+    </div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:16px">
+      <div class="list-box">
+        <div style="padding:13px 18px;border-bottom:1px solid var(--line-soft);font-size:13px;font-weight:600">常驻组件</div>
+        ${services
+          .map(
+            (sv) => `
+          <div class="svc-row">
+            <div class="dot ${sv.ok ? '' : 'down'}"></div>
+            <div style="flex-grow:1;min-width:0">
+              <div class="s-name">${sv.name}</div>
+              <div class="s-meta mono">${sv.meta}</div>
+            </div>
+            <span class="mono" style="font-size:11px;color:${sv.ok ? 'var(--sage)' : 'var(--red)'}">${sv.state}</span>
+          </div>`,
+          )
+          .join('')}
+      </div>
+      <div class="list-box">
+        <div style="padding:13px 18px;border-bottom:1px solid var(--line-soft);font-size:13px;font-weight:600">宿主资源</div>
+        <div style="padding:16px 18px;display:flex;flex-direction:column;gap:15px">
+          ${resources
+            .map(
+              (res) => `
+            <div>
+              <div style="display:flex;align-items:baseline;gap:8px">
+                <span style="font-size:12px;color:var(--text-1);flex-grow:1">${res.label}</span>
+                <span class="mono" style="font-size:11.5px">${res.value}</span>
+              </div>
+              ${res.pct !== null ? `<div class="res-bar"><div class="${res.pct > 80 ? 'hot' : ''}" style="width:${Math.min(100, res.pct)}%"></div></div>` : ''}
+            </div>`,
+            )
+            .join('')}
+          <div style="font-size:10.5px;color:var(--text-3)">资源读数来自 /proc 与 /sys，仅 Linux 宿主可用。</div>
+        </div>
+      </div>
+    </div>`;
+}
+
+// ---- 服务参数 ----
+
+async function paintConfig(body: HTMLElement) {
+  let ov: AdminOverview;
+  try {
+    ov = await adminOverview();
+  } catch (err) {
+    body.innerHTML = `<div class="error-text">${esc((err as Error).message)}</div>`;
+    return;
+  }
+  let policy = ov.policy;
+
+  const paint = () => {
+    const policies = [
+      { id: 'closed', label: '关闭注册', desc: '只能用 CLI 在服务器上开通' },
+      { id: 'invite', label: '邀请制', desc: '管理员发链接，有效期内可自助注册' },
+      { id: 'open', label: '开放注册', desc: '任何人都能注册——公网上不建议' },
+    ];
+    body.innerHTML = `
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:16px">
+        <div class="card">
+          <div style="font-size:13px;font-weight:600;margin-bottom:5px">注册策略</div>
+          <div style="font-size:11.5px;color:var(--text-2);margin-bottom:13px">决定新账号怎么来，改动立即生效</div>
+          <div style="display:flex;flex-direction:column;gap:8px">
+            ${policies
+              .map((p) => {
+                const on = policy === p.id;
+                return `
+              <button class="hit" data-policy="${p.id}" style="display:flex;align-items:flex-start;gap:11px;padding:11px 12px;border-radius:9px;border:1px solid ${on ? 'var(--ember-line)' : 'var(--line)'};background:${on ? 'var(--ember-tint)' : 'var(--bg-2)'};text-align:left;width:100%">
+                <div class="radio ${on ? 'on' : ''}" style="margin-top:1px"><div class="dot"></div></div>
+                <div style="flex-grow:1">
+                  <div style="font-size:13px;font-weight:${on ? 600 : 500};color:${on ? 'var(--ember)' : 'var(--text-0)'}">${p.label}</div>
+                  <div style="font-size:11px;color:var(--text-2);margin-top:2px">${p.desc}</div>
+                </div>
+              </button>`;
+              })
+              .join('')}
+          </div>
+        </div>
+        <div class="card">
+          <div style="font-size:13px;font-weight:600;margin-bottom:13px">组件地址（只读）</div>
+          <div style="display:flex;flex-direction:column;gap:11px">
+            ${[
+              ['LiveKit Twirp', ov.services.livekit?.url ?? ''],
+              ['Ingress WHIP 上游', ov.services.ingress?.ok ? ov.services.ingress.url : '未启用'],
+              ['数据库', ov.services.db?.url ?? ''],
+            ]
+              .map(
+                ([k, v]) => `
+              <div>
+                <div style="font-size:11px;color:var(--text-2);margin-bottom:6px">${k}</div>
+                <div class="mono" style="padding:9px 12px;border-radius:8px;background:var(--bg-2);border:1px solid var(--line);font-size:12px;color:var(--text-1);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(v)}</div>
+              </div>`,
+              )
+              .join('')}
+          </div>
+          <div style="margin-top:13px;font-size:11px;line-height:1.6;color:var(--text-3)">端口、域名与 ICE 在部署侧（.env / compose）改，改完重启容器生效——正在通话的人会掉线一次。</div>
+        </div>
+      </div>`;
+    body.querySelectorAll<HTMLButtonElement>('[data-policy]').forEach((btn) => {
+      btn.addEventListener('click', async () => {
+        try {
+          const r = await adminSetPolicy(btn.dataset.policy!);
+          policy = r.policy;
+          paint();
+          toast('注册策略已更新', 'ok');
+        } catch (err) {
+          toast((err as Error).message, 'bad');
+        }
+      });
+    });
+  };
+  paint();
+}
+
+// ---- 用户 ----
+
+async function paintUsers(body: HTMLElement) {
+  let users: AdminUser[] = [];
+  let query = '';
+  const meId = getUser()?.id;
+
+  async function load() {
+    users = await adminListUsers();
+    paint();
+  }
+
+  function paint() {
+    const q = query.trim().toLowerCase();
+    const shown = q ? users.filter((u) => u.username.toLowerCase().includes(q)) : users;
+    body.innerHTML = `
+      <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+        <div class="field" style="width:280px;height:38px">${icon('search', 15, 'var(--text-2)')}<input id="u-query" placeholder="搜用户名" value="${esc(query)}" /></div>
+        <div class="spacer"></div>
+        <a class="hit btn btn-primary" href="#/admin/invites">${icon('plus', 15, 'var(--on-ember)', 1.9)} 邀请新用户</a>
+      </div>
+      <div class="table-box">
+        <div class="table-head">
+          <div style="width:200px">用户</div>
+          <div style="width:90px">角色</div>
+          <div style="width:80px">设备</div>
+          <div style="flex-grow:1">最后活跃</div>
+          <div style="width:170px;text-align:right">操作</div>
+        </div>
+        ${
+          shown.length === 0
+            ? '<div class="table-empty">没有匹配的用户。</div>'
+            : shown
+                .map((u) => {
+                  const self = u.id === meId;
+                  return `
+        <div class="table-row ${u.disabled ? 'dim' : ''}">
+          <div style="width:200px;display:flex;align-items:center;gap:10px;min-width:0">
+            ${avatarHtml(u.username, 'avatar')}
+            <div style="min-width:0">
+              <div style="font-size:13px;font-weight:500">${esc(u.username)}</div>
+              <div class="mono" style="font-size:10px;color:var(--text-2);margin-top:2px">usr_${u.id}</div>
+            </div>
+          </div>
+          <div style="width:90px"><span class="chip ${u.is_admin ? 'tag-ember' : ''}" style="${u.is_admin ? '' : 'background:var(--bg-4);color:var(--text-1)'}">${u.is_admin ? '管理员' : '成员'}</span></div>
+          <div class="mono" style="width:80px;font-size:12px;color:var(--text-1)">${u.devices}</div>
+          <div style="flex-grow:1;font-size:12px;color:var(--text-2)">${timeAgo(u.last_seen)}</div>
+          <div style="width:170px;display:flex;gap:7px;justify-content:flex-end">
+            <button class="hit btn btn-sm ${self ? 'disabled' : ''}" data-toggle="${u.id}" data-disabled="${u.disabled}">${u.disabled ? '启用' : '禁用'}</button>
+            <button class="hit btn btn-sm ${self ? 'disabled' : 'btn-danger'}" data-del="${u.id}" data-name="${esc(u.username)}" style="width:28px;padding:0">${icon('trash', 13, self ? 'var(--text-3)' : 'var(--red)')}</button>
+          </div>
+        </div>`;
+                })
+                .join('')
+        }
+      </div>`;
+
+    const input = body.querySelector<HTMLInputElement>('#u-query')!;
+    input.addEventListener('input', () => {
+      query = input.value;
+      const pos = input.selectionStart;
+      paint();
+      const again = body.querySelector<HTMLInputElement>('#u-query')!;
+      again.focus();
+      again.setSelectionRange(pos, pos);
+    });
+    body.querySelectorAll<HTMLButtonElement>('[data-toggle]').forEach((btn) =>
+      btn.addEventListener('click', async () => {
+        if (btn.classList.contains('disabled')) return;
+        try {
+          await adminSetUserDisabled(Number(btn.dataset.toggle), btn.dataset.disabled !== 'true');
+          await load();
+        } catch (err) {
+          toast((err as Error).message, 'bad');
+        }
+      }),
+    );
+    body.querySelectorAll<HTMLButtonElement>('[data-del]').forEach((btn) =>
+      btn.addEventListener('click', async () => {
+        if (btn.classList.contains('disabled')) return;
+        if (!confirm(`删除用户 ${btn.dataset.name}？其会话、设备档案和白名单记录一并清除，不可恢复。`)) return;
+        try {
+          await adminDeleteUser(Number(btn.dataset.del));
+          await load();
+        } catch (err) {
+          toast((err as Error).message, 'bad');
+        }
+      }),
+    );
+  }
+  try {
+    await load();
+  } catch (err) {
+    body.innerHTML = `<div class="error-text">${esc((err as Error).message)}</div>`;
+  }
+}
+
+// ---- 房间 ----
+
+async function paintRooms(body: HTMLElement) {
+  let channels: Channel[] = [];
+  async function load() {
+    channels = await listChannels();
+    paint();
+  }
+  function paint() {
+    body.innerHTML = `
+      <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+        <div style="font-size:13px;color:var(--text-2)">常驻频道进程一直在，人进来就连上——不需要「开房」。建频道在大厅操作。</div>
+      </div>
+      <div class="table-box">
+        <div class="table-head">
+          <div style="width:190px">频道</div>
+          <div style="width:90px">在线</div>
+          <div style="width:140px">房主</div>
+          <div style="flex-grow:1">可见性</div>
+          <div style="width:100px;text-align:right">操作</div>
+        </div>
+        ${
+          channels.length === 0
+            ? '<div class="table-empty">还没有频道。</div>'
+            : channels
+                .map(
+                  (c) => `
+        <div class="table-row">
+          <div style="width:190px;display:flex;align-items:center;gap:9px;min-width:0">
+            ${icon('volume', 15, c.online ? 'var(--ember)' : 'var(--text-2)')}
+            <span style="font-size:13px;font-weight:500">${esc(c.name)}</span>
+          </div>
+          <div class="mono" style="width:90px;font-size:12px;color:var(--text-1)">${c.online ? `${c.online} 人` : '—'}</div>
+          <div style="width:140px;font-size:12px;color:var(--text-1)">${esc(c.created_by)}</div>
+          <div style="flex-grow:1"><span class="chip ${c.invite_only ? 'tag-ember' : ''}" style="${c.invite_only ? '' : 'background:var(--bg-4);color:var(--text-1)'}">${c.invite_only ? '邀请制' : '公开'}</span></div>
+          <div style="width:100px;display:flex;justify-content:flex-end">
+            <button class="hit btn btn-sm btn-danger" data-del="${c.id}" data-name="${esc(c.name)}">删除</button>
+          </div>
+        </div>`,
+                )
+                .join('')
+        }
+      </div>`;
+    body.querySelectorAll<HTMLButtonElement>('[data-del]').forEach((btn) =>
+      btn.addEventListener('click', async () => {
+        if (!confirm(`删除频道「${btn.dataset.name}」？聊天记录、黑白名单和推流 key 一并清除，不可恢复。`)) return;
+        try {
+          await adminDeleteChannel(Number(btn.dataset.del));
+          await load();
+        } catch (err) {
+          toast((err as Error).message, 'bad');
+        }
+      }),
+    );
+  }
+  try {
+    await load();
+  } catch (err) {
+    body.innerHTML = `<div class="error-text">${esc((err as Error).message)}</div>`;
+  }
+}
+
+// ---- 邀请 ----
+
+async function paintInvites(body: HTMLElement) {
+  let invites: Invite[] = [];
+  let base = '';
+  let ttl = '24h';
+  let uses = '1';
+  let note = '';
+  let fresh = '';
+
+  async function load() {
+    const r = await adminListInvites();
+    invites = r.invites;
+    base = r.base;
+    paint();
+  }
+
+  const stateOf = (iv: Invite): { label: string; cls: string; dead: boolean } => {
+    const now = Date.now();
+    const exp = new Date(iv.expires_at).getTime();
+    if (iv.revoked) return { label: '已撤销', cls: 'tag-red', dead: true };
+    if (exp < now) return { label: '已过期', cls: 'tag-red', dead: true };
+    if (iv.max_uses > 0 && iv.used >= iv.max_uses) return { label: '已用完', cls: '', dead: true };
+    const leftH = Math.ceil((exp - now) / 3600_000);
+    return { label: `有效 · 剩 ${leftH > 48 ? `${Math.ceil(leftH / 24)} 天` : `${leftH} 小时`}`, cls: 'tag-sage', dead: false };
+  };
+
+  function paint() {
+    const seg = (group: string, val: string, opts: [string, string][]) =>
+      `<div class="seg-group" style="background:var(--bg-2)">${opts
+        .map(([v, label]) => `<button class="hit seg ${val === v ? 'on' : ''}" data-${group}="${v}">${label}</button>`)
+        .join('')}</div>`;
+    body.innerHTML = `
+      <div class="card" style="padding:18px 20px">
+        <div style="font-size:13.5px;font-weight:600">生成邀请链接</div>
+        <div style="font-size:11.5px;color:var(--text-2);margin-top:4px">链接在有效期内可用，点开就能自己设账号密码</div>
+        <div style="display:flex;gap:20px;margin-top:16px;align-items:flex-end;flex-wrap:wrap">
+          <div>
+            <div style="font-size:11px;color:var(--text-2);margin-bottom:7px">有效期</div>
+            ${seg('ttl', ttl, [['1h', '1 小时'], ['24h', '24 小时'], ['7d', '7 天']])}
+          </div>
+          <div>
+            <div style="font-size:11px;color:var(--text-2);margin-bottom:7px">可用次数</div>
+            ${seg('uses', uses, [['1', '1 次'], ['5', '5 次'], ['0', '不限']])}
+          </div>
+          <div style="flex-grow:1;min-width:160px">
+            <div style="font-size:11px;color:var(--text-2);margin-bottom:7px">备注（给谁）</div>
+            <div class="field" style="height:38px;background:var(--bg-2)"><input id="iv-note" value="${esc(note)}" /></div>
+          </div>
+          <button class="hit btn btn-primary" id="iv-make">生成链接</button>
+        </div>
+        ${
+          fresh
+            ? `<div style="display:flex;align-items:center;gap:10px;height:42px;margin-top:14px;padding:0 6px 0 14px;border-radius:9px;background:var(--sage-tint);border:1px solid var(--sage-line)">
+                <span class="mono" style="font-size:12.5px;flex-grow:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(fresh)}</span>
+                <button class="hit btn btn-sm" id="iv-copy">${icon('copy', 13)} 复制</button>
+              </div>`
+            : ''
+        }
+      </div>
+      <div class="table-box">
+        <div class="table-head">
+          <div style="width:150px">邀请码</div>
+          <div style="width:150px">备注</div>
+          <div style="width:110px">可用次数</div>
+          <div style="flex-grow:1">状态</div>
+          <div style="width:150px;text-align:right">操作</div>
+        </div>
+        ${
+          invites.length === 0
+            ? '<div class="table-empty">还没有发过邀请。</div>'
+            : invites
+                .map((iv) => {
+                  const st = stateOf(iv);
+                  return `
+        <div class="table-row ${st.dead ? 'dim' : ''}">
+          <div class="mono" style="width:150px;font-size:12px;color:var(--text-1)">${esc(iv.code)}</div>
+          <div style="width:150px;font-size:12.5px;color:var(--text-1)">${esc(iv.note || '（无）')}</div>
+          <div class="mono" style="width:110px;font-size:12px;color:var(--text-1)">${iv.used} / ${iv.max_uses === 0 ? '∞' : iv.max_uses}</div>
+          <div style="flex-grow:1"><span class="chip ${st.cls}" style="${st.cls ? '' : 'background:var(--bg-4);color:var(--text-2)'}">${st.label}</span></div>
+          <div style="width:150px;display:flex;gap:7px;justify-content:flex-end">
+            ${st.dead ? '' : `<button class="hit btn btn-sm" data-copy="${esc(iv.code)}">复制链接</button>`}
+            <button class="hit btn btn-sm" data-del="${iv.id}">${st.dead ? '删除' : '撤销'}</button>
+          </div>
+        </div>`;
+                })
+                .join('')
+        }
+      </div>`;
+
+    body.querySelectorAll<HTMLButtonElement>('[data-ttl]').forEach((b) =>
+      b.addEventListener('click', () => {
+        ttl = b.dataset.ttl!;
+        note = body.querySelector<HTMLInputElement>('#iv-note')!.value;
+        paint();
+      }),
+    );
+    body.querySelectorAll<HTMLButtonElement>('[data-uses]').forEach((b) =>
+      b.addEventListener('click', () => {
+        uses = b.dataset.uses!;
+        note = body.querySelector<HTMLInputElement>('#iv-note')!.value;
+        paint();
+      }),
+    );
+    body.querySelector('#iv-make')!.addEventListener('click', async () => {
+      note = body.querySelector<HTMLInputElement>('#iv-note')!.value;
+      try {
+        const r = await adminCreateInvite(note, Number(uses), ttl);
+        fresh = r.url;
+        note = '';
+        await load();
+      } catch (err) {
+        toast((err as Error).message, 'bad');
+      }
+    });
+    body.querySelector('#iv-copy')?.addEventListener('click', async () => {
+      if (await copyText(fresh)) toast('已复制', 'ok', 1400);
+    });
+    body.querySelectorAll<HTMLButtonElement>('[data-copy]').forEach((b) =>
+      b.addEventListener('click', async () => {
+        if (await copyText(`${base}/#/join/${b.dataset.copy}`)) toast('已复制', 'ok', 1400);
+      }),
+    );
+    body.querySelectorAll<HTMLButtonElement>('[data-del]').forEach((b) =>
+      b.addEventListener('click', async () => {
+        try {
+          await adminDeleteInvite(Number(b.dataset.del));
+          await load();
+        } catch (err) {
+          toast((err as Error).message, 'bad');
+        }
+      }),
+    );
+  }
+  try {
+    await load();
+  } catch (err) {
+    body.innerHTML = `<div class="error-text">${esc((err as Error).message)}</div>`;
+  }
+}

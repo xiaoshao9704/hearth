@@ -2,8 +2,25 @@
 <html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="theme-color" content="#f7f3ee" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#0d0b0a" media="(prefers-color-scheme: dark)" />
     <title>Hearth</title>
+    <script>
+      // 主题需在 CSS 渲染前落到 html 上，避免闪白/闪黑
+      try {
+        var t = localStorage.getItem('hearth_theme');
+        document.documentElement.dataset.theme = t === 'light' || t === 'dark' ? t : 'auto';
+      } catch (e) {
+        document.documentElement.dataset.theme = 'auto';
+      }
+    </script>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&family=Noto+Sans+SC:wght@400;500;700&display=swap"
+    />
   </head>
   <body>
     <div id="app"></div>

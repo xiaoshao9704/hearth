@@ -19,7 +19,9 @@ type Config struct {
 	IngressUpstreamURL string // WHIP 上游（/w/ 代理目标）；空 = Ingress 未启用（/api/ingress 返回 503）
 	CORSOrigin         string // 允许的跨域来源，* 表示全部
 	StaticDir          string // 可选：前端构建产物目录，空则不托管
-	RegOpen            bool   // 是否开放注册（默认关闭，用 adduser CLI 加用户）
+	RegOpen            bool   // 兼容旧变量 REGISTRATION_OPEN=true（等价 REG_POLICY=open）
+	RegPolicy          string // 注册策略默认值：closed / invite / open（可被后台设置覆盖）
+	PublicURL          string // 站点公开地址（拼邀请链接用）；空 = 按请求推导
 }
 
 func Load() Config {
@@ -38,7 +40,21 @@ func Load() Config {
 		CORSOrigin:         env("CORS_ORIGIN", "*"),
 		StaticDir:          env("STATIC_DIR", ""),
 		RegOpen:            env("REGISTRATION_OPEN", "") == "true",
+		RegPolicy:          env("REG_POLICY", ""),
+		PublicURL:          env("PUBLIC_URL", ""),
 	}
+}
+
+// DefaultRegPolicy 注册策略默认值：REG_POLICY 优先，兼容 REGISTRATION_OPEN=true，否则邀请制。
+func (c Config) DefaultRegPolicy() string {
+	switch c.RegPolicy {
+	case "closed", "invite", "open":
+		return c.RegPolicy
+	}
+	if c.RegOpen {
+		return "open"
+	}
+	return "invite"
 }
 
 // DatabaseDSN 数据库连接串：DATABASE_URL 优先，空则回退 DB_PATH（sqlite 文件路径）。

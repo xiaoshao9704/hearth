@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"regexp"
 	"strings"
+	"sync"
+	"time"
 
 	"hearth/server/internal/chat"
 	"hearth/server/internal/config"
@@ -30,6 +32,11 @@ type API struct {
 	ing   *lkingress.Client
 	rooms *lkroom.Client
 	hub   *chat.Hub
+
+	// LiveKit 在房人数缓存（大厅频道列表用，避免每次列表都打 LiveKit）
+	countsMu sync.Mutex
+	counts   map[string]int
+	countsAt time.Time
 }
 
 func New(st *store.Store, cfg config.Config, hub *chat.Hub) *API {
@@ -47,8 +54,9 @@ func (a *API) Router() *chi.Mux {
 	r := chi.NewRouter()
 	r.Use(a.cors)
 
-	r.Post("/api/register", a.register)
+	r.Post("/api/register", a.registerWithPolicy)
 	r.Post("/api/login", a.login)
+	r.Get("/api/invites/{code}", a.inviteInfo)
 
 	// 需登录
 	r.Group(func(r chi.Router) {
@@ -61,6 +69,12 @@ func (a *API) Router() *chi.Mux {
 		r.Post("/api/ingress", a.getIngress)
 		r.Post("/api/ingress/reset", a.resetIngress)
 
+		// 账户设置
+		r.Post("/api/account/username", a.updateUsername)
+		r.Post("/api/account/password", a.updatePassword)
+		r.Get("/api/account/devices", a.listMyDevices)
+		r.Delete("/api/account/devices/{deviceID}", a.deleteMyDevice)
+
 		// 频道管理（房主）：频道解析与房主校验收敛到子路由中间件
 		r.Route("/api/channels/{channel}", func(r chi.Router) {
 			r.Use(a.requireOwner)
@@ -72,9 +86,42 @@ func (a *API) Router() *chi.Mux {
 			r.Get("/members", a.listMembers)
 			r.Post("/members", a.addMember)
 			r.Delete("/members", a.removeMember)
+			r.Get("/participants", a.channelParticipants)
+		})
+
+		// 管理后台
+		r.Route("/api/admin", func(r chi.Router) {
+			r.Use(a.requireAdmin)
+			r.Get("/overview", a.adminOverview)
+			r.Get("/policy", a.adminGetPolicy)
+			r.Post("/policy", a.adminSetPolicy)
+			r.Get("/users", a.adminListUsers)
+			r.Post("/users/{id}/disable", a.adminSetUserDisabled(true))
+			r.Post("/users/{id}/enable", a.adminSetUserDisabled(false))
+			r.Delete("/users/{id}", a.adminDeleteUser)
+			r.Delete("/channels/{id}", a.adminDeleteChannel)
+			r.Get("/invites", a.adminListInvites)
+			r.Post("/invites", a.adminCreateInvite)
+			r.Delete("/invites/{id}", a.adminRevokeInvite)
 		})
 	})
 	return r
+}
+
+// roomCounts 各频道在房人数（3 秒缓存）。
+func (a *API) roomCounts(ctx context.Context) (map[string]int, error) {
+	a.countsMu.Lock()
+	defer a.countsMu.Unlock()
+	if a.counts != nil && time.Since(a.countsAt) < 3*time.Second {
+		return a.counts, nil
+	}
+	counts, err := a.rooms.RoomCounts(ctx)
+	if err != nil {
+		return nil, err
+	}
+	a.counts = counts
+	a.countsAt = time.Now()
+	return counts, nil
 }
 
 // ---- 中间件与上下文 ----
@@ -168,36 +215,6 @@ type authResp struct {
 
 var usernameRe = regexp.MustCompile(`^[a-zA-Z0-9_-]{2,32}$`)
 
-func (a *API) register(w http.ResponseWriter, r *http.Request) {
-	if !a.cfg.RegOpen {
-		writeErr(w, http.StatusForbidden, "注册已关闭，请联系管理员开通账号")
-		return
-	}
-	var req credReq
-	if !decode(w, r, &req) {
-		return
-	}
-	if !usernameRe.MatchString(req.Username) || len(req.Password) < 6 {
-		writeErr(w, http.StatusBadRequest, "用户名需 2-32 位字母数字，密码至少 6 位")
-		return
-	}
-	hash, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "内部错误")
-		return
-	}
-	u, err := a.st.CreateUser(r.Context(), req.Username, string(hash))
-	if store.IsUniqueViolation(err) {
-		writeErr(w, http.StatusConflict, "用户名已被占用")
-		return
-	}
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "内部错误")
-		return
-	}
-	a.issueSession(w, r, u)
-}
-
 func (a *API) login(w http.ResponseWriter, r *http.Request) {
 	var req credReq
 	if !decode(w, r, &req) {
@@ -206,6 +223,10 @@ func (a *API) login(w http.ResponseWriter, r *http.Request) {
 	u, hash, err := a.st.UserByName(r.Context(), req.Username)
 	if err != nil || bcrypt.CompareHashAndPassword([]byte(hash), []byte(req.Password)) != nil {
 		writeErr(w, http.StatusUnauthorized, "用户名或密码错误")
+		return
+	}
+	if u.Disabled {
+		writeErr(w, http.StatusForbidden, "账号已被停用，请联系管理员")
 		return
 	}
 	a.issueSession(w, r, u)
@@ -240,8 +261,10 @@ func (a *API) listChannels(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "内部错误")
 		return
 	}
+	counts, _ := a.roomCounts(r.Context()) // LiveKit 不可达时在线数保持 0
 	for i := range chs {
 		chs[i].IsOwner = chs[i].OwnerID == u.ID
+		chs[i].Online = counts[chs[i].Name]
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"channels": chs})
 }

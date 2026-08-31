@@ -30,17 +30,52 @@ func NewClient(apiURL, key, secret string) *Client {
 	return c
 }
 
-// RoundTrip 为 Twirp 请求注入 RoomAdmin JWT（5 分钟时效，随用随签）。
+// RoundTrip 为 Twirp 请求注入 RoomAdmin+RoomList JWT（5 分钟时效，随用随签）。
 // LiveKit 校验管理员 grant 时要求 Room 与请求的房间一致，随请求体里的 room 签发。
 func (c *Client) RoundTrip(req *http.Request) (*http.Response, error) {
 	at := auth.NewAccessToken(c.key, c.secret)
-	at.SetVideoGrant(&auth.VideoGrant{RoomAdmin: true, Room: c.room}).SetValidFor(5 * time.Minute)
+	at.SetVideoGrant(&auth.VideoGrant{RoomAdmin: true, RoomList: true, Room: c.room}).SetValidFor(5 * time.Minute)
 	tok, err := at.ToJWT()
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("Authorization", "Bearer "+tok)
 	return http.DefaultTransport.RoundTrip(req)
+}
+
+// RoomCounts 返回当前有人的房间与在房人数（房间名 -> 人数）。
+func (c *Client) RoomCounts(ctx context.Context) (map[string]int, error) {
+	resp, err := c.api.ListRooms(ctx, &livekit.ListRoomsRequest{})
+	if err != nil {
+		return nil, fmt.Errorf("列出房间失败: %w", err)
+	}
+	out := make(map[string]int, len(resp.Rooms))
+	for _, r := range resp.Rooms {
+		out[r.Name] = int(r.NumParticipants)
+	}
+	return out, nil
+}
+
+// Participant 房间参与者的精简信息（identity 规则 {用户名}-{设备标签}）。
+type Participant struct {
+	Identity string `json:"identity"`
+	Name     string `json:"name"`
+	JoinedAt int64  `json:"joined_at"` // Unix 秒
+}
+
+// ListParticipants 列出房间当前参与者。
+func (c *Client) ListParticipants(ctx context.Context, room string) ([]Participant, error) {
+	c.room = room
+	defer func() { c.room = "" }()
+	resp, err := c.api.ListParticipants(ctx, &livekit.ListParticipantsRequest{Room: room})
+	if err != nil {
+		return nil, fmt.Errorf("列出参与者失败: %w", err)
+	}
+	out := make([]Participant, 0, len(resp.Participants))
+	for _, p := range resp.Participants {
+		out = append(out, Participant{Identity: p.Identity, Name: p.Name, JoinedAt: p.JoinedAt})
+	}
+	return out, nil
 }
 
 // RemoveParticipantsOf 把 room 里 identity 属于 username 的参与者全部移除

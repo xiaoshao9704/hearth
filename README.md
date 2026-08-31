@@ -46,7 +46,7 @@ $EDITOR .env
 # 3. 构建并启动（默认 hearth + livekit 两服务）
 docker compose up -d --build
 
-# 4. 创建第一个账号（注册接口默认关闭）
+# 4. 创建第一个账号（第一个账号自动成为管理员）
 docker compose exec hearth /app/hearth adduser <用户名> <密码>
 ```
 
@@ -55,7 +55,8 @@ docker compose exec hearth /app/hearth adduser <用户名> <密码>
 要点：
 
 - **TLS（可选）**：`docker compose --profile caddy up -d` 启用 Caddy 自动 Let's Encrypt（需 80/443 公网可达、域名已解析、`.env` 填好 DOMAIN）；自有证书写法见 `deploy/Caddyfile.template` 末尾注释
-- **OBS 推流（可选）**：`.env` 取消注释 `LIVEKIT_CONFIG` 与 `INGRESS_UPSTREAM_URL` 两行，重新 `./init.sh`，然后 `docker compose --profile ingress up -d`；房间页「OBS」按钮获取推流地址
+- **OBS 推流（可选）**：`.env` 取消注释 `LIVEKIT_CONFIG` 与 `INGRESS_UPSTREAM_URL` 两行，重新 `./init.sh`，然后 `docker compose --profile ingress up -d`；设置 →「推流」获取 WHIP 地址与密钥
+- **邀请注册**：注册默认走邀请制——管理员在「管理后台 → 邀请」生成有时效的链接（可设次数），对方点开自助建号；后台也可切换 关闭注册 / 开放注册
 - **数据库（可选）**：默认 sqlite（`/data` 卷）；`.env` 设 `DATABASE_URL` 可切 MySQL/Postgres
 - **媒体端口**：`.env` 的 `RTC_UDP_PORT`/`RTC_TCP_PORT` 需在防火墙/安全组放行（不经过反代）
 - **ARM64**：compose 全部镜像含 arm64 变体，树莓派可用
