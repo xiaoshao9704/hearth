@@ -229,18 +229,38 @@ ORDER BY u.id`))
 	for rows.Next() {
 		var u AdminUser
 		var isAdmin, disabled int64
-		var last sql.NullTime
+		// MAX() 聚合没有列声明类型:sqlite 驱动返回字符串,MySQL/PG 返回 time.Time
+		var last any
 		if err := rows.Scan(&u.ID, &u.Username, &isAdmin, &disabled, &u.CreatedAt, &u.Devices, &last); err != nil {
 			return nil, err
 		}
 		u.IsAdmin = isAdmin != 0
 		u.Disabled = disabled != 0
-		if last.Valid {
-			u.LastSeen = &last.Time
-		}
+		u.LastSeen = aggTime(last)
 		out = append(out, u)
 	}
 	return out, rows.Err()
+}
+
+// aggTime 解析聚合时间列在不同驱动下的返回:sqlite 是 "2006-01-02 15:04:05"(UTC) 字符串,
+// MySQL/PG 是 time.Time,nil 表示无设备记录。
+func aggTime(v any) *time.Time {
+	switch t := v.(type) {
+	case nil:
+		return nil
+	case time.Time:
+		return &t
+	case []byte:
+		return aggTime(string(t))
+	case string:
+		if ts, err := time.Parse("2006-01-02 15:04:05", t); err == nil {
+			return &ts
+		}
+		if ts, err := time.Parse(time.RFC3339, t); err == nil {
+			return &ts
+		}
+	}
+	return nil
 }
 
 func (s *Store) UserByID(ctx context.Context, id int64) (*User, error) {
