@@ -46,10 +46,10 @@ go run ./cmd/server    # 默认监听 :8080（须在 server/ 目录下运行，.
 
 ```bash
 # 本机
-go build -o flashcast-server ./cmd/server
+go build -o hearth-server ./cmd/server
 
 # 树莓派（linux/arm64，静态链接无 cgo）
-CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o flashcast-server-arm64 ./cmd/server
+CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o hearth-server-arm64 ./cmd/server
 ```
 
 ## 环境变量（.env）

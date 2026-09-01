@@ -1,4 +1,4 @@
-# FlashCast Web
+# Hearth Web
 
 浏览器前端：Vite + 原生 TypeScript（无框架），`livekit-client` 接入音视频。
 
@@ -10,7 +10,7 @@
 
 ## 投屏参数（核心诉求）
 
-`src/views/room.ts`：分辨率 1080p/720p、帧率 60/30/15、码率滑块 1–15 Mbps（默认按 宽×高×帧率×0.07 的 bpp 模型推导，1080p60≈8.7M）；发布固定 `videoCodec: 'h264'` + `screenShareSimulcastLayers: []`（单层，省 CPU）。选项持久化在 localStorage `fc_room_prefs`，对下一次开启投屏生效。
+`src/views/room.ts`：分辨率 1080p/720p、帧率 60/30/15、码率滑块 1–15 Mbps（默认按 宽×高×帧率×0.07 的 bpp 模型推导，1080p60≈8.7M）；发布固定 `videoCodec: 'h264'` + `screenShareSimulcastLayers: []`（单层，省 CPU）。选项持久化在 localStorage `hearth_room_prefs`，对下一次开启投屏生效。
 
 ## 音频处理
 

@@ -12,7 +12,7 @@
 // 其他可选覆盖：
 //
 //	LIVEKIT_STUN_SERVERS  逗号分隔的 STUN 服务器（默认 STUN 不可达时 livekit 启动即死，国内必配）
-//	REDIS_ADDR            ingress 依赖的 redis 地址；填了用外部实例，空则拉起内嵌 redis
+//	REDIS_ADDR            ingress 依赖的 redis：host:port 或 redis://[user:pass@]host:port[/db]；空则拉起内嵌 redis
 //
 // 首次启动在 /data/aio/ 生成随机密钥（持久化，跨重启稳定）；密钥经环境变量喂给
 // hearth（走"环境变量固定"语义，管理后台只读）。livekit.yaml / ingress.yaml 每次
@@ -27,6 +27,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log"
+	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -61,11 +62,15 @@ func main() {
 	ingTCPPort := envOr("INGRESS_TCP_PORT", "7886")
 	// 默认 STUN 被墙/不可达时 livekit 启动即死，国内部署必须能换成可用 STUN
 	lkStun := os.Getenv("LIVEKIT_STUN_SERVERS")
-	// ingress 依赖 redis：REDIS_ADDR 指向外部实例则直接用，空则拉起内嵌 redis
+	// ingress 依赖 redis：REDIS_ADDR 指向外部实例则直接用（支持 redis://[user:pass@]host:port[/db]），空则拉起内嵌 redis
 	redisAddr := os.Getenv("REDIS_ADDR")
 	embedRedis := embedIngress && redisAddr == ""
 	if embedRedis {
 		redisAddr = "127.0.0.1:6379"
+	}
+	redisBlock := ""
+	if embedIngress {
+		redisBlock = parseRedis(redisAddr).yaml()
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
@@ -74,11 +79,11 @@ func main() {
 
 	if embedLK {
 		// yaml 每次启动按当前 env 重生成（env 权威），手改会在重启后被覆盖
-		if err := os.WriteFile(filepath.Join(aioDir, "livekit.yaml"), []byte(livekitYAML(key, secret, redisAddr, lkPort, lkTCPPort, lkUDPPort, lkStun)), 0o644); err != nil {
+		if err := os.WriteFile(filepath.Join(aioDir, "livekit.yaml"), []byte(livekitYAML(key, secret, redisBlock, lkPort, lkTCPPort, lkUDPPort, lkStun)), 0o644); err != nil {
 			log.Fatalf("写 livekit.yaml 失败: %v", err)
 		}
 		if embedIngress {
-			if err := os.WriteFile(filepath.Join(aioDir, "ingress.yaml"), []byte(ingressYAML(key, secret, lkPort, whipPort, ingUDPPort, ingTCPPort, redisAddr)), 0o644); err != nil {
+			if err := os.WriteFile(filepath.Join(aioDir, "ingress.yaml"), []byte(ingressYAML(key, secret, lkPort, whipPort, ingUDPPort, ingTCPPort, redisBlock)), 0o644); err != nil {
 				log.Fatalf("写 ingress.yaml 失败: %v", err)
 			}
 			if embedRedis {
@@ -151,11 +156,7 @@ func envOr(key, def string) string {
 	return def
 }
 
-func livekitYAML(key, secret, redisAddr, port, tcpPort, udpPort, stunServers string) string {
-	redis := ""
-	if redisAddr != "" {
-		redis = fmt.Sprintf("redis:\n  address: %s\n", redisAddr)
-	}
+func livekitYAML(key, secret, redisBlock, port, tcpPort, udpPort, stunServers string) string {
 	stun := ""
 	if stunServers != "" {
 		var sb strings.Builder
@@ -173,17 +174,15 @@ rtc:
   use_external_ip: true
 %skeys:
   %s: %s
-%s`, port, udpPort, tcpPort, stun, key, secret, redis)
+%s`, port, udpPort, tcpPort, stun, key, secret, redisBlock)
 }
 
-func ingressYAML(key, secret, lkPort, whipPort, udpPort, tcpPort, redisAddr string) string {
+func ingressYAML(key, secret, lkPort, whipPort, udpPort, tcpPort, redisBlock string) string {
 	return fmt.Sprintf(`# aioinit 按环境变量生成，每次重启重写——要改参数请改环境变量，手改不保留
 api_key: %s
 api_secret: %s
 ws_url: ws://127.0.0.1:%s
-redis:
-  address: %s
-whip_port: %s
+%swhip_port: %s
 rtmp_port: -1
 rtc_config:
   udp_port: %s
@@ -192,8 +191,47 @@ rtc_config:
 cpu_cost:
   whip_cpu_cost: 0.3
   whip_bypass_transcoding_cpu_cost: 0.1
-`, key, secret, lkPort, redisAddr, whipPort, udpPort, tcpPort)
+`, key, secret, lkPort, redisBlock, whipPort, udpPort, tcpPort)
 }
+
+// ---- redis（ingress 依赖）----
+
+// redisCfg 外部 redis 连接参数；REDIS_ADDR 支持 host:port 或 redis://[user:pass@]host:port[/db]
+type redisCfg struct{ addr, user, pass, db string }
+
+func parseRedis(raw string) redisCfg {
+	if !strings.Contains(raw, "://") {
+		return redisCfg{addr: raw}
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		log.Fatalf("REDIS_ADDR 解析失败: %q（支持 host:port 或 redis://[user:pass@]host:port[/db]）", raw)
+	}
+	c := redisCfg{addr: u.Host, db: strings.TrimPrefix(u.Path, "/")}
+	if u.User != nil {
+		c.user = u.User.Username()
+		c.pass, _ = u.User.Password()
+	}
+	return c
+}
+
+// yaml 渲染 livekit/ingress 共用的 redis 配置块；账号密码走单引号防特殊字符破坏 YAML
+func (c redisCfg) yaml() string {
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "redis:\n  address: %s\n", c.addr)
+	if c.user != "" {
+		fmt.Fprintf(&sb, "  username: %s\n", yamlStr(c.user))
+	}
+	if c.pass != "" {
+		fmt.Fprintf(&sb, "  password: %s\n", yamlStr(c.pass))
+	}
+	if c.db != "" {
+		fmt.Fprintf(&sb, "  db: %s\n", c.db)
+	}
+	return sb.String()
+}
+
+func yamlStr(s string) string { return "'" + strings.ReplaceAll(s, "'", "''") + "'" }
 
 // ---- 子进程管理 ----
 
