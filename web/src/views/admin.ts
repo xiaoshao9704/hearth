@@ -16,6 +16,7 @@ import {
 } from '../api';
 import type { AdminOverview, AdminUser, Channel, ConfigItem, Invite } from '../api';
 import { avatarHtml, copyText, esc, icon, timeAgo, toast } from '../ui';
+import { menuButtonHtml, wireMenuButton } from '../shell';
 
 type Tab = 'status' | 'config' | 'users' | 'rooms' | 'invites';
 
@@ -38,6 +39,7 @@ export async function renderAdmin(root: HTMLElement, tab: Tab) {
 
   root.innerHTML = `
     <div class="app-frame">
+      <div class="nav-scrim"></div>
       <aside class="sidebar" style="width:210px;background-image:none">
         <div class="sidebar-head">
           ${icon('shield', 17, 'var(--ember)')}
@@ -62,6 +64,7 @@ export async function renderAdmin(root: HTMLElement, tab: Tab) {
       </aside>
       <div class="content">
         <header class="topbar" style="height:62px;padding:0 24px">
+          ${menuButtonHtml()}
           <h1 style="font-size:16px">${meta.label}</h1>
           <span class="sub" style="color:var(--text-2)">${meta.sub}</span>
           <div class="spacer"></div>
@@ -76,6 +79,8 @@ export async function renderAdmin(root: HTMLElement, tab: Tab) {
   `;
 
   const body = root.querySelector<HTMLDivElement>('#admin-body')!;
+  wireMenuButton(root);
+  root.querySelector('.nav-scrim')!.addEventListener('click', () => root.querySelector('.app-frame')?.classList.remove('nav-open'));
   switch (tab) {
     case 'status':
       await paintStatus(body);
