@@ -1248,7 +1248,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
                         {el(avatarHtml(uname, 'avatar' + (isSpeaking() ? ' speaking' : '')))}
                         <div style="flex-grow:1;min-width:0">
                           <div class="m-name">
-                            {uname}
+                            <span>{uname}</span>
                             <Show when={p.isLocal}>
                               <span class="muted">（我）</span>
                             </Show>

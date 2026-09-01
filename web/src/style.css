@@ -161,7 +161,7 @@ a:hover { color: var(--ember-soft); }
 }
 
 /* ---- 标签 ---- */
-.tag { padding: 1.5px 7px; border-radius: 4px; font-size: 9.5px; font-weight: 600; background: var(--bg-4); color: var(--text-2); }
+.tag { padding: 1.5px 7px; border-radius: 4px; font-size: 9.5px; font-weight: 600; background: var(--bg-4); color: var(--text-2); white-space: nowrap; flex-shrink: 0; }
 .tag-ember { background: var(--ember-tint); color: var(--ember); }
 .tag-sage { background: var(--sage-tint); color: var(--sage); }
 .tag-red { background: var(--red-tint); color: var(--red-text); }
@@ -413,8 +413,9 @@ a:hover { color: var(--ember-soft); }
 .side-panel .panel-body { flex-grow: 1; padding: 14px 10px; display: flex; flex-direction: column; gap: 16px; overflow-y: auto; min-height: 0; }
 .member-row { display: flex; align-items: center; gap: 10px; padding: 7px 8px; border-radius: 8px; }
 .member-row.owner-row { background: var(--bg-4); }
-.member-row .m-name { font-size: 13px; font-weight: 500; display: flex; align-items: center; gap: 6px; }
-.member-row .m-status { font-size: 11px; color: var(--text-2); }
+.member-row .m-name { font-size: 13px; font-weight: 500; display: flex; align-items: center; gap: 6px; min-width: 0; }
+.member-row .m-name > :first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.member-row .m-status { font-size: 11px; color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .member-row .m-status.hot { color: var(--ember); }
 .member-row .m-btn { width: 26px; height: 26px; flex-shrink: 0; border-radius: 6px; display: flex; align-items: center; justify-content: center; color: var(--text-2); }
 .member-row .m-btn.muted-on { background: var(--red-tint); color: var(--red); }
