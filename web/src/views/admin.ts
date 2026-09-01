@@ -127,10 +127,16 @@ async function paintStatus(body: HTMLElement) {
   const services = [
     { name: 'hearth-server', meta: `Go 单体 · ${esc(ov.go_version)} · 已运行 ${fmtUptime(ov.uptime_seconds)}`, ok: true, state: 'running' },
     {
-      name: `房间内核 · ${esc(ov.services.rtc?.name ?? '?')}`,
-      meta: esc(ov.services.rtc?.url ?? ''),
-      ok: ov.services.rtc?.ok ?? false,
-      state: ov.services.rtc?.ok ? 'running' : 'unreachable',
+      name: `语音内核 · ${esc(ov.services.voice?.name ?? '?')}`,
+      meta: esc(ov.services.voice?.url ?? '') || '进程内嵌（/api/voice）',
+      ok: ov.services.voice?.ok ?? false,
+      state: ov.services.voice?.ok ? 'running' : 'unreachable',
+    },
+    {
+      name: `舞台内核 · ${esc(ov.services.stage?.name ?? '?')}`,
+      meta: ov.services.stage?.name === 'none' ? '未启用（投屏/摄像头不可用）' : esc(ov.services.stage?.url ?? ''),
+      ok: ov.services.stage?.ok ?? false,
+      state: ov.services.stage?.ok ? 'running' : ov.services.stage?.name === 'none' ? 'off' : 'unreachable',
     },
     {
       name: `推流入口 · ${esc(ov.services.ingest?.name ?? '?')}`,
@@ -250,8 +256,9 @@ async function paintConfig(body: HTMLElement) {
         ${[...new Set(items.map((it) => it.group))]
           .map((g) => {
             const meta: Record<string, [string, string]> = {
-              core: ['内核选择', '换实现只改这里，各实现的配置互不干扰'],
+              core: ['内核选择', '语音 / 舞台（投屏）/ 推流入口分别选实现，配置互不干扰'],
               livekit: ['LiveKit', '信令与令牌签发'],
+              voice: ['内嵌语音 SFU（pion）', '本进程直出音频，UDP 单端口'],
               ingress: ['推流入口（OBS）', 'WHIP 上游与公开地址'],
             };
             const [title, sub] = meta[g] ?? [g, ''];

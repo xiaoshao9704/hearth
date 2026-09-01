@@ -17,7 +17,12 @@ import (
 func (a *API) RegisterProxies(r chi.Router) {
 	// 信令代理：/lk/rtc → 上游 /rtc（剥前缀，等价生产 Caddy 的 handle_path）
 	r.Handle("/lk/*", a.dynProxy("/lk", func(req *http.Request) string {
-		return a.rtcProvider(req.Context()).SignalProxyUpstream(req.Context())
+		if sp := a.stageProvider(req.Context()); sp != nil {
+			if u := sp.SignalProxyUpstream(req.Context()); u != "" {
+				return u
+			}
+		}
+		return a.voiceProvider(req.Context()).SignalProxyUpstream(req.Context())
 	}))
 	// 推流代理：保留完整 /w/{streamKey} 路径（推流端点需要 key 在路径里）
 	r.Handle("/w/*", a.dynProxy("", func(req *http.Request) string {

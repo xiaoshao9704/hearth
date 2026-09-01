@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	neturl "net/url"
 	"regexp"
 	"strings"
 	"sync"
@@ -15,6 +16,7 @@ import (
 	"hearth/server/internal/config"
 	"hearth/server/internal/rtc"
 	"hearth/server/internal/rtc/livekitrtc"
+	"hearth/server/internal/rtc/pionvoice"
 	"hearth/server/internal/store"
 
 	"crypto/rand"
@@ -31,9 +33,11 @@ type API struct {
 	hub *chat.Hub
 
 	// 内核注册表：接入层只依赖 rtc 接口，具体实现按选择器配置取（见 dyncfg.go）
-	rtcKernels    map[string]rtc.Provider
+	voiceKernels  map[string]rtc.Provider
+	stageKernels  map[string]rtc.Provider
 	ingestKernels map[string]rtc.IngestProvider
 	kernelKeys    []rtc.ConfigKey // 各实现自带的配置键汇总
+	pion          *pionvoice.Provider // /api/voice 信令端点直连（进程内实现）
 
 	// 在房人数缓存（大厅频道列表用，避免每次列表都打内核）
 	countsMu sync.Mutex
@@ -43,11 +47,13 @@ type API struct {
 
 func New(st *store.Store, cfg config.Config, hub *chat.Hub) *API {
 	a := &API{st: st, cfg: cfg, hub: hub}
-	// 注册内核实现：LiveKit 同时提供房间内核与推流入口
+	// 注册内核实现：LiveKit 可同时任语音/舞台/推流入口；pion 是进程内纯音频语音内核
 	lk := livekitrtc.New(a.dynVal)
-	a.rtcKernels = map[string]rtc.Provider{"livekit": lk}
+	a.pion = pionvoice.New(a.dynVal)
+	a.voiceKernels = map[string]rtc.Provider{"livekit": lk, "pion": a.pion}
+	a.stageKernels = map[string]rtc.Provider{"livekit": lk}
 	a.ingestKernels = map[string]rtc.IngestProvider{"livekit": lk}
-	a.kernelKeys = livekitrtc.ConfigKeys()
+	a.kernelKeys = append(livekitrtc.ConfigKeys(), pionvoice.ConfigKeys()...)
 	return a
 }
 
@@ -59,6 +65,7 @@ func (a *API) Router() *chi.Mux {
 	r.Post("/api/register", a.registerWithPolicy)
 	r.Post("/api/login", a.login)
 	r.Get("/api/invites/{code}", a.inviteInfo)
+	r.Get("/api/voice", a.voiceWS)
 
 	// 需登录
 	r.Group(func(r chi.Router) {
@@ -119,7 +126,7 @@ func (a *API) roomCounts(ctx context.Context) (map[string]int, error) {
 	if a.counts != nil && time.Since(a.countsAt) < 3*time.Second {
 		return a.counts, nil
 	}
-	counts, err := a.rtcProvider(ctx).RoomCounts(ctx)
+	counts, err := a.voiceProvider(ctx).RoomCounts(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -327,28 +334,63 @@ func (a *API) joinToken(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusForbidden, reason)
 		return
 	}
-	// 设备标签 = UA 推断 + 前端持久设备 ID(缺省时随机,不建档)
-	tag := deviceTag(r.UserAgent())
-	dev := deviceIDRe.FindString(req.DeviceID)
-	if dev != "" {
-		if err := a.st.RecordDevice(r.Context(), u.ID, dev, tag); err != nil {
-			log.Printf("记录设备失败: %v", err)
-		}
-		tag += "-" + dev
-	} else {
-		tag += "-" + randHex(2)
-	}
-	// 频道名即内核房间名，一一映射
-	creds, err := a.rtcProvider(r.Context()).JoinCredentials(r.Context(), c.Name, u.Username, tag)
+	tag := a.deviceTagFor(r, req.DeviceID, u.ID)
+	// 频道名即内核房间名，一一映射。语音线必发；舞台线可选；
+	// 两线同一内核时标记 combined，前端用一条连接承担两种角色（即旧单线形态）。
+	voiceP := a.voiceProvider(r.Context())
+	stageP := a.stageProvider(r.Context())
+	vc, err := voiceP.JoinCredentials(r.Context(), c.Name, u.Username, tag)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "签发令牌失败")
 		return
 	}
-	url := creds.URL
-	if url == "" {
-		url = a.signalURL(r) // 内核未声明浏览器地址时走同源信令代理
+	resp := map[string]any{"voice": a.fillCred(r, vc, c.Name)}
+	combined := stageP != nil && a.dynVal(r.Context(), "voice_provider") == a.dynVal(r.Context(), "stage_provider")
+	resp["combined"] = combined
+	if stageP != nil && !combined {
+		sc, serr := stageP.JoinCredentials(r.Context(), c.Name, u.Username, tag)
+		if serr != nil {
+			log.Printf("舞台线签发失败（语音照常）: %v", serr)
+		} else {
+			resp["stage"] = a.fillCred(r, sc, c.Name)
+		}
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"token": creds.Token, "url": url, "engine": creds.Engine})
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// fillCred 补全内核未声明的连接信息：pion 语音走同源 /api/voice 信令并透传会话 token，
+// livekit 走同源 /lk 代理。
+func (a *API) fillCred(r *http.Request, c rtc.Credentials, channel string) map[string]string {
+	url := c.URL
+	if url == "" {
+		if c.Engine == "pion-voice" {
+			scheme := "ws"
+			if requestScheme(r) == "https" {
+				scheme = "wss"
+			}
+			url = scheme + "://" + r.Host + "/api/voice?channel=" + neturl.QueryEscape(channel)
+		} else {
+			url = a.signalURL(r)
+		}
+	}
+	token := c.Token
+	if token == "" {
+		token = BearerToken(r)
+	}
+	return map[string]string{"engine": c.Engine, "url": url, "token": token}
+}
+
+// deviceTagFor 设备标签 = UA 推断 + 前端持久设备 ID（缺省时随机，不建档）；
+// 语音线与舞台线共用，保证同一设备两线 identity 一致。
+func (a *API) deviceTagFor(r *http.Request, deviceID string, userID int64) string {
+	tag := deviceTag(r.UserAgent())
+	if dev := deviceIDRe.FindString(deviceID); dev != "" {
+		if err := a.st.RecordDevice(r.Context(), userID, dev, tag); err != nil {
+			log.Printf("记录设备失败: %v", err)
+		}
+		return tag + "-" + dev
+	}
+	return tag + "-" + randHex(2)
 }
 
 // signalURL 按请求推导同源信令代理地址（/lk 路由）。
@@ -530,7 +572,14 @@ func (a *API) resolveTargetUser(w http.ResponseWriter, r *http.Request, u *store
 
 // evict 把用户从频道现场移除：LiveKit 侧踢全部设备 + 断开聊天 WS。
 func (a *API) evict(r *http.Request, c *store.Channel, t *store.User) (int, error) {
-	n, err := a.rtcProvider(r.Context()).RemoveParticipantsOf(r.Context(), c.Name, t.Username)
+	n, err := a.voiceProvider(r.Context()).RemoveParticipantsOf(r.Context(), c.Name, t.Username)
+	if sp := a.stageProvider(r.Context()); sp != nil {
+		if m, serr := sp.RemoveParticipantsOf(r.Context(), c.Name, t.Username); serr == nil {
+			n += m
+		} else if err == nil {
+			err = serr
+		}
+	}
 	if err != nil {
 		log.Printf("内核踢出 %s 失败: %v", t.Username, err)
 	}

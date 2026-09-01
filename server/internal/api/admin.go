@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"hearth/server/internal/rtc"
 	"hearth/server/internal/store"
 
 	"github.com/go-chi/chi/v5"
@@ -222,13 +223,25 @@ func (a *API) adminOverview(w http.ResponseWriter, r *http.Request) {
 		"uptime_seconds": int(time.Since(serverStart).Seconds()),
 		"go_version":     runtime.Version(),
 		"policy":         a.regPolicy(r),
-		"services": map[string]any{
-			"rtc": map[string]any{"name": a.rtcProvider(r.Context()).Name(), "ok": rtcOK,
-				"url": a.rtcProvider(r.Context()).SignalProxyUpstream(r.Context())},
-			"ingest": map[string]any{"name": a.ingestProvider(r.Context()).Name(), "ok": a.ingestProvider(r.Context()).Enabled(r.Context()),
-				"url": a.ingestProvider(r.Context()).ProxyUpstream(r.Context())},
-			"db": map[string]any{"ok": true, "url": dbLabel(a.cfg.DatabaseDSN())},
-		},
+		"services": func() map[string]any {
+			vp := a.voiceProvider(r.Context())
+			sv := map[string]any{
+				"voice": map[string]any{"name": vp.Name(), "ok": rtcOK, "url": vp.SignalProxyUpstream(r.Context())},
+				"ingest": map[string]any{"name": a.ingestProvider(r.Context()).Name(), "ok": a.ingestProvider(r.Context()).Enabled(r.Context()),
+					"url": a.ingestProvider(r.Context()).ProxyUpstream(r.Context())},
+				"db": map[string]any{"ok": true, "url": dbLabel(a.cfg.DatabaseDSN())},
+			}
+			if sp := a.stageProvider(r.Context()); sp != nil {
+				stageOK := true
+				if _, err := sp.RoomCounts(r.Context()); err != nil {
+					stageOK = false
+				}
+				sv["stage"] = map[string]any{"name": sp.Name(), "ok": stageOK, "url": sp.SignalProxyUpstream(r.Context())}
+			} else {
+				sv["stage"] = map[string]any{"name": "none", "ok": false, "url": ""}
+			}
+			return sv
+		}(),
 		"resources": hostResources(),
 	})
 }
@@ -457,11 +470,22 @@ func (a *API) adminSetPolicy(w http.ResponseWriter, r *http.Request) {
 
 func (a *API) channelParticipants(w http.ResponseWriter, r *http.Request) {
 	c := channelFrom(r)
-	ps, err := a.rtcProvider(r.Context()).ListParticipants(r.Context(), c.Name)
-	if err != nil {
-		// 内核侧房间不存在（没人）时按空列表处理
-		writeJSON(w, http.StatusOK, map[string]any{"participants": []any{}})
-		return
+	// 两条线的参与者并集（OBS 推流只在舞台线；同一设备两线 identity 一致会去重）
+	seen := map[string]bool{}
+	ps := []rtc.Participant{}
+	providers := []rtc.Provider{a.voiceProvider(r.Context())}
+	if sp := a.stageProvider(r.Context()); sp != nil {
+		providers = append(providers, sp)
+	}
+	for _, pr := range providers {
+		if list, err := pr.ListParticipants(r.Context(), c.Name); err == nil {
+			for _, x := range list {
+				if !seen[x.Identity] {
+					seen[x.Identity] = true
+					ps = append(ps, x)
+				}
+			}
+		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"participants": ps})
 }

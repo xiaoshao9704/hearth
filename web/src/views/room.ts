@@ -1,6 +1,8 @@
-// 房间页：布局、面板、聊天与断线重连都在这里；音视频经 AVEngine 接口驱动，
-// 不感知具体内核（LiveKit / 将来的 pion-voice 由凭证里的 engine 字段选择）。
-import { LIVEKIT_URL_FALLBACK, clearSession, fetchLiveKitToken, getUser, listChannels } from '../api';
+// 房间页：布局、面板、聊天与断线重连；音视频经 AVEngine 接口驱动。
+// 双线模型：语音线（voice，权威名册/说话状态）+ 舞台线（stage：投屏/摄像头/OBS 及其伴音）。
+// 两线同一内核时（combined）一条连接承担两种角色；舞台线缺席或断开只禁用投屏/摄像头，语音不受影响。
+import { clearSession, fetchJoinCredentials, getUser, listChannels } from '../api';
+import type { EngineCred } from '../api';
 import { connectChat } from '../chat';
 import type { ChatMessage } from '../chat';
 import { createEngine } from '../engine';
@@ -13,6 +15,17 @@ import { openSettings } from './settings';
 // iOS Safari 的私有全屏 API（iPhone 仅 video 元素可用）
 type IOSVideo = HTMLVideoElement & { webkitEnterFullscreen?: () => void };
 type SinkMedia = HTMLMediaElement & { setSinkId?: (id: string) => Promise<void> };
+
+type Role = 'voice' | 'stage';
+
+interface Line {
+  role: Role;
+  engine: AVEngine | null;
+  engineName: string;
+  attempts: number;
+  timer: number;
+  inflight: boolean;
+}
 
 export async function renderRoom(root: HTMLElement, channel: string) {
   const prefs = loadPrefs();
@@ -95,15 +108,18 @@ export async function renderRoom(root: HTMLElement, channel: string) {
   const roomMetaEl = shell.content.querySelector<HTMLSpanElement>('#room-meta')!;
 
   // ---- 状态 ----
-  let engine: AVEngine | null = null;
-  let engineName = '';
+  const voiceLine: Line = { role: 'voice', engine: null, engineName: '', attempts: 0, timer: 0, inflight: false };
+  let stageLine: Line | null = null; // null = 无舞台线；combined 时与 voiceLine 同引擎
+  let combined = false;
+  let stageUp = false;
   let leaving = false;
   let bounced = false;
-  const tiles = new Map<string, HTMLDivElement>(); // `${identity}:${source}` -> 视频卡片
-  const audioTiles = new Map<string, HTMLDivElement>(); // identity -> 无视频参与者的音频块
+  const tiles = new Map<string, HTMLDivElement>();
+  const audioTiles = new Map<string, HTMLDivElement>();
   const audioEls = new Map<string, Set<SinkMedia>>();
-  const volumes = new Map<string, number>(); // identity -> 本机静音 0/1
+  const volumes = new Map<string, number>();
   let deafened = false;
+  const speakingByRole: Record<Role, Set<string>> = { voice: new Set(), stage: new Set() };
   let speakingSet = new Set<string>();
   let micOn = prefs.mic;
   let cameraOn = prefs.camera;
@@ -111,7 +127,25 @@ export async function renderRoom(root: HTMLElement, channel: string) {
   const myUsername = getUser()?.username ?? '';
   const obsIdentity = `${myUsername}-obs`;
 
-  const parts = () => engine?.participants() ?? [];
+  const stageEngine = () => (combined ? voiceLine.engine : stageLine?.engine) ?? null;
+
+  // 双线参与者合并：语音线是名册权威（micOn），舞台线补充 sharing/OBS
+  function parts(): EPart[] {
+    const base = voiceLine.engine?.participants() ?? [];
+    if (combined || !stageLine?.engine) return base;
+    const map = new Map<string, EPart>();
+    base.forEach((p) => map.set(p.identity, { ...p }));
+    for (const s of stageLine.engine.participants()) {
+      const ex = map.get(s.identity);
+      if (ex) {
+        ex.sharing = ex.sharing || s.sharing;
+        ex.obs = ex.obs || s.obs;
+      } else {
+        map.set(s.identity, { ...s }); // OBS 推流等仅舞台线的参与者
+      }
+    }
+    return [...map.values()];
+  }
 
   const volumeFor = (identity: string) => volumes.get(identity) ?? (identity === obsIdentity ? 0 : 1);
 
@@ -253,7 +287,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
     }
   }
 
-  // 无视频参与者渲染音频块（头像大圆 + 名字 + 麦克风状态）
+  // 无视频参与者渲染音频块
   function syncAudioTiles() {
     const ps = parts();
     const want = new Set<string>();
@@ -280,16 +314,16 @@ export async function renderRoom(root: HTMLElement, channel: string) {
       }
       const speaking = speakingSet.has(p.identity);
       el.classList.toggle('speaking', speaking);
-      el.classList.toggle('muted', !p.micOn && !p.isLocal);
+      el.classList.toggle('muted', !p.micOn && !p.isLocal && !p.obs);
       el.innerHTML = `
         ${avatarHtml(p.username, 'avatar avatar-xl' + (speaking ? ' speaking' : ''))}
         <div class="a-name">
           <span>${esc(p.isLocal ? '你' : p.display)}</span>
-          ${micIcon(13, !p.micOn, !p.micOn ? 'var(--red)' : speaking ? 'var(--ember)' : 'var(--text-2)')}
+          ${micIcon(13, !p.micOn && !p.obs, !p.micOn && !p.obs ? 'var(--red)' : speaking ? 'var(--ember)' : 'var(--text-2)')}
         </div>
         ${p.obs ? '<div style="position:absolute;top:12px;right:12px" class="tag tag-ember mono">OBS 推流</div>' : ''}`;
     }
-    if (engine?.connected()) statusEl.textContent = '';
+    if (voiceLine.engine?.connected()) statusEl.textContent = '';
     applyLayout();
   }
 
@@ -313,13 +347,13 @@ export async function renderRoom(root: HTMLElement, channel: string) {
             const speaking = plist.some((p) => speakingSet.has(p.identity));
             const sharing = plist.some((p) => p.sharing);
             const obs = plist.some((p) => p.obs);
-            const muted = plist.every((p) => !p.micOn);
+            const muted = plist.every((p) => !p.micOn && !p.obs);
             const localMuted = plist.some((p) => volumeFor(p.identity) === 0);
             const statusBits = [
               sharing ? '投屏中' : '',
               obs ? 'OBS 推流' : '',
               speaking ? '说话中' : muted ? '已静音' : '',
-              plist.length > 1 ? `${plist.length} 台设备` : '',
+              plist.filter((p) => !p.obs).length > 1 ? `${plist.filter((p) => !p.obs).length} 台设备` : '',
               localMuted && !isMe ? '已本地静音' : '',
             ].filter(Boolean);
             return `
@@ -358,11 +392,13 @@ export async function renderRoom(root: HTMLElement, channel: string) {
     roomMetaEl.textContent = `${n} 人在房${screens ? ` · ${screens} 路投屏` : ''}`;
   }
 
-  // ---- 断线自动重连 ----
-  let connMeta = '';
-  let rejoinTimer = 0;
-  let rejoinAttempts = 0;
-  let rejoinInFlight = false;
+  function connBoxMeta(): string {
+    let m = `voice: ${voiceLine.engineName || '—'}`;
+    if (stageLine && !combined) m += ` · stage: ${stageUp ? stageLine.engineName : '重连中'}`;
+    return m;
+  }
+
+  // ---- 断线自动重连（按线独立）----
 
   function bounce(msg: string) {
     if (bounced) return;
@@ -374,97 +410,137 @@ export async function renderRoom(root: HTMLElement, channel: string) {
     }, 1500);
   }
 
-  function clearAllTiles() {
-    speakingSet.clear();
-    tiles.forEach((tile) => tile.remove());
-    tiles.clear();
-    audioTiles.forEach((tile) => tile.remove());
-    audioTiles.clear();
-    audioEls.forEach((set) => set.forEach((el) => el.remove()));
-    audioEls.clear();
-    pinnedKey = null;
-    refreshMembers();
-    refreshMeta();
+  function lineFor(role: Role): Line | null {
+    return role === 'voice' ? voiceLine : combined ? voiceLine : stageLine;
   }
 
-  function scheduleRejoin(delay?: number) {
+  function scheduleRejoin(role: Role, delay?: number) {
     if (leaving || bounced) return;
-    clearTimeout(rejoinTimer);
-    const wait = delay ?? Math.min(30000, 2000 * 2 ** Math.min(rejoinAttempts, 4)) * (0.7 + Math.random() * 0.6);
-    statusEl.textContent = rejoinAttempts === 0 ? '连接断开，正在重连…' : `连接断开，正在重连…（第 ${rejoinAttempts + 1} 次）`;
-    shell.setConn(false, '正在重连…');
-    rejoinTimer = window.setTimeout(() => void connectRoom(false), wait);
+    const line = lineFor(role);
+    if (!line) return;
+    clearTimeout(line.timer);
+    const wait = delay ?? Math.min(30000, 2000 * 2 ** Math.min(line.attempts, 4)) * (0.7 + Math.random() * 0.6);
+    if (role === 'voice' || combined) {
+      statusEl.textContent = line.attempts === 0 ? '连接断开，正在重连…' : `连接断开，正在重连…（第 ${line.attempts + 1} 次）`;
+      shell.setConn(false, '正在重连…');
+    }
+    line.timer = window.setTimeout(() => void connectLines(false, role), wait);
   }
 
-  // 进房（首连与重连共用）：拿凭证 → 按 engine 名建/复用引擎 → 连接 → 恢复发布状态
-  async function connectRoom(first: boolean) {
-    if (leaving || bounced || rejoinInFlight || engine?.connected()) return;
-    rejoinInFlight = true;
-    if (!first) rejoinAttempts++;
+  // 进房 / 按线重连：拿一次凭证，把指定线（或全部）接上
+  async function connectLines(first: boolean, only?: Role) {
+    if (leaving || bounced) return;
+    let creds;
     try {
-      const cred = await fetchLiveKitToken(channel);
-      const name = cred.engine || 'livekit';
-      if (!engine || name !== engineName) {
-        engine?.dispose();
-        engine = await createEngine(name, callbacks);
-        engineName = name;
+      creds = await fetchJoinCredentials(channel);
+    } catch (err) {
+      handleCredsError(err, first);
+      return;
+    }
+    combined = creds.combined;
+    if (!only || only === 'voice') {
+      await connectLine(voiceLine, creds.voice, first, 'voice');
+    }
+    if (combined) {
+      stageLine = voiceLine;
+      stageUp = !!voiceLine.engine?.connected();
+    } else if (creds.stage) {
+      if (!stageLine || stageLine === voiceLine) {
+        stageLine = { role: 'stage', engine: null, engineName: '', attempts: 0, timer: 0, inflight: false };
       }
-      const url = cred.url || LIVEKIT_URL_FALLBACK;
-      await engine.connect(url, cred.token);
-      connMeta = `${engineName} · ${new URL(url).host}`;
-      rejoinAttempts = 0;
-      statusEl.textContent = '';
-      shell.setConn(true, connMeta);
-      if (!first) toast('已重新连接', 'ok', 1800);
-      // 恢复发布状态：麦克风/摄像头按开关重开；投屏需要用户手势，不自动恢复
-      if (micOn) {
-        try {
-          await engine.setMic(true);
-        } catch (err) {
-          micOn = false;
-          if (first) toast(captureErrorMsg('麦克风', err), 'bad');
+      if (!only || only === 'stage') {
+        await connectLine(stageLine, creds.stage, first, 'stage');
+      }
+    } else {
+      stageLine = null;
+      stageUp = false;
+    }
+    updateStageButtons();
+    shell.setConn(!!voiceLine.engine?.connected(), connBoxMeta());
+  }
+
+  function handleCredsError(err: unknown, first: boolean) {
+    const msg = (err as Error).message ?? '';
+    if (first) statusEl.textContent = `连接失败：${msg}`;
+    if (msg.includes('封禁') || msg.includes('邀请制') || msg.includes('不存在')) {
+      bounce(msg);
+    } else if (msg.includes('登录已失效') || msg.includes('登录凭证')) {
+      bounced = true;
+      clearSession(); // 带失效 token 去登录页会被路由守卫弹回，先清掉
+      location.hash = '#/login';
+    } else {
+      scheduleRejoin('voice');
+    }
+  }
+
+  async function connectLine(line: Line, cred: EngineCred, first: boolean, role: Role) {
+    if (line.inflight || line.engine?.connected()) return;
+    line.inflight = true;
+    if (!first) line.attempts++;
+    try {
+      if (!line.engine || cred.engine !== line.engineName) {
+        line.engine?.dispose();
+        line.engine = await createEngine(cred.engine, makeCallbacks(role));
+        line.engineName = cred.engine;
+      }
+      await line.engine.connect(cred.url, cred.token);
+      line.attempts = 0;
+      if (role === 'voice') {
+        statusEl.textContent = '';
+        if (!first) toast('语音已重新连接', 'ok', 1800);
+        if (micOn) {
+          try {
+            await line.engine.setMic(true);
+          } catch (err) {
+            micOn = false;
+            if (first) toast(captureErrorMsg('麦克风', err), 'bad');
+          }
         }
       }
-      if (cameraOn) {
-        try {
-          await engine.setCamera(true);
-        } catch {
-          cameraOn = false;
+      if (role === 'stage' || combined) {
+        stageUp = true;
+        if (cameraOn) {
+          try {
+            await (role === 'stage' ? line.engine : voiceLine.engine)!.setCamera(true);
+          } catch {
+            cameraOn = false;
+          }
         }
-      }
-      if (screenOn) {
-        screenOn = false;
-        toast('重连后投屏需要重新发起', '', 4000);
+        if (screenOn) {
+          screenOn = false;
+          toast('重连后投屏需要重新发起', '', 4000);
+        }
       }
       refreshButtons();
       syncAudioTiles();
       refreshMembers();
       refreshMeta();
     } catch (err) {
-      const msg = (err as Error).message ?? '';
-      statusEl.textContent = first ? `连接失败：${msg}` : statusEl.textContent;
-      if (msg.includes('封禁') || msg.includes('邀请制') || msg.includes('不存在')) {
-        bounce(msg);
-      } else if (msg.includes('登录已失效') || msg.includes('登录凭证')) {
-        bounced = true;
-        clearSession(); // 带着失效 token 去登录页会被路由守卫弹回，先清掉
-        location.hash = '#/login';
+      if (role === 'voice') {
+        handleCredsError(err, first);
       } else {
-        scheduleRejoin();
+        stageUp = false;
+        if (first) toast(`舞台线连接失败（投屏/摄像头暂不可用）：${(err as Error).message}`, 'bad', 4000);
+        scheduleRejoin('stage');
       }
     } finally {
-      rejoinInFlight = false;
+      line.inflight = false;
+      updateStageButtons();
     }
   }
 
-  // 回前台 / 网络恢复：跳过退避立即重连（iOS 切后台回来最常见）
+  // 回前台 / 网络恢复：跳过退避立即重连
   const retryNow = () => {
     if (leaving || bounced) return;
-    if (engine && !engine.connected()) {
-      clearTimeout(rejoinTimer);
-      rejoinAttempts = 0;
-      void connectRoom(false);
-    }
+    (['voice', 'stage'] as Role[]).forEach((role) => {
+      const line = lineFor(role);
+      if (role === 'stage' && (combined || !line)) return;
+      if (line && line.engine && !line.engine.connected()) {
+        clearTimeout(line.timer);
+        line.attempts = 0;
+        void connectLines(false, role);
+      }
+    });
   };
   const onVisible = () => {
     if (document.visibilityState === 'visible') retryNow();
@@ -472,74 +548,89 @@ export async function renderRoom(root: HTMLElement, channel: string) {
   document.addEventListener('visibilitychange', onVisible);
   window.addEventListener('online', retryNow);
 
-  // ---- 引擎回调 ----
-  const callbacks: EngineCallbacks = {
-    onVideoTrack: (part, source, el) => addVideoTile(part, source, el),
-    onVideoTrackRemoved: (identity, source, els) => removeVideoTile(identity, source, els),
-    onAudioTrack: (identity, el) => {
-      let set = audioEls.get(identity);
-      if (!set) {
-        set = new Set();
-        audioEls.set(identity, set);
-      }
-      set.add(el as SinkMedia);
-      audioBin.appendChild(el);
-      applyAudioPrefs();
-    },
-    onAudioTrackRemoved: (identity, els) => {
-      els.forEach((el) => {
-        el.remove();
-        audioEls.get(identity)?.delete(el as SinkMedia);
-      });
-    },
-    onRoster: () => {
-      syncAudioTiles();
-      refreshMembers();
-      refreshMeta();
-    },
-    onSpeakers: (identities) => {
-      speakingSet = new Set(identities);
-      if (identities[0]) lastSpeaker = identities[0];
-      syncAudioTiles();
-      refreshMembers();
-    },
-    onReconnecting: () => {
-      statusEl.textContent = '连接不稳定，正在恢复…';
-      shell.setConn(false, '正在恢复连接…');
-    },
-    onReconnected: () => {
-      statusEl.textContent = '';
-      shell.setConn(true, connMeta);
-      syncAudioTiles();
-      refreshMembers();
-      refreshMeta();
-    },
-    onEnded: (reason) => {
-      if (leaving) return;
-      clearAllTiles();
-      if (reason === 'kicked') return bounce('你已被移出该频道');
-      if (reason === 'room-deleted') return bounce('频道已删除');
-      if (reason === 'duplicate') return bounce('该设备在其他页面进入了房间');
-      scheduleRejoin(0);
-    },
-    onLocalTrackEnded: (kind) => {
-      if (kind === 'mic' && micOn) {
-        micOn = false;
-        void engine?.setMic(false).catch(() => {});
-        toast('麦克风设备断开了（iPhone 连续互通断开会这样），已自动闭麦', 'bad');
-      }
-      if (kind === 'camera' && cameraOn) {
-        cameraOn = false;
-        void engine?.setCamera(false).catch(() => {});
-        toast('摄像头设备断开了，已自动关闭', 'bad');
-      }
-      refreshButtons();
-      syncAudioTiles();
-      refreshMembers();
-    },
-  };
+  // ---- 引擎回调（按线）----
+  function makeCallbacks(role: Role): EngineCallbacks {
+    return {
+      onVideoTrack: (part, source, el) => addVideoTile(part, source, el),
+      onVideoTrackRemoved: (identity, source, els) => removeVideoTile(identity, source, els),
+      onAudioTrack: (identity, el) => {
+        let set = audioEls.get(identity);
+        if (!set) {
+          set = new Set();
+          audioEls.set(identity, set);
+        }
+        set.add(el as SinkMedia);
+        audioBin.appendChild(el);
+        applyAudioPrefs();
+      },
+      onAudioTrackRemoved: (identity, els) => {
+        els.forEach((el) => {
+          el.remove();
+          audioEls.get(identity)?.delete(el as SinkMedia);
+        });
+      },
+      onRoster: () => {
+        syncAudioTiles();
+        refreshMembers();
+        refreshMeta();
+      },
+      onSpeakers: (identities) => {
+        speakingByRole[role] = new Set(identities);
+        speakingSet = new Set([...speakingByRole.voice, ...speakingByRole.stage]);
+        if (identities[0]) lastSpeaker = identities[0];
+        syncAudioTiles();
+        refreshMembers();
+      },
+      onReconnecting: () => {
+        if (role === 'voice' || combined) {
+          statusEl.textContent = '连接不稳定，正在恢复…';
+          shell.setConn(false, '正在恢复连接…');
+        }
+      },
+      onReconnected: () => {
+        if (role === 'voice' || combined) {
+          statusEl.textContent = '';
+          shell.setConn(true, connBoxMeta());
+        }
+        syncAudioTiles();
+        refreshMembers();
+        refreshMeta();
+      },
+      onEnded: (reason) => {
+        if (leaving) return;
+        if (reason === 'kicked') return bounce('你已被移出该频道');
+        if (reason === 'room-deleted') return bounce('频道已删除');
+        if (reason === 'duplicate') return bounce('该设备在其他页面进入了房间');
+        // lost
+        if (role === 'voice' || combined) {
+          scheduleRejoin('voice', 0);
+        } else {
+          stageUp = false;
+          screenOn = false;
+          refreshButtons();
+          updateStageButtons();
+          shell.setConn(!!voiceLine.engine?.connected(), connBoxMeta());
+          scheduleRejoin('stage', 0);
+        }
+      },
+      onLocalTrackEnded: (kind) => {
+        if (kind === 'mic' && micOn) {
+          micOn = false;
+          void voiceLine.engine?.setMic(false).catch(() => {});
+          toast('麦克风设备断开了（iPhone 连续互通断开会这样），已自动闭麦', 'bad');
+        }
+        if (kind === 'camera' && cameraOn) {
+          cameraOn = false;
+          void stageEngine()?.setCamera(false).catch(() => {});
+          toast('摄像头设备断开了，已自动关闭', 'bad');
+        }
+        refreshButtons();
+        syncAudioTiles();
+        refreshMembers();
+      },
+    };
+  }
 
-  // 采集失败的人话提示（Mac mini 无内置麦，iPhone 连续互通断开就会 NotFound）
   function captureErrorMsg(kind: '麦克风' | '摄像头', err: unknown): string {
     const name = (err as DOMException)?.name ?? '';
     if (name === 'NotFoundError' || name === 'DevicesNotFoundError')
@@ -550,7 +641,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
     return `${kind}启动失败：${(err as Error)?.message ?? name}`;
   }
 
-  // 设备失而复得（iPhone 靠近重连/插上耳机）时提醒一声
+  // 设备失而复得时提醒一声
   let hadAudioInput = true;
   const onDeviceChange = async () => {
     try {
@@ -582,12 +673,21 @@ export async function renderRoom(root: HTMLElement, channel: string) {
   }
   refreshButtons();
 
+  function updateStageButtons() {
+    const ok = !!stageEngine() && stageUp;
+    btnCamera.classList.toggle('disabled', !ok);
+    btnScreen.classList.toggle('disabled', !ok);
+    const hint = stageLine ? '舞台线重连中' : '本服未启用舞台线（投屏/摄像头）';
+    btnCamera.title = ok ? '摄像头' : hint;
+    btnScreen.title = ok ? '投屏' : hint;
+  }
+
   btnMic.addEventListener('click', async () => {
-    if (!engine) return;
+    if (!voiceLine.engine) return;
     micOn = !micOn;
     refreshButtons();
     try {
-      await engine.setMic(micOn);
+      await voiceLine.engine.setMic(micOn);
       const p = loadPrefs();
       p.mic = micOn;
       savePrefs(p);
@@ -607,11 +707,12 @@ export async function renderRoom(root: HTMLElement, channel: string) {
   });
 
   btnCamera.addEventListener('click', async () => {
-    if (!engine) return;
+    const eng = stageEngine();
+    if (!eng || !stageUp) return;
     cameraOn = !cameraOn;
     refreshButtons();
     try {
-      await engine.setCamera(cameraOn);
+      await eng.setCamera(cameraOn);
       const p = loadPrefs();
       p.camera = cameraOn;
       savePrefs(p);
@@ -623,11 +724,12 @@ export async function renderRoom(root: HTMLElement, channel: string) {
   });
 
   btnScreen.addEventListener('click', async () => {
-    if (!engine) return;
+    const eng = stageEngine();
+    if (!eng || !stageUp) return;
     screenOn = !screenOn;
     refreshButtons();
     try {
-      await engine.setScreen(screenOn);
+      await eng.setScreen(screenOn);
     } catch {
       screenOn = !screenOn; // 用户取消选择等情况回退
       refreshButtons();
@@ -748,24 +850,25 @@ export async function renderRoom(root: HTMLElement, channel: string) {
     const what = (ev as CustomEvent).detail as string;
     if (what === 'volume' || what === 'speaker') applyAudioPrefs();
     if (what === 'mirror') {
-      const video = tiles.get(`${engine?.localIdentity() ?? ''}:camera`)?.querySelector('video');
+      const id = stageEngine()?.localIdentity() ?? '';
+      const video = tiles.get(`${id}:camera`)?.querySelector('video');
       if (video) video.style.transform = loadPrefs().mirror ? 'scaleX(-1)' : '';
     }
     if (what === 'mic' && loadPrefs().mic !== micOn) {
       btnMic.click();
       return;
     }
-    if ((what === 'mic-device' || what === 'audio-chain') && micOn && engine) {
+    if ((what === 'mic-device' || what === 'audio-chain') && micOn && voiceLine.engine) {
       try {
-        await engine.restartMic();
+        await voiceLine.engine.restartMic();
       } catch {
         micOn = false;
         refreshButtons();
       }
     }
-    if (what === 'cam-device' && cameraOn && engine) {
+    if (what === 'cam-device' && cameraOn) {
       const p = loadPrefs();
-      if (p.camDeviceId) void engine.switchCamera(p.camDeviceId).catch(() => {});
+      if (p.camDeviceId) void stageEngine()?.switchCamera(p.camDeviceId).catch(() => {});
     }
   };
   prefsBus.addEventListener('prefs', onPrefs);
@@ -789,7 +892,8 @@ export async function renderRoom(root: HTMLElement, channel: string) {
 
   // ---- 首次连接与清理 ----
   applyPanel();
-  await connectRoom(true);
+  updateStageButtons();
+  await connectLines(true);
 
   const myHash = location.hash;
   const onHashChange = () => {
@@ -800,9 +904,11 @@ export async function renderRoom(root: HTMLElement, channel: string) {
       document.removeEventListener('visibilitychange', onVisible);
       window.removeEventListener('online', retryNow);
       leaving = true;
-      clearTimeout(rejoinTimer);
+      clearTimeout(voiceLine.timer);
+      if (stageLine && stageLine !== voiceLine) clearTimeout(stageLine.timer);
       chat.close();
-      engine?.dispose();
+      voiceLine.engine?.dispose();
+      if (stageLine && stageLine !== voiceLine) stageLine.engine?.dispose();
       shell.destroy();
     }
   };

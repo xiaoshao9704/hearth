@@ -13,10 +13,13 @@ import (
 	"hearth/server/internal/rtc"
 )
 
-// 内核选择器：换实现只改这两个值，各实现的配置键互不干扰、原样保留。
+// 内核选择器：换实现只改这里的值，各实现的配置键互不干扰、原样保留。
+// 语音线（voice）与舞台线（stage：投屏/摄像头/OBS 推流及其伴音）各占一个槽位。
 var selectorKeys = []rtc.ConfigKey{
-	{Name: "rtc_provider", Env: "RTC_PROVIDER", Group: "core",
-		Label: "房间内核", Hint: "当前可选：livekit"},
+	{Name: "voice_provider", Env: "VOICE_PROVIDER", Group: "core",
+		Label: "语音内核", Hint: "可选：livekit / pion（进程内纯音频 SFU）"},
+	{Name: "stage_provider", Env: "STAGE_PROVIDER", Group: "core",
+		Label: "舞台内核", Hint: "可选：livekit / none（纯语音部署，禁用投屏与摄像头）"},
 	{Name: "ingest_provider", Env: "INGEST_PROVIDER", Group: "core",
 		Label: "推流入口", Hint: "当前可选：livekit"},
 }
@@ -52,18 +55,30 @@ func (a *API) dynVal(ctx context.Context, name string) string {
 	if v, err := a.st.GetSetting(ctx, "cfg_"+name); err == nil && strings.TrimSpace(v) != "" {
 		return strings.TrimSpace(v)
 	}
-	if name == "rtc_provider" || name == "ingest_provider" {
-		return "livekit" // 注册表里的默认实现
+	if name == "voice_provider" || name == "stage_provider" || name == "ingest_provider" {
+		return "livekit" // 默认实现（两线同一 LiveKit 即今天的单线形态）
 	}
 	return k.Default
 }
 
-// rtcProvider 按选择器取房间内核；未知名字回退 livekit。
-func (a *API) rtcProvider(ctx context.Context) rtc.Provider {
-	if p, ok := a.rtcKernels[a.dynVal(ctx, "rtc_provider")]; ok {
+// voiceProvider 按选择器取语音内核；未知名字回退 livekit。
+func (a *API) voiceProvider(ctx context.Context) rtc.Provider {
+	if p, ok := a.voiceKernels[a.dynVal(ctx, "voice_provider")]; ok {
 		return p
 	}
-	return a.rtcKernels["livekit"]
+	return a.voiceKernels["livekit"]
+}
+
+// stageProvider 按选择器取舞台内核；"none" 返回 nil（纯语音部署）。
+func (a *API) stageProvider(ctx context.Context) rtc.Provider {
+	name := a.dynVal(ctx, "stage_provider")
+	if name == "none" {
+		return nil
+	}
+	if p, ok := a.stageKernels[name]; ok {
+		return p
+	}
+	return a.stageKernels["livekit"]
 }
 
 // ingestProvider 按选择器取推流入口；未知名字回退 livekit。

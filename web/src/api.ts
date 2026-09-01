@@ -104,10 +104,18 @@ export async function createChannel(name: string): Promise<Channel> {
   return req<Channel>('/api/channels', { method: 'POST', body: { name } });
 }
 
-export interface LiveKitCredentials {
-  token: string;
+export interface EngineCred {
+  engine: string; // 客户端引擎名（livekit / pion-voice …）
   url: string;
-  engine?: string; // 客户端引擎名（livekit / pion-voice …），缺省按 livekit
+  token: string;
+}
+
+// 双线进房凭证：语音线必有；舞台线（投屏/摄像头）可缺席；
+// combined = 两线同一内核，前端用一条连接承担两种角色
+export interface JoinCredentials {
+  voice: EngineCred;
+  stage?: EngineCred | null;
+  combined: boolean;
 }
 
 // 持久设备 ID：首次访问生成并存 localStorage，用于区分同一账号的多设备
@@ -127,8 +135,8 @@ export function deviceId(): string {
   return id;
 }
 
-export function fetchLiveKitToken(channel: string): Promise<LiveKitCredentials> {
-  return req<LiveKitCredentials>('/api/token', {
+export function fetchJoinCredentials(channel: string): Promise<JoinCredentials> {
+  return req<JoinCredentials>('/api/token', {
     method: 'POST',
     body: { channel, device_id: deviceId() },
   });
