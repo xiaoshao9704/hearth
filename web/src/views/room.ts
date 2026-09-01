@@ -356,14 +356,23 @@ export async function renderRoom(root: HTMLElement, channel: string) {
     if (username === myUsername) return;
     const targets = parts().filter((p) => !p.isLocal && p.username === username);
     const muted = targets.some((p) => volumeFor(p.identity) === 0);
-    // 禁言判定：该用户所有设备都被收走了发布权限（服务端 gag 会置 canPublish=false）
-    const gagged = targets.length > 0 && targets.every((p) => !p.canPublish);
+    // 禁言判定只看真人设备：OBS 推流参与者（ingress 自带发布权限）会污染 every() 推断
+    const voiceTargets = targets.filter((p) => !p.obs);
+    const gagged = voiceTargets.length > 0 && voiceTargets.every((p) => !p.canPublish);
+    const gagBtn = (on: boolean, label: string) =>
+      `<button class="hit um-item${on ? ' danger' : ''}" data-gag="${on}">${micIcon(14, on, on ? 'var(--red)' : 'currentColor')}<span>${label}</span></button>`;
     const menu = document.createElement('div');
     menu.className = 'user-menu';
     menu.innerHTML = `
       <div class="um-title">${esc(username)}</div>
       ${targets.length ? `<button class="hit um-item" data-act="mute">${slashIcon('volume', 14, !muted, 'currentColor')}<span>${muted ? '恢复声音' : '屏蔽声音'}</span></button>` : ''}
-      ${canModerate() && targets.length ? `<button class="hit um-item${gagged ? '' : ' danger'}" data-act="gag">${micIcon(14, !gagged, gagged ? 'currentColor' : 'var(--red)')}<span>${gagged ? '解除禁言' : '禁言'}</span></button>` : ''}
+      ${
+        canModerate()
+          ? voiceTargets.length
+            ? gagBtn(!gagged, gagged ? '解除禁言' : '禁言')
+            : gagBtn(true, '禁言') + gagBtn(false, '解除禁言') // 不在语音房也可改（落库权威，下次进房生效）
+          : ''
+      }
       ${canModerate() ? `<button class="hit um-item danger" data-act="kick">${icon('leave', 14, 'var(--red)')}<span>踢出房间</span></button>` : ''}`;
     if (!menu.querySelector('.um-item')) return;
     document.body.appendChild(menu);
@@ -385,14 +394,17 @@ export async function renderRoom(root: HTMLElement, channel: string) {
       refreshMembers();
       close();
     });
-    menu.querySelector('[data-act="gag"]')?.addEventListener('click', async () => {
-      close();
-      try {
-        await muteUser(channel, username, !gagged);
-        toast(gagged ? `已解除 ${username} 的禁言` : `已禁言 ${username}`, 'ok');
-      } catch (err) {
-        toast((err as Error).message, 'bad');
-      }
+    menu.querySelectorAll<HTMLButtonElement>('[data-gag]').forEach((btn) => {
+      btn.addEventListener('click', async () => {
+        close();
+        const on = btn.dataset.gag === 'true';
+        try {
+          await muteUser(channel, username, on);
+          toast(on ? `已禁言 ${username}` : `已解除 ${username} 的禁言`, 'ok');
+        } catch (err) {
+          toast((err as Error).message, 'bad');
+        }
+      });
     });
     menu.querySelector('[data-act="kick"]')?.addEventListener('click', async () => {
       close();
@@ -443,7 +455,8 @@ export async function renderRoom(root: HTMLElement, channel: string) {
             const obs = plist.some((p) => p.obs);
             const muted = plist.every((p) => !p.micOn && !p.obs);
             const localMuted = plist.some((p) => volumeFor(p.identity) === 0);
-            const gagged = plist.every((p) => !p.canPublish); // 服务端禁言收走发布权限
+            const realDevs = plist.filter((p) => !p.obs);
+            const gagged = realDevs.length > 0 && realDevs.every((p) => !p.canPublish); // 服务端禁言收走发布权限（obs 参与者不算）
             const statusBits = [
               sharing ? '投屏中' : '',
               obs ? 'OBS 推流' : '',

@@ -177,7 +177,7 @@ func (p *Provider) RemoveParticipantsOf(_ context.Context, room, username string
 	r.mu.Lock()
 	var targets []*participant
 	for _, pt := range r.parts {
-		if pt.identity == username || strings.HasPrefix(pt.identity, username+"-") {
+		if rtc.MatchesUser(pt.identity, username) {
 			targets = append(targets, pt)
 		}
 	}
@@ -189,7 +189,8 @@ func (p *Provider) RemoveParticipantsOf(_ context.Context, room, username string
 }
 
 // MuteUserAudio 服务端禁言/解禁某用户全部设备：丢弃其上行音频并锁死 mic 状态。
-// 进程内实现无发布权限概念，直接在转发层丢包等效；用户不在房间时返回 ErrNoParticipant。
+// 契约见 rtc.Provider（禁言=禁全部媒体发布）：本内核只承载音频，丢弃全部上行即等效。
+// 用户不在房间时返回 ErrNoParticipant。
 func (p *Provider) MuteUserAudio(_ context.Context, room, username string, muted bool) error {
 	p.mu.Lock()
 	r := p.rooms[room]
@@ -201,7 +202,7 @@ func (p *Provider) MuteUserAudio(_ context.Context, room, username string, muted
 	found := false
 	var targets []*participant
 	for _, pt := range r.parts {
-		if pt.identity == username || strings.HasPrefix(pt.identity, username+"-") {
+		if rtc.MatchesUser(pt.identity, username) {
 			pt.muted.Store(muted)
 			if muted {
 				pt.micOn = false // roster() 在 r.mu 下读
@@ -447,6 +448,13 @@ func (p *Provider) readLoop(ctx context.Context, api *webrtc.API, r *vroom, part
 			r.mu.Lock()
 			part.micOn = !m.On && !part.muted.Load() // 被禁言者不允许自行开麦；roster() 在 r.mu 下读
 			r.mu.Unlock()
+			if !m.On && part.muted.Load() {
+				// 被禁言者尝试开麦：补发 gag 通知（禁言时的通知可能因 send 满被丢弃过）
+				select {
+				case part.send <- sigMsg{Type: "gag", On: true}:
+				default:
+				}
+			}
 			r.broadcastRoster()
 		}
 	}

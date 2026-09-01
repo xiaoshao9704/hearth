@@ -79,7 +79,8 @@ func (a *API) updatePassword(w http.ResponseWriter, r *http.Request) {
 	}
 	hash, err := a.st.PasswordHash(r.Context(), u.ID)
 	if err != nil || bcrypt.CompareHashAndPassword([]byte(hash), []byte(req.Current)) != nil {
-		writeErr(w, http.StatusUnauthorized, "当前密码不正确")
+		// 400 而非 401：会话本身有效，401 会触发前端的"会话失效"全局登出
+		writeErr(w, http.StatusBadRequest, "当前密码不正确")
 		return
 	}
 	newHash, err := bcrypt.GenerateFromPassword([]byte(req.New), bcrypt.DefaultCost)

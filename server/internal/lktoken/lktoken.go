@@ -7,7 +7,10 @@ import (
 	"github.com/livekit/protocol/auth"
 )
 
-const ttl = 24 * time.Hour
+// TTL 只需覆盖"拿到凭证到完成入会"的窗口：入会后连接不受过期影响，
+// 断线重连由前端拿新令牌（重新经过禁言/封禁检查）。放长会让被禁言/封禁者
+// 用缓存旧令牌绕过服务端权限收回。
+const ttl = 10 * time.Minute
 
 // Sign 为 username 签发到 room 的 LiveKit JWT。
 // LiveKit 不允许房间内重复 identity(后者顶掉前者),identity 用 用户名-设备标签,

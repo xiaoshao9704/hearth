@@ -9,10 +9,17 @@ package rtc
 import (
 	"context"
 	"errors"
+	"strings"
 )
 
 // ErrNoParticipant 目标用户在指定房间内没有参与者（服务端静音等操作的前置条件不满足）。
 var ErrNoParticipant = errors.New("目标用户不在房间")
+
+// MatchesUser identity 是否归属该用户（identity 约定：{用户名} 或 {用户名}-{设备标签/obs}）。
+// kick/禁言等按用户扫参与者的实现统一用它，避免各处手写前缀判断漂移。
+func MatchesUser(identity, username string) bool {
+	return identity == username || strings.HasPrefix(identity, username+"-")
+}
 
 // ConfigFunc 取动态配置的生效值（环境变量 > 数据库 > 默认），由接入层注入。
 type ConfigFunc func(ctx context.Context, name string) string
@@ -55,7 +62,10 @@ type Provider interface {
 	ListParticipants(ctx context.Context, room string) ([]Participant, error)
 	// RemoveParticipantsOf 把某用户的全部设备移出房间，返回移除数量。
 	RemoveParticipantsOf(ctx context.Context, room, username string) (int, error)
-	// MuteUserAudio 服务端禁言/解禁某用户全部设备（改写发布权限，禁言期间无法自行开麦/推流）；
+	// MuteUserAudio 服务端禁言/解禁某用户全部设备。
+	// 契约：禁言 = 禁止该用户的**全部媒体发布**（音频、摄像头、投屏一并没收），
+	// 不只是音频——LiveKit 实现收走 CanPublish；纯音频内核丢弃全部上行即等效。
+	// 新实现必须遵循同一语义，与 joinToken 按 canPublish=false 签发的进房凭证一致。
 	// 用户不在房间时返回 ErrNoParticipant。
 	MuteUserAudio(ctx context.Context, room, username string, muted bool) error
 	// SignalProxyUpstream 同源信令代理的上游地址；空 = 该内核不需要信令代理。

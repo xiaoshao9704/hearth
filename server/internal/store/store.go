@@ -489,6 +489,16 @@ INSERT INTO ingresses (user_id, channel_id, ingress_id, stream_key) VALUES (?, ?
 	return &Ingress{ID: id, IngressID: ingressID, StreamKey: streamKey}, nil
 }
 
+// IngressOwner 按推流密钥反查归属（/w 推流入口按 channel_gags 拦截被禁言者用）。
+func (s *Store) IngressOwner(ctx context.Context, streamKey string) (userID, channelID int64, err error) {
+	err = s.db.QueryRowContext(ctx, s.q(
+		"SELECT user_id, channel_id FROM ingresses WHERE stream_key = ?"), streamKey).Scan(&userID, &channelID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, 0, ErrNotFound
+	}
+	return userID, channelID, err
+}
+
 func (s *Store) DeleteIngress(ctx context.Context, userID, channelID int64) error {
 	_, err := s.db.ExecContext(ctx, s.q(
 		"DELETE FROM ingresses WHERE user_id = ? AND channel_id = ?"), userID, channelID)

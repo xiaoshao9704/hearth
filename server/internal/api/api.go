@@ -93,6 +93,7 @@ func (a *API) Router() *chi.Mux {
 				r.Post("/ban", a.ban)
 				r.Post("/unban", a.unban)
 				r.Post("/mute", a.mute)
+				r.Post("/unmute", a.unmute)
 				r.Get("/bans", a.listBans)
 			})
 			r.Group(func(r chi.Router) {
@@ -666,61 +667,46 @@ func (a *API) unban(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// mute 服务端禁言/解禁目标用户（改写内核发布权限，对其全部设备生效；
-// 禁言期间无法自行开麦，已发布轨道会被服务端下架）。
-// 禁言状态落库（channel_gags）：离房重进时 joinToken 据此签无发布权限的令牌，禁言持续生效。
-func (a *API) mute(w http.ResponseWriter, r *http.Request) {
+// setGag 禁言/解禁目标用户（模式同 ban：落库为权威，现场传播尽力）。
+// 落库（channel_gags）保证离房/重进都生效——joinToken 与 /api/voice 入会都按它签发/拦截；
+// 内核调用只负责让"当前在房"的设备立即失声，目标不在房（ErrNoParticipant）不算失败。
+func (a *API) setGag(w http.ResponseWriter, r *http.Request, muted bool) {
 	c := channelFrom(r)
-	var req struct {
-		Username string `json:"username"`
-		Muted    bool   `json:"muted"`
-	}
-	if !decode(w, r, &req) {
+	t := a.resolveTargetUser(w, r, userFrom(r))
+	if t == nil {
 		return
 	}
-	if req.Username == "" {
-		writeErr(w, http.StatusBadRequest, "请求格式错误")
-		return
+	var err error
+	if muted {
+		err = a.st.Gag(r.Context(), c.ID, t.ID)
+	} else {
+		err = a.st.Ungag(r.Context(), c.ID, t.ID)
 	}
-	if req.Username == userFrom(r).Username {
-		writeErr(w, http.StatusBadRequest, "不能对自己操作")
-		return
-	}
-	t, _, err := a.st.UserByName(r.Context(), req.Username)
 	if err != nil {
-		writeErr(w, http.StatusNotFound, "用户不存在")
+		writeErr(w, http.StatusInternalServerError, "内部错误")
 		return
 	}
-	if err := a.voiceProvider(r.Context()).MuteUserAudio(r.Context(), c.Name, req.Username, req.Muted); err != nil {
-		if errors.Is(err, rtc.ErrNoParticipant) {
-			writeErr(w, http.StatusNotFound, "该用户不在频道中")
-			return
-		}
-		log.Printf("内核禁言 %s 失败: %v", req.Username, err)
-		writeErr(w, http.StatusBadGateway, "静音失败（内核不可达）")
-		return
-	}
-	// 舞台线是独立连接时同步禁言（与语音同一内核时 combined 单连接已覆盖）
+	kernels := []rtc.Provider{a.voiceProvider(r.Context())}
+	// 舞台线是独立连接时同步（与语音同一内核时 combined 单连接已覆盖）
 	if sp := a.stageProvider(r.Context()); sp != nil &&
 		a.dynVal(r.Context(), "voice_provider") != a.dynVal(r.Context(), "stage_provider") {
-		if err := sp.MuteUserAudio(r.Context(), c.Name, req.Username, req.Muted); err != nil &&
+		kernels = append(kernels, sp)
+	}
+	for _, p := range kernels {
+		if err := p.MuteUserAudio(r.Context(), c.Name, t.Username, muted); err != nil &&
 			!errors.Is(err, rtc.ErrNoParticipant) {
-			log.Printf("舞台线禁言 %s 失败: %v", req.Username, err)
+			log.Printf("内核(%s)禁言传播 %s 失败: %v", p.Name(), t.Username, err)
 		}
 	}
-	// LiveKit 侧已生效，落库失败不阻塞（仅影响重进时的禁言延续，记日志）
-	if req.Muted {
-		if err := a.st.Gag(r.Context(), c.ID, t.ID); err != nil {
-			log.Printf("记录禁言状态失败: %v", err)
-		}
-		writeJSON(w, http.StatusOK, map[string]string{"muted": req.Username})
-		return
+	key := "unmuted"
+	if muted {
+		key = "muted"
 	}
-	if err := a.st.Ungag(r.Context(), c.ID, t.ID); err != nil {
-		log.Printf("解除禁言状态失败: %v", err)
-	}
-	writeJSON(w, http.StatusOK, map[string]string{"unmuted": req.Username})
+	writeJSON(w, http.StatusOK, map[string]string{key: t.Username})
 }
+
+func (a *API) mute(w http.ResponseWriter, r *http.Request)   { a.setGag(w, r, true) }
+func (a *API) unmute(w http.ResponseWriter, r *http.Request) { a.setGag(w, r, false) }
 
 func (a *API) listBans(w http.ResponseWriter, r *http.Request) {
 	c := channelFrom(r)

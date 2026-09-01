@@ -24,9 +24,26 @@ func (a *API) RegisterProxies(r chi.Router) {
 		}
 		return a.voiceProvider(req.Context()).SignalProxyUpstream(req.Context())
 	}))
-	// 推流代理：保留完整 /w/{streamKey} 路径（推流端点需要 key 在路径里）
-	r.Handle("/w/*", a.dynProxy("", func(req *http.Request) string {
+	// 推流代理：保留完整 /w/{streamKey} 路径（推流端点需要 key 在路径里）。
+	// WHIP publish（POST）先按 channel_gags 拦截：被禁言者不能靠重推 OBS 绕过禁言
+	//（ingress 参与者自带发布权限，不经过 joinToken 的 canPublish 检查）。
+	wProxy := a.dynProxy("", func(req *http.Request) string {
 		return a.ingestProvider(req.Context()).ProxyUpstream(req.Context())
+	})
+	r.Handle("/w/*", http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if req.Method == http.MethodPost {
+			key := strings.TrimPrefix(req.URL.Path, "/w/")
+			if i := strings.IndexByte(key, '/'); i >= 0 {
+				key = key[:i]
+			}
+			if userID, channelID, err := a.st.IngressOwner(req.Context(), key); err == nil {
+				if gagged, gerr := a.st.IsGagged(req.Context(), channelID, userID); gerr == nil && gagged {
+					writeErr(w, http.StatusForbidden, "你已被禁言，无法推流")
+					return
+				}
+			}
+		}
+		wProxy.ServeHTTP(w, req)
 	}))
 }
 

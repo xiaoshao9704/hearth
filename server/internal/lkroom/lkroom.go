@@ -6,7 +6,6 @@ import (
 	"context"
 	"fmt"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/livekit/protocol/auth"
@@ -19,7 +18,14 @@ type Client struct {
 	api    livekit.RoomService
 	key    string
 	secret string
-	room   string // 当前操作的房间(LiveKit 要求 RoomAdmin grant 的 Room 与请求房间一致)
+}
+
+// roomCtxKey 房间名经 context 传到 RoundTrip（LiveKit 要求 RoomAdmin grant 的 Room
+// 与请求房间一致）。Client 是全 handler 共享的单例，不能用字段携带——并发请求会互踩。
+type roomCtxKey struct{}
+
+func withRoom(ctx context.Context, room string) context.Context {
+	return context.WithValue(ctx, roomCtxKey{}, room)
 }
 
 // NewClient apiURL 是 LiveKit server 的 Twirp 地址（与 Ingress 管理同一个）。
@@ -35,8 +41,9 @@ func NewClient(apiURL, key, secret string) *Client {
 // RoundTrip 为 Twirp 请求注入 RoomAdmin+RoomList JWT（5 分钟时效，随用随签）。
 // LiveKit 校验管理员 grant 时要求 Room 与请求的房间一致，随请求体里的 room 签发。
 func (c *Client) RoundTrip(req *http.Request) (*http.Response, error) {
+	room, _ := req.Context().Value(roomCtxKey{}).(string)
 	at := auth.NewAccessToken(c.key, c.secret)
-	at.SetVideoGrant(&auth.VideoGrant{RoomAdmin: true, RoomList: true, Room: c.room}).SetValidFor(5 * time.Minute)
+	at.SetVideoGrant(&auth.VideoGrant{RoomAdmin: true, RoomList: true, Room: room}).SetValidFor(5 * time.Minute)
 	tok, err := at.ToJWT()
 	if err != nil {
 		return nil, err
@@ -67,8 +74,7 @@ type Participant struct {
 
 // ListParticipants 列出房间当前参与者。
 func (c *Client) ListParticipants(ctx context.Context, room string) ([]Participant, error) {
-	c.room = room
-	defer func() { c.room = "" }()
+	ctx = withRoom(ctx, room)
 	resp, err := c.api.ListParticipants(ctx, &livekit.ListParticipantsRequest{Room: room})
 	if err != nil {
 		return nil, fmt.Errorf("列出参与者失败: %w", err)
@@ -83,15 +89,14 @@ func (c *Client) ListParticipants(ctx context.Context, room string) ([]Participa
 // RemoveParticipantsOf 把 room 里 identity 属于 username 的参与者全部移除
 // （identity 规则：{用户名}-{设备标签} 或 {用户名}-obs），返回移除数量。
 func (c *Client) RemoveParticipantsOf(ctx context.Context, room, username string) (int, error) {
-	c.room = room
-	defer func() { c.room = "" }()
+	ctx = withRoom(ctx, room)
 	resp, err := c.api.ListParticipants(ctx, &livekit.ListParticipantsRequest{Room: room})
 	if err != nil {
 		return 0, fmt.Errorf("列出参与者失败: %w", err)
 	}
 	n := 0
 	for _, p := range resp.Participants {
-		if p.Identity == username || strings.HasPrefix(p.Identity, username+"-") {
+		if rtc.MatchesUser(p.Identity, username) {
 			if _, err := c.api.RemoveParticipant(ctx, &livekit.RoomParticipantIdentity{
 				Room:     room,
 				Identity: p.Identity,
@@ -106,21 +111,21 @@ func (c *Client) RemoveParticipantsOf(ctx context.Context, room, username string
 
 // MuteUserAudio 服务端禁言/解禁 room 里 identity 属于 username 的参与者
 // （identity 规则同 RemoveParticipantsOf，对全部设备生效）。
+// 契约见 rtc.Provider：禁言收走全部媒体发布（CanPublish=false 覆盖音频/摄像头/投屏）。
 // 通过 UpdateParticipant 改写发布权限实现（CanPublish=false）：LiveKit 服务端会下架
 // 其全部已发布轨道，且客户端无法自行重新发布（区别于仅静音轨道，后者客户端可自行取消）。
 // 权限是整体替换语义（见 auth.VideoGrant.UpdateFromPermission），故从参与者当前权限
 // （ParticipantInfo.Permission）出发只翻转 CanPublish，避免误清 CanSubscribe/CanPublishData 等。
 // 该用户没有任何参与者在房间时返回 rtc.ErrNoParticipant。
 func (c *Client) MuteUserAudio(ctx context.Context, room, username string, muted bool) error {
-	c.room = room
-	defer func() { c.room = "" }()
+	ctx = withRoom(ctx, room)
 	resp, err := c.api.ListParticipants(ctx, &livekit.ListParticipantsRequest{Room: room})
 	if err != nil {
 		return fmt.Errorf("列出参与者失败: %w", err)
 	}
 	found := false
 	for _, p := range resp.Participants {
-		if p.Identity != username && !strings.HasPrefix(p.Identity, username+"-") {
+		if !rtc.MatchesUser(p.Identity, username) {
 			continue
 		}
 		found = true

@@ -176,7 +176,11 @@ export function banUser(channel: string, username: string): Promise<void> {
 }
 
 export function muteUser(channel: string, username: string, muted: boolean): Promise<unknown> {
-  return req(`/api/channels/${encodeURIComponent(channel)}/mute`, { method: 'POST', body: { username, muted } });
+  // 落库为权威：目标不在房也能禁言/解禁（下次进房生效）
+  return req(`/api/channels/${encodeURIComponent(channel)}/${muted ? 'mute' : 'unmute'}`, {
+    method: 'POST',
+    body: { username },
+  });
 }
 
 export function unbanUser(channel: string, username: string): Promise<void> {
