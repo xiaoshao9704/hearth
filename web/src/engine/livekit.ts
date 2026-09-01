@@ -120,6 +120,10 @@ export class LiveKitEngine implements AVEngine {
     return this.room.state === 'connected';
   }
 
+  localMicTrack(): MediaStreamTrack | null {
+    return this.room?.localParticipant.getTrackPublication(Track.Source.Microphone)?.track?.mediaStreamTrack ?? null;
+  }
+
   localIdentity() {
     return this.room.localParticipant.identity;
   }

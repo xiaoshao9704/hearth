@@ -42,6 +42,7 @@ export interface AVEngine {
   setCamera(on: boolean): Promise<void>;
   setScreen(on: boolean): Promise<void>;
   restartMic(): Promise<void>; // 开麦状态下设备/处理链变更：重启采集
+  localMicTrack(): MediaStreamTrack | null; // 当前发布中的本地麦克风轨（本地电平表用；未开麦为 null）
   switchCamera(deviceId: string): Promise<void>;
   dispose(): void; // 离开房间：断开并释放全部采集资源
 }

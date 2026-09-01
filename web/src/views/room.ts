@@ -1,7 +1,7 @@
 // 房间页：布局、面板、聊天与断线重连；音视频经 AVEngine 接口驱动。
 // 双线模型：语音线（voice，权威名册/说话状态）+ 舞台线（stage：投屏/摄像头/OBS 及其伴音）。
 // 两线同一内核时（combined）一条连接承担两种角色；舞台线缺席或断开只禁用投屏/摄像头，语音不受影响。
-import { clearSession, fetchJoinCredentials, getUser, listChannels } from '../api';
+import { clearSession, fetchJoinCredentials, getUser, kickUser, listChannels } from '../api';
 import type { EngineCred } from '../api';
 import { connectChat } from '../chat';
 import type { ChatMessage } from '../chat';
@@ -190,6 +190,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
 
   function applyLayout() {
     const spotlight = loadPrefs().layout === 'spotlight';
+    gridEl.dataset.tiles = String(allTiles().size);
     gridEl.classList.toggle('spotlight', spotlight);
     shell.content.querySelectorAll<HTMLButtonElement>('[data-layout]').forEach((b) => {
       b.classList.toggle('on', (b.dataset.layout === 'spotlight') === spotlight);
@@ -327,6 +328,49 @@ export async function renderRoom(root: HTMLElement, channel: string) {
     applyLayout();
   }
 
+  // ---- 用户操作菜单（聊天卡片与成员行共用）----
+  function showUserMenu(x: number, y: number, username: string) {
+    document.querySelector('.user-menu')?.remove();
+    if (username === myUsername) return;
+    const targets = parts().filter((p) => !p.isLocal && p.username === username);
+    const muted = targets.some((p) => volumeFor(p.identity) === 0);
+    const menu = document.createElement('div');
+    menu.className = 'user-menu';
+    menu.innerHTML = `
+      <div class="um-title">${esc(username)}</div>
+      ${targets.length ? `<button class="hit um-item" data-act="mute">${slashIcon('volume', 14, !muted, 'currentColor')}<span>${muted ? '恢复声音' : '屏蔽声音'}</span></button>` : ''}
+      ${isOwner ? `<button class="hit um-item danger" data-act="kick">${icon('leave', 14, 'var(--red)')}<span>踢出房间</span></button>` : ''}`;
+    if (!menu.querySelector('.um-item')) return;
+    document.body.appendChild(menu);
+    const mw = menu.offsetWidth;
+    const mh = menu.offsetHeight;
+    menu.style.left = `${Math.min(x, window.innerWidth - mw - 8)}px`;
+    menu.style.top = `${Math.min(y, window.innerHeight - mh - 8)}px`;
+    const close = () => {
+      menu.remove();
+      document.removeEventListener('pointerdown', onDoc, true);
+    };
+    const onDoc = (ev: Event) => {
+      if (!menu.contains(ev.target as Node)) close();
+    };
+    setTimeout(() => document.addEventListener('pointerdown', onDoc, true));
+    menu.querySelector('[data-act="mute"]')?.addEventListener('click', () => {
+      targets.forEach((p) => volumes.set(p.identity, muted ? 1 : 0));
+      applyAudioPrefs();
+      refreshMembers();
+      close();
+    });
+    menu.querySelector('[data-act="kick"]')?.addEventListener('click', async () => {
+      close();
+      try {
+        await kickUser(channel, username);
+        toast(`已把 ${username} 移出房间`, 'ok');
+      } catch (err) {
+        toast((err as Error).message, 'bad');
+      }
+    });
+  }
+
   // ---- 成员面板 ----
   const membersBody = shell.content.querySelector<HTMLDivElement>('#members-body')!;
   const membersCount = shell.content.querySelector<HTMLSpanElement>('#members-count')!;
@@ -368,12 +412,24 @@ export async function renderRoom(root: HTMLElement, channel: string) {
             ${
               isMe
                 ? ''
-                : `<button class="hit m-btn ${localMuted ? 'muted-on' : ''}" data-lmute="${esc(uname)}" title="${localMuted ? '恢复' : '本地静音'}">${slashIcon('volume', 14, localMuted, localMuted ? 'var(--red)' : 'var(--text-2)')}</button>`
+                : `<button class="hit m-btn ${localMuted ? 'muted-on' : ''}" data-lmute="${esc(uname)}" title="${localMuted ? '恢复' : '本地静音'}">${slashIcon('volume', 14, localMuted, localMuted ? 'var(--red)' : 'var(--text-2)')}</button>${
+                    isOwner ? `<button class="hit m-btn" data-mkick="${esc(uname)}" title="踢出房间">${icon('leave', 14, 'var(--red)')}</button>` : ''
+                  }`
             }
           </div>`;
           })
           .join('')}
       </div>`;
+    membersBody.querySelectorAll<HTMLButtonElement>('[data-mkick]').forEach((btn) => {
+      btn.addEventListener('click', async () => {
+        try {
+          await kickUser(channel, btn.dataset.mkick!);
+          toast(`已把 ${btn.dataset.mkick} 移出房间`, 'ok');
+        } catch (err) {
+          toast((err as Error).message, 'bad');
+        }
+      });
+    });
     membersBody.querySelectorAll<HTMLButtonElement>('[data-lmute]').forEach((btn) => {
       btn.addEventListener('click', () => {
         const uname = btn.dataset.lmute!;
@@ -578,6 +634,10 @@ export async function renderRoom(root: HTMLElement, channel: string) {
         speakingByRole[role] = new Set(identities);
         speakingSet = new Set([...speakingByRole.voice, ...speakingByRole.stage]);
         if (identities[0]) lastSpeaker = identities[0];
+        tiles.forEach((tile, key) => {
+          const id = key.slice(0, key.lastIndexOf(':'));
+          tile.classList.toggle('speaking', speakingSet.has(id));
+        });
         syncAudioTiles();
         refreshMembers();
       },
@@ -641,6 +701,45 @@ export async function renderRoom(root: HTMLElement, channel: string) {
     return `${kind}启动失败：${(err as Error)?.message ?? name}`;
   }
 
+  // 本地麦克风电平表：让说话的人确认自己有声音
+  let vuCtx: AudioContext | null = null;
+  let vuAnalyser: AnalyserNode | null = null;
+  let vuSrc: MediaStreamAudioSourceNode | null = null;
+  let vuTrack: MediaStreamTrack | null = null;
+  const vuTimer = window.setInterval(() => {
+    const track = micOn ? (voiceLine.engine?.localMicTrack() ?? null) : null;
+    if (track !== vuTrack) {
+      vuSrc?.disconnect();
+      vuSrc = null;
+      vuTrack = track;
+      if (track) {
+        if (!vuCtx) {
+          vuCtx = new AudioContext();
+          vuAnalyser = vuCtx.createAnalyser();
+          vuAnalyser.fftSize = 512;
+        }
+        if (vuCtx.state === 'suspended') void vuCtx.resume();
+        vuSrc = vuCtx.createMediaStreamSource(new MediaStream([track]));
+        vuSrc.connect(vuAnalyser!);
+      }
+    }
+    const bar = btnMic.querySelector<HTMLElement>('.mic-vu i');
+    if (!bar) return;
+    if (!vuTrack || !vuAnalyser) {
+      bar.style.width = '0%';
+      return;
+    }
+    const buf = new Uint8Array(vuAnalyser.fftSize);
+    vuAnalyser.getByteTimeDomainData(buf);
+    let sum = 0;
+    for (let i = 0; i < buf.length; i++) {
+      const d = (buf[i] - 128) / 128;
+      sum += d * d;
+    }
+    const rms = Math.sqrt(sum / buf.length);
+    bar.style.width = `${Math.min(100, Math.round(rms * 320))}%`;
+  }, 120);
+
   // 设备失而复得时提醒一声
   let hadAudioInput = true;
   const onDeviceChange = async () => {
@@ -663,7 +762,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
 
   function refreshButtons() {
     btnMic.classList.toggle('on', micOn);
-    btnMic.innerHTML = `${micIcon(17, !micOn, 'currentColor')}<span class="pill-label">${micOn ? '麦克风' : '已静音'}</span>`;
+    btnMic.innerHTML = `${micIcon(17, !micOn, 'currentColor')}<span class="pill-label">${micOn ? '麦克风' : '已静音'}</span>${micOn ? '<span class="mic-vu"><i></i></span>' : ''}`;
     btnDeaf.classList.toggle('danger', deafened);
     btnDeaf.innerHTML = slashIcon('speaker', 17, deafened, deafened ? 'var(--red)' : 'currentColor');
     btnCamera.classList.toggle('on', cameraOn);
@@ -741,7 +840,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
     openSettings('screen', { backLabel: `返回 ${channel}` });
   });
   shell.content.querySelector('#btn-settings')!.addEventListener('click', () => {
-    openSettings('account', { backLabel: `返回 ${channel}` });
+    openSettings('devices', { backLabel: `返回 ${channel}` });
   });
 
   shell.content.querySelectorAll<HTMLButtonElement>('[data-layout]').forEach((btn) => {
@@ -809,6 +908,15 @@ export async function renderRoom(root: HTMLElement, channel: string) {
         <div class="meta"><span class="who">${esc(m.username)}</span><span class="at">${fmtClock(m.created_at)}</span></div>
         <div class="text">${esc(m.content)}</div>
       </div>`;
+    if (m.username !== myUsername) {
+      div.addEventListener('contextmenu', (ev) => {
+        ev.preventDefault();
+        showUserMenu(ev.clientX, ev.clientY, m.username);
+      });
+      div.querySelector('.avatar')?.addEventListener('click', (ev) => {
+        showUserMenu((ev as MouseEvent).clientX, (ev as MouseEvent).clientY, m.username);
+      });
+    }
     chatLog.appendChild(div);
     chatLog.scrollTop = chatLog.scrollHeight;
     if (!isHistory && panel !== 'chat') {
@@ -882,8 +990,9 @@ export async function renderRoom(root: HTMLElement, channel: string) {
       if (isOwner) {
         const btn = shell.content.querySelector<HTMLButtonElement>('#btn-manage')!;
         btn.classList.remove('hidden');
+        btn.title = '频道管理（新标签打开，不离开房间）';
         btn.addEventListener('click', () => {
-          location.hash = `#/manage/${encodeURIComponent(channel)}`;
+          window.open(`#/manage/${encodeURIComponent(channel)}`, '_blank');
         });
       }
       refreshMembers();
@@ -904,6 +1013,8 @@ export async function renderRoom(root: HTMLElement, channel: string) {
       document.removeEventListener('visibilitychange', onVisible);
       window.removeEventListener('online', retryNow);
       leaving = true;
+      clearInterval(vuTimer);
+      void vuCtx?.close();
       clearTimeout(voiceLine.timer);
       if (stageLine && stageLine !== voiceLine) clearTimeout(stageLine.timer);
       chat.close();

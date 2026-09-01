@@ -42,6 +42,10 @@ export class PionVoiceEngine implements AVEngine {
     return this.ws?.readyState === WebSocket.OPEN && this.pc?.connectionState === 'connected';
   }
 
+  localMicTrack(): MediaStreamTrack | null {
+    return this.capture?.track ?? null;
+  }
+
   localIdentity() {
     return this.selfId;
   }
