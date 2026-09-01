@@ -263,7 +263,8 @@ export async function renderRoom(root: HTMLElement, channel: string) {
 
   function showUserMenu(x: number, y: number, username: string) {
     document.querySelector('.user-menu')?.remove();
-    if (username === myUsername) return;
+    // 对自己：只放开本地静音（自己的 OBS/其他设备回放），禁言/踢出不对自己开放
+    const isSelf = username === myUsername;
     const targets = parts().filter((p) => !p.isLocal && p.username === username);
     const muted = targets.some((p) => volumeFor(p.identity) === 0);
     // 禁言判定只看真人设备：OBS 推流参与者（ingress 自带发布权限）会污染 every() 推断
@@ -274,16 +275,16 @@ export async function renderRoom(root: HTMLElement, channel: string) {
     const menu = document.createElement('div');
     menu.className = 'user-menu';
     menu.innerHTML = `
-      <div class="um-title">${esc(username)}</div>
+      <div class="um-title">${esc(username)}${isSelf ? '（我）' : ''}</div>
       ${targets.length ? `<button class="hit um-item" data-act="mute">${slashIcon('volume', 14, !muted, 'currentColor')}<span>${muted ? '恢复声音' : '屏蔽声音'}</span></button>` : ''}
       ${
-        canModerate()
+        !isSelf && canModerate()
           ? voiceTargets.length
             ? gagBtn(!gagged, gagged ? '解除禁言' : '禁言')
             : gagBtn(true, '禁言') + gagBtn(false, '解除禁言') // 不在语音房也可改（落库权威，下次进房生效）
           : ''
       }
-      ${canModerate() ? `<button class="hit um-item danger" data-act="kick">${icon('leave', 14, 'var(--red)')}<span>踢出房间</span></button>` : ''}`;
+      ${!isSelf && canModerate() ? `<button class="hit um-item danger" data-act="kick">${icon('leave', 14, 'var(--red)')}<span>踢出房间</span></button>` : ''}`;
     if (!menu.querySelector('.um-item')) return;
     document.body.appendChild(menu);
     const mw = menu.offsetWidth;
@@ -1036,7 +1037,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
                   // 视频/音频卡片右键走同一个操作菜单
                   const identity = (ev.target as HTMLElement).closest<HTMLElement>('.tile')?.dataset.identity;
                   const p = parts().find((pp) => pp.identity === identity);
-                  if (!p || p.username === myUsername) return;
+                  if (!p) return; // 对自己也弹（菜单内只放开本地静音项）
                   ev.preventDefault();
                   showUserMenu(ev.clientX, ev.clientY, p.username);
                 }}
@@ -1142,7 +1143,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
               class="panel-body"
               onContextMenu={(ev) => {
                 const uname = (ev.target as HTMLElement).closest<HTMLElement>('.member-row')?.dataset.uname ?? '';
-                if (!uname || uname === myUsername) return;
+                if (!uname) return; // 对自己也弹（菜单内只放开本地静音项）
                 ev.preventDefault();
                 showUserMenu(ev.clientX, ev.clientY, uname);
               }}
