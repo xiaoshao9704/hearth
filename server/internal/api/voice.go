@@ -39,6 +39,13 @@ func (a *API) voiceWS(w http.ResponseWriter, r *http.Request) {
 	tag := a.deviceTagFor(r, r.URL.Query().Get("device_id"), u.ID)
 	identity := u.Username + "-" + tag
 
+	// 禁言随入会生效：joinToken 的 canPublish 对进程内内核无处安放，在此等效拦截
+	gagged, err := a.st.IsGagged(r.Context(), ch.ID, u.ID)
+	if err != nil {
+		http.Error(w, "内部错误", http.StatusInternalServerError)
+		return
+	}
+
 	originPatterns := []string{a.cfg.CORSOrigin}
 	if a.cfg.CORSOrigin == "*" {
 		originPatterns = nil
@@ -52,5 +59,5 @@ func (a *API) voiceWS(w http.ResponseWriter, r *http.Request) {
 	}
 	log.Printf("pion-voice 入会: room=%s identity=%s", ch.Name, identity)
 	// hijack 后 r.Context() 会被 net/http 取消，连接生命周期用独立 context
-	a.pion.HandleJoin(context.WithoutCancel(r.Context()), ch.Name, identity, u.Username, conn)
+	a.pion.HandleJoin(context.WithoutCancel(r.Context()), ch.Name, identity, u.Username, gagged, conn)
 }

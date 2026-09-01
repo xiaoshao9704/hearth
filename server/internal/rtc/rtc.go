@@ -6,7 +6,13 @@
 //   - 浏览器可见地址与同源代理上游都由实现声明，接入层只负责挂路由与兜底推导。
 package rtc
 
-import "context"
+import (
+	"context"
+	"errors"
+)
+
+// ErrNoParticipant 目标用户在指定房间内没有参与者（服务端静音等操作的前置条件不满足）。
+var ErrNoParticipant = errors.New("目标用户不在房间")
 
 // ConfigFunc 取动态配置的生效值（环境变量 > 数据库 > 默认），由接入层注入。
 type ConfigFunc func(ctx context.Context, name string) string
@@ -41,13 +47,17 @@ type Participant struct {
 // Provider 房间内核：签发进房凭证与房间管理。
 type Provider interface {
 	Name() string
-	// JoinCredentials 为用户签发进入房间的凭证；deviceTag 用于区分同账号多设备。
-	JoinCredentials(ctx context.Context, room, username, deviceTag string) (Credentials, error)
+	// JoinCredentials 为用户签发进入房间的凭证；deviceTag 用于区分同账号多设备；
+	// canPublish=false 表示用户被禁言（channel_gags），签发无发布权限的凭证。
+	JoinCredentials(ctx context.Context, room, username, deviceTag string, canPublish bool) (Credentials, error)
 	// RoomCounts 各房间在房人数（房间名 -> 人数）；错误视为内核不可达。
 	RoomCounts(ctx context.Context) (map[string]int, error)
 	ListParticipants(ctx context.Context, room string) ([]Participant, error)
 	// RemoveParticipantsOf 把某用户的全部设备移出房间，返回移除数量。
 	RemoveParticipantsOf(ctx context.Context, room, username string) (int, error)
+	// MuteUserAudio 服务端禁言/解禁某用户全部设备（改写发布权限，禁言期间无法自行开麦/推流）；
+	// 用户不在房间时返回 ErrNoParticipant。
+	MuteUserAudio(ctx context.Context, room, username string, muted bool) error
 	// SignalProxyUpstream 同源信令代理的上游地址；空 = 该内核不需要信令代理。
 	SignalProxyUpstream(ctx context.Context) string
 }

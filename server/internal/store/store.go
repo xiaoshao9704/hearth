@@ -220,6 +220,12 @@ var sqliteDDL = []string{
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
   UNIQUE(channel_id, user_id)
 )`,
+	`CREATE TABLE IF NOT EXISTS channel_gags (
+  channel_id INTEGER NOT NULL REFERENCES channels(id),
+  user_id INTEGER NOT NULL REFERENCES users(id),
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE(channel_id, user_id)
+)`,
 	`CREATE TABLE IF NOT EXISTS channel_members (
   channel_id INTEGER NOT NULL REFERENCES channels(id),
   user_id INTEGER NOT NULL REFERENCES users(id),
@@ -295,6 +301,12 @@ var mysqlDDL = []string{
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
   UNIQUE KEY uk_channel_bans (channel_id, user_id)
 )`,
+	`CREATE TABLE IF NOT EXISTS channel_gags (
+  channel_id BIGINT NOT NULL,
+  user_id BIGINT NOT NULL,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE KEY uk_channel_gags (channel_id, user_id)
+)`,
 	`CREATE TABLE IF NOT EXISTS channel_members (
   channel_id BIGINT NOT NULL,
   user_id BIGINT NOT NULL,
@@ -365,6 +377,12 @@ var pgDDL = []string{
   UNIQUE(user_id, channel_id)
 )`,
 	`CREATE TABLE IF NOT EXISTS channel_bans (
+  channel_id BIGINT NOT NULL REFERENCES channels(id),
+  user_id BIGINT NOT NULL REFERENCES users(id),
+  created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE(channel_id, user_id)
+)`,
+	`CREATE TABLE IF NOT EXISTS channel_gags (
   channel_id BIGINT NOT NULL REFERENCES channels(id),
   user_id BIGINT NOT NULL REFERENCES users(id),
   created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
@@ -646,6 +664,33 @@ func (s *Store) ListBans(ctx context.Context, channelID int64) ([]string, error)
 	return s.listUsernames(ctx, "channel_bans", channelID)
 }
 
+// ---- 禁言 ----
+
+// IsGagged 用户是否被该频道禁言。
+func (s *Store) IsGagged(ctx context.Context, channelID, userID int64) (bool, error) {
+	var n int
+	err := s.db.QueryRowContext(ctx, s.q(
+		"SELECT COUNT(1) FROM channel_gags WHERE channel_id = ? AND user_id = ?"), channelID, userID).Scan(&n)
+	return n > 0, err
+}
+
+func (s *Store) Gag(ctx context.Context, channelID, userID int64) error {
+	_, err := s.db.ExecContext(ctx, s.q(s.d.ignore(
+		"INSERT INTO channel_gags (channel_id, user_id) VALUES (?, ?)")), channelID, userID)
+	return err
+}
+
+func (s *Store) Ungag(ctx context.Context, channelID, userID int64) error {
+	_, err := s.db.ExecContext(ctx, s.q(
+		"DELETE FROM channel_gags WHERE channel_id = ? AND user_id = ?"), channelID, userID)
+	return err
+}
+
+// ListGags 返回该频道被禁言的用户名列表。
+func (s *Store) ListGags(ctx context.Context, channelID int64) ([]string, error) {
+	return s.listUsernames(ctx, "channel_gags", channelID)
+}
+
 // ---- 成员（邀请制白名单）----
 
 // IsMember 用户是否在该频道白名单内。
@@ -673,7 +718,7 @@ func (s *Store) ListMembers(ctx context.Context, channelID int64) ([]string, err
 	return s.listUsernames(ctx, "channel_members", channelID)
 }
 
-// listUsernames 取 channel_bans/channel_members 里的用户名（两表结构相同）。
+// listUsernames 取 channel_bans/channel_gags/channel_members 里的用户名（三表结构相同）。
 func (s *Store) listUsernames(ctx context.Context, table string, channelID int64) ([]string, error) {
 	rows, err := s.db.QueryContext(ctx, s.q(`
 SELECT u.username FROM `+table+` t JOIN users u ON u.id = t.user_id

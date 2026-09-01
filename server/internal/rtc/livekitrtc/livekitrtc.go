@@ -84,8 +84,8 @@ func (p *Provider) clients(ctx context.Context) (*lkingress.Client, *lkroom.Clie
 
 func (p *Provider) Name() string { return "livekit" }
 
-func (p *Provider) JoinCredentials(ctx context.Context, room, username, deviceTag string) (rtc.Credentials, error) {
-	tok, err := lktoken.Sign(p.cfg(ctx, "livekit_api_key"), p.cfg(ctx, "livekit_api_secret"), room, username, deviceTag)
+func (p *Provider) JoinCredentials(ctx context.Context, room, username, deviceTag string, canPublish bool) (rtc.Credentials, error) {
+	tok, err := lktoken.Sign(p.cfg(ctx, "livekit_api_key"), p.cfg(ctx, "livekit_api_secret"), room, username, deviceTag, canPublish)
 	if err != nil {
 		return rtc.Credentials{}, err
 	}
@@ -113,6 +113,11 @@ func (p *Provider) ListParticipants(ctx context.Context, room string) ([]rtc.Par
 func (p *Provider) RemoveParticipantsOf(ctx context.Context, room, username string) (int, error) {
 	_, rooms := p.clients(ctx)
 	return rooms.RemoveParticipantsOf(ctx, room, username)
+}
+
+func (p *Provider) MuteUserAudio(ctx context.Context, room, username string, muted bool) error {
+	_, rooms := p.clients(ctx)
+	return rooms.MuteUserAudio(ctx, room, username, muted)
 }
 
 func (p *Provider) SignalProxyUpstream(ctx context.Context) string {

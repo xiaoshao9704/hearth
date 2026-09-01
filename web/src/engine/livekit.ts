@@ -40,6 +40,7 @@ export class LiveKitEngine implements AVEngine {
       display: p.name || p.identity,
       isLocal: p.identity === this.room.localParticipant.identity,
       micOn: !!micPub && !micPub.isMuted,
+      canPublish: p.permissions?.canPublish !== false, // 服务端禁言会收走发布权限
       sharing: !!p.getTrackPublication(Track.Source.ScreenShare),
       obs: p.identity.endsWith('-obs'),
     };
@@ -96,6 +97,8 @@ export class LiveKitEngine implements AVEngine {
       })
       .on(RoomEvent.ParticipantConnected, () => this.cbs.onRoster())
       .on(RoomEvent.ParticipantDisconnected, () => this.cbs.onRoster())
+      // 禁言/解禁（canPublish 变化）：走名册刷新，视图据此更新徽标与自我提示
+      .on(RoomEvent.ParticipantPermissionsChanged, () => this.cbs.onRoster())
       .on(RoomEvent.Reconnecting, () => this.cbs.onReconnecting())
       .on(RoomEvent.Reconnected, () => this.cbs.onReconnected())
       .on(RoomEvent.Disconnected, (reason) => {

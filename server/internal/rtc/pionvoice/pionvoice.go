@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/pion/webrtc/v4"
@@ -38,12 +39,12 @@ func ConfigKeys() []rtc.ConfigKey {
 // ---- 信令消息 ----
 
 type sigMsg struct {
-	Type     string            `json:"type"` // C→S: offer/answer/mute；S→C: welcome/answer/offer/roster/speakers/bye
+	Type     string            `json:"type"` // C→S: offer/answer/mute；S→C: welcome/answer/offer/roster/speakers/gag/bye
 	SDP      string            `json:"sdp,omitempty"`
 	Mids     map[string]string `json:"mids,omitempty"` // S→C offer 附带：mid -> 对端 identity
 	Identity string            `json:"identity,omitempty"`
 	Peers    []peerInfo        `json:"peers,omitempty"`
-	On       bool              `json:"on"`
+	On       bool              `json:"on"` // mute: 闭麦状态；welcome/gag: 禁言状态
 	Speakers []string          `json:"speakers,omitempty"`
 	Reason   string            `json:"reason,omitempty"`
 }
@@ -52,6 +53,7 @@ type peerInfo struct {
 	Identity string `json:"identity"`
 	Name     string `json:"name"`
 	MicOn    bool   `json:"micOn"`
+	Muted    bool   `json:"muted,omitempty"` // 服务端禁言（channel_gags）
 }
 
 // ---- 参与者与房间 ----
@@ -66,6 +68,7 @@ type participant struct {
 	pc       *webrtc.PeerConnection
 	out      *webrtc.TrackLocalStaticRTP // 该参与者的上行音频，供他人订阅
 	micOn    bool
+	muted    atomic.Bool // 服务端禁言（channel_gags）：丢弃上行并锁死 mic 状态
 	closed   chan struct{}
 	closeOne sync.Once
 
@@ -128,8 +131,9 @@ func New(cfg rtc.ConfigFunc) *Provider {
 
 func (p *Provider) Name() string { return "pion-voice" }
 
-func (p *Provider) JoinCredentials(_ context.Context, _, _, _ string) (rtc.Credentials, error) {
-	// URL/Token 留空：api 层推导同源 /api/voice 信令地址并透传会话 token
+func (p *Provider) JoinCredentials(_ context.Context, _, _, _ string, _ bool) (rtc.Credentials, error) {
+	// URL/Token 留空：api 层推导同源 /api/voice 信令地址并透传会话 token；
+	// canPublish 此处在凭证层无处安放，禁言由 api 层在 /api/voice 入会时（HandleJoin muted 参数）生效
 	return rtc.Credentials{Engine: "pion-voice"}, nil
 }
 
@@ -182,6 +186,42 @@ func (p *Provider) RemoveParticipantsOf(_ context.Context, room, username string
 		pt.close("kicked")
 	}
 	return len(targets), nil
+}
+
+// MuteUserAudio 服务端禁言/解禁某用户全部设备：丢弃其上行音频并锁死 mic 状态。
+// 进程内实现无发布权限概念，直接在转发层丢包等效；用户不在房间时返回 ErrNoParticipant。
+func (p *Provider) MuteUserAudio(_ context.Context, room, username string, muted bool) error {
+	p.mu.Lock()
+	r := p.rooms[room]
+	p.mu.Unlock()
+	if r == nil {
+		return rtc.ErrNoParticipant
+	}
+	r.mu.Lock()
+	found := false
+	var targets []*participant
+	for _, pt := range r.parts {
+		if pt.identity == username || strings.HasPrefix(pt.identity, username+"-") {
+			pt.muted.Store(muted)
+			if muted {
+				pt.micOn = false // roster() 在 r.mu 下读
+			}
+			targets = append(targets, pt)
+			found = true
+		}
+	}
+	r.mu.Unlock()
+	if !found {
+		return rtc.ErrNoParticipant
+	}
+	for _, pt := range targets { // 告知被禁言者本人（前端自我提示 + 收成闭麦）
+		select {
+		case pt.send <- sigMsg{Type: "gag", On: muted}:
+		default:
+		}
+	}
+	r.broadcastRoster()
+	return nil
 }
 
 func (p *Provider) SignalProxyUpstream(context.Context) string { return "" } // 进程内，无代理
@@ -257,7 +297,7 @@ func (p *Provider) ensureAPI(ctx context.Context) (*webrtc.API, error) {
 
 // ---- 入会（由 api 层完成鉴权后调用，阻塞至连接结束）----
 
-func (p *Provider) HandleJoin(ctx context.Context, roomName, identity, name string, conn *websocket.Conn) {
+func (p *Provider) HandleJoin(ctx context.Context, roomName, identity, name string, muted bool, conn *websocket.Conn) {
 	api, err := p.ensureAPI(ctx)
 	if err != nil {
 		wsjson.Write(ctx, conn, sigMsg{Type: "bye", Reason: err.Error()})
@@ -287,6 +327,7 @@ func (p *Provider) HandleJoin(ctx context.Context, roomName, identity, name stri
 		closed: make(chan struct{}), senders: make(map[string]*webrtc.RTPSender),
 		answerCh: make(chan string, 1),
 	}
+	part.muted.Store(muted) // 禁言状态随入会生效（api 层据 channel_gags 判定）
 
 	r.mu.Lock()
 	if old := r.parts[identity]; old != nil {
@@ -297,7 +338,7 @@ func (p *Provider) HandleJoin(ctx context.Context, roomName, identity, name stri
 	r.mu.Unlock()
 
 	go part.writeLoop(ctx)
-	part.send <- sigMsg{Type: "welcome", Identity: identity, Peers: r.roster(identity)}
+	part.send <- sigMsg{Type: "welcome", Identity: identity, Peers: r.roster(identity), On: muted} // On = 自己是否被禁言
 	r.broadcastRoster()
 
 	p.readLoop(ctx, api, r, part) // 阻塞
@@ -404,7 +445,7 @@ func (p *Provider) readLoop(ctx context.Context, api *webrtc.API, r *vroom, part
 			}
 		case "mute":
 			r.mu.Lock()
-			part.micOn = !m.On // roster() 在 r.mu 下读
+			part.micOn = !m.On && !part.muted.Load() // 被禁言者不允许自行开麦；roster() 在 r.mu 下读
 			r.mu.Unlock()
 			r.broadcastRoster()
 		}
@@ -424,6 +465,9 @@ func (pt *participant) forward(tr *webrtc.TrackRemote, recv *webrtc.RTPReceiver)
 		pkt, _, err := tr.ReadRTP()
 		if err != nil {
 			return
+		}
+		if pt.muted.Load() {
+			continue // 服务端禁言：直接丢弃上行，不等客户端自觉
 		}
 		if levelID > 0 {
 			if raw := pkt.Header.GetExtension(uint8(levelID)); len(raw) > 0 {
@@ -545,7 +589,7 @@ func (r *vroom) roster(exclude string) []peerInfo {
 		if pt.identity == exclude {
 			continue
 		}
-		out = append(out, peerInfo{Identity: pt.identity, Name: pt.name, MicOn: pt.micOn})
+		out = append(out, peerInfo{Identity: pt.identity, Name: pt.name, MicOn: pt.micOn, Muted: pt.muted.Load()})
 	}
 	return out
 }

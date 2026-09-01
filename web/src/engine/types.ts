@@ -11,6 +11,7 @@ export interface EPart {
   display: string;
   isLocal: boolean;
   micOn: boolean;
+  canPublish: boolean; // false = 被服务端禁言（channel_gags）：无法开麦/推流
   sharing: boolean; // 有投屏轨
   obs: boolean; // OBS 推流参与者（identity 以 -obs 结尾）
 }

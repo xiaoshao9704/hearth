@@ -1,7 +1,7 @@
 // 房间页：布局、面板、聊天与断线重连；音视频经 AVEngine 接口驱动。
 // 双线模型：语音线（voice，权威名册/说话状态）+ 舞台线（stage：投屏/摄像头/OBS 及其伴音）。
 // 两线同一内核时（combined）一条连接承担两种角色；舞台线缺席或断开只禁用投屏/摄像头，语音不受影响。
-import { clearSession, fetchJoinCredentials, getUser, kickUser, listChannels } from '../api';
+import { clearSession, fetchJoinCredentials, getUser, kickUser, listChannels, muteUser } from '../api';
 import type { EngineCred } from '../api';
 import { connectChat } from '../chat';
 import type { ChatMessage } from '../chat';
@@ -228,6 +228,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
     if (tiles.has(key)) return;
     const tile = document.createElement('div');
     tile.className = 'tile' + (source === 'screen' ? ' tile-screen' : '');
+    tile.dataset.identity = part.identity;
     if (part.isLocal && source === 'camera' && loadPrefs().mirror) video.style.transform = 'scaleX(-1)';
 
     const label = document.createElement('div');
@@ -326,6 +327,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
       if (!el) {
         el = document.createElement('div');
         el.className = 'tile tile-audio';
+        el.dataset.identity = p.identity;
         el.addEventListener('click', () => togglePin(`${p.identity}:audio-tile`));
         gridEl.insertBefore(el, railEl);
         audioTiles.set(p.identity, el);
@@ -346,17 +348,23 @@ export async function renderRoom(root: HTMLElement, channel: string) {
   }
 
   // ---- 用户操作菜单（聊天卡片与成员行共用）----
+  // 管理操作（禁言/踢出）= 房主或管理员，与后端 requireModerator 一致
+  const canModerate = () => isOwner || getUser()?.is_admin === true;
+
   function showUserMenu(x: number, y: number, username: string) {
     document.querySelector('.user-menu')?.remove();
     if (username === myUsername) return;
     const targets = parts().filter((p) => !p.isLocal && p.username === username);
     const muted = targets.some((p) => volumeFor(p.identity) === 0);
+    // 禁言判定：该用户所有设备都被收走了发布权限（服务端 gag 会置 canPublish=false）
+    const gagged = targets.length > 0 && targets.every((p) => !p.canPublish);
     const menu = document.createElement('div');
     menu.className = 'user-menu';
     menu.innerHTML = `
       <div class="um-title">${esc(username)}</div>
       ${targets.length ? `<button class="hit um-item" data-act="mute">${slashIcon('volume', 14, !muted, 'currentColor')}<span>${muted ? '恢复声音' : '屏蔽声音'}</span></button>` : ''}
-      ${isOwner ? `<button class="hit um-item danger" data-act="kick">${icon('leave', 14, 'var(--red)')}<span>踢出房间</span></button>` : ''}`;
+      ${canModerate() && targets.length ? `<button class="hit um-item${gagged ? '' : ' danger'}" data-act="gag">${micIcon(14, !gagged, gagged ? 'currentColor' : 'var(--red)')}<span>${gagged ? '解除禁言' : '禁言'}</span></button>` : ''}
+      ${canModerate() ? `<button class="hit um-item danger" data-act="kick">${icon('leave', 14, 'var(--red)')}<span>踢出房间</span></button>` : ''}`;
     if (!menu.querySelector('.um-item')) return;
     document.body.appendChild(menu);
     const mw = menu.offsetWidth;
@@ -377,6 +385,15 @@ export async function renderRoom(root: HTMLElement, channel: string) {
       refreshMembers();
       close();
     });
+    menu.querySelector('[data-act="gag"]')?.addEventListener('click', async () => {
+      close();
+      try {
+        await muteUser(channel, username, !gagged);
+        toast(gagged ? `已解除 ${username} 的禁言` : `已禁言 ${username}`, 'ok');
+      } catch (err) {
+        toast((err as Error).message, 'bad');
+      }
+    });
     menu.querySelector('[data-act="kick"]')?.addEventListener('click', async () => {
       close();
       try {
@@ -388,9 +405,25 @@ export async function renderRoom(root: HTMLElement, channel: string) {
     });
   }
 
+  // 视频/音频卡片与成员行的右键都走同一个操作菜单
+  gridEl.addEventListener('contextmenu', (ev) => {
+    const identity = (ev.target as HTMLElement).closest<HTMLElement>('.tile')?.dataset.identity;
+    const p = parts().find((pp) => pp.identity === identity);
+    if (!p || p.username === myUsername) return;
+    ev.preventDefault();
+    showUserMenu(ev.clientX, ev.clientY, p.username);
+  });
+
   // ---- 成员面板 ----
   const membersBody = shell.content.querySelector<HTMLDivElement>('#members-body')!;
   const membersCount = shell.content.querySelector<HTMLSpanElement>('#members-count')!;
+
+  membersBody.addEventListener('contextmenu', (ev) => {
+    const uname = (ev.target as HTMLElement).closest<HTMLElement>('.member-row')?.dataset.uname ?? '';
+    if (!uname || uname === myUsername) return;
+    ev.preventDefault();
+    showUserMenu(ev.clientX, ev.clientY, uname);
+  });
 
   function refreshMembers() {
     const byUser = new Map<string, EPart[]>();
@@ -410,15 +443,17 @@ export async function renderRoom(root: HTMLElement, channel: string) {
             const obs = plist.some((p) => p.obs);
             const muted = plist.every((p) => !p.micOn && !p.obs);
             const localMuted = plist.some((p) => volumeFor(p.identity) === 0);
+            const gagged = plist.every((p) => !p.canPublish); // 服务端禁言收走发布权限
             const statusBits = [
               sharing ? '投屏中' : '',
               obs ? 'OBS 推流' : '',
               speaking ? '说话中' : muted ? '已静音' : '',
+              gagged ? '已禁言' : '',
               plist.filter((p) => !p.obs).length > 1 ? `${plist.filter((p) => !p.obs).length} 台设备` : '',
               localMuted && !isMe ? '已本地静音' : '',
             ].filter(Boolean);
             return `
-          <div class="member-row ${uname === ownerUsername ? 'owner-row' : ''}">
+          <div class="member-row ${uname === ownerUsername ? 'owner-row' : ''}" data-uname="${esc(uname)}">
             ${avatarHtml(uname, 'avatar' + (speaking ? ' speaking' : ''))}
             <div style="flex-grow:1;min-width:0">
               <div class="m-name">${esc(uname)}${isMe ? '<span class="muted">（我）</span>' : ''}
@@ -430,7 +465,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
               isMe
                 ? ''
                 : `<button class="hit m-btn ${localMuted ? 'muted-on' : ''}" data-lmute="${esc(uname)}" title="${localMuted ? '恢复' : '本地静音'}">${slashIcon('volume', 14, localMuted, localMuted ? 'var(--red)' : 'var(--text-2)')}</button>${
-                    isOwner ? `<button class="hit m-btn" data-mkick="${esc(uname)}" title="踢出房间">${icon('leave', 14, 'var(--red)')}</button>` : ''
+                    canModerate() ? `<button class="hit m-btn" data-mkick="${esc(uname)}" title="踢出房间">${icon('leave', 14, 'var(--red)')}</button>` : ''
                   }`
             }
           </div>`;
@@ -561,6 +596,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
       if (role === 'voice') {
         statusEl.textContent = '';
         if (!first) toast('语音已重新连接', 'ok', 1800);
+        checkSelfGag(); // 持久禁言：重进房时权限初始就是 canPublish=false
         if (micOn) {
           try {
             await line.engine.setMic(true);
@@ -646,6 +682,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
         syncAudioTiles();
         refreshMembers();
         refreshMeta();
+        if (role === 'voice') checkSelfGag(); // 禁言/解禁经名册刷新到达（权限变化 → canPublish）
       },
       onSpeakers: (identities) => {
         speakingByRole[role] = new Set(identities);
@@ -777,6 +814,26 @@ export async function renderRoom(root: HTMLElement, channel: string) {
   const btnCamera = shell.content.querySelector<HTMLButtonElement>('#btn-camera')!;
   const btnScreen = shell.content.querySelector<HTMLButtonElement>('#btn-screen')!;
 
+  // 自己被禁言（服务端收走发布权限 canPublish=false；持久禁言重进房时权限初始即为 false）
+  let selfGagged = false;
+  const isSelfGagged = () => voiceLine.engine?.participants().some((p) => p.isLocal && !p.canPublish) === true;
+
+  function checkSelfGag() {
+    const g = isSelfGagged();
+    if (g === selfGagged) return;
+    selfGagged = g;
+    if (g) {
+      // 服务端会顺带撤下已发布的麦克风轨道，本地 UI 同步收成闭麦
+      if (micOn) {
+        micOn = false;
+        refreshButtons();
+      }
+      toast('你已被禁言，无法发言', 'bad');
+    } else {
+      toast('你的禁言已解除', 'ok');
+    }
+  }
+
   function refreshButtons() {
     btnMic.classList.toggle('on', micOn);
     btnMic.innerHTML = `${micIcon(17, !micOn, 'currentColor')}<span class="pill-label">${micOn ? '麦克风' : '已静音'}</span>${micOn ? '<span class="mic-vu"><i></i></span>' : ''}`;
@@ -801,6 +858,11 @@ export async function renderRoom(root: HTMLElement, channel: string) {
   btnMic.addEventListener('click', async () => {
     if (!voiceLine.engine) return;
     micOn = !micOn;
+    if (micOn && isSelfGagged()) {
+      micOn = false;
+      toast('你已被禁言，无法开麦', 'bad');
+      return;
+    }
     refreshButtons();
     try {
       await voiceLine.engine.setMic(micOn);

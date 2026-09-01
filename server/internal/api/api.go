@@ -84,18 +84,25 @@ func (a *API) Router() *chi.Mux {
 		r.Get("/api/account/devices", a.listMyDevices)
 		r.Delete("/api/account/devices/{deviceID}", a.deleteMyDevice)
 
-		// 频道管理（房主）：频道解析与房主校验收敛到子路由中间件
+		// 频道管理：频道解析与权限校验收敛到子路由中间件
+		// （踢人/封禁/静音等管理操作 = 房主或管理员，其余 = 仅房主）
 		r.Route("/api/channels/{channel}", func(r chi.Router) {
-			r.Use(a.requireOwner)
-			r.Post("/kick", a.kick)
-			r.Post("/ban", a.ban)
-			r.Post("/unban", a.unban)
-			r.Get("/bans", a.listBans)
-			r.Post("/invite-only", a.setInviteOnly)
-			r.Get("/members", a.listMembers)
-			r.Post("/members", a.addMember)
-			r.Delete("/members", a.removeMember)
-			r.Get("/participants", a.channelParticipants)
+			r.Group(func(r chi.Router) {
+				r.Use(a.requireModerator)
+				r.Post("/kick", a.kick)
+				r.Post("/ban", a.ban)
+				r.Post("/unban", a.unban)
+				r.Post("/mute", a.mute)
+				r.Get("/bans", a.listBans)
+			})
+			r.Group(func(r chi.Router) {
+				r.Use(a.requireOwner)
+				r.Post("/invite-only", a.setInviteOnly)
+				r.Get("/members", a.listMembers)
+				r.Post("/members", a.addMember)
+				r.Delete("/members", a.removeMember)
+				r.Get("/participants", a.channelParticipants)
+			})
 		})
 
 		// 管理后台
@@ -150,7 +157,7 @@ func userFrom(r *http.Request) *store.User {
 	return u
 }
 
-// channelFrom 取 requireOwner 中间件注入的频道。
+// channelFrom 取 requireOwner / requireModerator 中间件注入的频道。
 func channelFrom(r *http.Request) *store.Channel {
 	c, _ := r.Context().Value(ctxChannel).(*store.Channel)
 	return c
@@ -173,20 +180,44 @@ func (a *API) auth(next http.Handler) http.Handler {
 	})
 }
 
+// channelOf 解析 {channel} 频道；已写错误响应时返回 nil。
+func (a *API) channelOf(w http.ResponseWriter, r *http.Request) *store.Channel {
+	c, err := a.st.ChannelByName(r.Context(), chi.URLParam(r, "channel"))
+	if errors.Is(err, store.ErrNotFound) {
+		writeErr(w, http.StatusNotFound, "频道不存在")
+		return nil
+	}
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "内部错误")
+		return nil
+	}
+	return c
+}
+
 // requireOwner 房主校验中间件：解析 {channel} 频道并确认当前用户是房主，频道注入 context。
 func (a *API) requireOwner(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		c, err := a.st.ChannelByName(r.Context(), chi.URLParam(r, "channel"))
-		if errors.Is(err, store.ErrNotFound) {
-			writeErr(w, http.StatusNotFound, "频道不存在")
-			return
-		}
-		if err != nil {
-			writeErr(w, http.StatusInternalServerError, "内部错误")
+		c := a.channelOf(w, r)
+		if c == nil {
 			return
 		}
 		if c.OwnerID != userFrom(r).ID {
 			writeErr(w, http.StatusForbidden, "只有房主能操作")
+			return
+		}
+		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), ctxChannel, c)))
+	})
+}
+
+// requireModerator 房主或管理员校验中间件：用于踢人/封禁/静音等频道管理操作，频道注入 context。
+func (a *API) requireModerator(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c := a.channelOf(w, r)
+		if c == nil {
+			return
+		}
+		if u := userFrom(r); c.OwnerID != u.ID && !u.IsAdmin {
+			writeErr(w, http.StatusForbidden, "只有房主或管理员能操作")
 			return
 		}
 		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), ctxChannel, c)))
@@ -334,12 +365,18 @@ func (a *API) joinToken(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusForbidden, reason)
 		return
 	}
+	// 禁言状态随进房凭证生效：被禁言用户签无发布权限的令牌
+	gagged, err := a.st.IsGagged(r.Context(), c.ID, u.ID)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "内部错误")
+		return
+	}
 	tag := a.deviceTagFor(r, req.DeviceID, u.ID)
 	// 频道名即内核房间名，一一映射。语音线必发；舞台线可选；
 	// 两线同一内核时标记 combined，前端用一条连接承担两种角色（即旧单线形态）。
 	voiceP := a.voiceProvider(r.Context())
 	stageP := a.stageProvider(r.Context())
-	vc, err := voiceP.JoinCredentials(r.Context(), c.Name, u.Username, tag)
+	vc, err := voiceP.JoinCredentials(r.Context(), c.Name, u.Username, tag, !gagged)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "签发令牌失败")
 		return
@@ -348,7 +385,7 @@ func (a *API) joinToken(w http.ResponseWriter, r *http.Request) {
 	combined := stageP != nil && a.dynVal(r.Context(), "voice_provider") == a.dynVal(r.Context(), "stage_provider")
 	resp["combined"] = combined
 	if stageP != nil && !combined {
-		sc, serr := stageP.JoinCredentials(r.Context(), c.Name, u.Username, tag)
+		sc, serr := stageP.JoinCredentials(r.Context(), c.Name, u.Username, tag, !gagged)
 		if serr != nil {
 			log.Printf("舞台线签发失败（语音照常）: %v", serr)
 		} else {
@@ -627,6 +664,62 @@ func (a *API) unban(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// mute 服务端禁言/解禁目标用户（改写内核发布权限，对其全部设备生效；
+// 禁言期间无法自行开麦，已发布轨道会被服务端下架）。
+// 禁言状态落库（channel_gags）：离房重进时 joinToken 据此签无发布权限的令牌，禁言持续生效。
+func (a *API) mute(w http.ResponseWriter, r *http.Request) {
+	c := channelFrom(r)
+	var req struct {
+		Username string `json:"username"`
+		Muted    bool   `json:"muted"`
+	}
+	if !decode(w, r, &req) {
+		return
+	}
+	if req.Username == "" {
+		writeErr(w, http.StatusBadRequest, "请求格式错误")
+		return
+	}
+	if req.Username == userFrom(r).Username {
+		writeErr(w, http.StatusBadRequest, "不能对自己操作")
+		return
+	}
+	t, _, err := a.st.UserByName(r.Context(), req.Username)
+	if err != nil {
+		writeErr(w, http.StatusNotFound, "用户不存在")
+		return
+	}
+	if err := a.voiceProvider(r.Context()).MuteUserAudio(r.Context(), c.Name, req.Username, req.Muted); err != nil {
+		if errors.Is(err, rtc.ErrNoParticipant) {
+			writeErr(w, http.StatusNotFound, "该用户不在频道中")
+			return
+		}
+		log.Printf("内核禁言 %s 失败: %v", req.Username, err)
+		writeErr(w, http.StatusBadGateway, "静音失败（内核不可达）")
+		return
+	}
+	// 舞台线是独立连接时同步禁言（与语音同一内核时 combined 单连接已覆盖）
+	if sp := a.stageProvider(r.Context()); sp != nil &&
+		a.dynVal(r.Context(), "voice_provider") != a.dynVal(r.Context(), "stage_provider") {
+		if err := sp.MuteUserAudio(r.Context(), c.Name, req.Username, req.Muted); err != nil &&
+			!errors.Is(err, rtc.ErrNoParticipant) {
+			log.Printf("舞台线禁言 %s 失败: %v", req.Username, err)
+		}
+	}
+	// LiveKit 侧已生效，落库失败不阻塞（仅影响重进时的禁言延续，记日志）
+	if req.Muted {
+		if err := a.st.Gag(r.Context(), c.ID, t.ID); err != nil {
+			log.Printf("记录禁言状态失败: %v", err)
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"muted": req.Username})
+		return
+	}
+	if err := a.st.Ungag(r.Context(), c.ID, t.ID); err != nil {
+		log.Printf("解除禁言状态失败: %v", err)
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"unmuted": req.Username})
 }
 
 func (a *API) listBans(w http.ResponseWriter, r *http.Request) {

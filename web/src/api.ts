@@ -56,6 +56,12 @@ async function req<T>(path: string, options: { method?: string; body?: unknown }
   });
   if (!res.ok) {
     const data = (await res.json().catch(() => null)) as { error?: string } | null;
+    // 带着 token 却 401 说明会话已失效（区别于登录页密码错误——那时本地无 token）：
+    // 清掉本地会话并跳回登录页，仍然 throw 让调用方停止后续逻辑
+    if (res.status === 401 && token) {
+      clearSession();
+      if (location.hash !== '#/login') location.hash = '#/login';
+    }
     throw new Error(data?.error ?? `请求失败 (${res.status})`);
   }
   if (res.status === 204) return undefined as T;
@@ -167,6 +173,10 @@ export function kickUser(channel: string, username: string): Promise<{ kicked: n
 
 export function banUser(channel: string, username: string): Promise<void> {
   return req(`/api/channels/${encodeURIComponent(channel)}/ban`, { method: 'POST', body: { username } });
+}
+
+export function muteUser(channel: string, username: string, muted: boolean): Promise<unknown> {
+  return req(`/api/channels/${encodeURIComponent(channel)}/mute`, { method: 'POST', body: { username, muted } });
 }
 
 export function unbanUser(channel: string, username: string): Promise<void> {

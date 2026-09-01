@@ -11,6 +11,8 @@ import (
 
 	"github.com/livekit/protocol/auth"
 	"github.com/livekit/protocol/livekit"
+
+	"hearth/server/internal/rtc"
 )
 
 type Client struct {
@@ -100,4 +102,45 @@ func (c *Client) RemoveParticipantsOf(ctx context.Context, room, username string
 		}
 	}
 	return n, nil
+}
+
+// MuteUserAudio 服务端禁言/解禁 room 里 identity 属于 username 的参与者
+// （identity 规则同 RemoveParticipantsOf，对全部设备生效）。
+// 通过 UpdateParticipant 改写发布权限实现（CanPublish=false）：LiveKit 服务端会下架
+// 其全部已发布轨道，且客户端无法自行重新发布（区别于仅静音轨道，后者客户端可自行取消）。
+// 权限是整体替换语义（见 auth.VideoGrant.UpdateFromPermission），故从参与者当前权限
+// （ParticipantInfo.Permission）出发只翻转 CanPublish，避免误清 CanSubscribe/CanPublishData 等。
+// 该用户没有任何参与者在房间时返回 rtc.ErrNoParticipant。
+func (c *Client) MuteUserAudio(ctx context.Context, room, username string, muted bool) error {
+	c.room = room
+	defer func() { c.room = "" }()
+	resp, err := c.api.ListParticipants(ctx, &livekit.ListParticipantsRequest{Room: room})
+	if err != nil {
+		return fmt.Errorf("列出参与者失败: %w", err)
+	}
+	found := false
+	for _, p := range resp.Participants {
+		if p.Identity != username && !strings.HasPrefix(p.Identity, username+"-") {
+			continue
+		}
+		found = true
+		// p.Permission 是本响应新解码的对象，原地翻转安全；
+		// nil 兜底与进房令牌（lktoken.Sign）的默认授权一致。
+		perm := p.Permission
+		if perm == nil {
+			perm = &livekit.ParticipantPermission{CanSubscribe: true, CanPublish: true, CanPublishData: true}
+		}
+		perm.CanPublish = !muted
+		if _, err := c.api.UpdateParticipant(ctx, &livekit.UpdateParticipantRequest{
+			Room:       room,
+			Identity:   p.Identity,
+			Permission: perm,
+		}); err != nil {
+			return fmt.Errorf("更新参与者 %s 权限失败: %w", p.Identity, err)
+		}
+	}
+	if !found {
+		return rtc.ErrNoParticipant
+	}
+	return nil
 }

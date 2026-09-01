@@ -12,7 +12,7 @@ interface SigMsg {
   sdp?: string;
   mids?: Record<string, string>;
   identity?: string;
-  peers?: { identity: string; name: string; micOn: boolean }[];
+  peers?: { identity: string; name: string; micOn: boolean; muted?: boolean }[];
   on?: boolean;
   speakers?: string[];
   reason?: string;
@@ -28,7 +28,8 @@ export class PionVoiceEngine implements AVEngine {
   private capture: MicCapture | null = null;
   private selfId = '';
   private micOn = false;
-  private roster = new Map<string, { name: string; micOn: boolean }>();
+  private gagged = false; // 服务端禁言：welcome.on 带入，gag 消息实时更新
+  private roster = new Map<string, { name: string; micOn: boolean; muted: boolean }>();
   private midMap: Record<string, string> = {};
   private trackEls = new Map<string, HTMLMediaElement[]>();
   private closed = false;
@@ -62,6 +63,7 @@ export class PionVoiceEngine implements AVEngine {
         display: usernameOf(this.selfId, ''),
         isLocal: true,
         micOn: this.micOn,
+        canPublish: !this.gagged,
         sharing: false,
         obs: false,
       },
@@ -73,6 +75,7 @@ export class PionVoiceEngine implements AVEngine {
         display: v.name || identity,
         isLocal: false,
         micOn: v.micOn,
+        canPublish: !v.muted,
         sharing: false,
         obs: false,
       });
@@ -134,7 +137,8 @@ export class PionVoiceEngine implements AVEngine {
           switch (m.type) {
             case 'welcome': {
               this.selfId = m.identity ?? '';
-              (m.peers ?? []).forEach((p) => this.roster.set(p.identity, { name: p.name, micOn: p.micOn }));
+              this.gagged = m.on === true; // 持久禁言：入会即被告知
+              (m.peers ?? []).forEach((p) => this.roster.set(p.identity, { name: p.name, micOn: p.micOn, muted: p.muted === true }));
               await this.setupPC();
               break;
             }
@@ -157,8 +161,13 @@ export class PionVoiceEngine implements AVEngine {
             }
             case 'roster':
               this.roster.clear();
-              (m.peers ?? []).forEach((p) => this.roster.set(p.identity, { name: p.name, micOn: p.micOn }));
+              (m.peers ?? []).forEach((p) => this.roster.set(p.identity, { name: p.name, micOn: p.micOn, muted: p.muted === true }));
               this.pruneGone();
+              this.cbs.onRoster();
+              break;
+            case 'gag': // 服务端禁言/解禁自己
+              this.gagged = m.on === true;
+              if (this.gagged && this.micOn) await this.setMic(false);
               this.cbs.onRoster();
               break;
             case 'speakers':
