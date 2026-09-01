@@ -211,7 +211,8 @@ a:hover { color: var(--ember-soft); }
 .conn-box.live .conn-title { color: var(--sage); }
 .conn-box .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--text-3); }
 .conn-box.live .dot { background: var(--sage); }
-.conn-box .conn-meta { font-size: 10.5px; color: var(--text-2); padding-left: 13px; }
+.conn-box .conn-meta { font-size: 10.5px; color: var(--text-2); padding-left: 13px; display: flex; flex-wrap: wrap; gap: 2px 10px; }
+.conn-box .conn-chip { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
 
 .user-bar {
   height: 58px; flex-shrink: 0; padding: 0 10px; display: flex; align-items: center; gap: 9px;

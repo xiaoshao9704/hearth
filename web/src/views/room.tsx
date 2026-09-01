@@ -15,7 +15,7 @@ import { createEngine } from '../engine';
 import type { AVEngine, EPart, EngineCallbacks, TrackSource, VideoStats } from '../engine/types';
 import { encoderIsHw, loadPrefs, prefsBus, savePrefs } from '../prefs';
 import { menuButtonHtml, renderShell, wireMenuButton } from '../shell';
-import { avatarHtml, esc, fmtClock, icon, micIcon, slashIcon, toast } from '../ui';
+import { avatarHtml, esc, fmtClock, icon, licon, micIcon, slashIcon, toast } from '../ui';
 import { openSettings } from './settings';
 
 // iOS Safari 的私有全屏 API（iPhone 仅 video 元素可用）
@@ -345,9 +345,12 @@ export async function renderRoom(root: HTMLElement, channel: string) {
   }
 
   function connBoxMeta(): string {
-    let m = `voice: ${voiceLine.engineName || '—'}`;
-    if (stageLine && !combined) m += ` · stage: ${stageUp ? stageLine.engineName : '重连中'}`;
-    return m;
+    // 图标 chip：窄屏放不下时按 chip 整体折行，不在值中间断
+    const chip = (ic: string, label: string) =>
+      `<span class="conn-chip">${icon(ic, 11, 'var(--text-2)', 1.7)}<span>${esc(label)}</span></span>`;
+    let h = chip('volume', voiceLine.engineName || '—');
+    if (stageLine && !combined) h += chip('screen', stageUp ? stageLine.engineName : '重连中');
+    return h;
   }
 
   function scheduleRejoin(role: Role, delay?: number) {
@@ -804,21 +807,21 @@ export async function renderRoom(root: HTMLElement, channel: string) {
           <Show when={e.source === 'screen' && (e.encTag() || e.liveStats())}>
             <div class="spec-badge stat-strip mono" title={e.specTip()}>
               <Show when={e.encTag()}>
-                <span class="stat">{el(icon('cube', 11))}{e.encTag()}</span>
+                <span class="stat">{el(licon('cpu'))}{e.encTag()}</span>
               </Show>
               <Show when={e.liveStats()}>
                 {(s) => (
                   <>
                     <span class="stat">
-                      {el(icon('screen', 11))}
+                      {el(licon('monitor'))}
                       {s().width}×{s().height}
                     </span>
                     <span class="stat">
-                      {el(icon('clock', 11))}
+                      {el(licon('timer'))}
                       {Math.round(s().fps)}
                     </span>
                     <span class="stat">
-                      {el(icon('pulse', 11))}
+                      {el(licon('gauge'))}
                       {(s().kbps / 1000).toFixed(1)}M
                     </span>
                   </>

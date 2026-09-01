@@ -125,7 +125,7 @@ export function renderShell(root: HTMLElement, opts: ShellOptions = {}): Shell {
     setConn(live, meta) {
       connBox.classList.toggle('live', live);
       connTitle.textContent = live ? '语音已连接' : '未连接语音';
-      connMeta.textContent = meta;
+      connMeta.innerHTML = meta; // 内容可信：调用方只传固定文案或 esc 过的引擎名
     },
     refreshChannels,
     destroy() {
