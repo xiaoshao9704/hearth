@@ -600,15 +600,16 @@ func (a *API) createIngress(r *http.Request, u *store.User, c *store.Channel) (*
 
 // ---- 频道管理（房主操作）----
 
-// resolveTargetUser 解析 body 里的目标用户名：须存在且不能是房主自己。
-func (a *API) resolveTargetUser(w http.ResponseWriter, r *http.Request, u *store.User) *store.User {
+// resolveTargetUser 解析 body 里的目标用户名：须存在；allowSelf=false 时禁止指向自己
+//（封禁/禁言对自己无意义；踢出允许——"踢出我的全部设备"用于远程下线忘关的 OBS/其他设备）。
+func (a *API) resolveTargetUser(w http.ResponseWriter, r *http.Request, u *store.User, allowSelf bool) *store.User {
 	var req struct {
 		Username string `json:"username"`
 	}
 	if !decode(w, r, &req) {
 		return nil
 	}
-	if req.Username == u.Username {
+	if !allowSelf && req.Username == u.Username {
 		writeErr(w, http.StatusBadRequest, "不能对自己操作")
 		return nil
 	}
@@ -639,7 +640,7 @@ func (a *API) evict(r *http.Request, c *store.Channel, t *store.User) (int, erro
 
 func (a *API) kick(w http.ResponseWriter, r *http.Request) {
 	c := channelFrom(r)
-	t := a.resolveTargetUser(w, r, userFrom(r))
+	t := a.resolveTargetUser(w, r, userFrom(r), true)
 	if t == nil {
 		return
 	}
@@ -653,7 +654,7 @@ func (a *API) kick(w http.ResponseWriter, r *http.Request) {
 
 func (a *API) ban(w http.ResponseWriter, r *http.Request) {
 	c := channelFrom(r)
-	t := a.resolveTargetUser(w, r, userFrom(r))
+	t := a.resolveTargetUser(w, r, userFrom(r), false)
 	if t == nil {
 		return
 	}
@@ -668,7 +669,7 @@ func (a *API) ban(w http.ResponseWriter, r *http.Request) {
 
 func (a *API) unban(w http.ResponseWriter, r *http.Request) {
 	c := channelFrom(r)
-	t := a.resolveTargetUser(w, r, userFrom(r))
+	t := a.resolveTargetUser(w, r, userFrom(r), false)
 	if t == nil {
 		return
 	}
@@ -684,7 +685,7 @@ func (a *API) unban(w http.ResponseWriter, r *http.Request) {
 // 内核调用只负责让"当前在房"的设备立即失声，目标不在房（ErrNoParticipant）不算失败。
 func (a *API) setGag(w http.ResponseWriter, r *http.Request, muted bool) {
 	c := channelFrom(r)
-	t := a.resolveTargetUser(w, r, userFrom(r))
+	t := a.resolveTargetUser(w, r, userFrom(r), false)
 	if t == nil {
 		return
 	}
@@ -757,7 +758,7 @@ func (a *API) listMembers(w http.ResponseWriter, r *http.Request) {
 
 func (a *API) addMember(w http.ResponseWriter, r *http.Request) {
 	c := channelFrom(r)
-	t := a.resolveTargetUser(w, r, userFrom(r))
+	t := a.resolveTargetUser(w, r, userFrom(r), false)
 	if t == nil {
 		return
 	}
@@ -770,7 +771,7 @@ func (a *API) addMember(w http.ResponseWriter, r *http.Request) {
 
 func (a *API) removeMember(w http.ResponseWriter, r *http.Request) {
 	c := channelFrom(r)
-	t := a.resolveTargetUser(w, r, userFrom(r))
+	t := a.resolveTargetUser(w, r, userFrom(r), false)
 	if t == nil {
 		return
 	}
