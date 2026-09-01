@@ -49,18 +49,31 @@ func (a *API) dynProxy(stripPrefix string, upstream func(*http.Request) string) 
 }
 
 // newReverseProxy 转发到 target；stripPrefix 非空时剥掉路径前缀。
+// 上游 URL 可带路径前缀与固定参数（如 http://host/sub?key=x）：
+// 路径拼在请求路径前，参数并入请求 query（与标准库单主机反代语义一致）。
 func newReverseProxy(target *url.URL, stripPrefix string) http.Handler {
 	return &httputil.ReverseProxy{
 		Director: func(req *http.Request) {
 			req.URL.Scheme = target.Scheme
 			req.URL.Host = target.Host
 			req.Host = target.Host
+			p := req.URL.Path
 			if stripPrefix != "" {
-				p := strings.TrimPrefix(req.URL.Path, stripPrefix)
-				if p == "" {
-					p = "/"
+				p = strings.TrimPrefix(p, stripPrefix)
+			}
+			if base := strings.TrimSuffix(target.Path, "/"); base != "" {
+				p = base + p
+			}
+			if p == "" {
+				p = "/"
+			}
+			req.URL.Path = p
+			if target.RawQuery != "" {
+				if req.URL.RawQuery == "" {
+					req.URL.RawQuery = target.RawQuery
+				} else {
+					req.URL.RawQuery = target.RawQuery + "&" + req.URL.RawQuery
 				}
-				req.URL.Path = p
 			}
 		},
 		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
