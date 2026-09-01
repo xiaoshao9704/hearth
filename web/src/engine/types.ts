@@ -43,6 +43,9 @@ export interface AVEngine {
   setScreen(on: boolean): Promise<void>;
   restartMic(): Promise<void>; // 开麦状态下设备/处理链变更：重启采集
   localMicTrack(): MediaStreamTrack | null; // 当前发布中的本地麦克风轨（本地电平表用；未开麦为 null）
+  // 投屏实际生效的编码器（getStats 运行时真值）；未投屏或引擎无视频返回 null。
+  // hw: powerEfficientEncoder 标准字段，旧浏览器缺失时为 null（调用方可按 impl 名兜底判断）
+  screenEncoderInfo(): Promise<{ impl: string; hw: boolean | null } | null>;
   switchCamera(deviceId: string): Promise<void>;
   dispose(): void; // 离开房间：断开并释放全部采集资源
 }

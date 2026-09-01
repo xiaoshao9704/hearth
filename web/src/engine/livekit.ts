@@ -120,6 +120,21 @@ export class LiveKitEngine implements AVEngine {
     return this.room.state === 'connected';
   }
 
+  async screenEncoderInfo(): Promise<{ impl: string; hw: boolean | null } | null> {
+    const track = this.room?.localParticipant.getTrackPublication(Track.Source.ScreenShare)?.track;
+    const sender = (track as unknown as { sender?: RTCRtpSender } | undefined)?.sender;
+    if (!sender) return null;
+    let out: { impl: string; hw: boolean | null } | null = null;
+    const stats = await sender.getStats();
+    stats.forEach((s) => {
+      const r = s as { type?: string; encoderImplementation?: string; powerEfficientEncoder?: boolean };
+      if (r.type === 'outbound-rtp' && r.encoderImplementation) {
+        out = { impl: r.encoderImplementation, hw: r.powerEfficientEncoder ?? null };
+      }
+    });
+    return out;
+  }
+
   localMicTrack(): MediaStreamTrack | null {
     return this.room?.localParticipant.getTrackPublication(Track.Source.Microphone)?.track?.mediaStreamTrack ?? null;
   }

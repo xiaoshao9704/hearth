@@ -122,3 +122,41 @@ export const prefsBus = new EventTarget();
 export function notifyPrefsChanged(what: string) {
   prefsBus.dispatchEvent(new CustomEvent('prefs', { detail: what }));
 }
+
+
+// ---- 投屏编码的软/硬编探测 ----
+
+// 运行时真值解读：优先浏览器上报的 powerEfficientEncoder，旧版本缺字段时按实现名兜底
+export function encoderIsHw(info: { impl: string; hw: boolean | null }): boolean | null {
+  if (info.hw !== null) return info.hw;
+  if (/libvpx|libaom|OpenH264/i.test(info.impl)) return false;
+  if (/External|VideoToolbox|MediaFoundation|Hardware|VAAPI/i.test(info.impl)) return true;
+  return null;
+}
+
+// 事前预测：MediaCapabilities 按当前档位问浏览器"这么编走不走硬件"
+export async function probeHwEncode(codec: ScreenCodec): Promise<boolean | null> {
+  try {
+    const mc = navigator.mediaCapabilities as {
+      encodingInfo?: (c: unknown) => Promise<{ supported: boolean; powerEfficient: boolean }>;
+    };
+    if (!mc?.encodingInfo) return null;
+    const p = loadPrefs();
+    const d = RES_DIMS[p.res] ?? RES_DIMS['1080p'];
+    const info = await mc.encodingInfo({
+      type: 'webrtc',
+      video: {
+        contentType: codec === 'h264' ? 'video/H264' : codec === 'vp9' ? 'video/VP9' : 'video/AV1',
+        width: d.width,
+        height: d.height,
+        framerate: p.fps,
+        bitrate: Math.round(p.bitrate * 1e6),
+        ...(codec === 'h264' ? {} : { scalabilityMode: 'L2T2_KEY' }),
+      },
+    });
+    if (!info.supported) return null;
+    return info.powerEfficient;
+  } catch {
+    return null;
+  }
+}

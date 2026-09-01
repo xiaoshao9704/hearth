@@ -621,3 +621,10 @@ a:hover { color: var(--ember-soft); }
 }
 .user-menu .um-item:hover { background: var(--bg-2); }
 .user-menu .um-item.danger { color: var(--red-text); }
+
+/* 编码档的软/硬编标注（设置页 MediaCapabilities 预测值） */
+.seg .enc-tag {
+  margin-left: 6px; font-size: 10px; padding: 1px 5px; border-radius: 5px;
+  background: var(--bg-4); color: var(--text-2);
+}
+.seg .enc-tag.hw { background: var(--ember-tint); color: var(--ember); }

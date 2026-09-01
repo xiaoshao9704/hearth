@@ -42,6 +42,10 @@ export class PionVoiceEngine implements AVEngine {
     return this.ws?.readyState === WebSocket.OPEN && this.pc?.connectionState === 'connected';
   }
 
+  async screenEncoderInfo(): Promise<{ impl: string; hw: boolean | null } | null> {
+    return null; // 语音线无视频
+  }
+
   localMicTrack(): MediaStreamTrack | null {
     return this.capture?.track ?? null;
   }

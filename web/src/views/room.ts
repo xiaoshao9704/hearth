@@ -7,7 +7,7 @@ import { connectChat } from '../chat';
 import type { ChatMessage } from '../chat';
 import { createEngine } from '../engine';
 import type { AVEngine, EPart, EngineCallbacks, TrackSource } from '../engine/types';
-import { loadPrefs, prefsBus, savePrefs } from '../prefs';
+import { encoderIsHw, loadPrefs, prefsBus, savePrefs } from '../prefs';
 import { menuButtonHtml, renderShell, wireMenuButton } from '../shell';
 import { avatarHtml, esc, fmtClock, icon, micIcon, slashIcon, toast } from '../ui';
 import { openSettings } from './settings';
@@ -243,6 +243,23 @@ export async function renderRoom(root: HTMLElement, channel: string) {
         ? `${p.res} · ${p.fps}fps · ${p.bitrate.toFixed(1)}M · ${p.screenCodec === 'h264' ? 'H.264 单层' : p.screenCodec.toUpperCase() + ' SVC'}`
         : '';
       badges.innerHTML = `<div class="live-badge">LIVE</div>${spec ? `<div class="spec-badge mono">${spec}</div>` : ''}`;
+      if (part.isLocal) {
+        // 追加实际生效的编码器（getStats 真值）：硬编/软编，编码器降级时跟着变
+        const specEl = badges.querySelector<HTMLElement>('.spec-badge');
+        const refreshEnc = async () => {
+          if (!tiles.has(key)) {
+            clearInterval(encTimer);
+            return;
+          }
+          const info = await stageEngine()?.screenEncoderInfo();
+          if (!info || !specEl) return;
+          const hw = encoderIsHw(info);
+          const tag = hw === true ? '硬编' : hw === false ? '软编' : info.impl;
+          specEl.textContent = `${spec} · ${tag}`;
+        };
+        const encTimer = window.setInterval(() => void refreshEnc(), 10000);
+        setTimeout(() => void refreshEnc(), 3000);
+      }
     }
     if (part.obs) badges.innerHTML += '<div class="spec-badge">OBS · WHIP</div>';
 

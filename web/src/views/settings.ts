@@ -19,6 +19,7 @@ import {
   autoBitrate,
   loadPrefs,
   notifyPrefsChanged,
+  probeHwEncode,
   savePrefs,
 } from '../prefs';
 import type { DenoiseMode, ScreenCodec } from '../prefs';
@@ -724,6 +725,14 @@ function renderScreen(body: HTMLElement, goStream: () => void) {
         notifyPrefsChanged('screen');
         paint();
       });
+    });
+    // 按当前分辨率/帧率问浏览器：各编码档走不走硬件（MediaCapabilities 事前预测）
+    (['vp9', 'av1', 'h264'] as ScreenCodec[]).forEach(async (c) => {
+      const hw = await probeHwEncode(c);
+      const btn = body.querySelector<HTMLButtonElement>(`[data-codec="${c}"]`);
+      if (btn && hw !== null && !btn.querySelector('.enc-tag')) {
+        btn.insertAdjacentHTML('beforeend', `<span class="enc-tag ${hw ? 'hw' : ''}">${hw ? '硬编' : '软编'}</span>`);
+      }
     });
     body.querySelectorAll<HTMLButtonElement>('[data-codec]').forEach((btn) => {
       btn.addEventListener('click', () => {
