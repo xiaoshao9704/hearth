@@ -21,6 +21,8 @@
 <button id="run">开始检测</button>
 <h2>能力与实测</h2>
 <table id="result"><tr><th>编码</th><th>解码(webrtc)</th><th>硬解</th><th>编码(webrtc)</th><th>硬编</th><th>loopback 实测</th></tr></table>
+<h2>分层模式支持（scalabilityMode × 编码，硬/软=powerEfficient）</h2>
+<table id="svc"><tr><th>编码</th><th>L1T1 单层</th><th>L1T2</th><th>L1T3</th><th>L2T2</th><th>L2T2_KEY</th><th>L3T3_KEY</th></tr></table>
 <div id="log"></div>
 <script>
 const CODECS = [
@@ -90,7 +92,23 @@ async function loopback(mime) {
   };
 }
 
+async function svcMatrix() {
+  const modes = ['L1T1','L1T2','L1T3','L2T2','L2T2_KEY','L3T3_KEY'];
+  const table = document.getElementById('svc');
+  for (const [name, mime] of CODECS) {
+    let html = cell(name);
+    for (const m of modes) {
+      const r = await navigator.mediaCapabilities.encodingInfo({type:'webrtc', video:{contentType:mime, width:1920, height:1080, framerate:60, bitrate:8_000_000, scalabilityMode:m}}).catch(()=>null);
+      html += cell(r?.supported ? (r.powerEfficient?'硬':'软') : '✗', r?.supported ? (r.powerEfficient?'hw':'') : 'no');
+    }
+    const row = document.createElement('tr');
+    row.innerHTML = html;
+    table.appendChild(row);
+  }
+}
+
 document.getElementById('run').onclick = async () => {
+  await svcMatrix();
   const table = document.getElementById('result');
   for (const [name, mime] of CODECS) {
     const { dec, enc } = await probe(mime);
