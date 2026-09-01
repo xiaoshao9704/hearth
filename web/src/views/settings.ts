@@ -826,7 +826,7 @@ function renderStream(body: HTMLElement) {
           ${icon('check', 16, 'var(--sage)')}
           <div style="display:flex;flex-direction:column;gap:6px">
             <div style="font-size:12.5px;font-weight:600;color:var(--text-0)">OBS 里怎么填</div>
-            <div style="font-size:12px;line-height:1.7">设置 → 直播 → 服务选 <span class="mono" style="color:var(--text-1)">WHIP</span>，服务器填上面那行，Bearer Token 填密钥。编码器用硬编，规格随便挑——服务端不转码，<span style="color:var(--sage)">2K / 4K / 120fps 原样透传</span>。</div>
+            <div style="font-size:12px;line-height:1.7">设置 → 直播 → 服务选 <span class="mono" style="color:var(--text-1)">WHIP</span>，服务器填上面那行，Bearer Token 填密钥。视频编码器<span style="color:var(--ember)">必须选 H.264</span>（如 Apple VT H.264 / NVENC H.264，硬编即可）——HEVC / AV1 服务端不收。规格随便挑，服务端不转码，<span style="color:var(--sage)">2K / 4K / 120fps 原样透传</span>。</div>
           </div>
         </div>
       </div>`;

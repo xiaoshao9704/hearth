@@ -48,6 +48,7 @@
 - 客户端向 ICE-Lite 服务端发 offer 不必等 gathering complete（最多等 1s），部分环境 gathering 永不完成。
 - 改挂载进容器的配置文件后 compose 不会自动重启服务，需手动 `docker restart`。
 - livekit `use_external_ip: true` 时默认 STUN 不可达会启动即死（国内必配 `LIVEKIT_STUN_SERVERS`）；`docker cp` 进容器的文件是 root 属主，distroless nonroot（65532）进程会写不动。
+- ingress 的 WHIP 直通（bypass_transcoding）只收 H.264+opus：HEVC/AV1 会 `unsupported codec in SDP offer`（实测于 ingress v1.5.0）；OBS bearer 模式端点是精确 `/w`（`/w/` 会 404，hearth 代理层已做规范化宽容）。
 
 ## 验证与发布
 
