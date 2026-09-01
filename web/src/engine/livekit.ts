@@ -12,7 +12,7 @@ import {
 import type { AudioCaptureOptions, ScreenShareCaptureOptions, TrackPublishOptions, VideoCodec } from 'livekit-client';
 import { RnnoisePipeline } from '../audio';
 import { RES_DIMS, loadPrefs } from '../prefs';
-import type { AVEngine, EPart, EngineCallbacks, TrackSource } from './types';
+import type { AVEngine, EPart, EngineCallbacks, TrackSource, VideoStats } from './types';
 
 const toSource = (s: Track.Source): TrackSource | null =>
   s === Track.Source.Camera ? 'camera' : s === Track.Source.ScreenShare ? 'screen' : null;
@@ -136,6 +136,42 @@ export class LiveKitEngine implements AVEngine {
       }
     });
     return out;
+  }
+
+  // 实测统计：对相邻两次采样做字节差分得码率（bits/ms = kbps）
+  private lastSample = new Map<string, { bytes: number; t: number }>();
+
+  private pickVideoStats(report: RTCStatsReport | undefined, type: 'outbound-rtp' | 'inbound-rtp', key: string): VideoStats | null {
+    if (!report) return null;
+    let out: VideoStats | null = null;
+    report.forEach((s) => {
+      const r = s as {
+        type?: string; kind?: string; bytesSent?: number; bytesReceived?: number;
+        timestamp?: number; frameWidth?: number; frameHeight?: number; framesPerSecond?: number;
+      };
+      if (r.type !== type || r.kind !== 'video') return;
+      const bytes = r.bytesSent ?? r.bytesReceived ?? 0;
+      const t = r.timestamp ?? 0;
+      const prev = this.lastSample.get(key);
+      this.lastSample.set(key, { bytes, t });
+      const kbps = prev && t > prev.t ? ((bytes - prev.bytes) * 8) / (t - prev.t) : 0;
+      out = { width: r.frameWidth ?? 0, height: r.frameHeight ?? 0, fps: r.framesPerSecond ?? 0, kbps: Math.max(0, Math.round(kbps)) };
+    });
+    return out;
+  }
+
+  async screenStats(): Promise<VideoStats | null> {
+    const track = this.room.localParticipant.getTrackPublication(Track.Source.ScreenShare)?.track;
+    if (!track) return null;
+    return this.pickVideoStats(await track.getRTCStatsReport(), 'outbound-rtp', 'local:screen');
+  }
+
+  async remoteVideoStats(identity: string, source: TrackSource): Promise<VideoStats | null> {
+    const p = this.room.getParticipantByIdentity(identity);
+    const src = source === 'screen' ? Track.Source.ScreenShare : Track.Source.Camera;
+    const track = p?.getTrackPublication(src)?.track;
+    if (!track) return null;
+    return this.pickVideoStats(await track.getRTCStatsReport(), 'inbound-rtp', `${identity}:${source}`);
   }
 
   localMicTrack(): MediaStreamTrack | null {

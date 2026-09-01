@@ -4,6 +4,14 @@
 
 export type TrackSource = 'camera' | 'screen';
 
+// 视频流运行时真值（getStats）：发送侧为实际上行，接收侧为本端实际拿到的层
+export interface VideoStats {
+  width: number;
+  height: number;
+  fps: number;
+  kbps: number;
+}
+
 // 参与者快照（identity 粒度 = 账号的一台设备；username 用于按账号聚合展示）
 export interface EPart {
   identity: string;
@@ -47,6 +55,10 @@ export interface AVEngine {
   // 投屏实际生效的编码器（getStats 运行时真值）；未投屏或引擎无视频返回 null。
   // hw: powerEfficientEncoder 标准字段，旧浏览器缺失时为 null（调用方可按 impl 名兜底判断）
   screenEncoderInfo(): Promise<{ impl: string; hw: boolean | null } | null>;
+  // 本地投屏的实测发送数据（getStats 差分码率）；未投屏或引擎无视频返回 null
+  screenStats(): Promise<VideoStats | null>;
+  // 远端视频轨的本端实测接收数据（SVC 下反映本端实际拿到的层）；无该轨或引擎无视频返回 null
+  remoteVideoStats(identity: string, source: TrackSource): Promise<VideoStats | null>;
   switchCamera(deviceId: string): Promise<void>;
   dispose(): void; // 离开房间：断开并释放全部采集资源
 }

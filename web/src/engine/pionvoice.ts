@@ -47,6 +47,14 @@ export class PionVoiceEngine implements AVEngine {
     return null; // 语音线无视频
   }
 
+  async screenStats() {
+    return null; // 语音线无视频
+  }
+
+  async remoteVideoStats() {
+    return null; // 语音线无视频
+  }
+
   localMicTrack(): MediaStreamTrack | null {
     return this.capture?.track ?? null;
   }

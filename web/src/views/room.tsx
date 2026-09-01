@@ -12,7 +12,7 @@ import type { EngineCred } from '../api';
 import { connectChat } from '../chat';
 import type { ChatMessage } from '../chat';
 import { createEngine } from '../engine';
-import type { AVEngine, EPart, EngineCallbacks, TrackSource } from '../engine/types';
+import type { AVEngine, EPart, EngineCallbacks, TrackSource, VideoStats } from '../engine/types';
 import { encoderIsHw, loadPrefs, prefsBus, savePrefs } from '../prefs';
 import { menuButtonHtml, renderShell, wireMenuButton } from '../shell';
 import { avatarHtml, esc, fmtClock, icon, micIcon, slashIcon, toast } from '../ui';
@@ -45,7 +45,9 @@ interface VideoEntry {
   username: string;
   display: string;
   obs: boolean;
-  specText: () => string; // 本地投屏的规格徽章文本（含编码器真值）；其余为空
+  specTip: () => string; // 徽章 tooltip：本地=配置目标，远端=说明
+  encTag: () => string; // 本地投屏实际生效的编码器（getStats 真值）；其余为空
+  liveStats: () => VideoStats | null; // 实测：本地=发送侧，远端=本端实际接收（SVC 选层后）
 }
 
 // 无视频参与者的音频块（内容全部从名册/说话信号派生）
@@ -85,7 +87,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
   let seq = 0; // 卡片到达顺序计数
   const audioEls = new Map<string, Set<SinkMedia>>();
   const speakingByRole: Record<Role, Set<string>> = { voice: new Set(), stage: new Set() };
-  const encTimers = new Set<number>(); // 投屏编码器徽章的刷新定时器，离房时兜底清掉
+  const tileTimers = new Set<number>(); // 投屏徽章的实测轮询定时器，离房时兜底清掉
 
   const stageEngine = () => (combined ? voiceLine.engine : stageLine?.engine) ?? null;
 
@@ -181,28 +183,40 @@ export async function renderRoom(root: HTMLElement, channel: string) {
     if (videoEntries().some((e) => e.key === key)) return;
     if (part.isLocal && source === 'camera' && loadPrefs().mirror) video.style.transform = 'scaleX(-1)';
 
-    let specText: () => string = () => '';
-    if (source === 'screen' && part.isLocal) {
+    let specTip: () => string = () => '';
+    let encTag: () => string = () => '';
+    let liveStats: () => VideoStats | null = () => null;
+    if (source === 'screen') {
+      const [stats, setStats] = createSignal<VideoStats | null>(null);
+      const [tag, setTag] = createSignal('');
+      liveStats = stats;
+      encTag = tag;
       const p = loadPrefs();
-      const spec = `${p.res} · ${p.fps}fps · ${p.bitrate.toFixed(1)}M · ${p.screenCodec === 'h264' ? 'H.264 单层' : p.screenCodec.toUpperCase() + ' SVC'}`;
-      const [txt, setTxt] = createSignal(spec);
-      specText = txt;
-      // 追加实际生效的编码器（getStats 真值）：硬编/软编，编码器降级时跟着变
-      const refreshEnc = async () => {
+      specTip = () =>
+        part.isLocal
+          ? `目标 ${p.res} · ${p.fps}fps · 上限 ${p.bitrate.toFixed(1)}M · ${p.screenCodec === 'h264' ? 'H.264 单层' : p.screenCodec.toUpperCase() + ' SVC'}`
+          : '你实际接收到的规格（SVC 按你的带宽选层，与他人可能不同）';
+      // 实测轮询（getStats 差分）；本地附带编码器真值（硬编/软编，降级时跟着变）
+      const refresh = async () => {
         if (!videoEntries().some((e) => e.key === key)) {
-          clearInterval(encTimer);
-          encTimers.delete(encTimer);
+          clearInterval(timer);
+          tileTimers.delete(timer);
           return;
         }
-        const info = await stageEngine()?.screenEncoderInfo();
-        if (!info) return;
-        const hw = encoderIsHw(info);
-        const tag = hw === true ? '硬编' : hw === false ? '软编' : info.impl;
-        setTxt(`${spec} · ${tag}`);
+        const eng = stageEngine();
+        if (!eng) return;
+        setStats(part.isLocal ? await eng.screenStats() : await eng.remoteVideoStats(part.identity, source));
+        if (part.isLocal) {
+          const info = await eng.screenEncoderInfo();
+          if (info) {
+            const hw = encoderIsHw(info);
+            setTag(`${p.screenCodec.toUpperCase()}·${hw === true ? '硬' : hw === false ? '软' : info.impl}`);
+          }
+        }
       };
-      const encTimer = window.setInterval(() => void refreshEnc(), 10000);
-      encTimers.add(encTimer);
-      setTimeout(() => void refreshEnc(), 3000);
+      const timer = window.setInterval(() => void refresh(), 2000);
+      tileTimers.add(timer);
+      setTimeout(() => void refresh(), 1500);
     }
 
     setVideoEntries((v) => [
@@ -218,7 +232,9 @@ export async function renderRoom(root: HTMLElement, channel: string) {
         username: part.username,
         display: part.display,
         obs: part.obs,
-        specText,
+        specTip,
+        encTag,
+        liveStats,
       },
     ]);
     maybeClearStatus();
@@ -785,8 +801,30 @@ export async function renderRoom(root: HTMLElement, channel: string) {
           <Show when={e.source === 'screen'}>
             <div class="live-badge">LIVE</div>
           </Show>
-          <Show when={e.source === 'screen' && e.specText()}>
-            <div class="spec-badge mono">{e.specText()}</div>
+          <Show when={e.source === 'screen' && (e.encTag() || e.liveStats())}>
+            <div class="spec-badge stat-strip mono" title={e.specTip()}>
+              <Show when={e.encTag()}>
+                <span class="stat">{el(icon('cube', 11))}{e.encTag()}</span>
+              </Show>
+              <Show when={e.liveStats()}>
+                {(s) => (
+                  <>
+                    <span class="stat">
+                      {el(icon('screen', 11))}
+                      {s().width}×{s().height}
+                    </span>
+                    <span class="stat">
+                      {el(icon('clock', 11))}
+                      {Math.round(s().fps)}
+                    </span>
+                    <span class="stat">
+                      {el(icon('pulse', 11))}
+                      {(s().kbps / 1000).toFixed(1)}M
+                    </span>
+                  </>
+                )}
+              </Show>
+            </div>
           </Show>
           <Show when={e.obs}>
             <div class="spec-badge">OBS · WHIP</div>
@@ -1252,8 +1290,8 @@ export async function renderRoom(root: HTMLElement, channel: string) {
       window.removeEventListener('online', retryNow);
       leaving = true;
       clearInterval(vuTimer);
-      encTimers.forEach((t) => clearInterval(t));
-      encTimers.clear();
+      tileTimers.forEach((t) => clearInterval(t));
+      tileTimers.clear();
       void vuCtx?.close();
       clearTimeout(voiceLine.timer);
       if (stageLine && stageLine !== voiceLine) clearTimeout(stageLine.timer);

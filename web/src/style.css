@@ -339,6 +339,8 @@ a:hover { color: var(--ember-soft); }
 }
 .live-badge::before { content: ''; width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
 .spec-badge { padding: 4px 9px; border-radius: 5px; background: var(--scrim); color: #cdc3ba; font-size: 10.5px; }
+.spec-badge.stat-strip { display: flex; align-items: center; gap: 8px; }
+.spec-badge .stat { display: inline-flex; align-items: center; gap: 3px; }
 .tile .tile-fs {
   position: absolute; top: 10px; right: 10px; width: 30px; height: 30px; border-radius: 7px;
   background: var(--scrim); color: var(--on-stage); display: flex; align-items: center; justify-content: center;
