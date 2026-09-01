@@ -1,22 +1,11 @@
-// 房间页（核心）：LiveKit 音视频 + 高码率投屏 + 成员/聊天双面板。
-// 布局与交互按 artifacts 原型：顶栏（九宫格/聚焦）、底部控制栏、右侧成员或聊天面板；
-// 设置改为全屏浮层（不断开通话），偏好改动经 prefsBus 热应用。
-import {
-  ConnectionState,
-  DisconnectReason,
-  Participant,
-  RemoteParticipant,
-  RemoteTrack,
-  Room,
-  RoomEvent,
-  Track,
-} from 'livekit-client';
-import type { AudioCaptureOptions, ScreenShareCaptureOptions, TrackPublishOptions } from 'livekit-client';
+// 房间页：布局、面板、聊天与断线重连都在这里；音视频经 AVEngine 接口驱动，
+// 不感知具体内核（LiveKit / 将来的 pion-voice 由凭证里的 engine 字段选择）。
 import { LIVEKIT_URL_FALLBACK, clearSession, fetchLiveKitToken, getUser, listChannels } from '../api';
 import { connectChat } from '../chat';
 import type { ChatMessage } from '../chat';
-import { RnnoisePipeline } from '../audio';
-import { RES_DIMS, loadPrefs, prefsBus, savePrefs } from '../prefs';
+import { createEngine } from '../engine';
+import type { AVEngine, EPart, EngineCallbacks, TrackSource } from '../engine/types';
+import { loadPrefs, prefsBus, savePrefs } from '../prefs';
 import { menuButtonHtml, renderShell, wireMenuButton } from '../shell';
 import { avatarHtml, esc, fmtClock, icon, micIcon, slashIcon, toast } from '../ui';
 import { openSettings } from './settings';
@@ -25,14 +14,11 @@ import { openSettings } from './settings';
 type IOSVideo = HTMLVideoElement & { webkitEnterFullscreen?: () => void };
 type SinkMedia = HTMLMediaElement & { setSinkId?: (id: string) => Promise<void> };
 
-const displayName = (p: Participant) => p.name || p.identity;
-const usernameOf = (p: Participant) => (p.name ? p.name : p.identity.split('-')[0]);
-
 export async function renderRoom(root: HTMLElement, channel: string) {
   const prefs = loadPrefs();
   const canScreenShare = typeof navigator.mediaDevices?.getDisplayMedia === 'function';
-  const obsIdentity = `${getUser()?.username ?? ''}-obs`;
   let isOwner = false;
+  let ownerUsername = '';
 
   const shell = renderShell(root, { activeChannel: channel });
   shell.setConn(false, '正在协商…');
@@ -108,15 +94,24 @@ export async function renderRoom(root: HTMLElement, channel: string) {
   const audioBin = shell.content.querySelector<HTMLDivElement>('#audio-bin')!;
   const roomMetaEl = shell.content.querySelector<HTMLSpanElement>('#room-meta')!;
 
-  // ---- LiveKit ----
-  const room = new Room();
+  // ---- 状态 ----
+  let engine: AVEngine | null = null;
+  let engineName = '';
   let leaving = false;
+  let bounced = false;
   const tiles = new Map<string, HTMLDivElement>(); // `${identity}:${source}` -> 视频卡片
   const audioTiles = new Map<string, HTMLDivElement>(); // identity -> 无视频参与者的音频块
   const audioEls = new Map<string, Set<SinkMedia>>();
   const volumes = new Map<string, number>(); // identity -> 本机静音 0/1
   let deafened = false;
-  const speakingSet = new Set<string>();
+  let speakingSet = new Set<string>();
+  let micOn = prefs.mic;
+  let cameraOn = prefs.camera;
+  let screenOn = false;
+  const myUsername = getUser()?.username ?? '';
+  const obsIdentity = `${myUsername}-obs`;
+
+  const parts = () => engine?.participants() ?? [];
 
   const volumeFor = (identity: string) => volumes.get(identity) ?? (identity === obsIdentity ? 0 : 1);
 
@@ -148,11 +143,11 @@ export async function renderRoom(root: HTMLElement, channel: string) {
     const merged = allTiles();
     if (merged.size === 0) return null;
     for (const key of merged.keys()) {
-      if (key.endsWith(`:${Track.Source.ScreenShare}`)) return key;
+      if (key.endsWith(':screen')) return key;
     }
     if (pinnedKey && merged.has(pinnedKey)) return pinnedKey;
     if (lastSpeaker) {
-      for (const cand of [`${lastSpeaker}:${Track.Source.Camera}`, `${lastSpeaker}:audio-tile`]) {
+      for (const cand of [`${lastSpeaker}:camera`, `${lastSpeaker}:audio-tile`]) {
         if (merged.has(cand)) return cand;
       }
     }
@@ -191,50 +186,30 @@ export async function renderRoom(root: HTMLElement, channel: string) {
     applyLayout();
   }
 
-  function labelHtml(p: Participant, source: Track.Source, isLocal: boolean): string {
-    const name = isLocal && source === Track.Source.Camera ? '你' : displayName(p);
-    const suffix = source === Track.Source.ScreenShare ? '的投屏' : '';
-    return `${avatarHtml(usernameOf(p), 'avatar avatar-sm')}<span>${esc(name)}${suffix}</span>`;
-  }
+  // ---- 视频卡片 ----
 
-  function addTile(p: Participant, track: Track, isLocal: boolean) {
-    if (track.kind === Track.Kind.Audio) {
-      if (isLocal) return; // 本地麦克风不回放
-      const el = track.attach() as SinkMedia;
-      let set = audioEls.get(p.identity);
-      if (!set) {
-        set = new Set();
-        audioEls.set(p.identity, set);
-      }
-      set.add(el);
-      audioBin.appendChild(el);
-      applyAudioPrefs();
-      return;
-    }
-    const key = `${p.identity}:${track.source}`;
+  function addVideoTile(part: EPart, source: TrackSource, video: HTMLVideoElement) {
+    const key = `${part.identity}:${source}`;
     if (tiles.has(key)) return;
     const tile = document.createElement('div');
-    tile.className = 'tile' + (track.source === Track.Source.ScreenShare ? ' tile-screen' : '');
-    const video = track.attach() as IOSVideo;
-    video.autoplay = true;
-    if (video instanceof HTMLVideoElement) video.playsInline = true;
-    if (isLocal) video.muted = true;
-    if (isLocal && track.source === Track.Source.Camera && loadPrefs().mirror) video.style.transform = 'scaleX(-1)';
+    tile.className = 'tile' + (source === 'screen' ? ' tile-screen' : '');
+    if (part.isLocal && source === 'camera' && loadPrefs().mirror) video.style.transform = 'scaleX(-1)';
 
     const label = document.createElement('div');
     label.className = 'tile-label';
-    label.innerHTML = labelHtml(p, track.source, isLocal);
+    const name = part.isLocal && source === 'camera' ? '你' : part.display;
+    label.innerHTML = `${avatarHtml(part.username, 'avatar avatar-sm')}<span>${esc(name)}${source === 'screen' ? '的投屏' : ''}</span>`;
 
     const badges = document.createElement('div');
     badges.className = 'tile-badges';
-    if (track.source === Track.Source.ScreenShare) {
-      const p2 = loadPrefs();
-      const spec = isLocal ? `${p2.res} · ${p2.fps}fps · ${p2.bitrate.toFixed(1)}M` : '';
+    if (source === 'screen') {
+      const p = loadPrefs();
+      const spec = part.isLocal
+        ? `${p.res} · ${p.fps}fps · ${p.bitrate.toFixed(1)}M · ${p.screenCodec === 'h264' ? 'H.264 单层' : p.screenCodec.toUpperCase() + ' SVC'}`
+        : '';
       badges.innerHTML = `<div class="live-badge">LIVE</div>${spec ? `<div class="spec-badge mono">${spec}</div>` : ''}`;
     }
-    if (p.identity.endsWith('-obs')) {
-      badges.innerHTML += '<div class="spec-badge">OBS · WHIP</div>';
-    }
+    if (part.obs) badges.innerHTML += '<div class="spec-badge">OBS · WHIP</div>';
 
     const pinIcon = document.createElement('span');
     pinIcon.className = 'tile-pin';
@@ -249,52 +224,43 @@ export async function renderRoom(root: HTMLElement, channel: string) {
     fsBtn.className = 'tile-fs hit';
     fsBtn.textContent = '⛶';
     fsBtn.title = '全屏';
-    if (typeof video.requestFullscreen !== 'function' && typeof video.webkitEnterFullscreen !== 'function') {
+    const iv = video as IOSVideo;
+    if (typeof iv.requestFullscreen !== 'function' && typeof iv.webkitEnterFullscreen !== 'function') {
       fsBtn.hidden = true;
     }
     fsBtn.addEventListener('click', () => {
-      if (typeof video.requestFullscreen === 'function') void video.requestFullscreen();
-      else video.webkitEnterFullscreen?.();
+      if (typeof iv.requestFullscreen === 'function') void iv.requestFullscreen();
+      else iv.webkitEnterFullscreen?.();
     });
 
     tile.append(video, badges, label, pinIcon, fsBtn);
     gridEl.insertBefore(tile, railEl);
     tiles.set(key, tile);
     syncAudioTiles();
-    applyLayout();
     refreshMeta();
   }
 
-  function removeTile(p: Participant, track: Track) {
-    if (track.kind === Track.Kind.Audio) {
-      track.detach().forEach((el) => {
-        el.remove();
-        audioEls.get(p.identity)?.delete(el as SinkMedia);
-      });
-      return;
-    }
-    const key = `${p.identity}:${track.source}`;
+  function removeVideoTile(identity: string, source: TrackSource, els: HTMLMediaElement[]) {
+    els.forEach((el) => el.remove());
+    const key = `${identity}:${source}`;
     const tile = tiles.get(key);
     if (tile) {
-      track.detach().forEach((el) => el.remove());
       tile.remove();
       tiles.delete(key);
       if (pinnedKey === key) pinnedKey = null;
       syncAudioTiles();
-      applyLayout();
       refreshMeta();
     }
   }
 
   // 无视频参与者渲染音频块（头像大圆 + 名字 + 麦克风状态）
   function syncAudioTiles() {
-    const ps = [room.localParticipant, ...room.remoteParticipants.values()];
+    const ps = parts();
     const want = new Set<string>();
     for (const p of ps) {
-      const hasVideo = [...tiles.keys()].some((k) => k.startsWith(`${p.identity}:`));
+      const hasVideo = tiles.has(`${p.identity}:camera`) || tiles.has(`${p.identity}:screen`);
       if (!hasVideo) want.add(p.identity);
     }
-    // 移除多余
     for (const [identity, el] of audioTiles) {
       if (!want.has(identity)) {
         el.remove();
@@ -302,7 +268,6 @@ export async function renderRoom(root: HTMLElement, channel: string) {
         if (pinnedKey === `${identity}:audio-tile`) pinnedKey = null;
       }
     }
-    // 补充缺少 + 刷新状态
     for (const p of ps) {
       if (!want.has(p.identity)) continue;
       let el = audioTiles.get(p.identity);
@@ -314,21 +279,18 @@ export async function renderRoom(root: HTMLElement, channel: string) {
         audioTiles.set(p.identity, el);
       }
       const speaking = speakingSet.has(p.identity);
-      const micPub = p.getTrackPublication(Track.Source.Microphone);
-      const micOn = !!micPub && !micPub.isMuted;
-      const isLocal = p.identity === room.localParticipant.identity;
       el.classList.toggle('speaking', speaking);
-      el.classList.toggle('muted', !micOn && !isLocal);
+      el.classList.toggle('muted', !p.micOn && !p.isLocal);
       el.innerHTML = `
-        ${avatarHtml(usernameOf(p), 'avatar avatar-xl' + (speaking ? ' speaking' : ''))}
+        ${avatarHtml(p.username, 'avatar avatar-xl' + (speaking ? ' speaking' : ''))}
         <div class="a-name">
-          <span>${esc(isLocal ? '你' : displayName(p))}</span>
-          ${micIcon(13, !micOn, !micOn ? 'var(--red)' : speaking ? 'var(--ember)' : 'var(--text-2)')}
+          <span>${esc(p.isLocal ? '你' : p.display)}</span>
+          ${micIcon(13, !p.micOn, !p.micOn ? 'var(--red)' : speaking ? 'var(--ember)' : 'var(--text-2)')}
         </div>
-        ${p.identity.endsWith('-obs') ? '<div style="position:absolute;top:12px;right:12px" class="tag tag-ember mono">OBS 推流</div>' : ''}`;
+        ${p.obs ? '<div style="position:absolute;top:12px;right:12px" class="tag tag-ember mono">OBS 推流</div>' : ''}`;
     }
-    statusEl.textContent = '';
-    applyLayout(); // 聚焦布局下新建的块要归位（焦点/缩略轨），否则会被 CSS 隐藏
+    if (engine?.connected()) statusEl.textContent = '';
+    applyLayout();
   }
 
   // ---- 成员面板 ----
@@ -336,29 +298,22 @@ export async function renderRoom(root: HTMLElement, channel: string) {
   const membersCount = shell.content.querySelector<HTMLSpanElement>('#members-count')!;
 
   function refreshMembers() {
-    const ps = [room.localParticipant, ...room.remoteParticipants.values()];
-    // 按用户名聚合（同账号多设备）
-    const byUser = new Map<string, Participant[]>();
-    for (const p of ps) {
-      const u = usernameOf(p);
-      if (!byUser.has(u)) byUser.set(u, []);
-      byUser.get(u)!.push(p);
+    const byUser = new Map<string, EPart[]>();
+    for (const p of parts()) {
+      if (!byUser.has(p.username)) byUser.set(p.username, []);
+      byUser.get(p.username)!.push(p);
     }
     membersCount.textContent = String(byUser.size);
-    const ownerName = ownerUsername;
     membersBody.innerHTML = `
       <div>
         <div class="side-section-title">在房 — ${byUser.size}</div>
         ${[...byUser.entries()]
           .map(([uname, plist]) => {
-            const isMe = uname === (getUser()?.username ?? '');
+            const isMe = uname === myUsername;
             const speaking = plist.some((p) => speakingSet.has(p.identity));
-            const sharing = plist.some((p) => !!p.getTrackPublication(Track.Source.ScreenShare));
-            const obs = plist.some((p) => p.identity.endsWith('-obs'));
-            const muted = plist.every((p) => {
-              const pub = p.getTrackPublication(Track.Source.Microphone);
-              return !pub || pub.isMuted;
-            });
+            const sharing = plist.some((p) => p.sharing);
+            const obs = plist.some((p) => p.obs);
+            const muted = plist.every((p) => !p.micOn);
             const localMuted = plist.some((p) => volumeFor(p.identity) === 0);
             const statusBits = [
               sharing ? '投屏中' : '',
@@ -368,11 +323,11 @@ export async function renderRoom(root: HTMLElement, channel: string) {
               localMuted && !isMe ? '已本地静音' : '',
             ].filter(Boolean);
             return `
-          <div class="member-row ${uname === ownerName ? 'owner-row' : ''}">
+          <div class="member-row ${uname === ownerUsername ? 'owner-row' : ''}">
             ${avatarHtml(uname, 'avatar' + (speaking ? ' speaking' : ''))}
             <div style="flex-grow:1;min-width:0">
               <div class="m-name">${esc(uname)}${isMe ? '<span class="muted">（我）</span>' : ''}
-                ${uname === ownerName ? '<span class="tag tag-ember">房主</span>' : ''}
+                ${uname === ownerUsername ? '<span class="tag tag-ember">房主</span>' : ''}
               </div>
               <div class="m-status ${speaking || sharing ? 'hot' : ''}">${statusBits.join(' · ')}</div>
             </div>
@@ -388,7 +343,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
     membersBody.querySelectorAll<HTMLButtonElement>('[data-lmute]').forEach((btn) => {
       btn.addEventListener('click', () => {
         const uname = btn.dataset.lmute!;
-        const targets = [...room.remoteParticipants.values()].filter((p) => usernameOf(p) === uname);
+        const targets = parts().filter((p) => !p.isLocal && p.username === uname);
         const nowMuted = targets.some((p) => volumeFor(p.identity) === 0);
         targets.forEach((p) => volumes.set(p.identity, nowMuted ? 1 : 0));
         applyAudioPrefs();
@@ -398,116 +353,16 @@ export async function renderRoom(root: HTMLElement, channel: string) {
   }
 
   function refreshMeta() {
-    const n = new Set(
-      [room.localParticipant, ...room.remoteParticipants.values()].map((p) => usernameOf(p)),
-    ).size;
-    const screens = [...tiles.keys()].filter((k) => k.endsWith(`:${Track.Source.ScreenShare}`)).length;
+    const n = new Set(parts().map((p) => p.username)).size;
+    const screens = [...tiles.keys()].filter((k) => k.endsWith(':screen')).length;
     roomMetaEl.textContent = `${n} 人在房${screens ? ` · ${screens} 路投屏` : ''}`;
   }
 
-  // 房主探测
-  let ownerUsername = '';
-  void listChannels()
-    .then((chs) => {
-      const ch = chs.find((c) => c.name === channel);
-      isOwner = ch?.is_owner === true;
-      ownerUsername = ch?.created_by ?? '';
-      if (isOwner) {
-        const btn = shell.content.querySelector<HTMLButtonElement>('#btn-manage')!;
-        btn.classList.remove('hidden');
-        btn.addEventListener('click', () => {
-          location.hash = `#/manage/${encodeURIComponent(channel)}`;
-        });
-      }
-      refreshMembers();
-    })
-    .catch(() => {});
-
-  room
-    .on(RoomEvent.TrackSubscribed, (track: RemoteTrack, _pub, participant: RemoteParticipant) =>
-      addTile(participant, track, false),
-    )
-    .on(RoomEvent.TrackUnsubscribed, (track: RemoteTrack, _pub, participant: RemoteParticipant) =>
-      removeTile(participant, track),
-    )
-    .on(RoomEvent.TrackMuted, (pub, participant) => {
-      if (pub.track && pub.kind === Track.Kind.Video) removeTile(participant, pub.track);
-      if (pub.source === Track.Source.Microphone) {
-        syncAudioTiles();
-        refreshMembers();
-      }
-    })
-    .on(RoomEvent.TrackUnmuted, (pub, participant) => {
-      if (pub.track && pub.kind === Track.Kind.Video) {
-        addTile(participant, pub.track, participant.identity === room.localParticipant.identity);
-      }
-      if (pub.source === Track.Source.Microphone) {
-        lastSpeaker = participant.identity;
-        syncAudioTiles();
-        refreshMembers();
-        applyLayout();
-      }
-    })
-    .on(RoomEvent.ActiveSpeakersChanged, (speakers) => {
-      speakingSet.clear();
-      speakers.forEach((s) => speakingSet.add(s.identity));
-      if (speakers[0]) lastSpeaker = speakers[0].identity;
-      syncAudioTiles();
-      refreshMembers();
-      applyLayout();
-    })
-    .on(RoomEvent.LocalTrackPublished, (pub) => {
-      if (pub.track) addTile(room.localParticipant, pub.track, true);
-      refreshButtons();
-      refreshMembers();
-    })
-    .on(RoomEvent.LocalTrackUnpublished, (pub) => {
-      if (pub.track) removeTile(room.localParticipant, pub.track);
-      refreshButtons();
-      refreshMembers();
-    })
-    .on(RoomEvent.ParticipantConnected, () => {
-      syncAudioTiles();
-      refreshMembers();
-      refreshMeta();
-    })
-    .on(RoomEvent.ParticipantDisconnected, () => {
-      syncAudioTiles();
-      refreshMembers();
-      refreshMeta();
-    })
-    .on(RoomEvent.Reconnecting, () => {
-      statusEl.textContent = '连接不稳定，正在恢复…';
-      shell.setConn(false, '正在恢复连接…');
-    })
-    .on(RoomEvent.Reconnected, () => {
-      statusEl.textContent = '';
-      shell.setConn(true, connMeta);
-      syncAudioTiles();
-      refreshMembers();
-      refreshMeta();
-    })
-    .on(RoomEvent.Disconnected, (reason) => {
-      if (leaving) return;
-      clearAllTiles();
-      // 被移出类的断开是终态，不重连
-      if (reason === DisconnectReason.PARTICIPANT_REMOVED || reason === DisconnectReason.ROOM_DELETED) {
-        bounce(reason === DisconnectReason.ROOM_DELETED ? '频道已删除' : '你已被移出该频道');
-        return;
-      }
-      if (reason === DisconnectReason.DUPLICATE_IDENTITY) {
-        bounce('该设备在其他页面进入了房间');
-        return;
-      }
-      scheduleRejoin(0);
-    });
-
-  // ---- 断线自动重连：SDK 自身恢复失败（Disconnected）后拿新 token 重新入会 ----
+  // ---- 断线自动重连 ----
   let connMeta = '';
   let rejoinTimer = 0;
   let rejoinAttempts = 0;
   let rejoinInFlight = false;
-  let bounced = false;
 
   function bounce(msg: string) {
     if (bounced) return;
@@ -519,7 +374,6 @@ export async function renderRoom(root: HTMLElement, channel: string) {
     }, 1500);
   }
 
-  // Disconnected 后 SDK 已解绑全部 track，把可能残留的卡片清干净
   function clearAllTiles() {
     speakingSet.clear();
     tiles.forEach((tile) => tile.remove());
@@ -539,32 +393,41 @@ export async function renderRoom(root: HTMLElement, channel: string) {
     const wait = delay ?? Math.min(30000, 2000 * 2 ** Math.min(rejoinAttempts, 4)) * (0.7 + Math.random() * 0.6);
     statusEl.textContent = rejoinAttempts === 0 ? '连接断开，正在重连…' : `连接断开，正在重连…（第 ${rejoinAttempts + 1} 次）`;
     shell.setConn(false, '正在重连…');
-    rejoinTimer = window.setTimeout(() => void rejoin(), wait);
+    rejoinTimer = window.setTimeout(() => void connectRoom(false), wait);
   }
 
-  async function rejoin() {
-    if (leaving || bounced || rejoinInFlight || room.state === ConnectionState.Connected) return;
+  // 进房（首连与重连共用）：拿凭证 → 按 engine 名建/复用引擎 → 连接 → 恢复发布状态
+  async function connectRoom(first: boolean) {
+    if (leaving || bounced || rejoinInFlight || engine?.connected()) return;
     rejoinInFlight = true;
-    rejoinAttempts++;
+    if (!first) rejoinAttempts++;
     try {
       const cred = await fetchLiveKitToken(channel);
-      await room.connect(cred.url || LIVEKIT_URL_FALLBACK, cred.token);
+      const name = cred.engine || 'livekit';
+      if (!engine || name !== engineName) {
+        engine?.dispose();
+        engine = await createEngine(name, callbacks);
+        engineName = name;
+      }
+      const url = cred.url || LIVEKIT_URL_FALLBACK;
+      await engine.connect(url, cred.token);
+      connMeta = `${engineName} · ${new URL(url).host}`;
       rejoinAttempts = 0;
       statusEl.textContent = '';
       shell.setConn(true, connMeta);
-      toast('已重新连接', 'ok', 1800);
-      // 恢复发布状态：麦克风/摄像头按断线前的开关重开；投屏需要用户手势，不自动恢复
+      if (!first) toast('已重新连接', 'ok', 1800);
+      // 恢复发布状态：麦克风/摄像头按开关重开；投屏需要用户手势，不自动恢复
       if (micOn) {
         try {
-          await enableMic();
-        } catch {
+          await engine.setMic(true);
+        } catch (err) {
           micOn = false;
+          if (first) toast(captureErrorMsg('麦克风', err), 'bad');
         }
       }
       if (cameraOn) {
         try {
-          const p = loadPrefs();
-          await room.localParticipant.setCameraEnabled(true, p.camDeviceId ? { deviceId: { ideal: p.camDeviceId } } : undefined);
+          await engine.setCamera(true);
         } catch {
           cameraOn = false;
         }
@@ -579,8 +442,8 @@ export async function renderRoom(root: HTMLElement, channel: string) {
       refreshMeta();
     } catch (err) {
       const msg = (err as Error).message ?? '';
-      // 令牌被拒是终态：封禁/白名单/会话失效不该无限重试
-      if (msg.includes('封禁') || msg.includes('邀请制')) {
+      statusEl.textContent = first ? `连接失败：${msg}` : statusEl.textContent;
+      if (msg.includes('封禁') || msg.includes('邀请制') || msg.includes('不存在')) {
         bounce(msg);
       } else if (msg.includes('登录已失效') || msg.includes('登录凭证')) {
         bounced = true;
@@ -597,10 +460,10 @@ export async function renderRoom(root: HTMLElement, channel: string) {
   // 回前台 / 网络恢复：跳过退避立即重连（iOS 切后台回来最常见）
   const retryNow = () => {
     if (leaving || bounced) return;
-    if (room.state === ConnectionState.Disconnected) {
+    if (engine && !engine.connected()) {
       clearTimeout(rejoinTimer);
       rejoinAttempts = 0;
-      void rejoin();
+      void connectRoom(false);
     }
   };
   const onVisible = () => {
@@ -609,10 +472,72 @@ export async function renderRoom(root: HTMLElement, channel: string) {
   document.addEventListener('visibilitychange', onVisible);
   window.addEventListener('online', retryNow);
 
-  // ---- 麦克风采集与发布 ----
-  const rnnoisePipe = new RnnoisePipeline();
-  let rnnoiseBroken = false;
-  document.addEventListener('pointerdown', () => void rnnoisePipe.resume(), false);
+  // ---- 引擎回调 ----
+  const callbacks: EngineCallbacks = {
+    onVideoTrack: (part, source, el) => addVideoTile(part, source, el),
+    onVideoTrackRemoved: (identity, source, els) => removeVideoTile(identity, source, els),
+    onAudioTrack: (identity, el) => {
+      let set = audioEls.get(identity);
+      if (!set) {
+        set = new Set();
+        audioEls.set(identity, set);
+      }
+      set.add(el as SinkMedia);
+      audioBin.appendChild(el);
+      applyAudioPrefs();
+    },
+    onAudioTrackRemoved: (identity, els) => {
+      els.forEach((el) => {
+        el.remove();
+        audioEls.get(identity)?.delete(el as SinkMedia);
+      });
+    },
+    onRoster: () => {
+      syncAudioTiles();
+      refreshMembers();
+      refreshMeta();
+    },
+    onSpeakers: (identities) => {
+      speakingSet = new Set(identities);
+      if (identities[0]) lastSpeaker = identities[0];
+      syncAudioTiles();
+      refreshMembers();
+    },
+    onReconnecting: () => {
+      statusEl.textContent = '连接不稳定，正在恢复…';
+      shell.setConn(false, '正在恢复连接…');
+    },
+    onReconnected: () => {
+      statusEl.textContent = '';
+      shell.setConn(true, connMeta);
+      syncAudioTiles();
+      refreshMembers();
+      refreshMeta();
+    },
+    onEnded: (reason) => {
+      if (leaving) return;
+      clearAllTiles();
+      if (reason === 'kicked') return bounce('你已被移出该频道');
+      if (reason === 'room-deleted') return bounce('频道已删除');
+      if (reason === 'duplicate') return bounce('该设备在其他页面进入了房间');
+      scheduleRejoin(0);
+    },
+    onLocalTrackEnded: (kind) => {
+      if (kind === 'mic' && micOn) {
+        micOn = false;
+        void engine?.setMic(false).catch(() => {});
+        toast('麦克风设备断开了（iPhone 连续互通断开会这样），已自动闭麦', 'bad');
+      }
+      if (kind === 'camera' && cameraOn) {
+        cameraOn = false;
+        void engine?.setCamera(false).catch(() => {});
+        toast('摄像头设备断开了，已自动关闭', 'bad');
+      }
+      refreshButtons();
+      syncAudioTiles();
+      refreshMembers();
+    },
+  };
 
   // 采集失败的人话提示（Mac mini 无内置麦，iPhone 连续互通断开就会 NotFound）
   function captureErrorMsg(kind: '麦克风' | '摄像头', err: unknown): string {
@@ -623,29 +548,6 @@ export async function renderRoom(root: HTMLElement, channel: string) {
       return `${kind}权限被拒绝，点地址栏右侧的图标允许后重试`;
     if (name === 'NotReadableError') return `${kind}被其他应用占用`;
     return `${kind}启动失败：${(err as Error)?.message ?? name}`;
-  }
-
-  // 设备中途断开（连续互通相机/拔线）：闭麦收摄像头 + 提示，而不是无声哑掉
-  function watchTrackEnded(kind: 'mic' | 'cam', track: MediaStreamTrack | undefined) {
-    track?.addEventListener(
-      'ended',
-      () => {
-        if (kind === 'mic' && micOn) {
-          micOn = false;
-          void disableMic().catch(() => {});
-          toast('麦克风设备断开了（iPhone 连续互通断开会这样），已自动闭麦', 'bad');
-        }
-        if (kind === 'cam' && cameraOn) {
-          cameraOn = false;
-          void room.localParticipant.setCameraEnabled(false).catch(() => {});
-          toast('摄像头设备断开了，已自动关闭', 'bad');
-        }
-        refreshButtons();
-        syncAudioTiles();
-        refreshMembers();
-      },
-      { once: true },
-    );
   }
 
   // 设备失而复得（iPhone 靠近重连/插上耳机）时提醒一声
@@ -662,64 +564,15 @@ export async function renderRoom(root: HTMLElement, channel: string) {
   navigator.mediaDevices?.addEventListener?.('devicechange', onDeviceChange);
   void onDeviceChange();
 
-  function micCaptureOptions(): AudioCaptureOptions {
-    const p = loadPrefs();
-    const music = p.musicMode;
-    return {
-      deviceId: p.micDeviceId ? { ideal: p.micDeviceId } : undefined,
-      echoCancellation: music ? false : p.echoCancellation,
-      noiseSuppression: music ? false : p.denoise === 'browser',
-      autoGainControl: music ? false : p.autoGainControl,
-    };
-  }
-
-  function micPublishOptions(): TrackPublishOptions {
-    return { audioPreset: { maxBitrate: loadPrefs().voiceBitrate } };
-  }
-
-  async function enableMic() {
-    const p = loadPrefs();
-    if (p.denoise === 'rnnoise' && !p.musicMode && !rnnoiseBroken) {
-      const raw = await navigator.mediaDevices.getUserMedia({ audio: micCaptureOptions() });
-      try {
-        const processed = await rnnoisePipe.start(raw);
-        await room.localParticipant.publishTrack(processed, {
-          ...micPublishOptions(),
-          source: Track.Source.Microphone,
-        });
-        watchTrackEnded('mic', raw.getAudioTracks()[0]);
-        return;
-      } catch (err) {
-        // RNNoise 管线不可用（wasm/worklet）：置灰回退；设备类错误在上面 getUserMedia 已抛给调用方
-        console.warn('RNNoise 不可用，回退浏览器内置处理:', err);
-        rnnoiseBroken = true;
-        raw.getTracks().forEach((t) => t.stop());
-        await rnnoisePipe.stop();
-      }
-    }
-    await room.localParticipant.setMicrophoneEnabled(true, micCaptureOptions(), micPublishOptions());
-    watchTrackEnded('mic', room.localParticipant.getTrackPublication(Track.Source.Microphone)?.track?.mediaStreamTrack);
-  }
-
-  async function disableMic() {
-    await room.localParticipant.setMicrophoneEnabled(false);
-    await rnnoisePipe.stop();
-  }
-
   // ---- 控制按钮 ----
   const btnMic = shell.content.querySelector<HTMLButtonElement>('#btn-mic')!;
   const btnDeaf = shell.content.querySelector<HTMLButtonElement>('#btn-deaf')!;
   const btnCamera = shell.content.querySelector<HTMLButtonElement>('#btn-camera')!;
   const btnScreen = shell.content.querySelector<HTMLButtonElement>('#btn-screen')!;
 
-  let micOn = prefs.mic;
-  let cameraOn = prefs.camera;
-  let screenOn = false;
-
   function refreshButtons() {
     btnMic.classList.toggle('on', micOn);
     btnMic.innerHTML = `${micIcon(17, !micOn, 'currentColor')}<span class="pill-label">${micOn ? '麦克风' : '已静音'}</span>`;
-    btnDeaf.classList.toggle('on', false);
     btnDeaf.classList.toggle('danger', deafened);
     btnDeaf.innerHTML = slashIcon('speaker', 17, deafened, deafened ? 'var(--red)' : 'currentColor');
     btnCamera.classList.toggle('on', cameraOn);
@@ -730,11 +583,11 @@ export async function renderRoom(root: HTMLElement, channel: string) {
   refreshButtons();
 
   btnMic.addEventListener('click', async () => {
+    if (!engine) return;
     micOn = !micOn;
     refreshButtons();
     try {
-      if (micOn) await enableMic();
-      else await disableMic();
+      await engine.setMic(micOn);
       const p = loadPrefs();
       p.mic = micOn;
       savePrefs(p);
@@ -754,17 +607,12 @@ export async function renderRoom(root: HTMLElement, channel: string) {
   });
 
   btnCamera.addEventListener('click', async () => {
+    if (!engine) return;
     cameraOn = !cameraOn;
     refreshButtons();
     try {
+      await engine.setCamera(cameraOn);
       const p = loadPrefs();
-      await room.localParticipant.setCameraEnabled(
-        cameraOn,
-        cameraOn && p.camDeviceId ? { deviceId: { ideal: p.camDeviceId } } : undefined,
-      );
-      if (cameraOn) {
-        watchTrackEnded('cam', room.localParticipant.getTrackPublication(Track.Source.Camera)?.track?.mediaStreamTrack);
-      }
       p.camera = cameraOn;
       savePrefs(p);
     } catch (err) {
@@ -775,31 +623,13 @@ export async function renderRoom(root: HTMLElement, channel: string) {
   });
 
   btnScreen.addEventListener('click', async () => {
+    if (!engine) return;
     screenOn = !screenOn;
     refreshButtons();
     try {
-      const p = loadPrefs();
-      const d = RES_DIMS[p.res];
-      const capture: ScreenShareCaptureOptions = {
-        resolution: { width: d.width, height: d.height, frameRate: p.fps },
-        contentHint: 'detail',
-      };
-      const publish: TrackPublishOptions = {
-        videoCodec: 'h264',
-        screenShareEncoding: {
-          maxBitrate: Math.round(p.bitrate * 1e6),
-          maxFramerate: p.fps,
-        },
-        // 单层：浏览器投屏只有软编，simulcast 双层会把 CPU 拖垮
-        screenShareSimulcastLayers: [],
-      };
-      await room.localParticipant.setScreenShareEnabled(
-        screenOn,
-        screenOn ? capture : undefined,
-        screenOn ? publish : undefined,
-      );
+      await engine.setScreen(screenOn);
     } catch {
-      screenOn = !screenOn;
+      screenOn = !screenOn; // 用户取消选择等情况回退
       refreshButtons();
     }
     refreshMeta();
@@ -812,7 +642,6 @@ export async function renderRoom(root: HTMLElement, channel: string) {
     openSettings('account', { backLabel: `返回 ${channel}` });
   });
 
-  // 布局切换
   shell.content.querySelectorAll<HTMLButtonElement>('[data-layout]').forEach((btn) => {
     btn.addEventListener('click', () => {
       const p = loadPrefs();
@@ -900,7 +729,6 @@ export async function renderRoom(root: HTMLElement, channel: string) {
       bounce(code === 1001 ? '频道已删除' : '你已被移出该频道');
     },
     onState: (state) => {
-      // 聊天断连自己会重连；只在输入框上给个轻提示
       chatInput.placeholder = state === 'open' ? `发消息到 #${channel}` : '聊天重连中…';
     },
   });
@@ -920,79 +748,48 @@ export async function renderRoom(root: HTMLElement, channel: string) {
     const what = (ev as CustomEvent).detail as string;
     if (what === 'volume' || what === 'speaker') applyAudioPrefs();
     if (what === 'mirror') {
-      const key = `${room.localParticipant.identity}:${Track.Source.Camera}`;
-      const video = tiles.get(key)?.querySelector('video');
+      const video = tiles.get(`${engine?.localIdentity() ?? ''}:camera`)?.querySelector('video');
       if (video) video.style.transform = loadPrefs().mirror ? 'scaleX(-1)' : '';
     }
     if (what === 'mic' && loadPrefs().mic !== micOn) {
       btnMic.click();
       return;
     }
-    if ((what === 'mic-device' || what === 'audio-chain') && micOn) {
-      // 开麦中换设备/处理链：重启采集
+    if ((what === 'mic-device' || what === 'audio-chain') && micOn && engine) {
       try {
-        await disableMic();
-        await enableMic();
+        await engine.restartMic();
       } catch {
         micOn = false;
         refreshButtons();
       }
     }
-    if (what === 'cam-device' && cameraOn) {
+    if (what === 'cam-device' && cameraOn && engine) {
       const p = loadPrefs();
-      if (p.camDeviceId) void room.switchActiveDevice('videoinput', p.camDeviceId).catch(() => {});
+      if (p.camDeviceId) void engine.switchCamera(p.camDeviceId).catch(() => {});
     }
   };
   prefsBus.addEventListener('prefs', onPrefs);
 
-  // ---- 连接与清理 ----
+  // ---- 房主探测 ----
+  void listChannels()
+    .then((chs) => {
+      const ch = chs.find((c) => c.name === channel);
+      isOwner = ch?.is_owner === true;
+      ownerUsername = ch?.created_by ?? '';
+      if (isOwner) {
+        const btn = shell.content.querySelector<HTMLButtonElement>('#btn-manage')!;
+        btn.classList.remove('hidden');
+        btn.addEventListener('click', () => {
+          location.hash = `#/manage/${encodeURIComponent(channel)}`;
+        });
+      }
+      refreshMembers();
+    })
+    .catch(() => {});
+
+  // ---- 首次连接与清理 ----
   applyPanel();
-  try {
-    const cred = await fetchLiveKitToken(channel);
-    statusEl.textContent = '正在加入房间…';
-    await room.connect(cred.url || LIVEKIT_URL_FALLBACK, cred.token);
-    statusEl.textContent = room.state === ConnectionState.Connected ? '' : '连接中…';
-    connMeta = `LiveKit · ${new URL(cred.url || LIVEKIT_URL_FALLBACK).host}`;
-    shell.setConn(true, connMeta);
-    syncAudioTiles();
-    refreshMembers();
-    refreshMeta();
-    if (prefs.mic) {
-      try {
-        await enableMic();
-        micOn = true;
-      } catch {
-        micOn = false;
-      }
-    }
-    if (prefs.camera) {
-      try {
-        const p = loadPrefs();
-        await room.localParticipant.setCameraEnabled(
-          true,
-          p.camDeviceId ? { deviceId: { ideal: p.camDeviceId } } : undefined,
-        );
-        cameraOn = true;
-      } catch {
-        cameraOn = false;
-      }
-    }
-    refreshButtons();
-  } catch (err) {
-    const msg = (err as Error).message ?? '';
-    statusEl.textContent = `连接失败：${msg}`;
-    shell.setConn(false, '连接失败');
-    // 权限类失败是终态；其余（服务暂不可达等）走自动重连
-    if (msg.includes('封禁') || msg.includes('邀请制')) {
-      bounce(msg);
-    } else if (msg.includes('登录已失效') || msg.includes('登录凭证')) {
-      bounced = true;
-      clearSession();
-      location.hash = '#/login';
-    } else {
-      scheduleRejoin();
-    }
-  }
+  await connectRoom(true);
 
   const myHash = location.hash;
   const onHashChange = () => {
@@ -1005,8 +802,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
       leaving = true;
       clearTimeout(rejoinTimer);
       chat.close();
-      void rnnoisePipe.stop();
-      room.disconnect();
+      engine?.dispose();
       shell.destroy();
     }
   };

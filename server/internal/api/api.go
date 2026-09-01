@@ -348,7 +348,7 @@ func (a *API) joinToken(w http.ResponseWriter, r *http.Request) {
 	if url == "" {
 		url = a.signalURL(r) // 内核未声明浏览器地址时走同源信令代理
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"token": creds.Token, "url": url})
+	writeJSON(w, http.StatusOK, map[string]string{"token": creds.Token, "url": url, "engine": creds.Engine})
 }
 
 // signalURL 按请求推导同源信令代理地址（/lk 路由）。

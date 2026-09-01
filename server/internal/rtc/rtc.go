@@ -22,10 +22,12 @@ type ConfigKey struct {
 	Default string `json:"-"`     // 环境与数据库都未设置时的兜底值，由实现声明
 }
 
-// Credentials 进房凭证。
+// Credentials 进房凭证。Engine 告诉前端用哪个客户端引擎与内核对话
+// （信令无标准协议，前后端实现必须配套；前端按名字动态加载对应 engine）。
 type Credentials struct {
-	URL   string // 浏览器连接地址；空 = 由接入层推导同源信令代理地址
-	Token string
+	URL    string // 浏览器连接地址；空 = 由接入层推导同源信令代理地址
+	Token  string
+	Engine string // 客户端引擎名：livekit / （将来）pion-voice …
 }
 
 // Participant 房间参与者的精简信息。

@@ -89,7 +89,7 @@ func (p *Provider) JoinCredentials(ctx context.Context, room, username, deviceTa
 	if err != nil {
 		return rtc.Credentials{}, err
 	}
-	return rtc.Credentials{URL: p.cfg(ctx, "livekit_url"), Token: tok}, nil
+	return rtc.Credentials{URL: p.cfg(ctx, "livekit_url"), Token: tok, Engine: "livekit"}, nil
 }
 
 func (p *Provider) RoomCounts(ctx context.Context) (map[string]int, error) {

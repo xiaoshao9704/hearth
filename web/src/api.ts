@@ -107,6 +107,7 @@ export async function createChannel(name: string): Promise<Channel> {
 export interface LiveKitCredentials {
   token: string;
   url: string;
+  engine?: string; // 客户端引擎名（livekit / pion-voice …），缺省按 livekit
 }
 
 // 持久设备 ID：首次访问生成并存 localStorage，用于区分同一账号的多设备

@@ -21,6 +21,7 @@ export function autoBitrate(res: string, fps: number): number {
 }
 
 export type DenoiseMode = 'rnnoise' | 'browser' | 'off';
+export type ScreenCodec = 'h264' | 'vp9' | 'av1';
 
 export interface RoomPrefs {
   mic: boolean;
@@ -30,6 +31,7 @@ export interface RoomPrefs {
   fps: number;
   bitrate: number; // Mbps
   bitrateAuto: boolean;
+  screenCodec: ScreenCodec; // 投屏编码：h264 单层 / vp9·av1 走 SVC 分层
   denoise: DenoiseMode; // 三选一：RNNoise / 浏览器自带 / 不降噪
   echoCancellation: boolean;
   autoGainControl: boolean;
@@ -53,6 +55,7 @@ export function defaultPrefs(): RoomPrefs {
     fps: 60,
     bitrate: autoBitrate('1080p', 60),
     bitrateAuto: true,
+    screenCodec: 'vp9',
     denoise: 'rnnoise',
     echoCancellation: true,
     autoGainControl: true,
@@ -92,6 +95,7 @@ export function loadPrefs(): RoomPrefs {
       fps: (FPS_BY_RES[p.res ?? '1080p'] ?? [15, 30, 60]).includes(p.fps as number) ? (p.fps as number) : def.fps,
       bitrate: typeof p.bitrate === 'number' && p.bitrate >= 1 && p.bitrate <= 15 ? p.bitrate : def.bitrate,
       bitrateAuto: p.bitrateAuto !== false,
+      screenCodec: p.screenCodec === 'h264' || p.screenCodec === 'av1' ? p.screenCodec : 'vp9',
       denoise,
       echoCancellation: p.echoCancellation !== false,
       autoGainControl: p.autoGainControl !== false,

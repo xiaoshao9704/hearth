@@ -21,7 +21,7 @@ import {
   notifyPrefsChanged,
   savePrefs,
 } from '../prefs';
-import type { DenoiseMode } from '../prefs';
+import type { DenoiseMode, ScreenCodec } from '../prefs';
 import { getTheme, setTheme } from '../theme';
 import type { Theme } from '../theme';
 import { avatarHtml, copyText, esc, icon, pwBarsHtml, pwScore, slashIcon, timeAgo, toast } from '../ui';
@@ -465,9 +465,16 @@ function renderAV(body: HTMLElement) {
   };
 
   async function refreshDevices() {
+    const rawOut = await enumerate('audiooutput');
+    // Windows 上 Chrome 会暴露 communications 虚拟设备——游戏声卡的聊天/通讯通道走它
+    const hasComms = rawOut.some((d) => d.id === 'communications');
     devices = {
       mic: await enumerate('audioinput'),
-      out: await enumerate('audiooutput'),
+      out: [
+        { id: '', name: '系统默认设备', meta: '跟随系统默认输出' },
+        ...(hasComms ? [{ id: 'communications', name: '默认通话设备', meta: '通讯通道（游戏声卡分离输出）' }] : []),
+        ...rawOut.filter((d) => d.id !== 'default' && d.id !== 'communications'),
+      ],
       cam: await enumerate('videoinput'),
     };
     paintAllPickers();
@@ -683,6 +690,18 @@ function renderScreen(body: HTMLElement, goStream: () => void) {
           </div>
         </div>
         <div class="kv-line">
+          <span class="k">编码</span>
+          <div class="seg-group" style="flex-grow:1">
+            ${([
+              ['vp9', 'VP9 · SVC'],
+              ['av1', 'AV1 · SVC'],
+              ['h264', 'H.264 单层'],
+            ] as const)
+              .map(([v, label]) => `<button class="hit seg ${prefs.screenCodec === v ? 'on' : ''}" data-codec="${v}">${label}</button>`)
+              .join('')}
+          </div>
+        </div>
+        <div class="kv-line">
           <span class="k">码率</span>
           <input class="range" type="range" min="${lim.min}" max="${lim.max}" step="0.5" value="${prefs.bitrate}" id="br-range" />
           <span class="mono" style="font-size:11.5px;color:var(--text-1);width:70px;text-align:right" id="br-label">${prefs.bitrate.toFixed(1)} Mbps</span>
@@ -690,7 +709,7 @@ function renderScreen(body: HTMLElement, goStream: () => void) {
         <div class="mono" style="padding-left:66px;font-size:10.5px;color:var(--text-3);margin-top:-8px">${prefs.res} · ${prefs.fps}fps 建议 ${lim.min}–${lim.max} Mbps${prefs.bitrateAuto ? '（当前为自动推荐值）' : ''}</div>
         <div class="hint-card">
           ${icon('cube', 15, 'var(--text-2)')}
-          <div>浏览器软编到 1080p60 为止——再往上是编码器的物理上限，不是服务器的。<button class="hit" id="go-stream" style="color:var(--ember)">2K / 4K / 120fps 走 OBS 推流 →</button></div>
+          <div>VP9/AV1 走 SVC 分层：弱网观众自动降到低分辨率层，不拖累全场，也让家宽上行的观众数上限变成软性劣化；AV1 压缩率最高但软编极吃 CPU（实验）。H.264 单层兼容性最好。浏览器软编到 1080p60 为止——再往上是编码器的物理上限。<button class="hit" id="go-stream" style="color:var(--ember)">2K / 4K / 120fps 走 OBS 推流 →</button></div>
         </div>
       </div>`;
 
@@ -701,6 +720,14 @@ function renderScreen(body: HTMLElement, goStream: () => void) {
         prefs.res = r;
         prefs.bitrate = autoBitrate(r, prefs.fps);
         prefs.bitrateAuto = true;
+        savePrefs(prefs);
+        notifyPrefsChanged('screen');
+        paint();
+      });
+    });
+    body.querySelectorAll<HTMLButtonElement>('[data-codec]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        prefs.screenCodec = btn.dataset.codec as ScreenCodec;
         savePrefs(prefs);
         notifyPrefsChanged('screen');
         paint();
