@@ -43,10 +43,14 @@ type API struct {
 	countsMu sync.Mutex
 	counts   map[string]int
 	countsAt time.Time
+
+	// pion 线一次性入场票表（见 admission.go）
+	ticketMu sync.Mutex
+	tickets  map[string]voiceTicket
 }
 
 func New(st *store.Store, cfg config.Config, hub *chat.Hub) *API {
-	a := &API{st: st, cfg: cfg, hub: hub}
+	a := &API{st: st, cfg: cfg, hub: hub, tickets: map[string]voiceTicket{}}
 	// 注册内核实现：LiveKit 可同时任语音/舞台/推流入口；pion 是进程内纯音频语音内核
 	lk := livekitrtc.New(a.dynVal)
 	a.pion = pionvoice.New(a.dynVal)
@@ -356,8 +360,8 @@ func (a *API) joinToken(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "内部错误")
 		return
 	}
-	// 进入权限：封禁 / 邀请制白名单
-	ok, reason, err := a.st.CanJoin(r.Context(), c, u.ID)
+	// 入场判定：封禁/邀请制决定能否进入，禁言随进房凭证生效（无发布权限）
+	adm, ok, reason, err := a.admitUser(r.Context(), c, u)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "内部错误")
 		return
@@ -366,39 +370,44 @@ func (a *API) joinToken(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusForbidden, reason)
 		return
 	}
-	// 禁言状态随进房凭证生效：被禁言用户签无发布权限的令牌
-	gagged, err := a.st.IsGagged(r.Context(), c.ID, u.ID)
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "内部错误")
-		return
-	}
 	tag := a.deviceTagFor(r, req.DeviceID, u.ID)
 	// 频道名即内核房间名，一一映射。语音线必发；舞台线可选；
 	// 两线同一内核时标记 combined，前端用一条连接承担两种角色（即旧单线形态）。
 	voiceP := a.voiceProvider(r.Context())
 	stageP := a.stageProvider(r.Context())
-	vc, err := voiceP.JoinCredentials(r.Context(), c.Name, u.Username, tag, !gagged)
+	vc, err := voiceP.JoinCredentials(r.Context(), c.Name, adm.Identity, tag, adm.CanPublish)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "签发令牌失败")
 		return
 	}
-	resp := map[string]any{"voice": a.fillCred(r, vc, c.Name)}
+	// pion 信令走一次性入场票：判定结果在此定格，/api/voice 凭票直接入会（见 admission.go）
+	ticket := ""
+	if vc.Engine == "pion-voice" {
+		ticket = a.issueVoiceTicket(voiceTicket{
+			room:     c.Name,
+			identity: adm.Identity + "-" + tag,
+			name:     adm.Identity,
+			userID:   u.ID,
+			muted:    !adm.CanPublish,
+		})
+	}
+	resp := map[string]any{"voice": a.fillCred(r, vc, c.Name, ticket)}
 	combined := stageP != nil && a.dynVal(r.Context(), "voice_provider") == a.dynVal(r.Context(), "stage_provider")
 	resp["combined"] = combined
 	if stageP != nil && !combined {
-		sc, serr := stageP.JoinCredentials(r.Context(), c.Name, u.Username, tag, !gagged)
+		sc, serr := stageP.JoinCredentials(r.Context(), c.Name, adm.Identity, tag, adm.CanPublish)
 		if serr != nil {
 			log.Printf("舞台线签发失败（语音照常）: %v", serr)
 		} else {
-			resp["stage"] = a.fillCred(r, sc, c.Name)
+			resp["stage"] = a.fillCred(r, sc, c.Name, "")
 		}
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
 
-// fillCred 补全内核未声明的连接信息：pion 语音走同源 /api/voice 信令并透传会话 token，
-// livekit 走同源 /lk 代理。
-func (a *API) fillCred(r *http.Request, c rtc.Credentials, channel string) map[string]string {
+// fillCred 补全内核未声明的连接信息：pion 语音走同源 /api/voice 信令并透传会话 token
+// （附一次性入场票），livekit 走同源 /lk 代理。
+func (a *API) fillCred(r *http.Request, c rtc.Credentials, channel, ticket string) map[string]string {
 	url := c.URL
 	if url == "" {
 		if c.Engine == "pion-voice" {
@@ -407,6 +416,9 @@ func (a *API) fillCred(r *http.Request, c rtc.Credentials, channel string) map[s
 				scheme = "wss"
 			}
 			url = scheme + "://" + r.Host + "/api/voice?channel=" + neturl.QueryEscape(channel)
+			if ticket != "" {
+				url += "&ticket=" + neturl.QueryEscape(ticket)
+			}
 		} else {
 			url = a.signalURL(r)
 		}

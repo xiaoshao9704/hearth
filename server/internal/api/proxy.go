@@ -36,11 +36,9 @@ func (a *API) RegisterProxies(r chi.Router) {
 			if i := strings.IndexByte(key, '/'); i >= 0 {
 				key = key[:i]
 			}
-			if userID, channelID, err := a.st.IngressOwner(req.Context(), key); err == nil {
-				if gagged, gerr := a.st.IsGagged(req.Context(), channelID, userID); gerr == nil && gagged {
-					writeErr(w, http.StatusForbidden, "你已被禁言，无法推流")
-					return
-				}
+			if !a.canPublishByStreamKey(req.Context(), key) {
+				writeErr(w, http.StatusForbidden, "你已被禁言，无法推流")
+				return
 			}
 		}
 		wProxy.ServeHTTP(w, req)
