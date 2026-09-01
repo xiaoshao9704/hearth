@@ -91,9 +91,14 @@ func (a *API) Router() *chi.Mux {
 		// 频道管理：频道解析与权限校验收敛到子路由中间件
 		// （踢人/封禁/静音等管理操作 = 房主或管理员，其余 = 仅房主）
 		r.Route("/api/channels/{channel}", func(r chi.Router) {
+			// kick 单独放行到登录层：踢"自己"的设备（远程下线忘关的 OBS/其他设备）
+			// 不需要管理权限，踢别人在 handler 内要求房主/管理员
+			r.Group(func(r chi.Router) {
+				r.Use(a.requireChannel)
+				r.Post("/kick", a.kick)
+			})
 			r.Group(func(r chi.Router) {
 				r.Use(a.requireModerator)
-				r.Post("/kick", a.kick)
 				r.Post("/ban", a.ban)
 				r.Post("/unban", a.unban)
 				r.Post("/mute", a.mute)
@@ -208,6 +213,17 @@ func (a *API) requireOwner(next http.Handler) http.Handler {
 		}
 		if c.OwnerID != userFrom(r).ID {
 			writeErr(w, http.StatusForbidden, "只有房主能操作")
+			return
+		}
+		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), ctxChannel, c)))
+	})
+}
+
+// requireChannel 仅解析 {channel} 注入 context（权限由 handler 自行判定）。
+func (a *API) requireChannel(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c := a.channelOf(w, r)
+		if c == nil {
 			return
 		}
 		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), ctxChannel, c)))
@@ -600,16 +616,16 @@ func (a *API) createIngress(r *http.Request, u *store.User, c *store.Channel) (*
 
 // ---- 频道管理（房主操作）----
 
-// resolveTargetUser 解析 body 里的目标用户名：须存在；allowSelf=false 时禁止指向自己
-//（封禁/禁言对自己无意义；踢出允许——"踢出我的全部设备"用于远程下线忘关的 OBS/其他设备）。
-func (a *API) resolveTargetUser(w http.ResponseWriter, r *http.Request, u *store.User, allowSelf bool) *store.User {
+// resolveTargetUser 解析 body 里的目标用户名：须存在且不能是自己（封禁/禁言对自己无意义；
+// 踢出有独立 handler，支持踢自己的设备）。
+func (a *API) resolveTargetUser(w http.ResponseWriter, r *http.Request, u *store.User) *store.User {
 	var req struct {
 		Username string `json:"username"`
 	}
 	if !decode(w, r, &req) {
 		return nil
 	}
-	if !allowSelf && req.Username == u.Username {
+	if req.Username == u.Username {
 		writeErr(w, http.StatusBadRequest, "不能对自己操作")
 		return nil
 	}
@@ -621,32 +637,58 @@ func (a *API) resolveTargetUser(w http.ResponseWriter, r *http.Request, u *store
 	return t
 }
 
-// evict 把用户从频道现场移除：LiveKit 侧踢全部设备 + 断开聊天 WS。
-func (a *API) evict(r *http.Request, c *store.Channel, t *store.User) (int, error) {
-	n, err := a.voiceProvider(r.Context()).RemoveParticipantsOf(r.Context(), c.Name, t.Username)
+// evict 把用户从频道现场移除：identity 为空踢全部设备并断聊天 WS；
+// 非空只踢该设备（RemoveParticipantsOf 的 MatchesUser 对完整 identity 即精确匹配），聊天不动。
+func (a *API) evict(r *http.Request, c *store.Channel, t *store.User, identity string) (int, error) {
+	target := t.Username
+	if identity != "" {
+		target = identity
+	}
+	n, err := a.voiceProvider(r.Context()).RemoveParticipantsOf(r.Context(), c.Name, target)
 	if sp := a.stageProvider(r.Context()); sp != nil {
-		if m, serr := sp.RemoveParticipantsOf(r.Context(), c.Name, t.Username); serr == nil {
+		if m, serr := sp.RemoveParticipantsOf(r.Context(), c.Name, target); serr == nil {
 			n += m
 		} else if err == nil {
 			err = serr
 		}
 	}
 	if err != nil {
-		log.Printf("内核踢出 %s 失败: %v", t.Username, err)
+		log.Printf("内核踢出 %s 失败: %v", target, err)
 	}
-	a.hub.CloseUserChannel(t.ID, c.ID)
+	if identity == "" {
+		a.hub.CloseUserChannel(t.ID, c.ID)
+	}
 	return n, err
 }
 
+// kick 踢出目标用户：identity 为空踢全部设备，非空只踢该设备（须归属 username）。
+// 踢自己（含自己的单个设备）只需登录；踢别人要求房主/管理员。
 func (a *API) kick(w http.ResponseWriter, r *http.Request) {
 	c := channelFrom(r)
-	t := a.resolveTargetUser(w, r, userFrom(r), true)
-	if t == nil {
+	u := userFrom(r)
+	var req struct {
+		Username string `json:"username"`
+		Identity string `json:"identity"`
+	}
+	if !decode(w, r, &req) {
 		return
 	}
-	n, err := a.evict(r, c, t)
+	if req.Username != u.Username && c.OwnerID != u.ID && !u.IsAdmin {
+		writeErr(w, http.StatusForbidden, "只有房主或管理员能踢出他人")
+		return
+	}
+	if req.Identity != "" && !rtc.MatchesUser(req.Identity, req.Username) {
+		writeErr(w, http.StatusBadRequest, "设备不属于该用户")
+		return
+	}
+	t, _, err := a.st.UserByName(r.Context(), req.Username)
 	if err != nil {
-		writeErr(w, http.StatusBadGateway, "踢出失败（LiveKit 不可达）")
+		writeErr(w, http.StatusNotFound, "用户不存在")
+		return
+	}
+	n, err := a.evict(r, c, t, req.Identity)
+	if err != nil {
+		writeErr(w, http.StatusBadGateway, "踢出失败（内核不可达）")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"kicked": n})
@@ -654,7 +696,7 @@ func (a *API) kick(w http.ResponseWriter, r *http.Request) {
 
 func (a *API) ban(w http.ResponseWriter, r *http.Request) {
 	c := channelFrom(r)
-	t := a.resolveTargetUser(w, r, userFrom(r), false)
+	t := a.resolveTargetUser(w, r, userFrom(r))
 	if t == nil {
 		return
 	}
@@ -663,13 +705,13 @@ func (a *API) ban(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// 封禁立即生效：踢出现场（LiveKit 失败不阻塞，token/WS 入口已拦死）
-	a.evict(r, c, t)
+	a.evict(r, c, t, "")
 	writeJSON(w, http.StatusOK, map[string]string{"banned": t.Username})
 }
 
 func (a *API) unban(w http.ResponseWriter, r *http.Request) {
 	c := channelFrom(r)
-	t := a.resolveTargetUser(w, r, userFrom(r), false)
+	t := a.resolveTargetUser(w, r, userFrom(r))
 	if t == nil {
 		return
 	}
@@ -685,7 +727,7 @@ func (a *API) unban(w http.ResponseWriter, r *http.Request) {
 // 内核调用只负责让"当前在房"的设备立即失声，目标不在房（ErrNoParticipant）不算失败。
 func (a *API) setGag(w http.ResponseWriter, r *http.Request, muted bool) {
 	c := channelFrom(r)
-	t := a.resolveTargetUser(w, r, userFrom(r), false)
+	t := a.resolveTargetUser(w, r, userFrom(r))
 	if t == nil {
 		return
 	}
@@ -758,7 +800,7 @@ func (a *API) listMembers(w http.ResponseWriter, r *http.Request) {
 
 func (a *API) addMember(w http.ResponseWriter, r *http.Request) {
 	c := channelFrom(r)
-	t := a.resolveTargetUser(w, r, userFrom(r), false)
+	t := a.resolveTargetUser(w, r, userFrom(r))
 	if t == nil {
 		return
 	}
@@ -771,7 +813,7 @@ func (a *API) addMember(w http.ResponseWriter, r *http.Request) {
 
 func (a *API) removeMember(w http.ResponseWriter, r *http.Request) {
 	c := channelFrom(r)
-	t := a.resolveTargetUser(w, r, userFrom(r), false)
+	t := a.resolveTargetUser(w, r, userFrom(r))
 	if t == nil {
 		return
 	}

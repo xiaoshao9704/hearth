@@ -167,8 +167,12 @@ export function resetIngress(channel: string): Promise<IngressInfo> {
 
 // ---- 频道管理（房主）----
 
-export function kickUser(channel: string, username: string): Promise<{ kicked: number }> {
-  return req(`/api/channels/${encodeURIComponent(channel)}/kick`, { method: 'POST', body: { username } });
+// identity 非空时只踢该设备（须归属 username）；空则踢全部设备
+export function kickUser(channel: string, username: string, identity?: string): Promise<{ kicked: number }> {
+  return req(`/api/channels/${encodeURIComponent(channel)}/kick`, {
+    method: 'POST',
+    body: { username, identity: identity ?? '' },
+  });
 }
 
 export function banUser(channel: string, username: string): Promise<void> {

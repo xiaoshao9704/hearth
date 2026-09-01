@@ -285,11 +285,15 @@ export async function renderRoom(root: HTMLElement, channel: string) {
           : ''
       }
       ${
-        isSelf
-          ? `<button class="hit um-item danger" data-act="kick">${icon('leave', 14, 'var(--red)')}<span>踢出我的全部设备</span></button>`
-          : canModerate()
-            ? `<button class="hit um-item danger" data-act="kick">${icon('leave', 14, 'var(--red)')}<span>踢出房间</span></button>`
-            : ''
+        isSelf || canModerate()
+          ? targets
+              .map(
+                (p) =>
+                  `<button class="hit um-item" data-kick-id="${esc(p.identity)}">${icon('leave', 14, 'currentColor')}<span>踢出 ${esc(p.obs ? 'OBS 推流' : p.identity.slice(username.length + 1) || p.identity)}</span></button>`,
+              )
+              .join('') +
+            `<button class="hit um-item danger" data-act="kick">${icon('leave', 14, 'var(--red)')}<span>${isSelf ? '踢出我的全部设备' : '踢出房间'}</span></button>`
+          : ''
       }`;
     if (!menu.querySelector('.um-item')) return;
     document.body.appendChild(menu);
@@ -321,6 +325,17 @@ export async function renderRoom(root: HTMLElement, channel: string) {
         try {
           await muteUser(channel, username, on);
           toast(on ? `已禁言 ${username}` : `已解除 ${username} 的禁言`, 'ok');
+        } catch (err) {
+          toast((err as Error).message, 'bad');
+        }
+      });
+    });
+    menu.querySelectorAll<HTMLButtonElement>('[data-kick-id]').forEach((btn) => {
+      btn.addEventListener('click', async () => {
+        close();
+        try {
+          await kickUser(channel, username, btn.dataset.kickId!);
+          toast('已踢出该设备', 'ok');
         } catch (err) {
           toast((err as Error).message, 'bad');
         }
