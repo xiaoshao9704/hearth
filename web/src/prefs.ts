@@ -21,7 +21,7 @@ export function autoBitrate(res: string, fps: number): number {
 }
 
 export type DenoiseMode = 'rnnoise' | 'browser' | 'off';
-export type ScreenCodec = 'h264' | 'vp9' | 'av1';
+export type ScreenCodec = 'h264' | 'h265' | 'vp9' | 'av1';
 
 export interface RoomPrefs {
   mic: boolean;
@@ -95,7 +95,7 @@ export function loadPrefs(): RoomPrefs {
       fps: (FPS_BY_RES[p.res ?? '1080p'] ?? [15, 30, 60]).includes(p.fps as number) ? (p.fps as number) : def.fps,
       bitrate: typeof p.bitrate === 'number' && p.bitrate >= 1 && p.bitrate <= 15 ? p.bitrate : def.bitrate,
       bitrateAuto: p.bitrateAuto !== false,
-      screenCodec: p.screenCodec === 'h264' || p.screenCodec === 'av1' ? p.screenCodec : 'vp9',
+      screenCodec: p.screenCodec === 'h264' || p.screenCodec === 'h265' || p.screenCodec === 'av1' ? p.screenCodec : 'vp9',
       denoise,
       echoCancellation: p.echoCancellation !== false,
       autoGainControl: p.autoGainControl !== false,
@@ -146,12 +146,13 @@ export async function probeHwEncode(codec: ScreenCodec): Promise<boolean | null>
     const info = await mc.encodingInfo({
       type: 'webrtc',
       video: {
-        contentType: codec === 'h264' ? 'video/H264' : codec === 'vp9' ? 'video/VP9' : 'video/AV1',
+        contentType:
+          codec === 'h264' ? 'video/H264' : codec === 'h265' ? 'video/H265' : codec === 'vp9' ? 'video/VP9' : 'video/AV1',
         width: d.width,
         height: d.height,
         framerate: p.fps,
         bitrate: Math.round(p.bitrate * 1e6),
-        ...(codec === 'h264' ? {} : { scalabilityMode: 'L2T2_KEY' }),
+        ...(codec === 'h264' || codec === 'h265' ? {} : { scalabilityMode: 'L2T2_KEY' }),
       },
     });
     if (!info.supported) return null;

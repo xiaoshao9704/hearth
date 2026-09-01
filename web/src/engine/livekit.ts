@@ -272,6 +272,15 @@ export class LiveKitEngine implements AVEngine {
     if (p.screenCodec === 'h264') {
       // 单层：H.264 无 SVC；simulcast 双编码会把软编 CPU 拖垮，维持单层
       publish = { videoCodec: 'h264', screenShareEncoding: encoding, screenShareSimulcastLayers: [] };
+    } else if (p.screenCodec === 'h265') {
+      // HEVC 单层（SDK 的 SVC 只认 vp9/av1）：发送端平台硬编、观众端硬解，
+      // 同码率观感约为 H.264 的 1.5 倍；不支持 h265 的订阅端触发 h264 备份编码
+      publish = {
+        videoCodec: 'h265' as VideoCodec,
+        screenShareEncoding: encoding,
+        screenShareSimulcastLayers: [],
+        backupCodec: { codec: 'h264' },
+      };
     } else {
       // SVC：单编码器产分层码流，SFU 按观众带宽逐层转发；
       // 不支持该编码的订阅端会触发 h264 备份编码（按需才多一路编码）

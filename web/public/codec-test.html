@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Hearth 编码能力检测</title>
+<style>
+  body { margin: 0; padding: 24px; font: 14px/1.6 -apple-system, "PingFang SC", sans-serif; background: #0d0b0a; color: #f4eee7; }
+  h1 { font-size: 18px; } h2 { font-size: 14px; margin: 20px 0 8px; color: #a89d94; }
+  table { border-collapse: collapse; width: 100%; max-width: 720px; }
+  td, th { padding: 6px 10px; border-bottom: 1px solid #2e2724; text-align: left; font-size: 13px; }
+  .ok { color: #86a06b; } .no { color: #d1493f; } .hw { color: #e8703a; }
+  .muted { color: #7a706a; }
+  button { font: inherit; padding: 8px 16px; border-radius: 8px; border: 0; background: #e8703a; color: #1a0f08; cursor: pointer; }
+  #log { font-family: ui-monospace, monospace; font-size: 12px; white-space: pre-wrap; color: #a89d94; margin-top: 12px; }
+</style>
+</head>
+<body>
+<h1>Hearth 编码能力检测</h1>
+<p class="muted">给观看/投屏设备做验收：下表为本机浏览器的 WebRTC 编解码真实能力（loopback 实测，非查表）。</p>
+<button id="run">开始检测</button>
+<h2>能力与实测</h2>
+<table id="result"><tr><th>编码</th><th>解码(webrtc)</th><th>硬解</th><th>编码(webrtc)</th><th>硬编</th><th>loopback 实测</th></tr></table>
+<div id="log"></div>
+<script>
+const CODECS = [
+  ['H.264', 'video/H264'],
+  ['HEVC / H.265', 'video/H265'],
+  ['VP9', 'video/VP9'],
+  ['AV1', 'video/AV1'],
+];
+const log = (m) => (document.getElementById('log').textContent += m + '\n');
+const cell = (v, cls) => `<td class="${cls ?? ''}">${v}</td>`;
+
+async function probe(mime) {
+  const video = { contentType: mime, width: 1920, height: 1080, framerate: 60, bitrate: 8_000_000 };
+  const dec = await navigator.mediaCapabilities.decodingInfo({ type: 'webrtc', video }).catch(() => null);
+  const enc = await navigator.mediaCapabilities.encodingInfo({ type: 'webrtc', video }).catch(() => null);
+  return { dec, enc };
+}
+
+// loopback：canvas 流经本机 PC 对连，强制该编码，验证真的能编出流并解回
+async function loopback(mime) {
+  const canvas = document.createElement('canvas');
+  canvas.width = 1280; canvas.height = 720;
+  const ctx = canvas.getContext('2d');
+  let hue = 0;
+  const timer = setInterval(() => {
+    ctx.fillStyle = `hsl(${(hue += 7) % 360} 70% 50%)`;
+    ctx.fillRect(0, 0, 1280, 720);
+    ctx.fillStyle = '#fff';
+    ctx.fillText(String(Date.now()), 40, 40);
+  }, 33);
+  const stream = canvas.captureStream(30);
+  const a = new RTCPeerConnection(), b = new RTCPeerConnection();
+  a.onicecandidate = (e) => e.candidate && b.addIceCandidate(e.candidate);
+  b.onicecandidate = (e) => e.candidate && a.addIceCandidate(e.candidate);
+  const tx = a.addTransceiver(stream.getVideoTracks()[0], { direction: 'sendonly' });
+  const caps = RTCRtpSender.getCapabilities('video').codecs;
+  const wanted = caps.filter((c) => c.mimeType.toLowerCase() === mime.toLowerCase());
+  if (!wanted.length) { clearInterval(timer); a.close(); b.close(); return { ok: false, why: '能力列表无此编码' }; }
+  tx.setCodecPreferences([...wanted, ...caps.filter((c) => /rtx|red|fec/i.test(c.mimeType))]);
+  const gotTrack = new Promise((r) => (b.ontrack = () => r()));
+  await a.setLocalDescription(await a.createOffer());
+  await b.setRemoteDescription(a.localDescription);
+  await b.setLocalDescription(await b.createAnswer());
+  await a.setRemoteDescription(b.localDescription);
+  await Promise.race([gotTrack, new Promise((r) => setTimeout(r, 3000))]);
+  // 等编码器真正出帧
+  let out = null, inn = null;
+  for (let i = 0; i < 20; i++) {
+    await new Promise((r) => setTimeout(r, 250));
+    const sStats = await a.getStats(), rStats = await b.getStats();
+    sStats.forEach((s) => { if (s.type === 'outbound-rtp' && s.kind === 'video') out = s; });
+    rStats.forEach((s) => { if (s.type === 'inbound-rtp' && s.kind === 'video') inn = s; });
+    if (out?.framesEncoded > 10 && inn?.framesDecoded > 10) break;
+  }
+  let codecMime = '';
+  if (out?.codecId) { (await a.getStats()).forEach((s) => { if (s.id === out.codecId) codecMime = s.mimeType; }); }
+  clearInterval(timer); a.close(); b.close();
+  if (!out || !out.framesEncoded) return { ok: false, why: '编码器未出帧' };
+  if (codecMime.toLowerCase() !== mime.toLowerCase()) return { ok: false, why: `协商成了 ${codecMime}` };
+  if (!inn || !inn.framesDecoded) return { ok: false, why: '解码端未出帧' };
+  return {
+    ok: true,
+    enc: out.encoderImplementation ?? '?',
+    encHw: out.powerEfficientEncoder,
+    dec: inn.decoderImplementation ?? '?',
+    decHw: inn.powerEfficientDecoder,
+  };
+}
+
+document.getElementById('run').onclick = async () => {
+  const table = document.getElementById('result');
+  for (const [name, mime] of CODECS) {
+    const { dec, enc } = await probe(mime);
+    log(`loopback 测试 ${name} …`);
+    const lb = await loopback(mime).catch((e) => ({ ok: false, why: e.message }));
+    const row = document.createElement('tr');
+    row.innerHTML =
+      cell(name) +
+      cell(dec?.supported ? '✓' : '✗', dec?.supported ? 'ok' : 'no') +
+      cell(dec?.powerEfficient ? '硬解' : dec?.supported ? '软解' : '—', dec?.powerEfficient ? 'hw' : 'muted') +
+      cell(enc?.supported ? '✓' : '✗', enc?.supported ? 'ok' : 'no') +
+      cell(enc?.powerEfficient ? '硬编' : enc?.supported ? '软编' : '—', enc?.powerEfficient ? 'hw' : 'muted') +
+      cell(lb.ok ? `✓ 编:${lb.encHw ? '硬' : '软'}(${lb.enc}) 解:${lb.decHw ? '硬' : '软'}` : `✗ ${lb.why}`, lb.ok ? 'ok' : 'no');
+    table.appendChild(row);
+    log(`  → ${lb.ok ? 'OK' : lb.why}`);
+  }
+  log('检测完成。');
+};
+</script>
+</body>
+</html>

@@ -696,6 +696,7 @@ function renderScreen(body: HTMLElement, goStream: () => void) {
             ${([
               ['vp9', 'VP9 · SVC'],
               ['av1', 'AV1 · SVC'],
+              ['h265', 'HEVC 单层'],
               ['h264', 'H.264 单层'],
             ] as const)
               .map(([v, label]) => `<button class="hit seg ${prefs.screenCodec === v ? 'on' : ''}" data-codec="${v}">${label}</button>`)
@@ -727,7 +728,7 @@ function renderScreen(body: HTMLElement, goStream: () => void) {
       });
     });
     // 按当前分辨率/帧率问浏览器：各编码档走不走硬件（MediaCapabilities 事前预测）
-    (['vp9', 'av1', 'h264'] as ScreenCodec[]).forEach(async (c) => {
+    (['vp9', 'av1', 'h265', 'h264'] as ScreenCodec[]).forEach(async (c) => {
       const hw = await probeHwEncode(c);
       const btn = body.querySelector<HTMLButtonElement>(`[data-codec="${c}"]`);
       if (btn && hw !== null && !btn.querySelector('.enc-tag')) {

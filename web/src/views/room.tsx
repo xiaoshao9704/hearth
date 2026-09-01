@@ -196,7 +196,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
       const p = loadPrefs();
       specTip = () =>
         part.isLocal
-          ? `目标 ${p.res} · ${p.fps}fps · 上限 ${p.bitrate.toFixed(1)}M · ${p.screenCodec === 'h264' ? 'H.264 单层' : p.screenCodec.toUpperCase() + ' SVC'}`
+          ? `目标 ${p.res} · ${p.fps}fps · 上限 ${p.bitrate.toFixed(1)}M · ${p.screenCodec === 'h264' ? 'H.264 单层' : p.screenCodec === 'h265' ? 'HEVC 单层' : p.screenCodec.toUpperCase() + ' SVC'}`
           : '你实际接收到的规格（SVC 按你的带宽选层，与他人可能不同）';
       // 实测轮询（getStats 差分）；本地附带编码器真值（硬编/软编，降级时跟着变）
       const refresh = async () => {
