@@ -269,6 +269,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
     const isSelf = username === myUsername;
     const targets = parts().filter((p) => !p.isLocal && p.username === username);
     const muted = targets.some((p) => volumeFor(p.identity) === 0);
+    const devName = (p: EPart) => (p.obs ? 'OBS 推流' : p.identity.slice(username.length + 1) || p.identity);
     // 禁言判定只看真人设备：OBS 推流参与者（ingress 自带发布权限）会污染 every() 推断
     const voiceTargets = targets.filter((p) => !p.obs);
     const gagged = voiceTargets.length > 0 && voiceTargets.every((p) => !p.canPublish);
@@ -278,7 +279,19 @@ export async function renderRoom(root: HTMLElement, channel: string) {
     menu.className = 'user-menu';
     menu.innerHTML = `
       <div class="um-title">${esc(username)}${isSelf ? '（我）' : ''}</div>
-      ${targets.length ? `<button class="hit um-item" data-act="mute">${slashIcon('volume', 14, !muted, 'currentColor')}<span>${muted ? '恢复声音' : '屏蔽声音'}</span></button>` : ''}
+      ${
+        targets.length > 1
+          ? targets
+              .map((p) => {
+                const m = volumeFor(p.identity) === 0;
+                return `<button class="hit um-item" data-mute-id="${esc(p.identity)}">${slashIcon('volume', 14, !m, m ? 'var(--red)' : 'currentColor')}<span>${m ? '恢复' : '屏蔽'} ${esc(devName(p))}</span></button>`;
+              })
+              .join('') +
+            `<button class="hit um-item" data-act="mute">${slashIcon('volume', 14, !muted, 'currentColor')}<span>${muted ? '恢复全部声音' : '屏蔽全部声音'}</span></button>`
+          : targets.length
+            ? `<button class="hit um-item" data-act="mute">${slashIcon('volume', 14, !muted, 'currentColor')}<span>${muted ? '恢复声音' : '屏蔽声音'}</span></button>`
+            : ''
+      }
       ${
         !isSelf && canModerate()
           ? voiceTargets.length
@@ -291,7 +304,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
           ? targets
               .map(
                 (p) =>
-                  `<button class="hit um-item" data-kick-id="${esc(p.identity)}">${icon('leave', 14, 'currentColor')}<span>踢出 ${esc(p.obs ? 'OBS 推流' : p.identity.slice(username.length + 1) || p.identity)}</span></button>`,
+                  `<button class="hit um-item" data-kick-id="${esc(p.identity)}">${icon('leave', 14, 'currentColor')}<span>踢出 ${esc(devName(p))}</span></button>`,
               )
               .join('') +
             `<button class="hit um-item danger" data-act="kick">${icon('leave', 14, 'var(--red)')}<span>${isSelf ? '踢出我的全部设备' : '踢出房间'}</span></button>`
@@ -330,6 +343,18 @@ export async function renderRoom(root: HTMLElement, channel: string) {
         } catch (err) {
           toast((err as Error).message, 'bad');
         }
+      });
+    });
+    menu.querySelectorAll<HTMLButtonElement>('[data-mute-id]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const id = btn.dataset.muteId!;
+        setVolumes((prev) => {
+          const m = new Map(prev);
+          m.set(id, volumeFor(id) === 0 ? 1 : 0);
+          return m;
+        });
+        applyAudioPrefs();
+        close();
       });
     });
     menu.querySelectorAll<HTMLButtonElement>('[data-kick-id]').forEach((btn) => {
