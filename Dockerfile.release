@@ -1,0 +1,15 @@
+# CI 装配镜像：二进制与前端已在 runner 上原生交叉编译完成（见 release 工作流 build 作业），
+# 本文件只有 COPY——buildx 产多架构镜像无需 QEMU。本地开发构建仍用根 Dockerfile。
+FROM gcr.io/distroless/static-debian12:nonroot
+ARG TARGETARCH
+# artifact 传递会丢执行位，--chmod 补回
+COPY --chmod=755 out/hearth-linux-${TARGETARCH} /app/hearth
+COPY web/dist /app/web
+COPY --chown=65532:65532 out/data /data
+ENV ADDR=:8080 \
+    DB_PATH=/data/hearth.db \
+    STATIC_DIR=/app/web
+VOLUME /data
+USER 65532
+EXPOSE 8080
+ENTRYPOINT ["/app/hearth"]
