@@ -151,6 +151,8 @@ export async function renderRoom(root: HTMLElement, channel: string) {
     audioEls.forEach((set, identity) => {
       const v = master * volumeFor(identity);
       set.forEach((elm) => {
+        // iOS Safari 的 volume 只读（设置被静默忽略），静音必须走 muted 属性
+        elm.muted = v === 0;
         elm.volume = v;
         if (p.speakerId && typeof elm.setSinkId === 'function') {
           elm.setSinkId(p.speakerId).catch(() => {});

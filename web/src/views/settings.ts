@@ -930,13 +930,13 @@ function renderDevices(body: HTMLElement) {
                 ${icon(isPhone ? 'phone' : 'device', 17, isThis ? 'var(--ember)' : 'var(--text-1)', 1.6)}
               </div>
               <div style="flex-grow:1;min-width:0">
-                <div style="display:flex;align-items:center;gap:8px">
-                  <span style="font-size:13.5px;font-weight:500">${esc(d.tag || '未知设备')}</span>
-                  ${isThis ? '<span class="tag tag-sage">本机</span>' : ''}
+                <div style="display:flex;align-items:center;gap:8px;min-width:0">
+                  <span style="font-size:13.5px;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(d.tag || '未知设备')}</span>
+                  ${isThis ? '<span class="tag tag-sage" style="flex-shrink:0">本机</span>' : ''}
                 </div>
-                <div class="mono" style="font-size:11px;color:var(--text-2);margin-top:3px">dev_${esc(d.device_id)} · ${timeAgo(d.last_seen)}</div>
+                <div class="mono" style="font-size:11px;color:var(--text-2);margin-top:3px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">dev_${esc(d.device_id)} · ${timeAgo(d.last_seen)}</div>
               </div>
-              ${isThis ? '<span style="font-size:12px;color:var(--text-3)">当前设备</span>' : `<button class="hit btn btn-sm" data-del="${esc(d.device_id)}">移除档案</button>`}
+              ${isThis ? '<span style="font-size:12px;color:var(--text-3);flex-shrink:0">当前设备</span>' : `<button class="hit btn btn-sm" data-del="${esc(d.device_id)}" style="flex-shrink:0">移除档案</button>`}
             </div>`;
                   })
                   .join('')

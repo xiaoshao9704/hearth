@@ -36,7 +36,9 @@ export class LiveKitEngine implements AVEngine {
     const micPub = p.getTrackPublication(Track.Source.Microphone);
     return {
       identity: p.identity,
-      username: p.name || p.identity.split('-')[0],
+      // OBS 参与者的 name 是 ingress 设置的显示名（"xxx(OBS)"），按用户名聚合/管理
+      // 操作（禁言/踢出）必须用真人用户名：identity 约定 {username}-obs，剥后缀取
+      username: p.identity.endsWith('-obs') ? p.identity.slice(0, -4) : p.name || p.identity.split('-')[0],
       display: p.name || p.identity,
       isLocal: p.identity === this.room.localParticipant.identity,
       micOn: !!micPub && !micPub.isMuted,
