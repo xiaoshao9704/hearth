@@ -205,6 +205,13 @@ async function paintConfig(body: HTMLElement) {
   let policy = ov.policy;
 
   // 依赖服务配置卡片：环境变量固定的只读展示；未固定的可编辑，保存落库即时生效
+  // 枚举值的人话标签（值本身仍以英文存库）
+  const KERNEL_LABELS: Record<string, string> = {
+    livekit: 'LiveKit',
+    pion: '内嵌 pion',
+    none: '关闭',
+  };
+
   const groupCard = (group: string, title: string, sub: string) => {
     const list = items.filter((it) => it.group === group);
     const anyEditable = list.some((it) => !it.locked);
@@ -228,7 +235,14 @@ async function paintConfig(body: HTMLElement) {
               ${
                 it.locked
                   ? `<div class="mono" style="padding:9px 12px;border-radius:8px;background:var(--bg-2);border:1px solid var(--line);font-size:12px;color:var(--text-1);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(it.secret ? '••••••••' : it.value || '（空）')}</div>`
-                  : `<div class="field" style="height:38px;background:var(--bg-2)"><input class="mono" style="font-size:12px" data-cfg="${it.name}" value="${esc(it.value)}" placeholder="${esc(placeholder)}" ${it.secret ? 'autocomplete="off"' : ''} /></div>`
+                  : it.options?.length
+                    ? `<div class="seg-group" style="background:var(--bg-2)" data-cfg-enum="${it.name}">${it.options
+                        .map(
+                          (opt) =>
+                            `<button class="hit seg ${it.value === opt ? 'on' : ''}" data-val="${esc(opt)}">${esc(KERNEL_LABELS[opt] ?? opt)}</button>`,
+                        )
+                        .join('')}</div>`
+                    : `<div class="field" style="height:38px;background:var(--bg-2)"><input class="mono" style="font-size:12px" data-cfg="${it.name}" value="${esc(it.value)}" placeholder="${esc(placeholder)}" ${it.secret ? 'autocomplete="off"' : ''} /></div>`
               }
             </div>`;
             })
@@ -287,6 +301,13 @@ async function paintConfig(body: HTMLElement) {
         </div>
       </div>`;
 
+    body.querySelectorAll<HTMLElement>('[data-cfg-enum]').forEach((seg) => {
+      seg.querySelectorAll<HTMLButtonElement>('.seg').forEach((btn) => {
+        btn.addEventListener('click', () => {
+          seg.querySelectorAll('.seg').forEach((b) => b.classList.toggle('on', b === btn));
+        });
+      });
+    });
     body.querySelectorAll<HTMLButtonElement>('[data-save]').forEach((btn) => {
       btn.addEventListener('click', async () => {
         const group = btn.dataset.save!;
@@ -299,6 +320,10 @@ async function paintConfig(body: HTMLElement) {
             if (item?.secret && item.set && input.value.trim() === '') return;
             values[input.dataset.cfg!] = input.value.trim();
           });
+        body.querySelectorAll<HTMLElement>(`[data-group="${group}"] [data-cfg-enum]`).forEach((seg) => {
+          const on = seg.querySelector<HTMLButtonElement>('.seg.on');
+          if (on) values[seg.dataset.cfgEnum!] = on.dataset.val!;
+        });
         try {
           await adminSetConfig(values);
           toast('已保存并生效', 'ok');

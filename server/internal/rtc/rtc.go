@@ -18,8 +18,9 @@ type ConfigKey struct {
 	Label   string `json:"label"`
 	Hint    string `json:"hint"`
 	Secret  bool   `json:"secret"`
-	Group   string `json:"group"` // 管理后台分组
-	Default string `json:"-"`     // 环境与数据库都未设置时的兜底值，由实现声明
+	Group   string   `json:"group"`             // 管理后台分组
+	Options []string `json:"options,omitempty"` // 枚举可选值（管理后台渲染选择框）；空 = 自由文本
+	Default string   `json:"-"`                 // 环境与数据库都未设置时的兜底值，由实现声明
 }
 
 // Credentials 进房凭证。Engine 告诉前端用哪个客户端引擎与内核对话

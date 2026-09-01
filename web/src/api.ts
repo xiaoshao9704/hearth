@@ -345,6 +345,7 @@ export interface ConfigItem {
   hint: string;
   secret: boolean;
   group: string;
+  options?: string[]; // 枚举可选值（渲染选择框）；缺省 = 自由文本
   value: string;
   set: boolean;
   locked: boolean;

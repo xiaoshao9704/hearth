@@ -16,12 +16,12 @@ import (
 // 内核选择器：换实现只改这里的值，各实现的配置键互不干扰、原样保留。
 // 语音线（voice）与舞台线（stage：投屏/摄像头/OBS 推流及其伴音）各占一个槽位。
 var selectorKeys = []rtc.ConfigKey{
-	{Name: "voice_provider", Env: "VOICE_PROVIDER", Group: "core",
-		Label: "语音内核", Hint: "可选：livekit / pion（进程内纯音频 SFU）"},
-	{Name: "stage_provider", Env: "STAGE_PROVIDER", Group: "core",
-		Label: "舞台内核", Hint: "可选：livekit / none（纯语音部署，禁用投屏与摄像头）"},
-	{Name: "ingest_provider", Env: "INGEST_PROVIDER", Group: "core",
-		Label: "推流入口", Hint: "当前可选：livekit"},
+	{Name: "voice_provider", Env: "VOICE_PROVIDER", Group: "core", Options: []string{"livekit", "pion"},
+		Label: "语音内核", Hint: "pion = 进程内纯音频 SFU；两线都选 livekit 即单线形态"},
+	{Name: "stage_provider", Env: "STAGE_PROVIDER", Group: "core", Options: []string{"livekit", "none"},
+		Label: "舞台内核", Hint: "none = 纯语音部署，禁用投屏与摄像头"},
+	{Name: "ingest_provider", Env: "INGEST_PROVIDER", Group: "core", Options: []string{"livekit"},
+		Label: "推流入口", Hint: "OBS/WHIP 推流的接入实现"},
 }
 
 func (a *API) allConfigKeys() []rtc.ConfigKey {
@@ -128,6 +128,19 @@ func (a *API) adminSetConfig(w http.ResponseWriter, r *http.Request) {
 		if envFixed(k) {
 			writeErr(w, http.StatusConflict, k.Label+" 已由环境变量固定，改部署侧配置后重启生效")
 			return
+		}
+		if len(k.Options) > 0 {
+			ok := false
+			for _, opt := range k.Options {
+				if req.Values[name] == opt {
+					ok = true
+					break
+				}
+			}
+			if !ok {
+				writeErr(w, http.StatusBadRequest, k.Label+" 的取值必须是: "+strings.Join(k.Options, " / "))
+				return
+			}
 		}
 	}
 	for name, value := range req.Values {
