@@ -631,3 +631,7 @@ a:hover { color: var(--ember-soft); }
   background: var(--bg-4); color: var(--text-2);
 }
 .seg .enc-tag.hw { background: var(--ember-tint); color: var(--ember); }
+
+
+/* 触屏长按弹操作菜单：禁用 iOS 长按系统气泡与文本选中 */
+.tile, .member-row { -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; }

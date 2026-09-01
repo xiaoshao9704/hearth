@@ -261,6 +261,8 @@ export async function renderRoom(root: HTMLElement, channel: string) {
   // 管理操作（禁言/踢出）= 房主或管理员，与后端 requireModerator 一致
   const canModerate = () => isOwnerSig() || getUser()?.is_admin === true;
 
+  let longPressTimer = 0; // 触屏长按弹菜单的定时器（tile 触摸事件共用）
+
   function showUserMenu(x: number, y: number, username: string) {
     document.querySelector('.user-menu')?.remove();
     // 对自己：只放开本地静音（自己的 OBS/其他设备回放），禁言/踢出不对自己开放
@@ -1062,6 +1064,17 @@ export async function renderRoom(root: HTMLElement, channel: string) {
                   ev.preventDefault();
                   showUserMenu(ev.clientX, ev.clientY, p.username);
                 }}
+                onTouchStart={(ev) => {
+                  // 触屏无右键：长按 500ms 弹同一个菜单（iOS Safari 不发 contextmenu）
+                  const identity = (ev.target as HTMLElement).closest<HTMLElement>('.tile')?.dataset.identity;
+                  const p = parts().find((pp) => pp.identity === identity);
+                  if (!p) return;
+                  const t = ev.touches[0];
+                  longPressTimer = window.setTimeout(() => showUserMenu(t.clientX, t.clientY, p.username), 500);
+                }}
+                onTouchMove={() => clearTimeout(longPressTimer)}
+                onTouchEnd={() => clearTimeout(longPressTimer)}
+                onTouchCancel={() => clearTimeout(longPressTimer)}
               >
                 <For each={gridTiles()}>{(e) => <Tile e={e} />}</For>
                 <div class="rail">
@@ -1209,6 +1222,13 @@ export async function renderRoom(root: HTMLElement, channel: string) {
                             {bits()}
                           </div>
                         </div>
+                        <button
+                          class="hit m-btn"
+                          title="更多操作"
+                          onClick={(ev) => showUserMenu(ev.clientX, ev.clientY, uname)}
+                        >
+                          <span style="font-size:15px;line-height:1;color:var(--text-2)">⋯</span>
+                        </button>
                         <Show when={!isMe}>
                           <button
                             class="hit m-btn"
