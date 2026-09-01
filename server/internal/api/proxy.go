@@ -30,11 +30,19 @@ func (a *API) RegisterProxies(r chi.Router) {
 	wProxy := a.dynProxy("", func(req *http.Request) string {
 		return a.ingestProvider(req.Context()).ProxyUpstream(req.Context())
 	})
-	r.Handle("/w/*", http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+	// 两种推流填法都支持：路径含 key（POST /w/{key}，ffmpeg 等）与 OBS 官方的
+	// bearer 模式（服务器填 /w、密钥放 Authorization: Bearer——ingress 要求精确 /w，
+	// 带尾斜杠的 /w/ 会 404，这里做规范化宽容）。
+	whipHandler := http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		if req.Method == http.MethodPost {
-			key := strings.TrimPrefix(req.URL.Path, "/w/")
+			key := strings.Trim(strings.TrimPrefix(req.URL.Path, "/w"), "/")
 			if i := strings.IndexByte(key, '/'); i >= 0 {
 				key = key[:i]
+			}
+			if key == "" {
+				// bearer 模式：key 在 Authorization 头；端点规范化为精确 /w
+				key = strings.TrimPrefix(req.Header.Get("Authorization"), "Bearer ")
+				req.URL.Path = "/w"
 			}
 			if !a.canPublishByStreamKey(req.Context(), key) {
 				writeErr(w, http.StatusForbidden, "你已被禁言，无法推流")
@@ -42,7 +50,9 @@ func (a *API) RegisterProxies(r chi.Router) {
 			}
 		}
 		wProxy.ServeHTTP(w, req)
-	}))
+	})
+	r.Handle("/w", whipHandler)
+	r.Handle("/w/*", whipHandler)
 }
 
 // dynProxy 目标逐请求解析的反代；未配置返回 503。
