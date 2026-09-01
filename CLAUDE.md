@@ -32,6 +32,13 @@
 - CSS 统一在 `src/style.css`，类名复用既有设计系统（ember 主题、三态明暗），选择器注意特异性（button 重置用零特异性 `:where`）。
 - 引擎抽象 `engine/types.ts`：新内核实现 `AVEngine` 并在 `engine/index.ts` 注册动态导入（保持代码分割）。
 
+### 自包含镜像（Dockerfile.aio + server/cmd/aioinit）
+
+- aioinit 是容器 PID1：按 `EMBED_LIVEKIT` / `EMBED_INGRESS` 拉起内嵌 livekit/redis/ingress，再拉起 hearth；子进程退避重启、SIGTERM 广播。
+- 密钥只持久化 `/data/aio/keys.env`（首启生成）；`livekit.yaml`/`ingress.yaml` **每次重启按环境变量重生成（env 权威，手改不保留）**——新增可调参数一律加环境变量，不要往 yaml 里塞静态值。
+- `/data` 是唯一的持久化边界：数据库、密钥、生成的 yaml 全在里面，不加自定义路径开关，用户挂卷即备份。
+- 内嵌服务与 hearth 的接线（`LIVEKIT_API_URL`、`INGRESS_UPSTREAM_URL` 等）由 aioinit 按端口 env 推导注入，业务代码不感知 aio 形态。
+
 ## 已知的坑（改相关代码前必读）
 
 - `websocket.Accept` hijack 后 `r.Context()` 被 net/http 取消：连接生命周期用 `context.WithoutCancel`。
@@ -40,6 +47,7 @@
 - 前端引擎重连前必须解绑旧 ws 的 handler（`teardown()`），否则旧连接被判 duplicate 时会误伤新连接。
 - 客户端向 ICE-Lite 服务端发 offer 不必等 gathering complete（最多等 1s），部分环境 gathering 永不完成。
 - 改挂载进容器的配置文件后 compose 不会自动重启服务，需手动 `docker restart`。
+- livekit `use_external_ip: true` 时默认 STUN 不可达会启动即死（国内必配 `LIVEKIT_STUN_SERVERS`）；`docker cp` 进容器的文件是 root 属主，distroless nonroot（65532）进程会写不动。
 
 ## 验证与发布
 

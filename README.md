@@ -59,10 +59,19 @@ hearth/
 ├── web/                     # Vite + TS；views/room.tsx 为 Solid，其余 vanilla
 ├── deploy/                  # 自托管 compose + 配置模板 + init.sh
 ├── Dockerfile               # 一体化开发镜像
-└── Dockerfile.release       # CI 纯装配镜像（配 .github/workflows/release.yml）
+├── Dockerfile.release       # CI 纯装配镜像（配 .github/workflows/release.yml）
+└── Dockerfile.aio           # 自包含镜像：-livekit / -full 两档（进程编排 server/cmd/aioinit）
 ```
 
 ## 自托管快速开始
+
+镜像分三档，按需选一条 `docker run`（数据、密钥与内嵌服务配置全部落在 `/data` 卷，挂载即持久化/备份）：
+
+| tag | 内容 | 体积 |
+|---|---|---|
+| `latest` / `X` | 纯 hearth（pion 语音 + 聊天 + 管理） | ~36MB |
+| `X-livekit` | + 内嵌 LiveKit（投屏/摄像头/弱网 SVC） | ~110MB |
+| `X-full` | + 内嵌 redis + ingress（OBS WHIP 推流） | ~600MB |
 
 最小形态**只需要 hearth 一个容器**（语音内核选 pion，舞台线关闭）：
 
@@ -75,7 +84,25 @@ docker run -d --name hearth \
 docker exec hearth /app/hearth adduser <用户名> <密码>   # 首账号自动管理员
 ```
 
-放行 `47700/udp`（语音媒体，公网 IP 自动探测），访问 `http://<主机>:8080` 即可开黑。要投屏/OBS 时再于管理后台把舞台线切到 LiveKit 并填写其配置——或用 `deploy/` 的 compose 一键起全家桶：
+放行 `47700/udp`（语音媒体，公网 IP 自动探测），访问 `http://<主机>:8080` 即可开黑。要投屏/OBS 时再于管理后台把舞台线切到 LiveKit 并填写其配置——或直接选自包含档，内嵌服务开箱即用：
+
+```bash
+# -livekit 档：内嵌 LiveKit，投屏/摄像头全功能（放行 7881、7882/udp）
+docker run -d --name hearth \
+  -p 8080:8080 -p 7881:7881 -p 7882:7882/udp \
+  -v hearth-data:/data \
+  ghcr.io/xiaoshao9704/hearth:latest-livekit
+
+# -full 档：再加内嵌 redis + ingress，OBS 可 WHIP 推流（再放行 7888、7885/udp、7886）
+docker run -d --name hearth \
+  -p 8080:8080 -p 7881:7881 -p 7882:7882/udp -p 7888:7888 -p 7885:7885/udp -p 7886:7886 \
+  -v hearth-data:/data \
+  ghcr.io/xiaoshao9704/hearth:latest-full
+```
+
+自包含档约定：密钥首启生成于 `/data/aio/keys.env`（持久化）；`livekit.yaml`/`ingress.yaml` 每次重启按环境变量重生成（**手改不保留**），端口等参数用 `LIVEKIT_PORT`、`LIVEKIT_TCP_PORT`、`LIVEKIT_UDP_PORT`、`INGRESS_WHIP_PORT`、`INGRESS_UDP_PORT`、`INGRESS_TCP_PORT` 覆盖；`EMBED_LIVEKIT=0` / `EMBED_INGRESS=0` 可临时关闭内嵌服务；默认 STUN 不可达（国内）时用 `LIVEKIT_STUN_SERVERS=stun.miwifi.com:3478` 指定，否则内嵌 LiveKit 启动即退出；`-full` 档的 redis 默认内嵌，`REDIS_ADDR=host:6379` 可改用外部实例。
+
+多容器拆部署仍可用 `deploy/` 的 compose 一键起全家桶：
 
 ```bash
 cd deploy && cp .env.example .env && $EDITOR .env

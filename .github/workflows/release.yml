@@ -52,6 +52,7 @@ jobs:
           mkdir -p "$GITHUB_WORKSPACE/out"
           for arch in amd64 arm64; do
             GOARCH=$arch go build -ldflags "-s -w" -o "$GITHUB_WORKSPACE/out/hearth-linux-$arch" ./cmd/server
+            GOARCH=$arch go build -ldflags "-s -w" -o "$GITHUB_WORKSPACE/out/aioinit-linux-$arch" ./cmd/aioinit
           done
 
       - name: 打包 Release 产物
@@ -70,6 +71,7 @@ jobs:
           name: dist
           path: |
             out/hearth-linux-*
+            out/aioinit-linux-*
             web/dist
             hearth_*.tar.gz
           retention-days: 14
@@ -119,3 +121,49 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+
+      # aio 自包含两档（Dockerfile.aio）：tag 加 -livekit / -full 后缀
+      - uses: docker/metadata-action@v6
+        id: meta-livekit
+        with:
+          images: ghcr.io/${{ github.repository }}
+          flavor: suffix=-livekit,onlatest=true
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable=${{ github.ref_type == 'tag' }}
+            type=raw,value=edge,enable=${{ github.ref_type != 'tag' }}
+
+      - uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: Dockerfile.aio
+          target: livekit
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta-livekit.outputs.tags }}
+          labels: ${{ steps.meta-livekit.outputs.labels }}
+
+      - uses: docker/metadata-action@v6
+        id: meta-full
+        with:
+          images: ghcr.io/${{ github.repository }}
+          flavor: suffix=-full,onlatest=true
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable=${{ github.ref_type == 'tag' }}
+            type=raw,value=edge,enable=${{ github.ref_type != 'tag' }}
+
+      # full 档 arm64 的 apt 层走 QEMU（分钟级，可接受）；两个官方 base 均有 arm64
+      - uses: docker/setup-qemu-action@v3
+
+      - uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: Dockerfile.aio
+          target: full
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta-full.outputs.tags }}
+          labels: ${{ steps.meta-full.outputs.labels }}
