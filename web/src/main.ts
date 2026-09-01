@@ -1,5 +1,6 @@
 // hash 路由：#/login、#/join/<code>、#/lobby、#/room/<频道名>、#/manage/<频道名>、#/admin/<tab>。
 import './style.css';
+import { initScreenCodecAuto } from './prefs';
 import { fetchMe, getToken } from './api';
 import { renderAdmin } from './views/admin';
 import { renderJoin } from './views/join';
@@ -56,3 +57,6 @@ if (getToken()) {
 } else {
   route();
 }
+
+// 投屏编码默认值按本机能力自动选择（硬编优先；用户手选过则不动）
+void initScreenCodecAuto();

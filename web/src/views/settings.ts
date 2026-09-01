@@ -738,6 +738,7 @@ function renderScreen(body: HTMLElement, goStream: () => void) {
     body.querySelectorAll<HTMLButtonElement>('[data-codec]').forEach((btn) => {
       btn.addEventListener('click', () => {
         prefs.screenCodec = btn.dataset.codec as ScreenCodec;
+        prefs.screenCodecAuto = false; // 手选后不再自动改
         savePrefs(prefs);
         notifyPrefsChanged('screen');
         paint();

@@ -31,7 +31,8 @@ export interface RoomPrefs {
   fps: number;
   bitrate: number; // Mbps
   bitrateAuto: boolean;
-  screenCodec: ScreenCodec; // 投屏编码：h264 单层 / vp9·av1 走 SVC 分层
+  screenCodec: ScreenCodec; // 投屏编码：h264/h265 单层 / vp9·av1 走 SVC 分层
+  screenCodecAuto: boolean; // true = 按本机能力自动选（硬编优先）；用户手选后置 false
   denoise: DenoiseMode; // 三选一：RNNoise / 浏览器自带 / 不降噪
   echoCancellation: boolean;
   autoGainControl: boolean;
@@ -56,6 +57,7 @@ export function defaultPrefs(): RoomPrefs {
     bitrate: autoBitrate('1080p', 60),
     bitrateAuto: true,
     screenCodec: 'vp9',
+    screenCodecAuto: true,
     denoise: 'rnnoise',
     echoCancellation: true,
     autoGainControl: true,
@@ -96,6 +98,7 @@ export function loadPrefs(): RoomPrefs {
       bitrate: typeof p.bitrate === 'number' && p.bitrate >= 1 && p.bitrate <= 15 ? p.bitrate : def.bitrate,
       bitrateAuto: p.bitrateAuto !== false,
       screenCodec: p.screenCodec === 'h264' || p.screenCodec === 'h265' || p.screenCodec === 'av1' ? p.screenCodec : 'vp9',
+      screenCodecAuto: p.screenCodecAuto !== false,
       denoise,
       echoCancellation: p.echoCancellation !== false,
       autoGainControl: p.autoGainControl !== false,
@@ -159,5 +162,34 @@ export async function probeHwEncode(codec: ScreenCodec): Promise<boolean | null>
     return info.powerEfficient;
   } catch {
     return null;
+  }
+}
+
+// ---- 投屏编码自动默认 ----
+
+// pickBestScreenCodec 按本机真实能力选默认编码：
+// 硬编优先，同硬编按体验排序——SVC 分层档（av1/vp9，硬编 SVC 存在即最优）
+// 排在高效单层档（h265）前，h264 兜底；全软编时选 vp9（SVC 平衡，
+// av1 软编吃 CPU 伤帧率不算"体验最好"）。
+export async function pickBestScreenCodec(): Promise<ScreenCodec> {
+  for (const c of ['av1', 'vp9', 'h265', 'h264'] as ScreenCodec[]) {
+    if ((await probeHwEncode(c)) === true) return c;
+  }
+  return 'vp9';
+}
+
+// initScreenCodecAuto 启动时执行一次：仅在用户未手选（screenCodecAuto）时更新默认值。
+export async function initScreenCodecAuto() {
+  const p = loadPrefs();
+  if (!p.screenCodecAuto) return;
+  try {
+    const best = await pickBestScreenCodec();
+    if (best !== p.screenCodec) {
+      const cur = loadPrefs(); // 重取，避免覆盖探测期间的其他改动
+      cur.screenCodec = best;
+      savePrefs(cur);
+    }
+  } catch {
+    // 探测失败维持现值
   }
 }
