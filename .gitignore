@@ -25,3 +25,4 @@ build/
 
 # 部署生成物（由 deploy/init.sh 生成，含密钥）
 deploy/generated/
+out/
