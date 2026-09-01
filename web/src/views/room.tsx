@@ -284,7 +284,13 @@ export async function renderRoom(root: HTMLElement, channel: string) {
             : gagBtn(true, '禁言') + gagBtn(false, '解除禁言') // 不在语音房也可改（落库权威，下次进房生效）
           : ''
       }
-      ${!isSelf && canModerate() ? `<button class="hit um-item danger" data-act="kick">${icon('leave', 14, 'var(--red)')}<span>踢出房间</span></button>` : ''}`;
+      ${
+        isSelf
+          ? `<button class="hit um-item danger" data-act="kick">${icon('leave', 14, 'var(--red)')}<span>踢出我的全部设备</span></button>`
+          : canModerate()
+            ? `<button class="hit um-item danger" data-act="kick">${icon('leave', 14, 'var(--red)')}<span>踢出房间</span></button>`
+            : ''
+      }`;
     if (!menu.querySelector('.um-item')) return;
     document.body.appendChild(menu);
     const mw = menu.offsetWidth;
@@ -324,7 +330,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
       close();
       try {
         await kickUser(channel, username);
-        toast(`已把 ${username} 移出房间`, 'ok');
+        toast(isSelf ? '已踢出你的全部设备（含本机与 OBS）' : `已把 ${username} 移出房间`, 'ok');
       } catch (err) {
         toast((err as Error).message, 'bad');
       }
