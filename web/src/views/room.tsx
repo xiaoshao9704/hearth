@@ -263,11 +263,15 @@ export async function renderRoom(root: HTMLElement, channel: string) {
 
   let longPressTimer = 0; // 触屏长按弹菜单的定时器（tile 触摸事件共用）
 
-  function showUserMenu(x: number, y: number, username: string) {
+  // identity 非空 = 设备模式（卡片/成员行入口）：菜单只控制这一台设备；
+  // 空 = 用户模式（聊天头像入口）：列出该用户全部设备。禁言始终是用户级操作。
+  function showUserMenu(x: number, y: number, username: string, identity?: string) {
     document.querySelector('.user-menu')?.remove();
-    // 对自己：只放开本地静音（自己的 OBS/其他设备回放），禁言/踢出不对自己开放
     const isSelf = username === myUsername;
-    const targets = parts().filter((p) => !p.isLocal && p.username === username);
+    const deviceMode = !!identity;
+    const targets = parts().filter(
+      (p) => !p.isLocal && p.username === username && (!deviceMode || p.identity === identity),
+    );
     const muted = targets.some((p) => volumeFor(p.identity) === 0);
     const devName = (p: EPart) => (p.obs ? 'OBS 推流' : p.identity.slice(username.length + 1) || p.identity);
     // 禁言判定只看真人设备：OBS 推流参与者（ingress 自带发布权限）会污染 every() 推断
@@ -278,7 +282,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
     const menu = document.createElement('div');
     menu.className = 'user-menu';
     menu.innerHTML = `
-      <div class="um-title">${esc(username)}${isSelf ? '（我）' : ''}</div>
+      <div class="um-title">${esc(username)}${isSelf ? '（我）' : ''}${deviceMode && targets[0] ? ` · ${esc(devName(targets[0]))}` : ''}</div>
       ${
         targets.length > 1
           ? targets
@@ -307,7 +311,9 @@ export async function renderRoom(root: HTMLElement, channel: string) {
                   `<button class="hit um-item" data-kick-id="${esc(p.identity)}">${icon('leave', 14, 'currentColor')}<span>踢出 ${esc(devName(p))}</span></button>`,
               )
               .join('') +
-            `<button class="hit um-item danger" data-act="kick">${icon('leave', 14, 'var(--red)')}<span>${isSelf ? '踢出我的全部设备' : '踢出房间'}</span></button>`
+            (deviceMode
+              ? ''
+              : `<button class="hit um-item danger" data-act="kick">${icon('leave', 14, 'var(--red)')}<span>${isSelf ? '踢出我的全部设备' : '踢出房间'}</span></button>`)
           : ''
       }`;
     if (!menu.querySelector('.um-item')) return;
@@ -1009,14 +1015,18 @@ export async function renderRoom(root: HTMLElement, channel: string) {
     const railTiles = createMemo(() => (spotlight() ? tileEntries().filter((e) => e.key !== focusKey()) : []));
 
     // 成员按账号聚合（一个账号多台设备合一行）
-    const memberGroups = createMemo(() => {
-      const byUser = new Map<string, EPart[]>();
-      for (const p of roster()) {
-        if (!byUser.has(p.username)) byUser.set(p.username, []);
-        byUser.get(p.username)!.push(p);
-      }
-      return [...byUser.entries()];
-    });
+    // 成员面板按设备维度平铺（与 tile/静音/踢出的操作粒度同构）：
+    // 同人排序相邻，本机最前、OBS 靠后；人数另行统计
+    const memberDevices = createMemo(() =>
+      [...roster()].sort(
+        (a, b) =>
+          a.username.localeCompare(b.username) ||
+          Number(b.isLocal) - Number(a.isLocal) ||
+          Number(a.obs) - Number(b.obs) ||
+          a.identity.localeCompare(b.identity),
+      ),
+    );
+    const memberUserCount = createMemo(() => new Set(roster().map((p) => p.username)).size);
 
     const Tile = (p: { e: TileEntry }) =>
       p.e.kind === 'video' ? (
@@ -1087,7 +1097,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
                   const p = parts().find((pp) => pp.identity === identity);
                   if (!p) return; // 对自己也弹（菜单内只放开本地静音项）
                   ev.preventDefault();
-                  showUserMenu(ev.clientX, ev.clientY, p.username);
+                  showUserMenu(ev.clientX, ev.clientY, p.username, p.identity);
                 }}
                 onTouchStart={(ev) => {
                   // 触屏无右键：长按 500ms 弹同一个菜单（iOS Safari 不发 contextmenu）
@@ -1095,7 +1105,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
                   const p = parts().find((pp) => pp.identity === identity);
                   if (!p) return;
                   const t = ev.touches[0];
-                  longPressTimer = window.setTimeout(() => showUserMenu(t.clientX, t.clientY, p.username), 500);
+                  longPressTimer = window.setTimeout(() => showUserMenu(t.clientX, t.clientY, p.username, p.identity), 500);
                 }}
                 onTouchMove={() => clearTimeout(longPressTimer)}
                 onTouchEnd={() => clearTimeout(longPressTimer)}
@@ -1188,7 +1198,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
             <div class="panel-head">
               <span style="flex-grow:1">成员</span>
               <span class="mono" style="font-size:11px;color:var(--text-2)">
-                {memberGroups().length}
+                {memberUserCount()}
               </span>
               <button
                 class="hit mini-btn"
@@ -1201,85 +1211,87 @@ export async function renderRoom(root: HTMLElement, channel: string) {
             <div
               class="panel-body"
               onContextMenu={(ev) => {
-                const uname = (ev.target as HTMLElement).closest<HTMLElement>('.member-row')?.dataset.uname ?? '';
-                if (!uname) return; // 对自己也弹（菜单内只放开本地静音项）
+                const row = (ev.target as HTMLElement).closest<HTMLElement>('.member-row');
+                if (!row?.dataset.uname) return;
                 ev.preventDefault();
-                showUserMenu(ev.clientX, ev.clientY, uname);
+                showUserMenu(ev.clientX, ev.clientY, row.dataset.uname, row.dataset.identity);
               }}
             >
               <div>
-                <div class="side-section-title">在房 — {memberGroups().length}</div>
-                <For each={memberGroups()}>
-                  {([uname, plist]) => {
+                <div class="side-section-title">
+                  在房 — {memberUserCount()} 人
+                  <Show when={memberDevices().length > memberUserCount()}> · {memberDevices().length} 设备</Show>
+                </div>
+                <For each={memberDevices()}>
+                  {(p) => {
+                    const uname = p.username;
                     const isMe = uname === myUsername;
-                    const sharing = plist.some((p) => p.sharing);
-                    const obs = plist.some((p) => p.obs);
-                    const mutedAll = plist.every((p) => !p.micOn && !p.obs);
-                    const realDevs = plist.filter((p) => !p.obs);
-                    const gagged = realDevs.length > 0 && realDevs.every((p) => !p.canPublish); // 服务端禁言收走发布权限（obs 参与者不算）
-                    const rowSpeaking = () => plist.some((p) => speaking().has(p.identity));
-                    const localMuted = () => plist.some((p) => volumeFor(p.identity) === 0);
+                    const dev = p.obs ? 'OBS 推流' : p.identity.slice(uname.length + 1) || p.identity;
+                    const isSpeaking = () => speaking().has(p.identity);
+                    const devMuted = () => volumeFor(p.identity) === 0;
                     const bits = () =>
                       [
-                        sharing ? '投屏中' : '',
-                        obs ? 'OBS 推流' : '',
-                        rowSpeaking() ? '说话中' : mutedAll ? '已静音' : '',
-                        gagged ? '已禁言' : '',
-                        realDevs.length > 1 ? `${realDevs.length} 台设备` : '',
-                        localMuted() && !isMe ? '已本地静音' : '',
+                        p.sharing ? '投屏中' : '',
+                        isSpeaking() ? '说话中' : !p.micOn && !p.obs ? '已静音' : '',
+                        !p.canPublish && !p.obs ? '已禁言' : '',
+                        devMuted() && !p.isLocal ? '已本地屏蔽' : '',
                       ]
                         .filter(Boolean)
                         .join(' · ');
                     return (
-                      <div class="member-row" classList={{ 'owner-row': uname === ownerName() }} data-uname={uname}>
-                        {el(avatarHtml(uname, 'avatar' + (rowSpeaking() ? ' speaking' : '')))}
+                      <div
+                        class="member-row"
+                        classList={{ 'owner-row': uname === ownerName() }}
+                        data-identity={p.identity}
+                        data-uname={uname}
+                      >
+                        {el(avatarHtml(uname, 'avatar' + (isSpeaking() ? ' speaking' : '')))}
                         <div style="flex-grow:1;min-width:0">
                           <div class="m-name">
                             {uname}
-                            <Show when={isMe}>
+                            <Show when={p.isLocal}>
                               <span class="muted">（我）</span>
                             </Show>
                             <Show when={uname === ownerName()}>
                               <span class="tag tag-ember">房主</span>
                             </Show>
                           </div>
-                          <div class="m-status" classList={{ hot: rowSpeaking() || sharing }}>
-                            {bits()}
+                          <div class="m-status" classList={{ hot: isSpeaking() || p.sharing }}>
+                            {dev}
+                            {bits() ? ' · ' + bits() : ''}
                           </div>
                         </div>
                         <button
                           class="hit m-btn"
                           title="更多操作"
-                          onClick={(ev) => showUserMenu(ev.clientX, ev.clientY, uname)}
+                          onClick={(ev) => showUserMenu(ev.clientX, ev.clientY, uname, p.identity)}
                         >
                           <span style="font-size:15px;line-height:1;color:var(--text-2)">⋯</span>
                         </button>
-                        <Show when={!isMe}>
+                        <Show when={!p.isLocal}>
                           <button
                             class="hit m-btn"
-                            classList={{ 'muted-on': localMuted() }}
-                            title={localMuted() ? '恢复' : '本地静音'}
+                            classList={{ 'muted-on': devMuted() }}
+                            title={devMuted() ? '恢复该设备声音' : '屏蔽该设备声音'}
                             onClick={() => {
-                              const targets = parts().filter((p) => !p.isLocal && p.username === uname);
-                              const nowMuted = targets.some((p) => volumeFor(p.identity) === 0);
                               setVolumes((prev) => {
                                 const m = new Map(prev);
-                                targets.forEach((p) => m.set(p.identity, nowMuted ? 1 : 0));
+                                m.set(p.identity, devMuted() ? 1 : 0);
                                 return m;
                               });
                               applyAudioPrefs();
                             }}
                           >
-                            {el(slashIcon('volume', 14, localMuted(), localMuted() ? 'var(--red)' : 'var(--text-2)'))}
+                            {el(slashIcon('volume', 14, devMuted(), devMuted() ? 'var(--red)' : 'var(--text-2)'))}
                           </button>
-                          <Show when={canModerate()}>
+                          <Show when={isMe || canModerate()}>
                             <button
                               class="hit m-btn"
-                              title="踢出房间"
+                              title="踢出该设备"
                               onClick={async () => {
                                 try {
-                                  await kickUser(channel, uname);
-                                  toast(`已把 ${uname} 移出房间`, 'ok');
+                                  await kickUser(channel, uname, p.identity);
+                                  toast('已踢出该设备', 'ok');
                                 } catch (err) {
                                   toast((err as Error).message, 'bad');
                                 }
