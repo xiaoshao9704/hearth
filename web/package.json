@@ -10,10 +10,12 @@
   },
   "dependencies": {
     "@sapphi-red/web-noise-suppressor": "^0.4.0",
-    "livekit-client": "^2.15.4"
+    "livekit-client": "^2.15.4",
+    "solid-js": "^1.9.15"
   },
   "devDependencies": {
     "typescript": "^5.8.3",
-    "vite": "^7.1.2"
+    "vite": "^7.1.2",
+    "vite-plugin-solid": "^2.11.14"
   }
 }
