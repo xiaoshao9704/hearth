@@ -141,4 +141,4 @@ cd web && npm install && npm run dev                          # :5173
 
 ## License
 
-MIT © 2026 shaokunyin，详见 [LICENSE](LICENSE)。
+MIT © 2026 [xiaoshao9704](https://github.com/xiaoshao9704)，详见 [LICENSE](LICENSE)。
