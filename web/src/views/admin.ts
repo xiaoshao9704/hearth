@@ -208,7 +208,7 @@ async function paintConfig(body: HTMLElement) {
   // 枚举值的人话标签（值本身仍以英文存库）
   const KERNEL_LABELS: Record<string, string> = {
     livekit: 'LiveKit',
-    pion: '内嵌 pion',
+    pion: 'Hearth 内置',
     none: '关闭',
   };
 
@@ -272,7 +272,7 @@ async function paintConfig(body: HTMLElement) {
             const meta: Record<string, [string, string]> = {
               core: ['内核选择', '语音 / 舞台（投屏）/ 推流入口分别选实现，配置互不干扰'],
               livekit: ['LiveKit', '信令与令牌签发'],
-              voice: ['内嵌语音 SFU（pion）', '本进程直出音频，UDP 单端口'],
+              voice: ['Hearth 内置语音', '本进程直出音频（pion 实现），UDP 单端口'],
               ingress: ['推流入口（OBS）', 'WHIP 上游与公开地址'],
             };
             const [title, sub] = meta[g] ?? [g, ''];

@@ -17,7 +17,7 @@ import (
 // 语音线（voice）与舞台线（stage：投屏/摄像头/OBS 推流及其伴音）各占一个槽位。
 var selectorKeys = []rtc.ConfigKey{
 	{Name: "voice_provider", Env: "VOICE_PROVIDER", Group: "core", Options: []string{"livekit", "pion"},
-		Label: "语音内核", Hint: "pion = 进程内纯音频 SFU；两线都选 livekit 即单线形态"},
+		Label: "语音内核", Hint: "Hearth 内置 = 进程内纯音频 SFU（pion 实现），零外部依赖；两线都选 LiveKit 即单线形态"},
 	{Name: "stage_provider", Env: "STAGE_PROVIDER", Group: "core", Options: []string{"livekit", "none"},
 		Label: "舞台内核", Hint: "none = 纯语音部署，禁用投屏与摄像头"},
 	{Name: "ingest_provider", Env: "INGEST_PROVIDER", Group: "core", Options: []string{"livekit"},
