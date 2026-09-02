@@ -6,14 +6,18 @@ import (
 	"encoding/json"
 	"errors"
 	"time"
+
+	"github.com/uptrace/bun"
 )
 
 // ProviderRecord 是注册制下的服务实例记录：alias 为实例唯一标识，type 为实现类型，
 // params 为该实例的配置（整体 JSON 存入 TEXT 列）。
 type ProviderRecord struct {
-	Alias     string            `json:"alias"`
+	bun.BaseModel `bun:"table:providers"`
+
+	Alias     string            `bun:",pk" json:"alias"`
 	Type      string            `json:"type"`
-	Params    map[string]string `json:"params"`
+	Params    map[string]string `bun:"-" json:"params"` // 整体 JSON 存 params 列，读写走 NewRaw
 	CreatedAt time.Time         `json:"created_at"`
 	UpdatedAt time.Time         `json:"updated_at"`
 }
@@ -24,9 +28,9 @@ func (s *Store) CreateProvider(ctx context.Context, rec *ProviderRecord) error {
 	if err != nil {
 		return err
 	}
-	_, err = s.db.ExecContext(ctx, s.q(
-		"INSERT INTO providers (alias, type, params) VALUES (?, ?, ?)"),
-		rec.Alias, rec.Type, string(params))
+	_, err = s.bun.NewRaw(
+		"INSERT INTO providers (alias, type, params) VALUES (?, ?, ?)",
+		rec.Alias, rec.Type, string(params)).Exec(ctx)
 	return err
 }
 
@@ -34,9 +38,9 @@ func (s *Store) CreateProvider(ctx context.Context, rec *ProviderRecord) error {
 func (s *Store) ProviderByAlias(ctx context.Context, alias string) (*ProviderRecord, error) {
 	var rec ProviderRecord
 	var params string
-	err := s.db.QueryRowContext(ctx, s.q(
-		"SELECT alias, type, params, created_at, updated_at FROM providers WHERE alias = ?"), alias).
-		Scan(&rec.Alias, &rec.Type, &params, &rec.CreatedAt, &rec.UpdatedAt)
+	err := s.bun.NewRaw(
+		"SELECT alias, type, params, created_at, updated_at FROM providers WHERE alias = ?", alias).
+		Scan(ctx, &rec.Alias, &rec.Type, &params, &rec.CreatedAt, &rec.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -51,25 +55,27 @@ func (s *Store) ProviderByAlias(ctx context.Context, alias string) (*ProviderRec
 
 // ListProviders 列出全部实例，按 created_at 升序（同秒按 alias 次级排序，保证顺序稳定）。
 func (s *Store) ListProviders(ctx context.Context) ([]*ProviderRecord, error) {
-	rows, err := s.db.QueryContext(ctx, s.q(
-		"SELECT alias, type, params, created_at, updated_at FROM providers ORDER BY created_at, alias"))
-	if err != nil {
+	// params 列是整体 JSON，先扫进完整行结构体再解到 Params（ProviderRecord.Params 不对应列）
+	var rows []providerRow
+	if err := s.bun.NewRaw(
+		"SELECT alias, type, params, created_at, updated_at FROM providers ORDER BY created_at, alias").
+		Scan(ctx, &rows); err != nil {
 		return nil, err
 	}
-	defer rows.Close()
 	out := []*ProviderRecord{}
-	for rows.Next() {
-		var rec ProviderRecord
-		var params string
-		if err := rows.Scan(&rec.Alias, &rec.Type, &params, &rec.CreatedAt, &rec.UpdatedAt); err != nil {
+	for _, row := range rows {
+		rec := &ProviderRecord{
+			Alias:     row.Alias,
+			Type:      row.Type,
+			CreatedAt: row.CreatedAt,
+			UpdatedAt: row.UpdatedAt,
+		}
+		if err := json.Unmarshal([]byte(row.Params), &rec.Params); err != nil {
 			return nil, err
 		}
-		if err := json.Unmarshal([]byte(params), &rec.Params); err != nil {
-			return nil, err
-		}
-		out = append(out, &rec)
+		out = append(out, rec)
 	}
-	return out, rows.Err()
+	return out, nil
 }
 
 // UpdateProviderParams 整体替换实例配置并刷新 updated_at；alias 不存在返回 ErrNotFound。
@@ -82,13 +88,13 @@ func (s *Store) UpdateProviderParams(ctx context.Context, alias string, params m
 	if _, err := s.ProviderByAlias(ctx, alias); err != nil {
 		return err
 	}
-	_, err = s.db.ExecContext(ctx, s.q(
-		"UPDATE providers SET params = ?, updated_at = CURRENT_TIMESTAMP WHERE alias = ?"),
-		string(data), alias)
+	_, err = s.bun.NewRaw(
+		"UPDATE providers SET params = ?, updated_at = CURRENT_TIMESTAMP WHERE alias = ?",
+		string(data), alias).Exec(ctx)
 	return err
 }
 
 func (s *Store) DeleteProvider(ctx context.Context, alias string) error {
-	_, err := s.db.ExecContext(ctx, s.q("DELETE FROM providers WHERE alias = ?"), alias)
+	_, err := s.bun.NewRaw("DELETE FROM providers WHERE alias = ?", alias).Exec(ctx)
 	return err
 }

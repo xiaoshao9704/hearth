@@ -64,6 +64,7 @@
 - 改挂载进容器的配置文件后 compose 不会自动重启服务，需手动 `docker restart`。
 - livekit `use_external_ip: true` 时默认 STUN 不可达会启动即死（国内必配 `LIVEKIT_STUN_SERVERS`）；`docker cp` 进容器的文件是 root 属主，distroless nonroot（65532）进程会写不动。
 - ingress 的 WHIP 直通（bypass_transcoding）只收 H.264+opus：HEVC/AV1 会 `unsupported codec in SDP offer`（实测于 ingress v1.5.0）；OBS bearer 模式端点是精确 `/w`（`/w/` 会 404，hearth 代理层已做规范化宽容）。
+- store schema 变更只加迁移文件（`server/internal/store/` 包根的 `NNNNN_name.go`，bun/migrate 从文件名解析迁移名，文件名不可改），不改 `00001_baseline.go`；api 语义迁移走 `settings.migration_version` 游标，两者职责不交叉（启动顺序：store.Open 的 Bun schema 迁移 → api 游标数据迁移）。Bun `NewRaw` 的 `?` 参数是按方言安全内联格式化进 SQL（不是改写成驱动占位符再绑定），传参无需顾虑方言。
 
 ## 验证与发布
 
