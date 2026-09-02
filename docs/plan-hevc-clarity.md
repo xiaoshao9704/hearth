@@ -5,8 +5,8 @@ v1（Oryx HLS 主线）已被实测推翻——保留于文末"备选：Oryx 直
 
 ## 目标
 
-**在有限码率（家宽上行）下，不牺牲帧率的前提下提高清晰度。**
-= 同码率换更高效编码：HEVC ≈ H.264 观感 1.5 倍（用户设备有 HEVC 硬编硬解；无 AV1 硬编）。
+**在有限码率（上行带宽）下，不牺牲帧率的前提下提高清晰度。**
+= 同码率换更高效编码：HEVC ≈ H.264 观感 1.5 倍（主流设备普遍有 HEVC 硬编硬解，AV1 硬编尚不普及）。
 
 ## 实测确立的事实（2026-09-01）
 
@@ -53,37 +53,37 @@ OBS NVENC HEVC/H.264（+将来 AV1）→ 自研纯 Go WHIP 网关（白名单自
 
 1. P0 实验（先打最薄的一层）；
 2. 无论 P0 成败，P1 立项（OBS 路径独立成立）；
-3. 观众设备矩阵实测：朋友的每台设备跑一次 decodingInfo(H265)（自托管的优势：
-   兼容性按可枚举的朋友设备算，不需要全网覆盖）。
+3. 观众设备矩阵实测：每台观众设备跑一次 decodingInfo(H265)（自托管的优势：
+   兼容性按可枚举的实际观众设备算，不需要全网覆盖）。
 
 ## 推流端兜底矩阵（编码能力不构成硬约束）
 
 发送端有多条独立可行的路，按优先尝试序：
 
 1. **投屏机浏览器硬编**（P0 主路）：投屏所在机器的 Chrome H265 send 能力即平台硬编
-   （Mac=VideoToolbox ✓；Windows=NVENC HEVC，GTX 10 系+基本都有，**逐台实测确认**，
+   （macOS=VideoToolbox；Windows=NVENC HEVC，近几代 NVIDIA 显卡基本都有，**逐台实测确认**，
    不从一台设备的能力推断另一台）。
 2. **OBS 直推**（P1 主路）：Windows OBS NVENC HEVC，或 Mac OBS Apple VT HEVC。
-3. **采集卡 + Mac OBS**：Windows 游戏画面 → 采集卡 → Mac 端 VideoToolbox HEVC 硬编推流——
+3. **采集卡 + 第二台机器 OBS**：游戏机画面 → 采集卡 → 另一台机器硬编推流——
    游戏机零编码负担的兜底。
-4. **Mac ffmpeg 转码**：hevc_videotoolbox 硬转码可行，但注意 **ffmpeg 的 WHIP muxer
+4. **ffmpeg 硬转码**：hevc_videotoolbox / hevc_nvenc 可行，但注意 **ffmpeg 的 WHIP muxer
    只支持 h264（实测）**——ffmpeg+HEVC 只能配 RTMP/SRT 出口（即 Oryx 备选线），
    WHIP 推 HEVC 请用 OBS。
 
-观众端才是需要逐台验证的一侧：朋友每台设备跑 `decodingInfo(webrtc, H265)`。
+观众端才是需要逐台验证的一侧：每台观众设备跑 `decodingInfo(webrtc, H265)`。
 
 ## 备选：Oryx 直播频道（降级挂起）
 
 v1 计划的 Oryx 路线（频道级 stage_type + HLS HEVC 直通 + hls.js 播放引擎）整体挂起，
 触发条件收窄为以下之一：
 - 需要 RTMP/SRT 老工具推流接入；
-- 需要转推大平台（B 站等，观众规模化的正解——家宽上行只出一份）；
+- 需要转推大平台（B 站等，观众规模化的正解——本地上行只出一份）；
 - P0/P1 均被堵死（HEVC over WebRTC 链路出现未预见的墙）。
 
-届时按 v1 设计执行（git 历史可查完整方案：频道级舞台类型、DDNS 域名+TLS 复活、
+届时按 v1 设计执行（git 历史可查完整方案：频道级舞台类型、域名+TLS 复活、
 LL-HLS 2-5s 延迟档、多流并行）。
 
 ## 不变量
 
-- 观众上限 = 家宽上行 ÷ 码率，任何路线不变；规模化 = 转推平台。
+- 观众上限 = 上行带宽 ÷ 码率，任何路线不变；规模化 = 转推平台。
 - 语音线不受影响（pion/livekit 照旧）；名册/禁言/踢出体系不动。

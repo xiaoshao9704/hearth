@@ -2,7 +2,7 @@
 
 Go 后端：用户体系（bcrypt + Bearer 会话）、频道管理、LiveKit 令牌签发、频道聊天 WebSocket、内置反向代理（/lk、/w）。
 
-- 存储：sqlite 默认（`modernc.org/sqlite`，纯 Go 无 cgo），`DATABASE_URL` 可切 MySQL/Postgres；可交叉编译到树莓派 linux/arm64
+- 存储：sqlite 默认（`modernc.org/sqlite`，纯 Go 无 cgo），`DATABASE_URL` 可切 MySQL/Postgres；可交叉编译到 linux/arm64
 - 路由：chi（`github.com/go-chi/chi/v5`），认证/房主校验为中间件
 - 聊天 WS：`nhooyr.io/websocket`
 
@@ -48,7 +48,7 @@ go run ./cmd/server    # 默认监听 :8080（须在 server/ 目录下运行，.
 # 本机
 go build -o hearth-server ./cmd/server
 
-# 树莓派（linux/arm64，静态链接无 cgo）
+# linux/arm64（静态链接无 cgo）
 CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o hearth-server-arm64 ./cmd/server
 ```
 

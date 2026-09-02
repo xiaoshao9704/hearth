@@ -1,5 +1,7 @@
 # 计划：pionwhip——内嵌 WHIP 直通推流网关（OBS 高效编码的唯一路径）
 
+命名更新（2026-09-02）：本计划中的 pionwhip 已定名 **Bellows**（`rtc/bellows`，选择器值 `bellows`）；语音内核 pionvoice 同期定名 **Ember**（`rtc/ember`）。旧值 `pion`/`pion_*` 由 dyncfg 兼容映射。
+
 状态：P1+P2 核心已实现（2026-09-02）。已完成：WHIP 握手（POST/PATCH/DELETE、201+Location+显式
 Content-Length）、codec 白名单显式校验（opus/h264/h265/av1，VP8 等 400 拒绝）、pion 收流、
 lksdk bot（identity={user}-obs）零转码直通发布、PLI/FIR 桥接（lksdk `WithRTCPHandler` 回调）、
@@ -15,7 +17,7 @@ lksdk bot（identity={user}-obs）零转码直通发布、PLI/FIR 桥接（lksdk
    GitHub latest，Pi 上已在跑）的 WHIP 视频白名单硬编码只有 VP8+H.264，无配置项，
    main 分支同样——升级路线不存在。而链路其余环节全绿（见"已验证地基"）。
 2. **`-full` 镜像档退役**：OBS 推流不再依赖 ingress+redis+GStreamer，600MB Ubuntu 档
-   消失，`-livekit` 档（~110MB）即全功能。家里部署的 ingress/redis 容器同步下线。
+   消失，`-livekit` 档（~110MB）即全功能。现有部署的 ingress/redis 容器同步下线。
 3. **摆脱不受控上游**：codec 白名单、鉴权、行为全部进自己进程（与 pionvoice 同哲学）。
 
 ## 已验证的地基（2026-09-01/02 实测）
@@ -54,7 +56,7 @@ OBS ──WHIP(POST /w + Bearer)──> hearth（同源，握手直达不再反�
   （UpdateParticipant/RemoveParticipant 按 identity 前缀）天然生效。
 - **配置**：`pionwhip_*` 命名空间（UDP 端口默认 47710、public IP 留空自动探测——
   与 pionvoice 共享探测工具函数）；`ingest_provider` 枚举加 `pion`，动态切换即时生效。
-- **部署**：家里/单机场景只多开一个 UDP 端口转发；aio `-livekit` 档内置本实现后即全功能。
+- **部署**：单机场景只多开一个 UDP 端口转发；aio `-livekit` 档内置本实现后即全功能。
 
 ## 阶段
 
@@ -71,7 +73,7 @@ OBS ──WHIP(POST /w + Bearer)──> hearth（同源，握手直达不再反�
 
 **P3 收尾**
 - 流状态（在线徽标）、断流清理与重推；`-full` 档退役（Dockerfile.aio/CI/README）；
-  家里 compose 下线 ingress+redis；CLAUDE.md 增补 pionwhip 约定。
+  现有 compose 下线 ingress+redis；CLAUDE.md 增补 pionwhip 约定。
 
 ## 动手前技术验证点
 

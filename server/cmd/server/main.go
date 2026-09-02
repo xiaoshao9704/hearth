@@ -58,7 +58,7 @@ func main() {
 	a.RegisterProxies(r)
 	r.Get("/api/chat", hub.ServeHTTP)
 
-	// 可选：静态托管前端构建产物（部署到树莓派时一个二进制搞定）
+	// 可选：静态托管前端构建产物（单机部署时一个二进制搞定）
 	if cfg.StaticDir != "" {
 		fs := http.FileServer(http.Dir(cfg.StaticDir))
 		r.Get("/*", fs.ServeHTTP)

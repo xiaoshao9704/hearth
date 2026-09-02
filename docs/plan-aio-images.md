@@ -8,7 +8,7 @@
   另加 `LIVEKIT_STUN_SERVERS`（默认 STUN 不可达时 livekit 启动即死，国内必配）与 `REDIS_ADDR`（填了用外部 redis，空则内嵌）。
 - 基础镜像整体可经 build-arg 替换：`LIVEKIT_IMAGE`/`INGRESS_IMAGE`/`DISTROLESS_IMAGE`（版本钉死在默认值里）。
 - release.yml：`-full` 档有 apt 层，arm64 构建需 setup-qemu（分钟级，可接受）；其余纯装配不变。
-- 本地验证（macOS arm64）两档全通过；livekit 外网 IP 探测依赖可用 STUN，媒体面留待 Linux 宿主复验。
+- 本地验证（arm64 开发机）两档全通过；livekit 外网 IP 探测依赖可用 STUN，媒体面留待 Linux 宿主复验。
 
 ## 背景与目标
 
@@ -46,7 +46,7 @@
      a) 容器日志见 `[aioinit] livekit 已启动` 与 hearth 监听；
      b) `curl :8080` 200、登录建号、`/api/token` 返回 livekit 凭证（combined）；
      c) `/lk` 代理 → 内嵌 livekit twirp 可达（管理后台服务状态 voice/stage ok）。
-     媒体层不在本机验证（Docker Desktop macOS 的 UDP 端口转发损坏是已知问题），留待 Linux 宿主/生产。
+     媒体层不在本机验证（Docker Desktop 的 UDP 端口转发损坏是已知问题），留待 Linux 宿主/生产。
    - `-full` 档：build（首次含 apt 层较慢）→ run → 额外验证：
      a) redis/ingress 均被拉起且无崩溃循环；
      b) hearth 后台「推流入口」显示已启用（INGRESS_UPSTREAM_URL=127.0.0.1:7888）；
@@ -77,6 +77,6 @@
    secure context，访客零安装）。首启体验：生成管理员、自动开浏览器、防火墙提示。
 3. **Windows exe + 投屏**：依赖 pion 舞台内核（局域网场景纯直通转发即可，不需要 SVC 选层）
    或 LiveKit Windows 交叉编译试金石（官方不支持，需真机验证 UDP/网卡枚举）。
-4. **EasyTier 组网**：无公网 IP 的朋友组网开黑。前置：自签 HTTPS（同 2）；集成形态倾向伴生进程 +
+4. **EasyTier 组网**：无公网 IP 的用户组网开黑。前置：自签 HTTPS（同 2）；集成形态倾向伴生进程 +
    pion 通告虚拟网 IP。
 5. AI 会话总结：挂起（定位不符 + ASR 算力/隐私成本）；pion 内核旁路音频的技术入口保留。

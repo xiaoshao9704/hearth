@@ -16,11 +16,11 @@
 
 | 插槽 | 承载 | 可选实现 |
 |------|------|----------|
-| `voice_provider` 语音线 | 麦克风音频、名册、说话检测 | `livekit` / `pion`（进程内纯音频 SFU，零外部依赖） |
+| `voice_provider` 语音线 | 麦克风音频、名册、说话检测 | `livekit` / `ember`（Ember，进程内纯音频 SFU，零外部依赖） |
 | `stage_provider` 舞台线 | 投屏、摄像头、OBS 推流及其伴音 | `livekit` / `none`（纯语音部署） |
-| `ingest_provider` 推流入口 | OBS WHIP 接入 | `livekit`（Ingress） |
+| `ingest_provider` 推流入口 | OBS WHIP 接入 | `livekit`（Ingress）/ `bellows`（Bellows，进程内或远端直通网关，支持 HEVC/AV1） |
 
-两线选同一内核时自动合并为单连接（combined，即传统单线形态）。典型混合部署：语音跑在云上小水管 VPS 的内嵌 pion（物理隔离、永远流畅），投屏走家宽大上行的 LiveKit。
+两线选同一内核时自动合并为单连接（combined，即传统单线形态）。典型混合部署：语音跑在公网服务器的内嵌 Ember（物理隔离、永远流畅），投屏走上行带宽充足的另一处 LiveKit。
 
 内核抽象是中性的 `rtc.Provider` / `rtc.IngestProvider` 接口（`server/internal/rtc/`），配置键按实现命名空间隔离，换内核不迁移配置；前端按凭证里的引擎名动态加载对应客户端（代码分割，LiveKit SDK 只在用到时下载）。
 
@@ -52,7 +52,7 @@ hearth/
 │   ├── cmd/server/          # 入口 + adduser CLI
 │   └── internal/
 │       ├── api/             # REST + WS 路由、入场判定(admission)、动态配置、反代
-│       ├── rtc/             # 内核抽象接口 + livekitrtc / pionvoice 两个实现
+│       ├── rtc/             # 内核抽象接口 + livekitrtc / ember / bellows 三个实现
 │       ├── lkroom|lkingress|lktoken/  # LiveKit 管理面客户端
 │       ├── chat/            # 聊天 hub
 │       └── store/           # sqlite/MySQL/Postgres
@@ -69,16 +69,16 @@ hearth/
 
 | tag | 内容 | 体积 |
 |---|---|---|
-| `latest` / `X` | 纯 hearth（pion 语音 + 聊天 + 管理） | ~36MB |
+| `latest` / `X` | 纯 hearth（Ember 语音 + 聊天 + 管理） | ~36MB |
 | `X-livekit` | + 内嵌 LiveKit（投屏/摄像头/弱网 SVC） | ~110MB |
 | `X-full` | + 内嵌 redis + ingress（OBS WHIP 推流） | ~600MB |
 
-最小形态**只需要 hearth 一个容器**（语音内核选 pion，舞台线关闭）：
+最小形态**只需要 hearth 一个容器**（语音内核选 ember，舞台线关闭）：
 
 ```bash
 docker run -d --name hearth \
   -p 8080:8080 -p 47700:47700/udp \
-  -e VOICE_PROVIDER=pion -e STAGE_PROVIDER=none \
+  -e VOICE_PROVIDER=ember -e STAGE_PROVIDER=none \
   -v hearth-data:/data \
   ghcr.io/xiaoshao9704/hearth:latest
 docker exec hearth /app/hearth adduser <用户名> <密码>   # 首账号自动管理员
@@ -102,6 +102,18 @@ docker run -d --name hearth \
 
 自包含档约定：密钥首启生成于 `/data/aio/keys.env`（持久化）；`livekit.yaml`/`ingress.yaml` 每次重启按环境变量重生成（**手改不保留**），端口等参数用 `LIVEKIT_PORT`、`LIVEKIT_TCP_PORT`、`LIVEKIT_UDP_PORT`、`INGRESS_WHIP_PORT`、`INGRESS_UDP_PORT`、`INGRESS_TCP_PORT` 覆盖；`EMBED_LIVEKIT=0` / `EMBED_INGRESS=0` 可临时关闭内嵌服务；默认 STUN 不可达（国内）时用 `LIVEKIT_STUN_SERVERS=stun.miwifi.com:3478` 指定，否则内嵌 LiveKit 启动即退出；`-full` 档的 redis 默认内嵌，`REDIS_ADDR` 可改用外部实例（`host:port` 或 `redis://[user:pass@]host:port[/db]`，密码含 `#` 等特殊字符需百分号转义，语义同 `DATABASE_URL`）。
 
+### OBS 推流网关放到局域网（Bellows 远端形态）
+
+hearth 所在服务器上行有限、LiveKit 部署在别处时，OBS 的视频不该绕 hearth 一圈。Release 里有单文件 `bellows-linux-{amd64,arm64}`，放到 LiveKit 同一局域网的任意机器（低功耗 arm64 小主机即可）：
+
+```bash
+HEARTH_URL=https://hearth.example.com BELLOWS_SHARED_SECRET=<随机串> \
+LIVEKIT_API_URL=http://<livekit>:7880 LIVEKIT_API_KEY=… LIVEKIT_API_SECRET=… \
+./bellows-linux-arm64          # WHIP 监听 :8090，媒体 47710/udp，通告本机局域网 IP
+```
+
+hearth 侧「管理后台 → 服务参数」：推流入口选 **Bellows**，`远端 Bellows 地址` 填 `http://<该机器内网IP>:8090`，共享密钥填同一值。之后用户拿到的推流地址直接指向这台机器：OBS → Bellows → LiveKit 全在局域网，hearth 只做一次密钥反查与入场判定。外网推流者才需要端口映射/TLS，见 `docs/plan-bellows-upnp.md`。
+
 多容器拆部署仍可用 `deploy/` 的 compose 一键起全家桶：
 
 ```bash
@@ -113,16 +125,16 @@ cd deploy && cp .env.example .env && $EDITOR .env
 
 - **反代内置**：`/lk` 信令、`/w` WHIP、Web、API 同端口，不强制 Caddy/nginx；TLS 可用 `--profile caddy` 或接入自己的网关
 - **动态配置**：环境变量（含 .env）设置的项在后台只读；未设置的可在「管理后台 → 服务参数」填写落库、保存即生效
-- **媒体端口**：语音 `PION_UDP_PORT`（默认 47700/udp）、LiveKit RTC 端口需防火墙/安全组放行（媒体不经反代）
+- **媒体端口**：语音 `EMBER_UDP_PORT`（默认 47700/udp）、LiveKit RTC 端口需防火墙/安全组放行（媒体不经反代）
 - **数据库**：默认 sqlite（`/data` 卷）；`DATABASE_URL` 可切 MySQL/Postgres
-- **ARM64**：镜像含 arm64 变体，树莓派可用
+- **ARM64**：镜像含 arm64 变体，arm64 小主机可用
 
 ## 开发
 
 ```bash
 # 后端（终端一）——纯语音开发零外部依赖
 cd server
-VOICE_PROVIDER=pion STAGE_PROVIDER=none go run ./cmd/server   # :8080
+VOICE_PROVIDER=ember STAGE_PROVIDER=none go run ./cmd/server   # :8080
 
 # 前端（终端二）
 cd web && npm install && npm run dev                          # :5173
@@ -136,7 +148,7 @@ cd web && npm install && npm run dev                          # :5173
 
 1. ✅ MVP：多频道 + LiveKit 音视频 + 高码率投屏 + 聊天 + OBS WHIP
 2. ✅ 频道管理（踢出/封禁/禁言/邀请制）、VP9/AV1 SVC、管理后台与动态配置
-3. ✅ 内核插件化：中性 Provider 抽象、双线插槽、内嵌 pion 语音 SFU
+3. ✅ 内核插件化：中性 Provider 抽象、双线插槽、内嵌 Ember 语音 SFU（pion/webrtc）
 4. 自研舞台内核 / SRS 直播频道 / SFU 级联
 
 ## License
