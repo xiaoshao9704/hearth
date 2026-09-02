@@ -82,7 +82,7 @@ type Gateway struct {
 	announcer *lite.Announcer
 
 	mu       sync.Mutex
-	sessions map[string]*session // 键 = 会话资源 id（POST 应答 Location /w/{rid}），非推流密钥
+	sessions map[string]*session // 键 = 会话资源 id（POST 应答 Location 的相对地址 {rid}），非推流密钥
 }
 
 func New(cfg rtc.ConfigFunc, resolve ResolveFunc) *Gateway {
@@ -345,8 +345,11 @@ func (g *Gateway) handlePost(w http.ResponseWriter, r *http.Request, streamKey s
 
 	body := []byte(pc.LocalDescription().SDP)
 	w.Header().Set("Content-Type", "application/sdp")
-	// 资源地址用一次性会话 id：bearer 模式的密钥不能经 Location 回流进 URL/访问日志
-	w.Header().Set("Location", "/w/"+rid)
+	// 资源地址用一次性会话 id：bearer 模式的密钥不能经 Location 回流进 URL/访问日志。
+	// 用相对形式（不带 /w/ 前缀）：OBS 按请求路径解析——直连 /w/{key} → /w/{rid}，
+	// 经 hearth 反代 /providers/{alias}/w/{key} → /providers/{alias}/w/{rid}，两种形态都对；
+	// 绝对形式 /w/{rid} 在反代形态下会解析到根路径导致 DELETE 405。
+	w.Header().Set("Location", rid)
 	// ffmpeg 的 WHIP muxer 读不了 chunked 响应，必须显式 Content-Length
 	w.Header().Set("Content-Length", strconv.Itoa(len(body)))
 	w.WriteHeader(http.StatusCreated)
@@ -462,7 +465,7 @@ func (g *Gateway) removeSession(s *session) {
 
 type session struct {
 	gw   *Gateway
-	rid  string // 会话资源 id（Location /w/{rid}）
+	rid  string // 会话资源 id（Location 相对地址 {rid}）
 	key  string // 推流密钥
 	room string // 频道名 = LiveKit 房间名
 	user string
