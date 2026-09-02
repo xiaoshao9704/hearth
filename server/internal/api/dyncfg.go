@@ -6,6 +6,7 @@ package api
 
 import (
 	"context"
+	"log"
 	"net/http"
 	"os"
 	"strings"
@@ -24,16 +25,27 @@ var selectorKeys = []rtc.ConfigKey{
 		Label: "推流入口", Hint: "OBS/WHIP 推流的接入实现；Bellows = 进程内直通网关（支持 HEVC/AV1，发进 LiveKit 房间）"},
 }
 
-// 旧名兼容：自研内核改名（pion → ember / bellows）后，存量环境变量与 DB 配置继续生效。
-var legacySelectorValue = map[string]string{
-	"voice_provider":  "ember",
-	"ingest_provider": "bellows",
-}
-
-// 旧键兼容：ember_* 未设置时回退改名前的 pion_* 配置。
-var legacyKeyFallback = map[string]struct{ Name, Env string }{
-	"ember_udp_port":  {"pion_udp_port", "PION_UDP_PORT"},
-	"ember_public_ip": {"pion_public_ip", "PION_PUBLIC_IP"},
+// warnLegacyConfig 启动时检查改名前的旧配置（0.3.0 曾做兼容映射，0.3.1 起不再识别）：
+// 选择器里的 "pion" 按未知值回落 livekit，pion_* 键被忽略回落 ember_* 默认值，
+// 这里只打一次日志提示管理员改配置，不做静默迁移。
+func (a *API) warnLegacyConfig(ctx context.Context) {
+	for _, sel := range []string{"voice_provider", "ingest_provider"} {
+		if a.dynVal(ctx, sel) == "pion" {
+			log.Printf("配置告警: %s=pion 已不再支持（改名为 ember/bellows），当前回落到 livekit，请在管理后台重新选择", sel)
+		}
+	}
+	for _, old := range []struct{ Env, Name, New string }{
+		{"PION_UDP_PORT", "pion_udp_port", "ember_udp_port"},
+		{"PION_PUBLIC_IP", "pion_public_ip", "ember_public_ip"},
+	} {
+		v := os.Getenv(old.Env)
+		if v == "" {
+			v, _ = a.st.GetSetting(ctx, "cfg_"+old.Name)
+		}
+		if strings.TrimSpace(v) != "" {
+			log.Printf("配置告警: %s/%s 已不再读取，请改用 %s（当前按默认值运行）", old.Env, old.Name, old.New)
+		}
+	}
 }
 
 func (a *API) allConfigKeys() []rtc.ConfigKey {
@@ -53,40 +65,22 @@ func (a *API) findDynKey(name string) *rtc.ConfigKey {
 // envFixed 该项是否被环境变量固定（.env 在启动时已合入环境）。
 func envFixed(k *rtc.ConfigKey) bool { return k.Env != "" && os.Getenv(k.Env) != "" }
 
-// dynVal 取生效值：环境变量 > 数据库 > 旧名回退 > 实现声明的兜底默认（选择器默认 livekit）。
+// dynVal 取生效值：环境变量 > 数据库 > 实现声明的兜底默认（选择器默认 livekit）。
+// 选择器取到未注册的名字（含改名前的 "pion"）由各 *Provider 取值函数回落 livekit。
 func (a *API) dynVal(ctx context.Context, name string) string {
 	k := a.findDynKey(name)
 	if k == nil {
 		return ""
 	}
-	v := a.rawDynVal(ctx, k)
-	// 选择器里存量的 "pion" 映射到改名后的内核
-	if v == "pion" {
-		if nv, ok := legacySelectorValue[name]; ok {
-			return nv
-		}
-	}
-	return v
-}
-
-func (a *API) rawDynVal(ctx context.Context, k *rtc.ConfigKey) string {
 	if k.Env != "" {
 		if v := os.Getenv(k.Env); v != "" {
 			return v
 		}
 	}
-	if v, err := a.st.GetSetting(ctx, "cfg_"+k.Name); err == nil && strings.TrimSpace(v) != "" {
+	if v, err := a.st.GetSetting(ctx, "cfg_"+name); err == nil && strings.TrimSpace(v) != "" {
 		return strings.TrimSpace(v)
 	}
-	if lk, ok := legacyKeyFallback[k.Name]; ok {
-		if v := os.Getenv(lk.Env); v != "" {
-			return v
-		}
-		if v, err := a.st.GetSetting(ctx, "cfg_"+lk.Name); err == nil && strings.TrimSpace(v) != "" {
-			return strings.TrimSpace(v)
-		}
-	}
-	if k.Name == "voice_provider" || k.Name == "stage_provider" || k.Name == "ingest_provider" {
+	if name == "voice_provider" || name == "stage_provider" || name == "ingest_provider" {
 		return "livekit" // 默认实现（两线同一 LiveKit 即今天的单线形态）
 	}
 	return k.Default

@@ -24,7 +24,7 @@
 - `rtc.Provider` / `rtc.IngestProvider` 接口保持**中性命名**，不得泄漏任何具体实现（LiveKit 等）的语义。
 - **业务状态的权威在 store（DB），内核只是现场执行器**：禁言/封禁等管制状态先落库、再向内核尽力传播（`ErrNoParticipant` 不算失败）。新内核不需要理解业务状态，只需会对当前参与者执行操作。
 - 配置键按实现命名空间隔离（`livekit_*`、`ember_*`、`bellows_*`），由实现自带 `ConfigKeys()` 声明；换内核不迁移配置。选择器与枚举值见 `api/dyncfg.go`。
-- 自研内核命名：**Ember**（语音，`rtc/ember`，选择器值 `ember`）、**Bellows**（WHIP 推流网关，`rtc/bellows`，选择器值 `bellows`）。改名前的选择器值 `pion` 与配置键 `pion_*` 由 `dyncfg.go` 的兼容映射继续生效，不得删除该映射。
+- 自研内核命名：**Ember**（语音，`rtc/ember`，选择器值 `ember`）、**Bellows**（WHIP 推流网关，`rtc/bellows`，选择器值 `bellows`）。改名前的选择器值 `pion` 与配置键 `pion_*` 只在 v0.3.0 做过兼容映射，v0.3.1 起不再识别：选择器未知值回落 `livekit`，`pion_*` 被忽略回落 `ember_*` 默认值，启动时 `warnLegacyConfig` 打一次告警提示改配置。不要再加回兼容映射。
 - 接口分层：`rtc.Provider` 是语音（房间）内核，`rtc.StageProvider` 内嵌 Provider 代表舞台（视频）内核——舞台槽位只接受 StageProvider，视频专属方法只加在 StageProvider 上；Ember 补齐视频能力后实现 StageProvider 即可上舞台线。进程内 ICE-Lite 内核共用的传输基建（UDP mux / 公网 IP 探测）在 `rtc/lite`，不要在各内核里复制。
 - identity 约定：`{用户名}` 或 `{用户名}-{设备标签/obs}`，归属判断**必须**用 `rtc.MatchesUser`，禁止手写前缀判断。
 - `MuteUserAudio` 契约：禁言 = 禁**全部**媒体发布（音频/摄像头/投屏），不只是音频。

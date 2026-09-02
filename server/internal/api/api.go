@@ -72,6 +72,7 @@ func New(st *store.Store, cfg config.Config, hub *chat.Hub) *API {
 	a.stageKernels = map[string]rtc.StageProvider{"livekit": lk}
 	a.ingestKernels = map[string]rtc.IngestProvider{"livekit": lk, "bellows": pw}
 	a.kernelKeys = append(append(livekitrtc.ConfigKeys(), ember.ConfigKeys()...), bellows.ConfigKeys()...)
+	a.warnLegacyConfig(context.Background())
 	return a
 }
 

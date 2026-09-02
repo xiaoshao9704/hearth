@@ -1,6 +1,6 @@
 # 计划：pionwhip——内嵌 WHIP 直通推流网关（OBS 高效编码的唯一路径）
 
-命名更新（2026-09-02）：本计划中的 pionwhip 已定名 **Bellows**（`rtc/bellows`，选择器值 `bellows`）；语音内核 pionvoice 同期定名 **Ember**（`rtc/ember`）。旧值 `pion`/`pion_*` 由 dyncfg 兼容映射。
+命名更新（2026-09-02）：本计划中的 pionwhip 已定名 **Bellows**（`rtc/bellows`，选择器值 `bellows`）；语音内核 pionvoice 同期定名 **Ember**（`rtc/ember`）。旧值 `pion`/`pion_*` 仅 v0.3.0 做兼容映射，v0.3.1 起回落默认值并在启动日志告警。
 
 状态：P1+P2 核心已实现（2026-09-02）。已完成：WHIP 握手（POST/PATCH/DELETE、201+Location+显式
 Content-Length）、codec 白名单显式校验（opus/h264/h265/av1，VP8 等 400 拒绝）、pion 收流、
