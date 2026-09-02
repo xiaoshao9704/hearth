@@ -107,6 +107,18 @@ func WHIPToken(r *http.Request) (token string, bearer bool) {
 	return token, false
 }
 
+// WHIPGrantIssuer 可选能力：远端 WHIP 网关的通行证签发。接入层在反代前做完入场判定，
+// 把结果签成短时效通行证塞进请求头，网关本地验签即可（与进房凭证同一模型：
+// 接入层签、内核验）。实现该接口且 ProxyUpstream 非空时，/w POST 的判定是
+// definitive（密钥不存在 404、不许推 403、查询出错 503），不再 fail-open。
+type WHIPGrantIssuer interface {
+	// IssueWHIPGrant 为一次 WHIP POST 签发通行证，返回请求头名与值；
+	// offer 是完整请求体（通行证应与其绑定，防重放挪用）。
+	IssueWHIPGrant(ctx context.Context, streamKey, room, username string, offer []byte) (header, value string, err error)
+	// RevokeRemoteSessions 通知远端网关掐断该推流密钥名下的全部会话（尽力）。
+	RevokeRemoteSessions(ctx context.Context, streamKey string) error
+}
+
 // WHIPServer 可选能力：进程内处理 WHIP 推流的 IngestProvider（ProxyUpstream 为空时
 // 接入层把 /w 请求直接交给它；ProxyUpstream 非空则照常反代，实现可据配置在两者间切换）。
 type WHIPServer interface {

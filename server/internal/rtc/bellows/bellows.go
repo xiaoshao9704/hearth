@@ -10,8 +10,8 @@
 //   - 进程内：hearth 自己收流，/w 由接入层直接交给 ServeWHIP；
 //   - 远端：设 bellows_remote_url 后 hearth 不收流，/w 信令反代到远端的 cmd/bellows
 //     进程（通常在 LiveKit 同一局域网），媒体由推流端直达远端，视频不再经过 hearth
-//     所在服务器；远端按 key 回调 hearth 的内部接口反查归属并做入场判定。
-//     OBS 地址默认仍是 hearth 同源 /w（bellows_public_url 可改成直连远端）。
+//     所在服务器。入场判定在 hearth 反代前做完并签成短时效通行证（grant）塞进请求头，
+//     远端只本地验签（见 grant.go），无出站依赖；OBS 必须经 hearth 同源 /w 才有 grant。
 package bellows
 
 import (
@@ -38,12 +38,9 @@ import (
 	"hearth/server/internal/rtc/lite"
 )
 
-// ResolveFunc 的哨兵错误：密钥不存在 → 404；不许推流（封禁/禁言）→ 403；
+// ResolveFunc 的哨兵错误：密钥不存在 → 404；
 // 其余错误视为内部故障 → 503，避免瞬时 DB 抖动被误报成「密钥已重置」。
-var (
-	ErrUnknownKey = errors.New("unknown stream key")
-	ErrForbidden  = errors.New("publish not allowed")
-)
+var ErrUnknownKey = errors.New("unknown stream key")
 
 // ConfigKeys 本实现声明的配置键（命名空间 bellows_*）。端口改动需重启生效。
 func ConfigKeys() []rtc.ConfigKey {
@@ -54,18 +51,17 @@ func ConfigKeys() []rtc.ConfigKey {
 			Label: "WHIP 公网 IP", Hint: "留空 = 启动时 HTTP 自动探测（云主机一般留空即可）"},
 		{Name: "bellows_remote_url", Env: "BELLOWS_REMOTE_URL", Group: "ingress",
 			Label: "远端 Bellows 地址", Hint: "设置后本进程不收流，/w 反代到该地址的 cmd/bellows（如 http://192.168.1.20:8090）；留空 = 进程内收流"},
-		{Name: "bellows_public_url", Env: "BELLOWS_PUBLIC_URL", Group: "ingress",
-			Label: "浏览器可见 WHIP 基地址", Hint: "留空 = 同源推流代理（推荐，OBS 地址不变、经 hearth TLS）；填远端直连地址可绕过 hearth"},
 		{Name: "bellows_shared_secret", Env: "BELLOWS_SHARED_SECRET", Group: "ingress", Secret: true,
-			Label: "远端 Bellows 共享密钥", Hint: "远端进程回调 hearth 反查推流密钥时的凭证，两边填同一值"},
+			Label: "远端 Bellows 共享密钥", Hint: "hearth 签发推流通行证、远端验签用的 HMAC 密钥，两边填同一值"},
 	}
 }
 
-// ResolveFunc 按推流密钥反查归属（房间名 = 频道名，用户名用于 bot identity），由接入层注入。
-// 密钥不存在须返回 ErrUnknownKey，不许推流返回 ErrForbidden；其余错误按内部故障处理。
+// ResolveFunc 按推流密钥反查归属（房间名 = 频道名，用户名用于 bot identity），由接入层注入，
+// 仅进程内形态使用。密钥不存在须返回 ErrUnknownKey；其余错误按内部故障处理。
 type ResolveFunc func(ctx context.Context, streamKey string) (room, username string, err error)
 
-// Gateway 同时实现 rtc.IngestProvider 与 rtc.WHIPServer（进程内处理 /w 请求，不反代）。
+// Gateway 同时实现 rtc.IngestProvider 与 rtc.WHIPServer（进程内处理 /w 请求，不反代）；
+// 远端形态下另实现 rtc.WHIPGrantIssuer（hearth 侧签发通行证、通知撤销远端会话）。
 type Gateway struct {
 	cfg     rtc.ConfigFunc
 	resolve ResolveFunc
@@ -81,6 +77,11 @@ type Gateway struct {
 
 func New(cfg rtc.ConfigFunc, resolve ResolveFunc) *Gateway {
 	return &Gateway{cfg: cfg, resolve: resolve, sessions: map[string]*session{}}
+}
+
+// NewRemote 远端形态（cmd/bellows）：不做归属反查，handlePost 只验 hearth 签发的通行证。
+func NewRemote(cfg rtc.ConfigFunc) *Gateway {
+	return &Gateway{cfg: cfg, sessions: map[string]*session{}}
 }
 
 func randHex(nbytes int) (string, error) {
@@ -100,7 +101,7 @@ func (g *Gateway) remoteURL(ctx context.Context) string {
 	return strings.TrimSuffix(strings.TrimSpace(g.cfg(ctx, "bellows_remote_url")), "/")
 }
 
-// Enabled 进程内形态的前提是能连进 LiveKit 房间；远端形态只需远端地址与回调密钥
+// Enabled 进程内形态的前提是能连进 LiveKit 房间；远端形态只需远端地址与共享密钥
 // （LiveKit 凭证在远端进程手里）。
 func (g *Gateway) Enabled(ctx context.Context) bool {
 	if g.remoteURL(ctx) != "" {
@@ -125,21 +126,36 @@ func (g *Gateway) DeleteEndpoint(_ context.Context, id string) error {
 	return nil
 }
 
-// PublicBase 浏览器可见的推流基地址；留空 = 同源 /w/（进程内直接处理，远端形态经 hearth
-// 反代信令、媒体仍直达远端）。与 livekit 的 ingress_public_url 同语义。
-func (g *Gateway) PublicBase(ctx context.Context) string {
-	return strings.TrimSpace(g.cfg(ctx, "bellows_public_url"))
-}
+// PublicBase 恒为空（同源 /w/）：纯通行证模型下 OBS 必须经 hearth 反代才有 grant，
+// 直连远端的形态不存在。
+func (g *Gateway) PublicBase(context.Context) string { return "" }
 
 // ProxyUpstream 远端形态下 hearth 的 /w 反代到远端 cmd/bellows；进程内为空，接入层直接交给 ServeWHIP。
 func (g *Gateway) ProxyUpstream(ctx context.Context) string { return g.remoteURL(ctx) }
 
 // Handler 独立进程用的 /w 处理器（令牌解析 + ServeWHIP）；进程内形态由接入层做同样的事。
+// DELETE /w/sessions/{key} 是 hearth 通知撤销远端会话的端点（验 revoke 通行证），
+// 只服务于远端形态；会话资源 id 是随机 hex，不会与 "sessions" 前缀冲突。
 func (g *Gateway) Handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/w/sessions/") {
+			g.handleRevoke(w, r, strings.TrimPrefix(r.URL.Path, "/w/sessions/"))
+			return
+		}
 		token, _ := rtc.WHIPToken(r)
 		g.ServeWHIP(w, r, token)
 	})
+}
+
+// handleRevoke 验 revoke 通行证后掐断该推流密钥名下的全部会话；幂等（无会话也 204）。
+func (g *Gateway) handleRevoke(w http.ResponseWriter, r *http.Request, streamKey string) {
+	p, err := verifyGrant(g.cfg(r.Context(), "bellows_shared_secret"), r.Header.Get(GrantHeader))
+	if err != nil || p.Op != "revoke" || p.Key != streamKey {
+		http.Error(w, errInvalidGrant.Error(), http.StatusUnauthorized)
+		return
+	}
+	g.closeSessionsByKey(streamKey)
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // closeSessionsByKey 摘除并关闭该推流密钥名下的所有会话。
@@ -208,18 +224,26 @@ func (g *Gateway) handlePost(w http.ResponseWriter, r *http.Request, streamKey s
 		http.Error(w, "编码不受支持（仅 H264/H265/AV1 视频与 Opus 音频）", http.StatusBadRequest)
 		return
 	}
-	room, username, err := g.resolve(r.Context(), streamKey)
-	if errors.Is(err, ErrUnknownKey) {
-		http.Error(w, "推流密钥无效或已重置", http.StatusNotFound)
-		return
-	}
-	if errors.Is(err, ErrForbidden) {
-		http.Error(w, "你已被禁言或封禁，无法推流", http.StatusForbidden)
-		return
-	}
-	if err != nil {
-		http.Error(w, "推流网关暂时不可用，请稍后再试", http.StatusServiceUnavailable)
-		return
+	// 归属来源二选一：进程内形态反查接入层注入的 resolve；远端形态验 hearth 签发的
+	// 通行证（绑定密钥与 offer 哈希，判定已在 hearth 侧做完，这里不再问任何人）
+	var room, username string
+	if g.resolve != nil {
+		room, username, err = g.resolve(r.Context(), streamKey)
+		if errors.Is(err, ErrUnknownKey) {
+			http.Error(w, "推流密钥无效或已重置", http.StatusNotFound)
+			return
+		}
+		if err != nil {
+			http.Error(w, "推流网关暂时不可用，请稍后再试", http.StatusServiceUnavailable)
+			return
+		}
+	} else {
+		p, verr := verifyGrant(g.cfg(r.Context(), "bellows_shared_secret"), r.Header.Get(GrantHeader))
+		if verr != nil || p.Op != "publish" || p.Key != streamKey || p.Offer != offerHash(offer) {
+			http.Error(w, errInvalidGrant.Error(), http.StatusUnauthorized)
+			return
+		}
+		room, username = p.Room, p.User
 	}
 	api, err := g.ensureAPI(r.Context())
 	if err != nil {

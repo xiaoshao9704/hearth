@@ -154,8 +154,7 @@ bellows:
   entrypoint: ["/app/bellows"]
   network_mode: host
   environment:
-    HEARTH_URL: https://hearth.example.com      # 回调反查推流密钥 + 入场判定
-    BELLOWS_SHARED_SECRET: <随机串>              # 与 hearth 侧同值
+    BELLOWS_SHARED_SECRET: <随机串>              # 与 hearth 侧同值（hearth 签通行证、远端验签）
     LIVEKIT_API_URL: http://127.0.0.1:7880
     LIVEKIT_API_KEY: …
     LIVEKIT_API_SECRET: …
@@ -164,7 +163,7 @@ bellows:
     BELLOWS_PUBLIC_IP: 192.168.1.20              # 向推流端通告的地址；留空 = 本机出口网卡 IP
 ```
 
-hearth 侧「管理后台 → 服务参数」（或 compose 环境变量）：推流入口选 **Bellows**，`远端 Bellows 地址` 填 hearth 能访问到的该机器地址（如 `http://192.168.1.20:8090`），共享密钥填同一值。用户的推流地址**保持 hearth 同源 `/w`**：信令经 hearth 反代到远端（TLS 不变、OBS 地址不变），媒体按通告地址直达远端。想让 OBS 完全绕开 hearth 时再填 `浏览器可见 WHIP 基地址`。外网推流者才需要端口映射/TLS，见 `docs/plan-bellows-upnp.md`。
+hearth 侧「管理后台 → 服务参数」（或 compose 环境变量）：推流入口选 **Bellows**，`远端 Bellows 地址` 填 hearth 能访问到的该机器地址（如 `http://192.168.1.20:8090`），共享密钥填同一值。用户的推流地址**保持 hearth 同源 `/w`**：hearth 在反代前做完入场判定并签发短时效通行证随请求头带给远端，远端本地验签、**不需要访问 hearth**；信令经 hearth 反代（TLS 不变、OBS 地址不变），媒体按通告地址直达远端。外网推流者才需要端口映射/TLS，见 `docs/plan-bellows-upnp.md`。
 
 多容器拆部署仍可用 `deploy/` 的 compose 一键起全家桶：
 

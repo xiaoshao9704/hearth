@@ -5,7 +5,7 @@
 ## 背景
 
 远端 Bellows（`cmd/bellows`）已能跑在 LiveKit 同一局域网的机器上收 OBS 推流。推流者与 Bellows 同一局域网时
-**不需要任何对外端口**：WHIP 信令默认经 hearth 同源反代到 Bellows（`bellows_public_url` 也可直指其内网地址），
+**不需要任何对外端口**：WHIP 信令经 hearth 同源反代到 Bellows（通行证模型下 OBS 只能走这条路），
 `BELLOWS_PUBLIC_IP` 默认取本机出口网卡 IP，媒体在局域网内闭环。只有当有人从外网往该局域网推流时，
 Bellows 所在机器才需要对外可达——本计划解决这一步的自动化。
 

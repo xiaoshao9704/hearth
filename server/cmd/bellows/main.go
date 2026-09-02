@@ -1,10 +1,11 @@
 // Bellows 独立进程：跑在 LiveKit 同一局域网的机器上收 OBS 的 WHIP 推流并直通发进
-// LiveKit，视频不经过 hearth 所在服务器。推流密钥的归属与入场判定回调 hearth 内部接口，
-// 本进程不碰数据库。hearth 侧把 bellows_remote_url 指到这里即可。
+// LiveKit，视频不经过 hearth 所在服务器。无状态、无出站依赖（只连 LiveKit）：
+// 推流密钥的归属与入场判定由 hearth 在反代前做完并签成短时效通行证（grant）随请求头带来，
+// 本进程只本地验签（BELLOWS_SHARED_SECRET 与 hearth 的 bellows_shared_secret 同值）。
+// hearth 侧把 bellows_remote_url 指到这里即可。
 //
 // 环境变量：
 //
-//	HEARTH_URL              必填，hearth 地址（回调 /api/internal/ingest/resolve）
 //	BELLOWS_SHARED_SECRET   必填，与 hearth 的 bellows_shared_secret 相同
 //	LIVEKIT_API_URL / LIVEKIT_API_KEY / LIVEKIT_API_SECRET  必填，与 hearth 同名
 //	BELLOWS_ADDR            WHIP HTTP 监听地址，默认 :8090
@@ -14,16 +15,12 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
-	"fmt"
 	"log"
 	"net"
 	"net/http"
-	"net/url"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 	"time"
 
@@ -31,16 +28,15 @@ import (
 )
 
 func main() {
-	hearth := strings.TrimSuffix(need("HEARTH_URL"), "/")
-	secret := need("BELLOWS_SHARED_SECRET")
 	lk := map[string]string{
-		"livekit_api_url":    need("LIVEKIT_API_URL"),
-		"livekit_api_key":    need("LIVEKIT_API_KEY"),
-		"livekit_api_secret": need("LIVEKIT_API_SECRET"),
-		"bellows_udp_port":   envOr("BELLOWS_UDP_PORT", "47710"),
-		"bellows_public_ip":  envOr("BELLOWS_PUBLIC_IP", localIP()),
+		"bellows_shared_secret": need("BELLOWS_SHARED_SECRET"),
+		"livekit_api_url":       need("LIVEKIT_API_URL"),
+		"livekit_api_key":       need("LIVEKIT_API_KEY"),
+		"livekit_api_secret":    need("LIVEKIT_API_SECRET"),
+		"bellows_udp_port":      envOr("BELLOWS_UDP_PORT", "47710"),
+		"bellows_public_ip":     envOr("BELLOWS_PUBLIC_IP", localIP()),
 	}
-	gw := bellows.New(func(_ context.Context, name string) string { return lk[name] }, resolveVia(hearth, secret))
+	gw := bellows.NewRemote(func(_ context.Context, name string) string { return lk[name] })
 
 	mux := http.NewServeMux()
 	mux.Handle("/w", gw.Handler())
@@ -49,7 +45,7 @@ func main() {
 	srv := &http.Server{Addr: envOr("BELLOWS_ADDR", ":8090"), Handler: mux}
 
 	go func() {
-		log.Printf("bellows 监听于 %s（hearth=%s 通告IP=%s）", srv.Addr, hearth, lk["bellows_public_ip"])
+		log.Printf("bellows 监听于 %s（通告IP=%s）", srv.Addr, lk["bellows_public_ip"])
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Fatalf("监听失败: %v", err)
 		}
@@ -60,38 +56,6 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	srv.Shutdown(ctx)
-}
-
-// resolveVia 回调 hearth 反查推流密钥归属；hearth 在同一接口里完成入场判定（封禁/禁言 → 403）。
-func resolveVia(hearth, secret string) bellows.ResolveFunc {
-	client := &http.Client{Timeout: 10 * time.Second}
-	return func(ctx context.Context, streamKey string) (string, string, error) {
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet,
-			hearth+"/api/internal/ingest/resolve?key="+url.QueryEscape(streamKey), nil)
-		if err != nil {
-			return "", "", err
-		}
-		req.Header.Set("Authorization", "Bearer "+secret)
-		resp, err := client.Do(req)
-		if err != nil {
-			return "", "", err
-		}
-		defer resp.Body.Close()
-		switch resp.StatusCode {
-		case http.StatusOK:
-			var out struct{ Room, Username string }
-			if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-				return "", "", err
-			}
-			return out.Room, out.Username, nil
-		case http.StatusNotFound:
-			return "", "", bellows.ErrUnknownKey
-		case http.StatusForbidden:
-			return "", "", bellows.ErrForbidden
-		default:
-			return "", "", fmt.Errorf("hearth 回调返回 %d", resp.StatusCode)
-		}
-	}
 }
 
 // localIP 本机出口网卡 IP：UDP Dial 不发包，只借路由表选网卡。

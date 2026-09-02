@@ -3,6 +3,9 @@
 package api
 
 import (
+	"bytes"
+	"errors"
+	"io"
 	"log"
 	"net/http"
 	"net/http/httputil"
@@ -12,6 +15,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"hearth/server/internal/rtc"
+	"hearth/server/internal/store"
 )
 
 // RegisterProxies 注册内置反代路由（chi 的 "/lk/*" 通配匹配子树，比静态托管的 "/*" 更具体，优先命中）。
@@ -41,7 +45,14 @@ func (a *API) RegisterProxies(r chi.Router) {
 			if bearer {
 				req.URL.Path = "/w" // bearer 模式端点规范化为精确 /w
 			}
-			if !a.canPublishByStreamKey(req.Context(), key) {
+			// 远端 Bellows（实现了通行证签发）：判定在反代前做完并签成 grant 带给远端，
+			// definitive（404/403/503），不再 fail-open；其他上游保持现有 fail-open 拦截
+			ip := a.ingestProvider(req.Context())
+			if gi, ok := ip.(rtc.WHIPGrantIssuer); ok && ip.ProxyUpstream(req.Context()) != "" {
+				if !a.admitWhipRemote(w, req, gi, key) {
+					return
+				}
+			} else if !a.canPublishByStreamKey(req.Context(), key) {
 				writeErr(w, http.StatusForbidden, "你已被禁言，无法推流")
 				return
 			}
@@ -65,6 +76,50 @@ func (a *API) RegisterProxies(r chi.Router) {
 	})
 	r.Handle("/w", whipHandler)
 	r.Handle("/w/*", whipHandler)
+}
+
+// admitWhipRemote 远端 Bellows 的 POST 处理：读取并回填请求体（保持显式 ContentLength，
+// 避免反代变 chunked），definitive 入场判定后签发通行证随反代带给远端。
+// 通行证模型下远端不再回调，这里就是最终裁决：密钥不存在 404、不许推 403、查询出错 503。
+// 返回 false 时响应已写好。
+func (a *API) admitWhipRemote(w http.ResponseWriter, req *http.Request, gi rtc.WHIPGrantIssuer, key string) bool {
+	offer, err := io.ReadAll(http.MaxBytesReader(w, req.Body, 256<<10))
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "读取 SDP offer 失败")
+		return false
+	}
+	req.Body = io.NopCloser(bytes.NewReader(offer))
+	req.ContentLength = int64(len(offer))
+	c, u, err := a.ingressOwner(req.Context(), key)
+	if errors.Is(err, store.ErrNotFound) {
+		writeErr(w, http.StatusNotFound, "推流密钥无效或已重置")
+		return false
+	}
+	if err != nil {
+		writeErr(w, http.StatusServiceUnavailable, "推流网关暂时不可用，请稍后再试")
+		return false
+	}
+	adm, ok, reason, err := a.admitUser(req.Context(), c, u)
+	if err != nil {
+		writeErr(w, http.StatusServiceUnavailable, "推流网关暂时不可用，请稍后再试")
+		return false
+	}
+	if !ok {
+		writeErr(w, http.StatusForbidden, reason)
+		return false
+	}
+	if !adm.CanPublish {
+		writeErr(w, http.StatusForbidden, "你已被禁言，无法推流")
+		return false
+	}
+	h, v, err := gi.IssueWHIPGrant(req.Context(), key, c.Name, u.Username, offer)
+	if err != nil {
+		log.Printf("签发推流通行证失败: %v", err)
+		writeErr(w, http.StatusInternalServerError, "内部错误")
+		return false
+	}
+	req.Header.Set(h, v)
+	return true
 }
 
 // dynProxy 目标逐请求解析的反代；未配置返回 503。

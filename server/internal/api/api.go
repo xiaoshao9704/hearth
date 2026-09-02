@@ -85,7 +85,6 @@ func (a *API) Router() *chi.Mux {
 	r.Post("/api/login", a.login)
 	r.Get("/api/invites/{code}", a.inviteInfo)
 	r.Get("/api/voice", a.voiceWS)
-	r.Get("/api/internal/ingest/resolve", a.ingestResolve) // 远端 bellows 回调，共享密钥鉴权
 
 	// 需登录
 	r.Group(func(r chi.Router) {
@@ -603,6 +602,8 @@ func (a *API) getIngress(w http.ResponseWriter, r *http.Request) {
 
 // deleteOldEndpoint 尽力删除记录归属内核侧的旧端点：删除必须发给创建它的内核
 // （比如 livekit 期间建的 ingress 切到 bellows 后仍要在 LiveKit 侧删掉，否则旧 key 一直有效）。
+// 归属内核是远端网关（WHIPGrantIssuer）时再通知其掐断该 key 的远端会话——
+// 通行证是短时效入场券不管会话生命周期，重置密钥要能把正在推的旧会话掐掉。
 func (a *API) deleteOldEndpoint(r *http.Request, rec *store.Ingress) {
 	ik := a.ingestKernels[rec.Provider]
 	if ik == nil {
@@ -611,6 +612,13 @@ func (a *API) deleteOldEndpoint(r *http.Request, rec *store.Ingress) {
 	if derr := ik.DeleteEndpoint(r.Context(), rec.IngressID); derr != nil {
 		// 内核侧删不掉不阻塞重建（记录可能已是残缺的）
 		log.Printf("删除旧 ingress %s（内核 %s）失败: %v", rec.IngressID, rec.Provider, derr)
+	}
+	if gi, ok := ik.(rtc.WHIPGrantIssuer); ok {
+		ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+		defer cancel()
+		if rerr := gi.RevokeRemoteSessions(ctx, rec.StreamKey); rerr != nil {
+			log.Printf("撤销远端会话（key 内核 %s）失败: %v", rec.Provider, rerr)
+		}
 	}
 }
 
