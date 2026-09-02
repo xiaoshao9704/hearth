@@ -15,6 +15,7 @@ export interface VideoStats {
 // 参与者快照（identity 粒度 = 账号的一台设备；username 用于按账号聚合展示）
 export interface EPart {
   identity: string;
+  uid: number; // 归属用户 id（内核元数据透传）：管理操作的目标，前端不解析 identity
   username: string;
   display: string;
   isLocal: boolean;

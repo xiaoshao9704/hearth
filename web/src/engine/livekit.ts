@@ -34,9 +34,9 @@ export class LiveKitEngine implements AVEngine {
 
   private toPart(p: Participant): EPart {
     const micPub = p.getTrackPublication(Track.Source.Microphone);
-    // 推流参与者的元数据是 hearth 下发的 JSON（username/kind=ingest/tag）；
-    // 识别与归属都走它，不再解析 identity 后缀（用户名允许含 -，剥后缀取用户名是错的）
-    let meta: { username?: string; kind?: string; tag?: string } | null = null;
+    // 元数据是 hearth 下发的 rtc.Meta JSON（uid/username/kind/tag），进房令牌与推流发布
+    // 两条路径都写。身份与展示全走它——identity 的主体是 user_id，本就不含用户名
+    let meta: { uid?: number; username?: string; kind?: string; tag?: string } | null = null;
     if (p.metadata) {
       try {
         meta = JSON.parse(p.metadata);
@@ -47,14 +47,15 @@ export class LiveKitEngine implements AVEngine {
     const ingest = meta?.kind === 'ingest';
     return {
       identity: p.identity,
-      username: meta?.username || p.name || p.identity.split('-')[0],
+      uid: meta?.uid ?? 0,
+      username: meta?.username ?? p.name ?? '',
       display: p.name || p.identity,
       isLocal: p.identity === this.room.localParticipant.identity,
       micOn: !!micPub && !micPub.isMuted,
       canPublish: p.permissions?.canPublish !== false, // 服务端禁言会收走发布权限
       sharing: !!p.getTrackPublication(Track.Source.ScreenShare),
       ingest,
-      tag: ingest ? (meta?.tag ?? '') : '',
+      tag: meta?.tag ?? '', // 浏览器参与者也有设备标签，展示设备名要用它
     };
   }
 

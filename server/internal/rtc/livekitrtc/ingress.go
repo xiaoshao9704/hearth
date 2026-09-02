@@ -55,9 +55,9 @@ func (i *Ingress) Enabled(ctx context.Context) bool {
 // （DeleteIngestEndpointsByToken + DeleteEndpoint），上游会话随端点删除自然终止。
 func (i *Ingress) RevokeToken(context.Context, string) error { return nil }
 
-// EnsureEndpoint 创建「令牌 → 实例凭证」的上游端点（identity={用户名}-{标签}），
+// EnsureEndpoint 创建「令牌 → 实例凭证」的上游端点（identity 见 rtc.Identity），
 // 返回 ingress_id 与 LiveKit 签发的 stream key；房间由 BindRoom 随后写入。
-func (i *Ingress) EnsureEndpoint(ctx context.Context, identity, name string, meta map[string]string) (id, upstreamKey string, err error) {
+func (i *Ingress) EnsureEndpoint(ctx context.Context, identity, name string, meta rtc.Meta) (id, upstreamKey string, err error) {
 	return i.client(ctx).Create(ctx, identity, name, meta)
 }
 

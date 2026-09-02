@@ -12,21 +12,21 @@ interface SigMsg {
   sdp?: string;
   mids?: Record<string, string>;
   identity?: string;
-  // 名册条目：username/kind/tag 标识推流参与者（kind=ingest），缺省时回落 name/identity 推断
-  peers?: { identity: string; name: string; micOn: boolean; muted?: boolean; username?: string; kind?: string; tag?: string }[];
+  self?: { identity: string; uid: number; name: string; micOn: boolean; muted?: boolean; username?: string; kind?: string; tag?: string }; // welcome 附带：自己的名册条目
+  // 名册条目：uid 是管理操作的目标，username/kind/tag 用于展示与识别推流参与者
+  peers?: { identity: string; uid: number; name: string; micOn: boolean; muted?: boolean; username?: string; kind?: string; tag?: string }[];
   on?: boolean;
   speakers?: string[];
   reason?: string;
 }
-
-const usernameOf = (identity: string, name: string) => name || identity.split('-')[0];
 
 // 名册条目（身份之外的展示/管理信息）
 interface RosterEntry {
   name: string;
   micOn: boolean;
   muted: boolean;
-  username: string; // 归属用户名（推流参与者由服务端给出，其余按 name/identity 推断）
+  uid: number; // 归属用户 id（服务端给出；管理操作的目标）
+  username: string; // 归属用户名（纯展示）
   ingest: boolean;
   tag: string;
 }
@@ -38,6 +38,7 @@ export class EmberEngine implements AVEngine {
   private micTx: RTCRtpTransceiver | null = null;
   private capture: MicCapture | null = null;
   private selfId = '';
+  private self: RosterEntry | null = null; // 自己的名册条目（welcome 给出）
   private micOn = false;
   private gagged = false; // 服务端禁言：welcome.on 带入，gag 消息实时更新
   private roster = new Map<string, RosterEntry>();
@@ -78,19 +79,21 @@ export class EmberEngine implements AVEngine {
     const out: EPart[] = [
       {
         identity: this.selfId,
-        username: usernameOf(this.selfId, ''),
-        display: usernameOf(this.selfId, ''),
+        uid: this.self?.uid ?? 0,
+        username: this.self?.username ?? '',
+        display: this.self?.name ?? this.selfId,
         isLocal: true,
         micOn: this.micOn,
         canPublish: !this.gagged,
         sharing: false,
         ingest: false,
-        tag: '',
+        tag: this.self?.tag ?? '',
       },
     ];
     this.roster.forEach((v, identity) => {
       out.push({
         identity,
+        uid: v.uid,
         username: v.username,
         display: v.name || identity,
         isLocal: false,
@@ -104,17 +107,16 @@ export class EmberEngine implements AVEngine {
     return out;
   }
 
-  // 名册条目落库：推流参与者（kind=ingest）的 username/tag 由服务端给出，
-  // 缺字段的旧服务端按 name/identity 推断（普通参与者两条路殊途同归）
+  // 名册条目落库：uid/username/kind/tag 全由服务端给出，前端不做任何 identity 解析
   private static peerEntry(p: NonNullable<SigMsg['peers']>[number]): RosterEntry {
-    const ingest = p.kind === 'ingest';
     return {
       name: p.name,
       micOn: p.micOn,
       muted: p.muted === true,
-      username: p.username || usernameOf(p.identity, p.name),
-      ingest,
-      tag: ingest ? (p.tag ?? '') : '',
+      uid: p.uid,
+      username: p.username ?? p.name,
+      ingest: p.kind === 'ingest',
+      tag: p.tag ?? '',
     };
   }
 
@@ -172,6 +174,7 @@ export class EmberEngine implements AVEngine {
           switch (m.type) {
             case 'welcome': {
               this.selfId = m.identity ?? '';
+              this.self = m.self ? EmberEngine.peerEntry(m.self) : null;
               this.gagged = m.on === true; // 持久禁言：入会即被告知
               (m.peers ?? []).forEach((p) => this.roster.set(p.identity, EmberEngine.peerEntry(p)));
               await this.setupPC();

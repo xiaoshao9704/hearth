@@ -87,9 +87,9 @@ func (c *Client) ListParticipants(ctx context.Context, room string) ([]Participa
 	return out, nil
 }
 
-// RemoveParticipantsOf 把 room 里 identity 属于 username 的参与者全部移除
-// （identity 规则：{用户名}-{设备标签} 或 {用户名}-obs），返回移除数量。
-func (c *Client) RemoveParticipantsOf(ctx context.Context, room, username string) (int, error) {
+// RemoveParticipantsOf 把 room 里 identity 属于该用户的参与者移除（identity 规则见 rtc.Identity），
+// device 非空时只移除该 identity（归属约束仍生效），返回移除数量。
+func (c *Client) RemoveParticipantsOf(ctx context.Context, room string, userID int64, device string) (int, error) {
 	ctx = withRoom(ctx, room)
 	resp, err := c.api.ListParticipants(ctx, &livekit.ListParticipantsRequest{Room: room})
 	if err != nil {
@@ -97,7 +97,7 @@ func (c *Client) RemoveParticipantsOf(ctx context.Context, room, username string
 	}
 	n := 0
 	for _, p := range resp.Participants {
-		if rtc.MatchesUser(p.Identity, username) {
+		if rtc.MatchesUser(p.Identity, userID) && (device == "" || p.Identity == device) {
 			if _, err := c.api.RemoveParticipant(ctx, &livekit.RoomParticipantIdentity{
 				Room:     room,
 				Identity: p.Identity,
@@ -110,7 +110,7 @@ func (c *Client) RemoveParticipantsOf(ctx context.Context, room, username string
 	return n, nil
 }
 
-// MuteUserAudio 服务端禁言/解禁 room 里 identity 属于 username 的参与者
+// MuteUserAudio 服务端禁言/解禁 room 里 identity 属于该用户的参与者
 // （identity 规则同 RemoveParticipantsOf，对全部设备生效）。
 // 契约见 rtc.Provider：禁言收走全部媒体发布（CanPublish=false 覆盖音频/摄像头/投屏）。
 // 通过 UpdateParticipant 改写发布权限实现（CanPublish=false）：LiveKit 服务端会下架
@@ -118,7 +118,7 @@ func (c *Client) RemoveParticipantsOf(ctx context.Context, room, username string
 // 权限是整体替换语义（见 auth.VideoGrant.UpdateFromPermission），故从参与者当前权限
 // （ParticipantInfo.Permission）出发只翻转 CanPublish，避免误清 CanSubscribe/CanPublishData 等。
 // 该用户没有任何参与者在房间时返回 rtc.ErrNoParticipant。
-func (c *Client) MuteUserAudio(ctx context.Context, room, username string, muted bool) error {
+func (c *Client) MuteUserAudio(ctx context.Context, room string, userID int64, muted bool) error {
 	ctx = withRoom(ctx, room)
 	resp, err := c.api.ListParticipants(ctx, &livekit.ListParticipantsRequest{Room: room})
 	if err != nil {
@@ -126,7 +126,7 @@ func (c *Client) MuteUserAudio(ctx context.Context, room, username string, muted
 	}
 	found := false
 	for _, p := range resp.Participants {
-		if !rtc.MatchesUser(p.Identity, username) {
+		if !rtc.MatchesUser(p.Identity, userID) {
 			continue
 		}
 		found = true

@@ -301,7 +301,8 @@ type migrationStep struct {
 // runMigrations 版本游标迁移入口：末尾照常重建注册表。
 // 以后所有跨版本兼容处理都作为新版本步挂在这里。
 func (a *API) runMigrations(ctx context.Context) {
-	a.runMigrationSteps(ctx, []migrationStep{{1, a.migrateProviders}, {2, a.importSelectorEnv}, {3, a.migrateIngestTokens}})
+	a.runMigrationSteps(ctx, []migrationStep{{1, a.migrateProviders}, {2, a.importSelectorEnv},
+		{3, a.migrateIngestTokens}, {4, a.migrateEndpointIdentity}})
 	a.reloadProviders(ctx)
 }
 
@@ -462,4 +463,31 @@ func (a *API) migrateIngestTokens(ctx context.Context) error {
 		}
 	}
 	return a.st.DropIngresses(ctx)
+}
+
+// migrateEndpointIdentity v4：identity 主体由用户名改为 user_id（rtc.Identity），
+// 存量上游端点里固化的 identity/name/metadata 全部过期——逐实例尽力 DeleteEndpoint
+// 后清空 ingest_endpoints，下次推流按新 identity 惰性重建。
+// 幂等：表已空时两步都是空操作。
+func (a *API) migrateEndpointIdentity(ctx context.Context) error {
+	// 必须先重建注册表：runMigrationSteps 跑在 New() 的 reloadProviders 之前，
+	// 此刻注册表里只有内建实例，而持有上游端点的 livekit-ingress 是 env/DB 注册的——
+	// 不重建就每条都取不到实例，一次 DeleteEndpoint 也不发，端点连同有效 stream key
+	// 全部残留在上游且此后再也删不到。v1 建的 provider 行也要靠这次重建才可见。
+	a.reloadProviders(ctx)
+	eps, err := a.st.AllIngestEndpoints(ctx)
+	if err != nil {
+		return err
+	}
+	for _, ep := range eps {
+		inst := a.instance(ep.Alias)
+		if inst == nil || inst.Ingest == nil {
+			continue // 实例已注销，内核侧删除无从下手
+		}
+		if derr := inst.Ingest.DeleteEndpoint(ctx, ep.IngressID); derr != nil {
+			// 删不掉不阻塞迁移：记录清掉后下次推流会重建，残留端点由管理员在上游自行清理
+			log.Printf("迁移 v4 删除旧 ingress 端点 %s（实例 %s）失败: %v", ep.IngressID, ep.Alias, derr)
+		}
+	}
+	return a.st.DeleteAllIngestEndpoints(ctx)
 }

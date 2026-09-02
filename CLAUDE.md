@@ -30,13 +30,14 @@
 - 接口分层：`rtc.Provider` 是语音（房间）内核，`rtc.StageProvider` 内嵌 Provider 代表舞台（视频）内核——舞台槽位只接受 StageProvider，视频专属方法只加在 StageProvider 上；Ember 补齐视频能力后实现 StageProvider 即可上舞台线。进程内 ICE-Lite 内核共用的传输基建在 `rtc/lite`，不要在各内核里复制：`lite.Transport` 持有 UDP mux 与 MediaEngine（只建一次），`webrtc.API` 按 PeerConnection 用 `lite.Announcer` 的当前宣告规则组装——探测经 `/healthz?refresh=1`（仅回环来源）或容器 healthcheck 子命令（`hearth|bellows healthcheck`）周期刷新，公网 IP 变化不重启、不动在途会话。健康检查只表示进程活着：探测失败/映射为空不得返回非 200（防 autoheal 误杀）。
 - 推流出口走 `rtc.Publisher` 能力接口（「把轨发布进舞台内核」的客户端能力，挂在舞台实例对象上）：Bellows 对舞台内核中立，进程内形态每次发布时取**当前舞台线实例**的 Publisher（注册表切换即生效，取不到则 `Enabled=false`），远端 `cmd/bellows` 编译进全部实现、由 `BELLOWS_SINK`（默认 `livekit`）选用。PLI 桥接约定：`TrackRemote` 不暴露所属连接，「观众关键帧请求 → 推流端 PLI」的回执无法走接口参数，由 bellows 在调 `PublishRemote` 前用 `rtc.WithKeyframeRelay` 挂到 ctx、Publisher 经 `rtc.KeyframeRelay` 消费（取不到则丢弃关键帧请求）。**回执一律走 ctx**：`Publisher` 接口只描述「发布一条轨」，容纳不下会话级事件。同一机制的第二条是 `rtc.WithPublishLost`/`rtc.PublishLost`——Publisher 与舞台内核断连后**必须**回执给 bellows 拆掉推流会话，让推流端重推：已建立的会话不会再产生新轨去触发重连，只摘连接不拆会话的话轨会一直写进死连接，表现为推流端显示正常而观众永久黑屏。
 - `rtc.IngestProvider` 的端点方法是**按发布身份（identity, 标签）而非（用户, 房间）**的语义：`EnsureEndpoint`/`BindRoom`/`DeleteEndpoint` 管理「用户令牌 → 实例凭证」的上游映射（livekit-ingress：反代前 `BindRoom` 写房间、改写 Bearer 为上游 stream key）；Bellows 的实例凭证就是通行证，三个方法空实现。令牌重置/改标签时删除该令牌名下全部端点，下次推流重建。
-- identity 约定：浏览器端 `{用户名}` 或 `{用户名}-{设备标签}`（多设备同账号），推流端 `{用户名}-{标签}`——标签是推流令牌的可改属性（默认 `obs`），由 hearth 组好经通行证/端点下发，Bellows 与内核只透传。「是否推流设备」走参与者元数据 `kind=ingest`（元数据至少含 `username`、`kind`、`tag`），不解析 identity 后缀。归属判断**必须**用 `rtc.MatchesUser`，禁止手写前缀判断。
+- **user_id 是唯一的身份键，username 只做展示/登录/注册**。identity 由 `rtc.Identity(userID, tag)` 组成 `u{user_id}` 或 `u{user_id}-{标签}`（浏览器标签 = 设备标签，推流标签 = 令牌的可改属性，默认 `obs`），归属判断**必须**用 `rtc.MatchesUser(identity, userID)`，禁止手写主体解析。用户名绝不进入判定路径：它可改、改后旧名即释放、且字符集含 `-`——拿它当键会在改名后让归属错位，也会让互为前缀的两个用户名彼此误伤（禁言一个掐掉另一个的推流）。管理接口（踢出/封禁/禁言/移出白名单）一律收 `user_id`；例外只有「加白名单」，那是房主手输名字的一次 `名字 → 用户` 查找（与登录同类），查到后立即换成 user_id。
+- 展示信息统一走参与者元数据 `rtc.Meta{uid,username,kind,tag}`：进房令牌（`lktoken.Sign` 的 `SetMetadata`）与推流发布（`publisher.go`）两条路径都写，ember 经 `welcome.self` / `roster` 下发。前端据此显示名字、按 uid 聚合设备、识别推流设备（`kind=ingest`），**不解析 identity、不按用户名反查**。
 - `MuteUserAudio` 契约：禁言 = 禁**全部**媒体发布（音频/摄像头/投屏），不只是音频。
 - 凭证是短时效入场券（10 分钟 TTL），不是会话生命周期授权；断线重连必须回到签发路径重新判定。
 
 ### 入场判定（server/internal/api/admission.go）
 
-一条规则，三个执行点：`admitUser` 是唯一的"谁能进房、能否发布"决策函数，`joinToken`（凭证签发）、`/providers/ember/voice`（ember 验票入会）、`/providers/{alias}/w` POST（WHIP 推流拦截，统一走 `admitIngest`：令牌反查用户 + URL 取频道，进程内 bellows / 远端 bellows / livekit-ingress 三条路径共用，definitive 404/403/503 无 fail-open）都调它。远端 `cmd/bellows` 进程没有数据库也不回调：hearth 在反代前做完判定，把结果签成短时效通行证（grant）塞进请求头，远端只本地验签（与 LiveKit join token 同一模型）。新增入口或新增入场约束时**只改这里**，不得在别处散落 `CanJoin`/`IsGagged` 组合。ember 线走一次性入场票（60s、取出即删、防挪用），不做二次判定。
+一条规则，三个执行点：`admitUser` 是唯一的"谁能进房、能否发布"决策函数（返回 `UID`/`Username`，identity 由调用方经 `rtc.Identity` 组），`joinToken`（凭证签发）、`/providers/ember/voice`（ember 验票入会）、`/providers/{alias}/w` POST（WHIP 推流拦截，统一走 `admitIngest`：令牌反查用户 + URL 取频道，进程内 bellows / 远端 bellows / livekit-ingress 三条路径共用，definitive 404/403/503 无 fail-open）都调它。远端 `cmd/bellows` 进程没有数据库也不回调：hearth 在反代前做完判定，把结果签成短时效通行证（grant）塞进请求头，远端只本地验签（与 LiveKit join token 同一模型）。新增入口或新增入场约束时**只改这里**，不得在别处散落 `CanJoin`/`IsGagged` 组合。ember 线走一次性入场票（60s、取出即删、防挪用），不做二次判定。
 
 ### 动态配置（server/internal/api/dyncfg.go）
 

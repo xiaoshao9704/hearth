@@ -42,7 +42,7 @@ func seedIngestUser(t *testing.T, a *API, username, channel string) (*store.User
 	return u, it
 }
 
-// admitIngest 全分支：令牌 404 / 频道 404 / 封禁 403 / 禁言 403 / 正常（identity={用户名}-{标签}，name=用户名）。
+// admitIngest 全分支：令牌 404 / 频道 404 / 封禁 403 / 禁言 403 / 正常（identity=u{id}-{标签}，meta 带 uid/用户名）。
 func TestAdmitIngestBranches(t *testing.T) {
 	a := testAPI(t)
 	ctx := context.Background()
@@ -78,7 +78,8 @@ func TestAdmitIngestBranches(t *testing.T) {
 	}
 	a.st.Ungag(ctx, 1, u.ID)
 	code, adm, ok := call("chan1", it.Token)
-	if !ok || adm.Room != "chan1" || adm.Identity != "alice-obs" || adm.Name != "alice" || adm.Tag != "obs" {
+	if !ok || adm.Room != "chan1" || adm.Identity != rtc.Identity(u.ID, "obs") ||
+		adm.Meta.UID != u.ID || adm.Meta.Username != "alice" || adm.Meta.Kind != "ingest" || adm.Meta.Tag != "obs" {
 		t.Fatalf("正常推流判定不符: code=%d ok=%v adm=%+v", code, ok, adm)
 	}
 }
@@ -158,19 +159,19 @@ type fakeStagePublisher struct {
 }
 
 func (f *fakeStagePublisher) Name() string { return "fake-stage" }
-func (f *fakeStagePublisher) JoinCredentials(context.Context, string, string, string, bool) (rtc.Credentials, error) {
+func (f *fakeStagePublisher) JoinCredentials(context.Context, string, rtc.Meta, bool) (rtc.Credentials, error) {
 	return rtc.Credentials{}, nil
 }
 func (f *fakeStagePublisher) RoomCounts(context.Context) (map[string]int, error) { return nil, nil }
 func (f *fakeStagePublisher) ListParticipants(context.Context, string) ([]rtc.Participant, error) {
 	return nil, nil
 }
-func (f *fakeStagePublisher) RemoveParticipantsOf(context.Context, string, string) (int, error) {
+func (f *fakeStagePublisher) RemoveParticipantsOf(context.Context, string, int64, string) (int, error) {
 	return 0, nil
 }
-func (f *fakeStagePublisher) MuteUserAudio(context.Context, string, string, bool) error { return nil }
-func (f *fakeStagePublisher) SignalProxyUpstream(context.Context) string                { return "" }
-func (f *fakeStagePublisher) PublishRemote(_ context.Context, _, identity, _ string, _ map[string]string, _ *webrtc.TrackRemote) (func(), error) {
+func (f *fakeStagePublisher) MuteUserAudio(context.Context, string, int64, bool) error { return nil }
+func (f *fakeStagePublisher) SignalProxyUpstream(context.Context) string               { return "" }
+func (f *fakeStagePublisher) PublishRemote(_ context.Context, _, identity, _ string, _ rtc.Meta, _ *webrtc.TrackRemote) (func(), error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls = append(f.calls, identity)
@@ -374,11 +375,12 @@ func TestWhipLivekitIngress(t *testing.T) {
 	if loc := first.Header().Get("Location"); loc != "/providers/ing1/w/sessions/upstream-rid" {
 		t.Fatalf("Location 应改写为同源代理路径，实际 %q", loc)
 	}
-	// 控制面：CreateIngress（identity=alice-obs，name=用户名）+ UpdateIngress 换房到 chan1
+	// 控制面：CreateIngress（identity=u{id}-obs，name=用户名）+ UpdateIngress 换房到 chan1
 	if len(*calls) != 2 || (*calls)[0].op != "create" || (*calls)[1].op != "update" {
 		t.Fatalf("首推应 create+update: %+v", *calls)
 	}
-	if (*calls)[0].body["participant_identity"] != "alice-obs" || (*calls)[0].body["participant_name"] != "alice" {
+	if (*calls)[0].body["participant_identity"] != rtc.Identity(u.ID, "obs") ||
+		(*calls)[0].body["participant_name"] != "alice" {
 		t.Fatalf("CreateIngress 身份不符: %+v", (*calls)[0].body)
 	}
 	if (*calls)[1].body["room_name"] != "chan1" {
@@ -471,8 +473,8 @@ func TestMigrateIngestTokensV3(t *testing.T) {
 	if legacy, err := s.LegacyIngressTokens(ctx); err != nil || len(legacy) != 0 {
 		t.Fatalf("ingresses 表应已 DROP: %v %v", legacy, err)
 	}
-	if v, _ := s.MigrationVersion(ctx); v != 3 {
-		t.Fatalf("游标应为 3，实际 %d", v)
+	if v, _ := s.MigrationVersion(ctx); v != 4 {
+		t.Fatalf("游标应为 4，实际 %d", v)
 	}
 	// 幂等：重跑不覆盖用户后续改动（改标签后重跑，令牌与标签都保持）
 	if err := s.UpdateIngestTokenTag(ctx, u1.ID, "cam"); err != nil {
@@ -490,8 +492,8 @@ func TestMigrateV3EmptyDB(t *testing.T) {
 	maskProviderEnv(t)
 	a := testAPI(t)
 	ctx := context.Background()
-	if v, _ := a.st.MigrationVersion(ctx); v != 3 {
-		t.Fatalf("空库游标应为 3，实际 %d", v)
+	if v, _ := a.st.MigrationVersion(ctx); v != 4 {
+		t.Fatalf("空库游标应为 4，实际 %d", v)
 	}
 	u, err := a.st.CreateUser(ctx, "alice", "x")
 	if err != nil {
@@ -520,8 +522,9 @@ func TestWhipNoIngestCap(t *testing.T) {
 
 // ---- 改名/并发/可用性回归 ----
 
-// 改用户名必须让上游端点失效重建：端点的 identity/name/metadata 在建端点时按用户名固化，
-// 复用旧端点会让推流继续以旧用户名进房（房主对新名的管制全部落空）。
+// 改用户名必须让上游端点失效重建：端点的 name/metadata 在建端点时固化，复用旧端点会让
+// 推流顶着旧用户名显示。identity 换成 u{id} 后归属本身不再受改名影响（管制照常命中），
+// 这里保的是展示信息的一致性。
 func TestRenameTearsDownIngestEndpoint(t *testing.T) {
 	maskProviderEnv(t)
 	a := testAPI(t)
@@ -547,8 +550,9 @@ func TestRenameTearsDownIngestEndpoint(t *testing.T) {
 	if rec := post("chan1", it.Token); rec.Code != 201 {
 		t.Fatalf("首推应 201，实际 %d", rec.Code)
 	}
-	if (*calls)[0].body["participant_identity"] != "alice-obs" {
-		t.Fatalf("首推 identity 应为 alice-obs: %+v", (*calls)[0].body)
+	if (*calls)[0].body["participant_identity"] != rtc.Identity(u.ID, "obs") ||
+		(*calls)[0].body["participant_name"] != "alice" {
+		t.Fatalf("首推身份不符: %+v", (*calls)[0].body)
 	}
 
 	// 改名 → 端点应被删除（DeleteIngress）且记录清空
@@ -567,9 +571,10 @@ func TestRenameTearsDownIngestEndpoint(t *testing.T) {
 		t.Fatalf("改名后同一令牌应仍可推流，实际 %d", rec.Code)
 	}
 	created := (*calls)[3]
-	if created.op != "create" || created.body["participant_identity"] != "bob-obs" ||
+	// identity 只认 user_id：改名前后不变（归属稳定）；展示名与元数据按新用户名重建
+	if created.op != "create" || created.body["participant_identity"] != rtc.Identity(u.ID, "obs") ||
 		created.body["participant_name"] != "bob" {
-		t.Fatalf("重建端点应用新用户名: %+v", created.body)
+		t.Fatalf("重建端点应保持 identity、换新展示名: %+v", created.body)
 	}
 }
 
@@ -656,5 +661,164 @@ func TestIngestTokenReportsEnabled(t *testing.T) {
 	a.st.SetSetting(ctx, "cfg_stage_provider", "fakestage")
 	if got := get()["enabled"]; got != true {
 		t.Fatalf("发布出口可用时 enabled 应为 true，实际 %v", got)
+	}
+}
+
+// 迁移 v4：identity 主体由用户名改成 user_id 后，存量上游端点里固化的身份全部过期——
+// 逐实例 DeleteEndpoint 后清空 ingest_endpoints，下次推流按新 identity 重建。
+func TestMigrateEndpointIdentityV4(t *testing.T) {
+	maskProviderEnv(t)
+	a := testAPI(t)
+	ctx := context.Background()
+	_, it := seedIngestUser(t, a, "alice", "chan1")
+	twirpURL, whipURL, calls, _ := newFakeLivekit(t)
+	a.st.CreateProvider(ctx, &store.ProviderRecord{Alias: "ing1", Type: TypeLivekitIngress, Params: map[string]string{
+		"livekit_api_url": twirpURL, "livekit_api_key": "k", "livekit_api_secret": "s",
+		"ingress_upstream_url": whipURL}})
+	a.reloadProviders(ctx)
+
+	// 造一条「旧 identity」的存量端点
+	if err := a.st.UpsertIngestEndpoint(ctx, &store.IngestEndpoint{
+		TokenID: it.ID, Alias: "ing1", IngressID: "old-in", UpstreamKey: "old-sk", BoundRoom: "chan1"}); err != nil {
+		t.Fatalf("造端点失败: %v", err)
+	}
+	// 归属实例已注销的端点：内核侧删不了，但记录同样要清（不能挡住迁移）
+	if err := a.st.UpsertIngestEndpoint(ctx, &store.IngestEndpoint{
+		TokenID: it.ID, Alias: "gone", IngressID: "orphan", UpstreamKey: "k2"}); err != nil {
+		t.Fatalf("造孤儿端点失败: %v", err)
+	}
+
+	a.st.SetMigrationVersion(ctx, 3) // 回到 v4 之前
+	a.runMigrations(ctx)
+
+	if v, _ := a.st.MigrationVersion(ctx); v != 4 {
+		t.Fatalf("游标应推进到 4，实际 %d", v)
+	}
+	deleted := 0
+	for _, c := range *calls {
+		if c.op == "delete" && c.body["ingress_id"] == "old-in" {
+			deleted++
+		}
+	}
+	if deleted != 1 {
+		t.Fatalf("应对在册实例的旧端点调一次 DeleteIngress: %+v", *calls)
+	}
+	for _, alias := range []string{"ing1", "gone"} {
+		if ep, err := a.st.IngestEndpoint(ctx, it.ID, alias); !errors.Is(err, store.ErrNotFound) {
+			t.Fatalf("端点 %s 应已清空: %+v %v", alias, ep, err)
+		}
+	}
+	// 幂等：空表重跑不报错、不再发删除
+	before := len(*calls)
+	a.st.SetMigrationVersion(ctx, 3)
+	a.runMigrations(ctx)
+	if len(*calls) != before {
+		t.Fatalf("空表重跑不应再调控制面: %+v", *calls)
+	}
+}
+
+// 管理操作的目标是 user_id：改名后对新 user_id 的禁言/踢出照常命中同一批参与者，
+// 且不会误伤「用户名与他人 identity 同形」的第三方（旧的前缀匹配会）。
+func TestModerationTargetsUserID(t *testing.T) {
+	maskProviderEnv(t)
+	a := testAPI(t)
+	ctx := context.Background()
+	owner, err := a.st.CreateUser(ctx, "owner", "x")
+	if err != nil {
+		t.Fatalf("建房主失败: %v", err)
+	}
+	c, err := a.st.CreateChannel(ctx, "chan1", owner.ID)
+	if err != nil {
+		t.Fatalf("建频道失败: %v", err)
+	}
+	target, err := a.st.CreateUser(ctx, "alice", "x")
+	if err != nil {
+		t.Fatalf("建目标用户失败: %v", err)
+	}
+	sess, err := a.st.CreateSession(ctx, owner.ID)
+	if err != nil {
+		t.Fatalf("建会话失败: %v", err)
+	}
+	r := a.Router()
+
+	// 按 user_id 禁言 → 落库
+	rec := doReq(t, r, "POST", "/api/channels/chan1/mute", sess, map[string]any{"user_id": target.ID})
+	if rec.Code != 200 {
+		t.Fatalf("禁言应 200，实际 %d: %s", rec.Code, rec.Body.String())
+	}
+	gagged, err := a.st.IsGagged(ctx, c.ID, target.ID)
+	if err != nil || !gagged {
+		t.Fatalf("禁言应落库: %v %v", gagged, err)
+	}
+
+	// 改名后同一 user_id 仍能解禁（旧实现按用户名发，改名即失联）
+	if err := a.st.UpdateUsername(ctx, target.ID, "bob"); err != nil {
+		t.Fatalf("改名失败: %v", err)
+	}
+	rec = doReq(t, r, "POST", "/api/channels/chan1/unmute", sess, map[string]any{"user_id": target.ID})
+	if rec.Code != 200 {
+		t.Fatalf("改名后解禁应 200，实际 %d: %s", rec.Code, rec.Body.String())
+	}
+	if gagged, _ := a.st.IsGagged(ctx, c.ID, target.ID); gagged {
+		t.Fatal("解禁应生效")
+	}
+
+	// 不存在的 user_id → 404；对自己操作 → 400
+	if rec := doReq(t, r, "POST", "/api/channels/chan1/ban", sess, map[string]any{"user_id": 99999}); rec.Code != 404 {
+		t.Fatalf("未知 user_id 应 404，实际 %d", rec.Code)
+	}
+	if rec := doReq(t, r, "POST", "/api/channels/chan1/ban", sess, map[string]any{"user_id": owner.ID}); rec.Code != 400 {
+		t.Fatalf("对自己操作应 400，实际 %d", rec.Code)
+	}
+
+	// 设备级踢出的归属校验按 user_id：别人的 identity 不接受
+	rec = doReq(t, r, "POST", "/api/channels/chan1/kick", sess,
+		map[string]any{"user_id": target.ID, "identity": rtc.Identity(owner.ID, "mac")})
+	if rec.Code != 400 {
+		t.Fatalf("设备不属于目标用户应 400，实际 %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// v4 必须在生产启动顺序下也真的删掉上游端点：runMigrationSteps 跑在 New() 的
+// reloadProviders 之前，注册表此刻只有内建实例——迁移不自己重建的话，
+// livekit-ingress 类实例一个都取不到，端点连同有效 stream key 全部残留在上游。
+func TestMigrateEndpointIdentityV4ProductionOrdering(t *testing.T) {
+	maskProviderEnv(t)
+	a := testAPI(t)
+	ctx := context.Background()
+	_, it := seedIngestUser(t, a, "alice", "chan1")
+	twirpURL, whipURL, calls, _ := newFakeLivekit(t)
+	a.st.CreateProvider(ctx, &store.ProviderRecord{Alias: "ing1", Type: TypeLivekitIngress, Params: map[string]string{
+		"livekit_api_url": twirpURL, "livekit_api_key": "k", "livekit_api_secret": "s",
+		"ingress_upstream_url": whipURL}})
+	if err := a.st.UpsertIngestEndpoint(ctx, &store.IngestEndpoint{
+		TokenID: it.ID, Alias: "ing1", IngressID: "old-in", UpstreamKey: "old-sk", BoundRoom: "chan1"}); err != nil {
+		t.Fatalf("造端点失败: %v", err)
+	}
+
+	// 把注册表退回「只有内建实例」的启动态：不预先 reload，复现 New() 的真实顺序
+	a.providersMu.Lock()
+	a.providers = map[string]*ProviderInstance{}
+	a.providerOrder = nil
+	for _, inst := range a.builtinInstances() {
+		a.providers[inst.Alias] = inst
+		a.providerOrder = append(a.providerOrder, inst.Alias)
+	}
+	a.providersMu.Unlock()
+
+	a.st.SetMigrationVersion(ctx, 3)
+	a.runMigrations(ctx)
+
+	deleted := 0
+	for _, c := range *calls {
+		if c.op == "delete" && c.body["ingress_id"] == "old-in" {
+			deleted++
+		}
+	}
+	if deleted != 1 {
+		t.Fatalf("生产启动顺序下 v4 应删掉上游端点，实际 delete 次数 = %d（记录清空但上游残留）", deleted)
+	}
+	if ep, err := a.st.IngestEndpoint(ctx, it.ID, "ing1"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("端点记录应清空: %+v %v", ep, err)
 	}
 }

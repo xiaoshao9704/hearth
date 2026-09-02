@@ -82,8 +82,8 @@ func (p *Provider) client(ctx context.Context) *lkroom.Client {
 
 func (p *Provider) Name() string { return "livekit" }
 
-func (p *Provider) JoinCredentials(ctx context.Context, room, username, deviceTag string, canPublish bool) (rtc.Credentials, error) {
-	tok, err := lktoken.Sign(p.cfg(ctx, "livekit_api_key"), p.cfg(ctx, "livekit_api_secret"), room, username, deviceTag, canPublish)
+func (p *Provider) JoinCredentials(ctx context.Context, room string, meta rtc.Meta, canPublish bool) (rtc.Credentials, error) {
+	tok, err := lktoken.Sign(p.cfg(ctx, "livekit_api_key"), p.cfg(ctx, "livekit_api_secret"), room, meta, canPublish)
 	if err != nil {
 		return rtc.Credentials{}, err
 	}
@@ -102,26 +102,23 @@ func (p *Provider) ListParticipants(ctx context.Context, room string) ([]rtc.Par
 	out := make([]rtc.Participant, 0, len(ps))
 	for _, x := range ps {
 		pt := rtc.Participant{Identity: x.Identity, Name: x.Name, JoinedAt: x.JoinedAt}
-		// 元数据是 hearth 发布者写入的 {"username","kind","tag"} JSON（publisher.go）；
-		// 非 JSON 或缺字段按普通参与者处理
-		var meta struct {
-			Kind string `json:"kind"`
-			Tag  string `json:"tag"`
-		}
+		// 元数据是 hearth 组好的 rtc.Meta JSON（进房令牌 lktoken.Sign 与推流发布 publisher.go
+		// 两条路径都写）；非 JSON 或缺字段按无归属信息的参与者处理，展示侧自行兜底
+		var meta rtc.Meta
 		if json.Unmarshal([]byte(x.Metadata), &meta) == nil {
-			pt.Kind, pt.Tag = meta.Kind, meta.Tag
+			pt.UID, pt.Username, pt.Kind, pt.Tag = meta.UID, meta.Username, meta.Kind, meta.Tag
 		}
 		out = append(out, pt)
 	}
 	return out, nil
 }
 
-func (p *Provider) RemoveParticipantsOf(ctx context.Context, room, username string) (int, error) {
-	return p.client(ctx).RemoveParticipantsOf(ctx, room, username)
+func (p *Provider) RemoveParticipantsOf(ctx context.Context, room string, userID int64, device string) (int, error) {
+	return p.client(ctx).RemoveParticipantsOf(ctx, room, userID, device)
 }
 
-func (p *Provider) MuteUserAudio(ctx context.Context, room, username string, muted bool) error {
-	return p.client(ctx).MuteUserAudio(ctx, room, username, muted)
+func (p *Provider) MuteUserAudio(ctx context.Context, room string, userID int64, muted bool) error {
+	return p.client(ctx).MuteUserAudio(ctx, room, userID, muted)
 }
 
 func (p *Provider) SignalProxyUpstream(ctx context.Context) string {

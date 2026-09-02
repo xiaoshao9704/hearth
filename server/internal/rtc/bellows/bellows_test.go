@@ -21,7 +21,7 @@ import (
 // publishCall 假 Publisher 记录的一次发布。
 type publishCall struct {
 	room, identity, name string
-	meta                 map[string]string
+	meta                 rtc.Meta
 }
 
 type fakePublisher struct {
@@ -30,7 +30,7 @@ type fakePublisher struct {
 	lost  func() // 最近一次发布时 ctx 上挂的「发布出口已断」回执
 }
 
-func (f *fakePublisher) PublishRemote(ctx context.Context, room, identity, name string, meta map[string]string, _ *webrtc.TrackRemote) (func(), error) {
+func (f *fakePublisher) PublishRemote(ctx context.Context, room, identity, name string, meta rtc.Meta, _ *webrtc.TrackRemote) (func(), error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls = append(f.calls, publishCall{room, identity, name, meta})
@@ -65,14 +65,15 @@ func testGateway(udpPort string, pub *fakePublisher, roomFor func(token string) 
 		}
 		return ""
 	}
-	resolve := func(_ context.Context, token string) (string, string, string, string, error) {
+	resolve := func(_ context.Context, token string) (string, string, rtc.Meta, error) {
 		switch token {
 		case "good":
-			return roomFor(token), "alice-obs", "alice", "obs", nil
+			return roomFor(token), rtc.Identity(7, "obs"),
+				rtc.Meta{UID: 7, Username: "alice", Kind: "ingest", Tag: "obs"}, nil
 		case "boom":
-			return "", "", "", "", errors.New("db down") // 模拟瞬时故障
+			return "", "", rtc.Meta{}, errors.New("db down") // 模拟瞬时故障
 		}
-		return "", "", "", "", ErrUnknownKey
+		return "", "", rtc.Meta{}, ErrUnknownKey
 	}
 	return New(cfg, resolve, func(context.Context) rtc.Publisher { return pub })
 }
@@ -250,10 +251,10 @@ func TestPublisherPassthrough(t *testing.T) {
 
 	s.handleTrack(nil) // tr 仅透传给 Publisher，假实现不解引用
 	got := pub.last()
-	if got.room != "chan1" || got.identity != "alice-obs" || got.name != "alice" {
+	if got.room != "chan1" || got.identity != "u7-obs" || got.name != "alice" {
 		t.Fatalf("透传身份不符: %+v", got)
 	}
-	if got.meta["username"] != "alice" || got.meta["kind"] != "ingest" || got.meta["tag"] != "obs" {
+	if got.meta.UID != 7 || got.meta.Username != "alice" || got.meta.Kind != "ingest" || got.meta.Tag != "obs" {
 		t.Fatalf("meta 不符: %+v", got.meta)
 	}
 }

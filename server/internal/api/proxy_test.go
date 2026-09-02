@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	"hearth/server/internal/rtc"
 	"hearth/server/internal/store"
 )
 
@@ -106,17 +107,19 @@ func TestWhipPerAlias(t *testing.T) {
 	if len(got) != 1 || got[0].path != "/w/chan1/"+it.Token || got[0].body != "sdp" {
 		t.Fatalf("上游收到的请求不符: %+v", got)
 	}
-	// grant payload：新字段（op/token/room/identity/name/tag/offer）齐全，name 是用户名
+	// grant payload：字段齐全，identity 主体是 user_id，展示信息在 meta 里
 	var p struct {
-		Op, Token, Room, Identity, Name, Kind, Tag, Offer string
+		Op, Token, Room, Identity, Offer string
+		Meta                             rtc.Meta
 	}
 	raw, err := base64.RawURLEncoding.DecodeString(strings.SplitN(got[0].grant, ".", 2)[0])
 	if err != nil || json.Unmarshal(raw, &p) != nil {
 		t.Fatalf("grant 解码失败: %v", err)
 	}
 	sum := sha256.Sum256([]byte("sdp"))
-	if p.Op != "publish" || p.Token != it.Token || p.Room != "chan1" || p.Identity != "alice-obs" ||
-		p.Name != "alice" || p.Kind != "ingest" || p.Tag != "obs" || p.Offer != hex.EncodeToString(sum[:]) {
+	if p.Op != "publish" || p.Token != it.Token || p.Room != "chan1" || p.Identity != rtc.Identity(u.ID, "obs") ||
+		p.Meta.UID != u.ID || p.Meta.Username != "alice" || p.Meta.Kind != "ingest" || p.Meta.Tag != "obs" ||
+		p.Offer != hex.EncodeToString(sum[:]) {
 		t.Fatalf("grant payload 不符: %+v", p)
 	}
 
