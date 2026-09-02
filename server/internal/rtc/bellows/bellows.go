@@ -27,6 +27,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/livekit/server-sdk-go/v2"
 	"github.com/pion/rtcp"
@@ -74,22 +75,54 @@ type Gateway struct {
 	cfg     rtc.ConfigFunc
 	resolve ResolveFunc
 
-	// initMu 只保护 api 懒初始化：公网 IP 探测最长约 10s，不能拿 mu
-	// 顶着，否则首推期间所有会话操作（DELETE/状态回调清理）全被阻塞。
-	initMu sync.Mutex
-	api    *webrtc.API
+	// initMu 只保护 transport 懒初始化；宣告探测在 Announcer 里（最长约 2s），
+	// 不拿 mu 顶着，否则首推期间所有会话操作（DELETE/状态回调清理）全被阻塞。
+	initMu    sync.Mutex
+	transport *lite.Transport
+	announcer *lite.Announcer
 
 	mu       sync.Mutex
 	sessions map[string]*session // 键 = 会话资源 id（POST 应答 Location /w/{rid}），非推流密钥
 }
 
 func New(cfg rtc.ConfigFunc, resolve ResolveFunc) *Gateway {
-	return &Gateway{cfg: cfg, resolve: resolve, sessions: map[string]*session{}}
+	g := &Gateway{cfg: cfg, resolve: resolve, sessions: map[string]*session{}}
+	g.announcer = lite.NewAnnouncer(
+		func(ctx context.Context) string { return g.cfg(ctx, "bellows_public_ip") },
+		func(ctx context.Context) string { return g.cfg(ctx, "bellows_stun_servers") },
+	)
+	return g
 }
 
 // NewRemote 远端形态（cmd/bellows）：不做归属反查，handlePost 只验 hearth 签发的通行证。
 func NewRemote(cfg rtc.ConfigFunc) *Gateway {
-	return &Gateway{cfg: cfg, sessions: map[string]*session{}}
+	g := &Gateway{cfg: cfg, sessions: map[string]*session{}}
+	g.announcer = lite.NewAnnouncer(
+		func(ctx context.Context) string { return g.cfg(ctx, "bellows_public_ip") },
+		func(ctx context.Context) string { return g.cfg(ctx, "bellows_stun_servers") },
+	)
+	return g
+}
+
+// RefreshAnnounce 健康检查触发的宣告探测刷新。远端形态（hearth 侧的 bellows-remote
+// 实例）不收流，宣告是远端进程自己的事，这里直接 no-op。
+func (g *Gateway) RefreshAnnounce(ctx context.Context) (changed bool, externals []string, probedAt time.Time) {
+	if g.remoteURL(ctx) != "" {
+		return false, nil, time.Time{}
+	}
+	changed = g.announcer.Refresh(ctx)
+	externals, probedAt = g.announceSnapshot()
+	return changed, externals, probedAt
+}
+
+// AnnounceSnapshot 只读当前公网映射，给健康检查回显。
+func (g *Gateway) AnnounceSnapshot() (externals []string, probedAt time.Time) {
+	return g.announceSnapshot()
+}
+
+func (g *Gateway) announceSnapshot() ([]string, time.Time) {
+	rules, at := g.announcer.Snapshot()
+	return lite.RuleExternals(rules), at
 }
 
 func randHex(nbytes int) (string, error) {
@@ -249,7 +282,13 @@ func (g *Gateway) handlePost(w http.ResponseWriter, r *http.Request, streamKey s
 		}
 		room, username = p.Room, p.User
 	}
-	api, err := g.ensureAPI(r.Context())
+	t, err := g.ensureTransport(r.Context())
+	if err != nil {
+		http.Error(w, "推流网关不可用: "+err.Error(), http.StatusServiceUnavailable)
+		return
+	}
+	// 每个会话用当时的宣告规则组装 API：规则刷新只影响新会话，在途会话不受打扰
+	api, err := t.NewAPI(g.announcer.Rules(r.Context()))
 	if err != nil {
 		http.Error(w, "推流网关不可用: "+err.Error(), http.StatusServiceUnavailable)
 		return
@@ -350,22 +389,34 @@ func offerWithinWhitelist(offer string) bool {
 	return true
 }
 
-// ---- WebRTC API（懒初始化，传输基建见 rtc/lite）----
+// ---- WebRTC Transport（懒初始化，传输基建见 rtc/lite）----
 
-// ensureAPI 失败不缓存：端口被瞬时占用（如重启重叠期）下一次推流会重试，
+// ensureTransport 失败不缓存：端口被瞬时占用（如重启重叠期）下一次推流会重试，
 // 而不是把网关永久卡在错误态直到进程重启。
-func (g *Gateway) ensureAPI(ctx context.Context) (*webrtc.API, error) {
+func (g *Gateway) ensureTransport(ctx context.Context) (*lite.Transport, error) {
 	g.initMu.Lock()
 	defer g.initMu.Unlock()
-	if g.api != nil {
-		return g.api, nil
+	if g.transport != nil {
+		return g.transport, nil
 	}
 	port, err := strconv.Atoi(g.cfg(ctx, "bellows_udp_port"))
 	if err != nil || port <= 0 || port > 65535 {
 		port = 47710
 	}
-	rules := lite.AnnounceRules(g.cfg(ctx, "bellows_public_ip"), g.cfg(ctx, "bellows_stun_servers"))
+	m, err := whipMediaEngine()
+	if err != nil {
+		return nil, err
+	}
+	t, err := lite.NewTransport(port, m)
+	if err != nil {
+		return nil, fmt.Errorf("WHIP %w", err)
+	}
+	g.transport = t
+	log.Printf("bellows 就绪: udp=%d", port)
+	return t, nil
+}
 
+func whipMediaEngine() (*webrtc.MediaEngine, error) {
 	m := &webrtc.MediaEngine{}
 	if err := m.RegisterCodec(webrtc.RTPCodecParameters{
 		RTPCodecCapability: webrtc.RTPCodecCapability{
@@ -396,13 +447,7 @@ func (g *Gateway) ensureAPI(ctx context.Context) (*webrtc.API, error) {
 			return nil, err
 		}
 	}
-	api, err := lite.NewAPI(port, rules, m)
-	if err != nil {
-		return nil, fmt.Errorf("WHIP %w", err)
-	}
-	g.api = api
-	log.Printf("bellows 就绪: udp=%d 公网映射=%v", port, lite.RuleExternals(rules))
-	return g.api, nil
+	return m, nil
 }
 
 func (g *Gateway) removeSession(s *session) {

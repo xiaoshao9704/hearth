@@ -29,6 +29,7 @@ ENV ADDR=:8080 \
 VOLUME /data
 USER 65532
 EXPOSE 8080 7880 7881 7882/udp
+HEALTHCHECK --interval=60s --timeout=12s --start-period=20s CMD ["/app/hearth", "healthcheck"]
 ENTRYPOINT ["/app/aioinit"]
 
 # ---- -full 档 ----
@@ -54,4 +55,5 @@ ENV ADDR=:8080 \
     INGRESS_TCP_PORT=7886
 VOLUME /data
 EXPOSE 8080 7880 7881 7882/udp 7888 7885/udp 7886
+HEALTHCHECK --interval=60s --timeout=12s --start-period=20s CMD ["/app/hearth", "healthcheck"]
 ENTRYPOINT ["/app/aioinit"]

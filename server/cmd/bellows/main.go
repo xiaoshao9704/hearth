@@ -12,10 +12,14 @@
 //	BELLOWS_UDP_PORT        媒体 UDP 端口，默认 47710
 //	BELLOWS_PUBLIC_IP       向推流端通告的 IP；留空 = 自动宣告全部网卡地址 + STUN 探测的公网映射，显式设置则只通告该地址
 //	BELLOWS_STUN_SERVERS    逗号分隔的 STUN 服务器；探测各网卡公网映射用，留空用内置默认
+//
+// 子命令：`bellows healthcheck` 探活本机 /healthz 并顺带触发宣告探测刷新（容器健康检查用，
+// 镜像无 shell/curl，健康检查命令只能是二进制自己）。
 package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"log"
 	"net/http"
@@ -25,9 +29,19 @@ import (
 	"time"
 
 	"hearth/server/internal/rtc/bellows"
+	"hearth/server/internal/rtc/lite"
+	"hearth/server/internal/selfcheck"
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "healthcheck" {
+		if err := selfcheck.Run(selfcheck.URL(envOr("BELLOWS_ADDR", ":8090"))); err != nil {
+			log.Printf("健康检查失败: %v", err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	lk := map[string]string{
 		"bellows_shared_secret": need("BELLOWS_SHARED_SECRET"),
 		"livekit_api_url":       need("LIVEKIT_API_URL"),
@@ -42,7 +56,21 @@ func main() {
 	mux := http.NewServeMux()
 	mux.Handle("/w", gw.Handler())
 	mux.Handle("/w/", gw.Handler())
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("ok")) })
+	// 健康状态只表示进程活着：探测失败/映射为空不影响 200。refresh=1 触发宣告探测，
+	// 只接受回环来源（容器内健康检查），外部请求带参数也只回显。
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("refresh") == "1" && lite.LoopbackRemote(r.RemoteAddr) {
+			gw.RefreshAnnounce(r.Context())
+		}
+		externals, probedAt := gw.AnnounceSnapshot()
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"ok": true,
+			"announce": map[string]any{
+				"externals": externals, "probed_at": probedAt,
+			},
+		})
+	})
 	srv := &http.Server{Addr: envOr("BELLOWS_ADDR", ":8090"), Handler: mux}
 
 	go func() {

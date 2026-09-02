@@ -12,6 +12,7 @@ import (
 	"hearth/server/internal/api"
 	"hearth/server/internal/chat"
 	"hearth/server/internal/config"
+	"hearth/server/internal/selfcheck"
 	"hearth/server/internal/store"
 
 	"golang.org/x/crypto/bcrypt"
@@ -21,6 +22,16 @@ var usernameRe = regexp.MustCompile(`^[a-zA-Z0-9_-]{2,32}$`)
 
 func main() {
 	cfg := config.Load()
+
+	// CLI 子命令: healthcheck —— 容器健康检查（镜像无 shell/curl）：探活本机 /healthz
+	// 并顺带触发宣告探测刷新。不开数据库。
+	if len(os.Args) > 1 && os.Args[1] == "healthcheck" {
+		if err := selfcheck.Run(selfcheck.URL(cfg.Addr)); err != nil {
+			log.Printf("健康检查失败: %v", err)
+			os.Exit(1)
+		}
+		return
+	}
 
 	st, err := store.Open(cfg.DatabaseDSN())
 	if err != nil {

@@ -162,6 +162,12 @@ bellows:
     BELLOWS_UDP_PORT: "47710"                    # 媒体
     BELLOWS_PUBLIC_IP: 192.168.1.20              # 显式指定 = 只通告该地址（覆盖）；留空 = 自动宣告全部网卡地址 + STUN 探测的公网映射
     # BELLOWS_STUN_SERVERS: stun.miwifi.com:3478 # 公网映射探测用，逗号分隔；留空用内置默认
+  healthcheck:                                   # 兼做宣告探测的刷新触发：公网 IP 变化后新会话在 interval 内拿到新候选，无需重启
+    test: ["/app/bellows", "healthcheck"]        # 镜像无 shell/curl，用 exec 形式
+    interval: 60s
+    timeout: 12s
+    start_period: 20s
+    retries: 3
 ```
 
 要让局域网与外网推流者都能连，**删掉 `BELLOWS_PUBLIC_IP`** 让它自动宣告（STUN 不可达时配 `BELLOWS_STUN_SERVERS`），而不是改成公网 IP——显式配置是覆盖语义，改成公网 IP 会让局域网推流绕 NAT 回环。

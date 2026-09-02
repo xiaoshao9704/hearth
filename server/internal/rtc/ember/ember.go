@@ -121,14 +121,33 @@ type Provider struct {
 	mu    sync.Mutex
 	rooms map[string]*vroom
 
-	// initMu 只保护 api 懒初始化：公网 IP 探测最长约 10s，不能顶着 mu
+	// initMu 只保护 transport 懒初始化；宣告探测在 Announcer 里，不顶着 mu
 	// 让首个入会把名册/人数等房间操作一起卡住
-	initMu sync.Mutex
-	api    *webrtc.API
+	initMu    sync.Mutex
+	transport *lite.Transport
+	announcer *lite.Announcer
 }
 
 func New(cfg rtc.ConfigFunc) *Provider {
-	return &Provider{cfg: cfg, rooms: make(map[string]*vroom)}
+	p := &Provider{cfg: cfg, rooms: make(map[string]*vroom)}
+	p.announcer = lite.NewAnnouncer(
+		func(ctx context.Context) string { return p.cfg(ctx, "ember_public_ip") },
+		func(ctx context.Context) string { return p.cfg(ctx, "ember_stun_servers") },
+	)
+	return p
+}
+
+// RefreshAnnounce 健康检查触发的宣告探测刷新。
+func (p *Provider) RefreshAnnounce(ctx context.Context) (changed bool, externals []string, probedAt time.Time) {
+	changed = p.announcer.Refresh(ctx)
+	externals, probedAt = p.AnnounceSnapshot()
+	return changed, externals, probedAt
+}
+
+// AnnounceSnapshot 只读当前公网映射，给健康检查回显。
+func (p *Provider) AnnounceSnapshot() (externals []string, probedAt time.Time) {
+	rules, at := p.announcer.Snapshot()
+	return lite.RuleExternals(rules), at
 }
 
 func (p *Provider) Name() string { return "ember" }
@@ -229,20 +248,19 @@ func (p *Provider) MuteUserAudio(_ context.Context, room, username string, muted
 
 func (p *Provider) SignalProxyUpstream(context.Context) string { return "" } // 进程内，无代理
 
-// ---- WebRTC API（懒初始化，传输基建见 rtc/lite）----
+// ---- WebRTC Transport（懒初始化，传输基建见 rtc/lite）----
 
-// ensureAPI 失败不缓存：端口被瞬时占用时下一次入会重试，不把内核永久卡在错误态。
-func (p *Provider) ensureAPI(ctx context.Context) (*webrtc.API, error) {
+// ensureTransport 失败不缓存：端口被瞬时占用时下一次入会重试，不把内核永久卡在错误态。
+func (p *Provider) ensureTransport(ctx context.Context) (*lite.Transport, error) {
 	p.initMu.Lock()
 	defer p.initMu.Unlock()
-	if p.api != nil {
-		return p.api, nil
+	if p.transport != nil {
+		return p.transport, nil
 	}
 	port, err := strconv.Atoi(p.cfg(ctx, "ember_udp_port"))
 	if err != nil || port <= 0 || port > 65535 {
 		port = 47700
 	}
-	rules := lite.AnnounceRules(p.cfg(ctx, "ember_public_ip"), p.cfg(ctx, "ember_stun_servers"))
 
 	m := &webrtc.MediaEngine{}
 	if err := m.RegisterCodec(webrtc.RTPCodecParameters{
@@ -260,19 +278,26 @@ func (p *Provider) ensureAPI(ctx context.Context) (*webrtc.API, error) {
 	}, webrtc.RTPCodecTypeAudio); err != nil {
 		return nil, err
 	}
-	api, err := lite.NewAPI(port, rules, m)
+	t, err := lite.NewTransport(port, m)
 	if err != nil {
 		return nil, fmt.Errorf("语音%w", err)
 	}
-	p.api = api
-	log.Printf("ember 就绪: udp=%d 公网映射=%v", port, lite.RuleExternals(rules))
-	return p.api, nil
+	p.transport = t
+	log.Printf("ember 就绪: udp=%d", port)
+	return t, nil
 }
 
 // ---- 入会（由 api 层完成鉴权后调用，阻塞至连接结束）----
 
 func (p *Provider) HandleJoin(ctx context.Context, roomName, identity, name string, muted bool, conn *websocket.Conn) {
-	api, err := p.ensureAPI(ctx)
+	t, err := p.ensureTransport(ctx)
+	if err != nil {
+		wsjson.Write(ctx, conn, sigMsg{Type: "bye", Reason: err.Error()})
+		conn.Close(websocket.StatusInternalError, "voice unavailable")
+		return
+	}
+	// 每次入会用当时的宣告规则组装 API：规则刷新只影响新连接，在途会话不受打扰
+	api, err := t.NewAPI(p.announcer.Rules(ctx))
 	if err != nil {
 		wsjson.Write(ctx, conn, sigMsg{Type: "bye", Reason: err.Error()})
 		conn.Close(websocket.StatusInternalError, "voice unavailable")
