@@ -134,7 +134,7 @@ func (a *API) grantWHIP(w http.ResponseWriter, req *http.Request, gi rtc.WHIPGra
 	}
 	req.Body = io.NopCloser(bytes.NewReader(offer))
 	req.ContentLength = int64(len(offer))
-	h, v, err := gi.IssueWHIPGrant(req.Context(), token, adm.Room, adm.Identity, adm.Name, adm.Tag, offer)
+	h, v, err := gi.IssueWHIPGrant(req.Context(), token, adm.Room, adm.Identity, adm.Meta, offer)
 	if err != nil {
 		log.Printf("签发推流通行证失败: %v", err)
 		writeErr(w, http.StatusInternalServerError, "内部错误")
@@ -161,8 +161,7 @@ func (a *API) bindIngressEndpoint(w http.ResponseWriter, req *http.Request, inst
 		// 持锁后重查：等锁期间可能已被并发请求建好
 		ep, err = a.st.IngestEndpoint(ctx, adm.TokenID, inst.Alias)
 		if errors.Is(err, store.ErrNotFound) {
-			id, key, cerr := inst.Ingest.EnsureEndpoint(ctx, adm.Identity, adm.Name,
-				map[string]string{"username": adm.Name, "kind": "ingest", "tag": adm.Tag})
+			id, key, cerr := inst.Ingest.EnsureEndpoint(ctx, adm.Identity, adm.Meta.Username, adm.Meta)
 			if cerr != nil {
 				log.Printf("创建 ingress 端点失败（实例 %s）: %v", inst.Alias, cerr)
 				writeErr(w, http.StatusBadGateway, "推流上游不可用")

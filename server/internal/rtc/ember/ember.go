@@ -43,6 +43,7 @@ type sigMsg struct {
 	SDP      string            `json:"sdp,omitempty"`
 	Mids     map[string]string `json:"mids,omitempty"` // S→C offer 附带：mid -> 对端 identity
 	Identity string            `json:"identity,omitempty"`
+	Self     *peerInfo         `json:"self,omitempty"` // welcome 附带：自己的名册条目（前端本地参与者据此，不解析 identity）
 	Peers    []peerInfo        `json:"peers,omitempty"`
 	On       bool              `json:"on"` // mute: 闭麦状态；welcome/gag: 禁言状态
 	Speakers []string          `json:"speakers,omitempty"`
@@ -51,10 +52,11 @@ type sigMsg struct {
 
 type peerInfo struct {
 	Identity string `json:"identity"`
+	UID      int64  `json:"uid"` // 归属用户 id（前端据此聚合设备与发管理操作，不解析 identity）
 	Name     string `json:"name"`
-	Username string `json:"username"`       // 归属用户名（语音参与者 = 显示名；前端据此聚合设备，不再解析 identity 前缀）
+	Username string `json:"username"`       // 归属用户名（纯展示）
 	Kind     string `json:"kind,omitempty"` // 参与者类别（ingest = 推流设备）；ember 是纯语音内核，恒为空
-	Tag      string `json:"tag,omitempty"`  // 推流设备标签（kind=ingest 时有效）
+	Tag      string `json:"tag,omitempty"`  // 设备标签
 	MicOn    bool   `json:"micOn"`
 	Muted    bool   `json:"muted,omitempty"` // 服务端禁言（channel_gags）
 }
@@ -63,6 +65,9 @@ type peerInfo struct {
 
 type participant struct {
 	identity string
+	uid      int64  // 归属用户 id（管理操作的目标；identity 的主体就是它）
+	username string // 归属用户名（纯展示）
+	tag      string // 设备标签
 	name     string
 	joinedAt int64
 
@@ -155,7 +160,7 @@ func (p *Provider) AnnounceSnapshot() (externals []string, probedAt time.Time) {
 
 func (p *Provider) Name() string { return "ember" }
 
-func (p *Provider) JoinCredentials(_ context.Context, _, _, _ string, _ bool) (rtc.Credentials, error) {
+func (p *Provider) JoinCredentials(context.Context, string, rtc.Meta, bool) (rtc.Credentials, error) {
 	// URL/Token 留空：api 层推导同源 /providers/ember/voice 信令地址并透传会话 token；
 	// canPublish 此处在凭证层无处安放，禁言由 api 层在信令入会时（HandleJoin muted 参数）生效
 	return rtc.Credentials{Engine: "ember"}, nil
@@ -186,12 +191,13 @@ func (p *Provider) ListParticipants(_ context.Context, room string) ([]rtc.Parti
 	defer r.mu.Unlock()
 	out := make([]rtc.Participant, 0, len(r.parts))
 	for _, pt := range r.parts {
-		out = append(out, rtc.Participant{Identity: pt.identity, Name: pt.name, JoinedAt: pt.joinedAt})
+		out = append(out, rtc.Participant{Identity: pt.identity, UID: pt.uid, Username: pt.username,
+			Name: pt.name, JoinedAt: pt.joinedAt, Tag: pt.tag})
 	}
 	return out, nil
 }
 
-func (p *Provider) RemoveParticipantsOf(_ context.Context, room, username string) (int, error) {
+func (p *Provider) RemoveParticipantsOf(_ context.Context, room string, userID int64, device string) (int, error) {
 	p.mu.Lock()
 	r := p.rooms[room]
 	p.mu.Unlock()
@@ -201,7 +207,7 @@ func (p *Provider) RemoveParticipantsOf(_ context.Context, room, username string
 	r.mu.Lock()
 	var targets []*participant
 	for _, pt := range r.parts {
-		if rtc.MatchesUser(pt.identity, username) {
+		if rtc.MatchesUser(pt.identity, userID) && (device == "" || pt.identity == device) {
 			targets = append(targets, pt)
 		}
 	}
@@ -215,7 +221,7 @@ func (p *Provider) RemoveParticipantsOf(_ context.Context, room, username string
 // MuteUserAudio 服务端禁言/解禁某用户全部设备：丢弃其上行音频并锁死 mic 状态。
 // 契约见 rtc.Provider（禁言=禁全部媒体发布）：本内核只承载音频，丢弃全部上行即等效。
 // 用户不在房间时返回 ErrNoParticipant。
-func (p *Provider) MuteUserAudio(_ context.Context, room, username string, muted bool) error {
+func (p *Provider) MuteUserAudio(_ context.Context, room string, userID int64, muted bool) error {
 	p.mu.Lock()
 	r := p.rooms[room]
 	p.mu.Unlock()
@@ -226,7 +232,7 @@ func (p *Provider) MuteUserAudio(_ context.Context, room, username string, muted
 	found := false
 	var targets []*participant
 	for _, pt := range r.parts {
-		if rtc.MatchesUser(pt.identity, username) {
+		if rtc.MatchesUser(pt.identity, userID) {
 			pt.muted.Store(muted)
 			if muted {
 				pt.micOn = false // roster() 在 r.mu 下读
@@ -292,7 +298,8 @@ func (p *Provider) ensureTransport(ctx context.Context) (*lite.Transport, error)
 
 // ---- 入会（由 api 层完成鉴权后调用，阻塞至连接结束）----
 
-func (p *Provider) HandleJoin(ctx context.Context, roomName, identity, name string, muted bool, conn *websocket.Conn) {
+func (p *Provider) HandleJoin(ctx context.Context, roomName string, meta rtc.Meta, muted bool, conn *websocket.Conn) {
+	identity, name := rtc.Identity(meta.UID, meta.Tag), meta.Username
 	t, err := p.ensureTransport(ctx)
 	if err != nil {
 		wsjson.Write(ctx, conn, sigMsg{Type: "bye", Reason: err.Error()})
@@ -324,7 +331,8 @@ func (p *Provider) HandleJoin(ctx context.Context, roomName, identity, name stri
 	}
 
 	part := &participant{
-		identity: identity, name: name, joinedAt: time.Now().Unix(),
+		identity: identity, uid: meta.UID, username: meta.Username, tag: meta.Tag,
+		name: name, joinedAt: time.Now().Unix(),
 		conn: conn, send: make(chan sigMsg, 32), out: out,
 		closed: make(chan struct{}), senders: make(map[string]*webrtc.RTPSender),
 		answerCh: make(chan string, 1),
@@ -340,7 +348,10 @@ func (p *Provider) HandleJoin(ctx context.Context, roomName, identity, name stri
 	r.mu.Unlock()
 
 	go part.writeLoop(ctx)
-	part.send <- sigMsg{Type: "welcome", Identity: identity, Peers: r.roster(identity), On: muted} // On = 自己是否被禁言
+	self := peerInfo{Identity: identity, UID: meta.UID, Name: name, Username: meta.Username,
+		Tag: meta.Tag, MicOn: false, Muted: muted}
+	// On = 自己是否被禁言
+	part.send <- sigMsg{Type: "welcome", Identity: identity, Self: &self, Peers: r.roster(identity), On: muted}
 	r.broadcastRoster()
 
 	p.readLoop(ctx, api, r, part) // 阻塞
@@ -598,7 +609,8 @@ func (r *vroom) roster(exclude string) []peerInfo {
 		if pt.identity == exclude {
 			continue
 		}
-		out = append(out, peerInfo{Identity: pt.identity, Name: pt.name, Username: pt.name, MicOn: pt.micOn, Muted: pt.muted.Load()})
+		out = append(out, peerInfo{Identity: pt.identity, UID: pt.uid, Name: pt.name, Username: pt.username,
+			Tag: pt.tag, MicOn: pt.micOn, Muted: pt.muted.Load()})
 	}
 	return out
 }

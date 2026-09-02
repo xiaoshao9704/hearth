@@ -1,6 +1,6 @@
 # 计划：功能键全面改用 user_id，username 只留展示/登录/注册
 
-状态：待实施。前置：`plan-ingest-token.md` 已实施（本计划复用它建好的参与者元数据通道）。
+状态：已实施（S1–S4 全过：单测 + `-race` 全绿、本地双线冒烟通过）。2026-09-03。前置：`plan-ingest-token.md` 已实施（本计划复用它建好的参与者元数据通道）。
 
 ## 动机
 
@@ -67,12 +67,26 @@
 
 ### S4 存量端点失效重建（游标迁移 v4）
 
-`ingest_endpoints` 里的端点带旧 `{用户名}-{标签}` identity，升级后必须重建。新增游标步 v4：
-逐实例 `DeleteEndpoint` 后清空 `ingest_endpoints`，下次推流按新 identity 惰性重建
-（复用 `teardownIngestEndpoints` 的逻辑，对全表执行）。
+`ingest_endpoints` 里的端点带旧 `{用户名}-{标签}` identity，升级后必须重建。游标步 v4
+（`migrateEndpointIdentity`）逐实例 `DeleteEndpoint` 后清空 `ingest_endpoints`，
+下次推流按新 identity 惰性重建；归属实例已注销的端点删不掉也照样清记录，不挡迁移。
 
-> 副作用：动机 §1 的改名 bug 由此**结构性消失**——identity 不含用户名，改名不再让端点过期，
-> 只有改标签才需要重建（现有 `ingestTokenTag` 已经在做）。
+> 副作用：动机 §1 的改名 bug 由此**结构性消失**——identity 不含用户名，改名不再影响归属，
+> 管制照常命中。改名仍保留端点重建（`updateUsername` 里那次 teardown），但保的只是
+> 展示信息（`participant_name` / `metadata.username`）的一致性，不再是安全问题。
+
+## 实施记录（与计划的偏差）
+
+- **`rtc.Meta` 取代 `map[string]string`**：元数据要带 `uid int64`，塞进 `map[string]string`
+  得来回转字符串。顺手把 `Publisher.PublishRemote` / `IngestProvider.EnsureEndpoint` /
+  `WHIPGrantIssuer.IssueWHIPGrant` / `Provider.JoinCredentials` 的元数据参数统一成 `rtc.Meta`。
+- **`RemoveParticipantsOf` 加 `device` 参数**：设备级踢出原先靠「把 identity 当 username 传，
+  用 `MatchesUser` 的 `identity == username` 分支撞上」实现——换 user_id 后这个巧合没了，
+  改成显式的 `(userID, device)`：device 为空 = 全部设备，非空 = 只踢该 identity 且仍受 userID 约束。
+- **聊天消息补 `uid`**：右键聊天头像开菜单需要目标 uid，`messages` 表本来就有 `user_id`，
+  查询与 `ChatMessage` 一并带出。
+- **`welcome` 补 `self`**：ember 的本地参与者原先靠前端从 identity 反推用户名，
+  改由服务端在 welcome 里直接给出自己的名册条目。
 
 ## 验收
 
@@ -87,5 +101,5 @@
 ## 不做
 
 - 不改 `users.username` 的唯一约束与改名策略（旧名释放后可被注册，这在 user_id 模型下不再有害）。
-- 不动 `listUsernames`（管理后台的封禁/白名单列表按 user_id 查、转成用户名展示，属正确用法）。
-- 不改聊天消息的作者字段（已是 user_id 外键）。
+- 名单接口（`/bans`、`/members`）改回 `{id, username}` 对：解禁/移出白名单要带 uid，光有名字不够。
+- 「加白名单」保留按用户名收（房主手输名字，界面上没有 uid 可选；等价于登录时的名字查找）。

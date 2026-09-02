@@ -28,11 +28,11 @@ type pubRoom struct {
 }
 
 // PublishRemote 把一条远端轨直通发布进 LiveKit 房间。identity/name/meta 由接入层组好经
-// bellows 透传（identity={用户名}-{标签}，与既有归属约定一致，房主侧的
+// bellows 透传（identity 见 rtc.Identity，房主侧的
 // MuteUserAudio/RemoveParticipantsOf 对它天然生效）；meta 序列化为 ParticipantMetadata
-// JSON 下发给观众端（至少含 username、kind=ingest、tag）。
+// JSON 下发给观众端（见 rtc.Meta）。
 // 返回的 unpublish 幂等：末条轨收回时断开房间连接。
-func (p *Provider) PublishRemote(ctx context.Context, room, identity, name string, meta map[string]string, tr *webrtc.TrackRemote) (func(), error) {
+func (p *Provider) PublishRemote(ctx context.Context, room, identity, name string, meta rtc.Meta, tr *webrtc.TrackRemote) (func(), error) {
 	rawMeta, err := json.Marshal(meta)
 	if err != nil {
 		return nil, err

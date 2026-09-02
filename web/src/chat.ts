@@ -6,7 +6,8 @@ import { getToken, wsBase } from './api';
 export interface ChatMessage {
   id: number;
   channel_id: number;
-  username: string;
+  uid: number; // 发送者 user_id（右键菜单的操作目标）
+  username: string; // 纯展示
   content: string;
   created_at: string;
 }

@@ -83,7 +83,7 @@ func TestMigrateImportsLegacyCfg(t *testing.T) {
 	maskProviderEnv(t)
 	a := testAPI(t)
 	ctx := context.Background()
-	// testAPI 的 New 已跑过全部迁移（空库游标 0→3）；重置游标模拟从旧版本升级
+	// testAPI 的 New 已跑过全部迁移（空库游标 0→4）；重置游标模拟从旧版本升级
 	a.st.SetMigrationVersion(ctx, 0)
 	a.st.SetSetting(ctx, "cfg_livekit_api_url", "http://old:7880")
 	a.st.SetSetting(ctx, "cfg_livekit_api_key", "k")
@@ -91,8 +91,8 @@ func TestMigrateImportsLegacyCfg(t *testing.T) {
 	a.st.SetSetting(ctx, "cfg_ingest_provider", "livekit") // 旧值：livekit 的 ingress 面
 	a.st.SetSetting(ctx, "cfg_ingress_upstream_url", "http://old:58080")
 	a.runMigrations(ctx)
-	if v, _ := a.st.MigrationVersion(ctx); v != 3 {
-		t.Fatalf("迁移成功后游标应为最新版本 3，实际 %d", v)
+	if v, _ := a.st.MigrationVersion(ctx); v != 4 {
+		t.Fatalf("迁移成功后游标应为最新版本 4，实际 %d", v)
 	}
 	if a.instance("livekit") == nil || a.instance("livekit").Locked {
 		t.Fatal("旧 cfg_livekit_* 应导入为 DB 实例 livekit")
@@ -229,7 +229,7 @@ func TestMigrationFailureKeepsCursor(t *testing.T) {
 func TestMigrateFreshDeployKeepsBuiltinDefaults(t *testing.T) {
 	// 屏蔽真实环境里可能存在的内核变量，保证「全新部署」前提
 	maskProviderEnv(t)
-	a := testAPI(t) // New 里已完成全新部署的首次迁移（游标 0→3）
+	a := testAPI(t) // New 里已完成全新部署的首次迁移（游标 0→4）
 	ctx := context.Background()
 	a.runMigrations(ctx) // 重跑幂等
 	for _, k := range []string{"cfg_voice_provider", "cfg_stage_provider", "cfg_ingest_provider"} {

@@ -174,32 +174,42 @@ export function setIngestTag(tag: string): Promise<IngestTokenInfo> {
 
 // ---- 频道管理（房主）----
 
-// identity 非空时只踢该设备（须归属 username）；空则踢全部设备
-export function kickUser(channel: string, username: string, identity?: string): Promise<{ kicked: number }> {
+// 管理操作的目标一律是 user_id：用户名可改、改后旧名即释放，拿它当目标会在
+// 改名/重注册后打到别人身上。uid 从参与者元数据（EPart.uid / RoomParticipant.uid）
+// 或名单条目（UserRef.id）来，前端不解析 identity、也不按用户名反查。
+
+// identity 非空时只踢该设备（须归属该 uid）；空则踢全部设备
+export function kickUser(channel: string, uid: number, identity?: string): Promise<{ kicked: number }> {
   return req(`/api/channels/${encodeURIComponent(channel)}/kick`, {
     method: 'POST',
-    body: { username, identity: identity ?? '' },
+    body: { user_id: uid, identity: identity ?? '' },
   });
 }
 
-export function banUser(channel: string, username: string): Promise<void> {
-  return req(`/api/channels/${encodeURIComponent(channel)}/ban`, { method: 'POST', body: { username } });
+export function banUser(channel: string, uid: number): Promise<void> {
+  return req(`/api/channels/${encodeURIComponent(channel)}/ban`, { method: 'POST', body: { user_id: uid } });
 }
 
-export function muteUser(channel: string, username: string, muted: boolean): Promise<unknown> {
+export function muteUser(channel: string, uid: number, muted: boolean): Promise<unknown> {
   // 落库为权威：目标不在房也能禁言/解禁（下次进房生效）
   return req(`/api/channels/${encodeURIComponent(channel)}/${muted ? 'mute' : 'unmute'}`, {
     method: 'POST',
-    body: { username },
+    body: { user_id: uid },
   });
 }
 
-export function unbanUser(channel: string, username: string): Promise<void> {
-  return req(`/api/channels/${encodeURIComponent(channel)}/unban`, { method: 'POST', body: { username } });
+export function unbanUser(channel: string, uid: number): Promise<void> {
+  return req(`/api/channels/${encodeURIComponent(channel)}/unban`, { method: 'POST', body: { user_id: uid } });
 }
 
-export async function listBans(channel: string): Promise<string[]> {
-  const data = await req<{ bans: string[] | null }>(`/api/channels/${encodeURIComponent(channel)}/bans`);
+// UserRef 名单条目：id 是操作目标，username 只用于展示
+export interface UserRef {
+  id: number;
+  username: string;
+}
+
+export async function listBans(channel: string): Promise<UserRef[]> {
+  const data = await req<{ bans: UserRef[] | null }>(`/api/channels/${encodeURIComponent(channel)}/bans`);
   return data.bans ?? [];
 }
 
@@ -210,13 +220,15 @@ export function setInviteOnly(channel: string, enabled: boolean): Promise<{ invi
   });
 }
 
-export async function listMembers(channel: string): Promise<string[]> {
-  const data = await req<{ members: string[] | null }>(
+export async function listMembers(channel: string): Promise<UserRef[]> {
+  const data = await req<{ members: UserRef[] | null }>(
     `/api/channels/${encodeURIComponent(channel)}/members`,
   );
   return data.members ?? [];
 }
 
+// 加白名单按用户名收：目标是还没进过房的人，房主手输名字、界面上没有 uid 可选，
+// 与登录同属「名字 → 用户」的一次查找（服务端查到后立即换成 user_id 落库）
 export function addMember(channel: string, username: string): Promise<void> {
   return req(`/api/channels/${encodeURIComponent(channel)}/members`, {
     method: 'POST',
@@ -224,19 +236,21 @@ export function addMember(channel: string, username: string): Promise<void> {
   });
 }
 
-export function removeMember(channel: string, username: string): Promise<void> {
+export function removeMember(channel: string, uid: number): Promise<void> {
   return req(`/api/channels/${encodeURIComponent(channel)}/members`, {
     method: 'DELETE',
-    body: { username },
+    body: { user_id: uid },
   });
 }
 
 export interface RoomParticipant {
   identity: string;
-  name: string;
+  uid: number; // 归属用户 id（内核元数据透传；管理操作的目标）
+  username: string; // 归属用户名（纯展示）
+  name: string; // 内核侧显示名
   joined_at: number;
   kind?: string; // 参与者类别（omitempty；ingest = 推流设备）
-  tag?: string; // 推流设备标签（kind=ingest 时有效）
+  tag?: string; // 设备标签
 }
 
 export async function listParticipants(channel: string): Promise<RoomParticipant[]> {

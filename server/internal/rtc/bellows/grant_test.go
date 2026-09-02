@@ -47,7 +47,8 @@ func remoteCfg(udpPort string) func(context.Context, string) string {
 // mustSign 以测试密钥签 publish 通行证（identity/name/tag 由 hearth 侧组好，这里直接给测试值）。
 func mustSign(t *testing.T, g *Gateway, token, offer string) string {
 	t.Helper()
-	h, v, err := g.IssueWHIPGrant(context.Background(), token, "chan1", "alice-obs", "alice", "obs", []byte(offer))
+	h, v, err := g.IssueWHIPGrant(context.Background(), token, "chan1", rtc.Identity(7, "obs"),
+		rtc.Meta{UID: 7, Username: "alice", Kind: "ingest", Tag: "obs"}, []byte(offer))
 	if err != nil {
 		t.Fatalf("签发失败: %v", err)
 	}
@@ -58,8 +59,9 @@ func mustSign(t *testing.T, g *Gateway, token, offer string) string {
 }
 
 func TestGrantRoundTrip(t *testing.T) {
-	p := grantPayload{V: 1, Op: "publish", Token: "tok", Room: "r", Identity: "alice-obs",
-		Name: "alice", Kind: "ingest", Tag: "obs", Offer: "abc", Exp: time.Now().Add(grantTTL).Unix()}
+	p := grantPayload{V: 1, Op: "publish", Token: "tok", Room: "r", Identity: "u7-obs",
+		Meta: rtc.Meta{UID: 7, Username: "alice", Kind: "ingest", Tag: "obs"},
+		Offer: "abc", Exp: time.Now().Add(grantTTL).Unix()}
 	v, err := signGrant(testSecret, p)
 	if err != nil {
 		t.Fatalf("签发失败: %v", err)

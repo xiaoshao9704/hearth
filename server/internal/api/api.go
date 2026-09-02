@@ -61,12 +61,12 @@ func New(st *store.Store, cfg config.Config, hub *chat.Hub) *API {
 	// 内建实例：ember 是进程内纯音频语音内核；bellows 是进程内 WHIP 直通推流网关
 	//（OBS HEVC/AV1 的接入路径），其余形态由 env/DB 注册成实例（见 providers.go）
 	a.ember = ember.New(a.dynVal)
-	a.ingressResolver = func(ctx context.Context, _ string) (string, string, string, string, error) {
+	a.ingressResolver = func(ctx context.Context, _ string) (string, string, rtc.Meta, error) {
 		adm, ok := ctx.Value(ingestCtxKey{}).(ingestAdmission)
 		if !ok {
-			return "", "", "", "", bellows.ErrUnknownKey
+			return "", "", rtc.Meta{}, bellows.ErrUnknownKey
 		}
-		return adm.Room, adm.Identity, adm.Name, adm.Tag, nil
+		return adm.Room, adm.Identity, adm.Meta, nil
 	}
 	a.kernelKeys = append(ember.ConfigKeys(), bellows.ConfigKeys()...)
 	// 注册表先种内建实例：启动期迁移或 ListProviders 失败（保留旧表）时，
@@ -422,12 +422,14 @@ func (a *API) joinToken(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusForbidden, reason)
 		return
 	}
-	tag := a.deviceTagFor(r, req.DeviceID, u.ID)
+	// 参与者元数据组一次两线共用：身份判定走 identity 里的 user_id，
+	// 用户名等展示信息随元数据下发（前端不解析 identity）
+	meta := rtc.Meta{UID: adm.UID, Username: adm.Username, Tag: a.deviceTagFor(r, req.DeviceID, u.ID)}
 	// 频道名即内核房间名，一一映射。语音线必发；舞台线可选；
 	// 两线同一实例时标记 combined，前端用一条连接承担两种角色（即旧单线形态）。
 	voiceAlias, voiceP := a.voiceInstance(r.Context())
 	stageAlias, stageP := a.stageInstance(r.Context())
-	vc, err := voiceP.JoinCredentials(r.Context(), c.Name, adm.Identity, tag, adm.CanPublish)
+	vc, err := voiceP.JoinCredentials(r.Context(), c.Name, meta, adm.CanPublish)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "签发令牌失败")
 		return
@@ -436,18 +438,17 @@ func (a *API) joinToken(w http.ResponseWriter, r *http.Request) {
 	ticket := ""
 	if vc.Engine == "ember" {
 		ticket = a.issueVoiceTicket(voiceTicket{
-			room:     c.Name,
-			identity: adm.Identity + "-" + tag,
-			name:     adm.Identity,
-			userID:   u.ID,
-			muted:    !adm.CanPublish,
+			room:   c.Name,
+			meta:   meta,
+			userID: u.ID,
+			muted:  !adm.CanPublish,
 		})
 	}
 	resp := map[string]any{"voice": a.fillCred(r, vc, c.Name, ticket, voiceAlias)}
 	combined := stageP != nil && voiceAlias == stageAlias
 	resp["combined"] = combined
 	if stageP != nil && !combined {
-		sc, serr := stageP.JoinCredentials(r.Context(), c.Name, adm.Identity, tag, adm.CanPublish)
+		sc, serr := stageP.JoinCredentials(r.Context(), c.Name, meta, adm.CanPublish)
 		if serr != nil {
 			log.Printf("舞台线签发失败（语音照常）: %v", serr)
 		} else {
@@ -559,20 +560,21 @@ func deviceTag(ua string) string {
 
 // ---- 频道管理（房主操作）----
 
-// resolveTargetUser 解析 body 里的目标用户名：须存在且不能是自己（封禁/禁言对自己无意义；
-// 踢出有独立 handler，支持踢自己的设备）。
+// resolveTargetUser 解析 body 里的目标 user_id：须存在且不能是自己（封禁/禁言对自己无意义；
+// 踢出有独立 handler，支持踢自己的设备）。目标一律用 user_id——用户名可改、改后旧名即释放，
+// 拿它做操作目标会在改名/重注册后打到别人身上；前端从参与者元数据的 uid 取。
 func (a *API) resolveTargetUser(w http.ResponseWriter, r *http.Request, u *store.User) *store.User {
 	var req struct {
-		Username string `json:"username"`
+		UserID int64 `json:"user_id"`
 	}
 	if !decode(w, r, &req) {
 		return nil
 	}
-	if req.Username == u.Username {
+	if req.UserID == u.ID {
 		writeErr(w, http.StatusBadRequest, "不能对自己操作")
 		return nil
 	}
-	t, _, err := a.st.UserByName(r.Context(), req.Username)
+	t, err := a.st.UserByID(r.Context(), req.UserID)
 	if err != nil {
 		writeErr(w, http.StatusNotFound, "用户不存在")
 		return nil
@@ -581,23 +583,19 @@ func (a *API) resolveTargetUser(w http.ResponseWriter, r *http.Request, u *store
 }
 
 // evict 把用户从频道现场移除：identity 为空踢全部设备并断聊天 WS；
-// 非空只踢该设备（RemoveParticipantsOf 的 MatchesUser 对完整 identity 即精确匹配），聊天不动。
+// 非空只踢该设备（归属约束由内核侧按 user_id 保底），聊天不动。
 func (a *API) evict(r *http.Request, c *store.Channel, t *store.User, identity string) (int, error) {
-	target := t.Username
-	if identity != "" {
-		target = identity
-	}
 	_, vp := a.voiceInstance(r.Context())
-	n, err := vp.RemoveParticipantsOf(r.Context(), c.Name, target)
+	n, err := vp.RemoveParticipantsOf(r.Context(), c.Name, t.ID, identity)
 	if _, sp := a.stageInstance(r.Context()); sp != nil {
-		if m, serr := sp.RemoveParticipantsOf(r.Context(), c.Name, target); serr == nil {
+		if m, serr := sp.RemoveParticipantsOf(r.Context(), c.Name, t.ID, identity); serr == nil {
 			n += m
 		} else if err == nil {
 			err = serr
 		}
 	}
 	if err != nil {
-		log.Printf("内核踢出 %s 失败: %v", target, err)
+		log.Printf("内核踢出 uid=%d（设备 %q）失败: %v", t.ID, identity, err)
 	}
 	if identity == "" {
 		a.hub.CloseUserChannel(t.ID, c.ID)
@@ -605,27 +603,27 @@ func (a *API) evict(r *http.Request, c *store.Channel, t *store.User, identity s
 	return n, err
 }
 
-// kick 踢出目标用户：identity 为空踢全部设备，非空只踢该设备（须归属 username）。
+// kick 踢出目标用户：identity 为空踢全部设备，非空只踢该设备（须归属该 user_id）。
 // 踢自己（含自己的单个设备）只需登录；踢别人要求房主/管理员。
 func (a *API) kick(w http.ResponseWriter, r *http.Request) {
 	c := channelFrom(r)
 	u := userFrom(r)
 	var req struct {
-		Username string `json:"username"`
+		UserID   int64  `json:"user_id"`
 		Identity string `json:"identity"`
 	}
 	if !decode(w, r, &req) {
 		return
 	}
-	if req.Username != u.Username && c.OwnerID != u.ID && !u.IsAdmin {
+	if req.UserID != u.ID && c.OwnerID != u.ID && !u.IsAdmin {
 		writeErr(w, http.StatusForbidden, "只有房主或管理员能踢出他人")
 		return
 	}
-	if req.Identity != "" && !rtc.MatchesUser(req.Identity, req.Username) {
+	if req.Identity != "" && !rtc.MatchesUser(req.Identity, req.UserID) {
 		writeErr(w, http.StatusBadRequest, "设备不属于该用户")
 		return
 	}
-	t, _, err := a.st.UserByName(r.Context(), req.Username)
+	t, err := a.st.UserByID(r.Context(), req.UserID)
 	if err != nil {
 		writeErr(w, http.StatusNotFound, "用户不存在")
 		return
@@ -692,9 +690,9 @@ func (a *API) setGag(w http.ResponseWriter, r *http.Request, muted bool) {
 		kernels = append(kernels, sp)
 	}
 	for _, p := range kernels {
-		if err := p.MuteUserAudio(r.Context(), c.Name, t.Username, muted); err != nil &&
+		if err := p.MuteUserAudio(r.Context(), c.Name, t.ID, muted); err != nil &&
 			!errors.Is(err, rtc.ErrNoParticipant) {
-			log.Printf("内核(%s)禁言传播 %s 失败: %v", p.Name(), t.Username, err)
+			log.Printf("内核(%s)禁言传播 uid=%d 失败: %v", p.Name(), t.ID, err)
 		}
 	}
 	key := "unmuted"
@@ -709,12 +707,12 @@ func (a *API) unmute(w http.ResponseWriter, r *http.Request) { a.setGag(w, r, fa
 
 func (a *API) listBans(w http.ResponseWriter, r *http.Request) {
 	c := channelFrom(r)
-	names, err := a.st.ListBans(r.Context(), c.ID)
+	bans, err := a.st.ListBans(r.Context(), c.ID)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "内部错误")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"bans": names})
+	writeJSON(w, http.StatusOK, map[string]any{"bans": bans})
 }
 
 func (a *API) setInviteOnly(w http.ResponseWriter, r *http.Request) {
@@ -734,18 +732,34 @@ func (a *API) setInviteOnly(w http.ResponseWriter, r *http.Request) {
 
 func (a *API) listMembers(w http.ResponseWriter, r *http.Request) {
 	c := channelFrom(r)
-	names, err := a.st.ListMembers(r.Context(), c.ID)
+	members, err := a.st.ListMembers(r.Context(), c.ID)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "内部错误")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"members": names})
+	writeJSON(w, http.StatusOK, map[string]any{"members": members})
 }
 
+// addMember 把用户加入邀请制白名单。**这里按用户名收是有意的**：目标是「还没进过房的人」，
+// 房主手输名字，界面上没有 uid 可选——与登录同属「名字 → 用户」的一次查找，
+// 查到后立即换成 user_id 落库，用户名不进任何判定。
+// 移出白名单走 removeMember（从名单里点，带 uid）。
 func (a *API) addMember(w http.ResponseWriter, r *http.Request) {
 	c := channelFrom(r)
-	t := a.resolveTargetUser(w, r, userFrom(r))
-	if t == nil {
+	u := userFrom(r)
+	var req struct {
+		Username string `json:"username"`
+	}
+	if !decode(w, r, &req) {
+		return
+	}
+	t, _, err := a.st.UserByName(r.Context(), strings.TrimSpace(req.Username))
+	if err != nil {
+		writeErr(w, http.StatusNotFound, "用户不存在")
+		return
+	}
+	if t.ID == u.ID {
+		writeErr(w, http.StatusBadRequest, "不用把自己加进白名单（房主天然可进）")
 		return
 	}
 	if err := a.st.AddMember(r.Context(), c.ID, t.ID); err != nil {

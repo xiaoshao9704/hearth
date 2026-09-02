@@ -17,6 +17,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"hearth/server/internal/rtc"
 )
 
 // GrantHeader 反代时携带通行证的请求头。
@@ -30,20 +32,18 @@ const grantClockSkew = 30 * time.Second
 
 var errInvalidGrant = errors.New("通行证无效或已过期")
 
-// grantPayload 通行证内容。op=publish 时带 room/identity/name/tag/offer（offer = 请求体
-// SHA256 hex，绑定 SDP 防重放挪用；identity/name/tag 由 hearth 组好，网关只透传）；
-// op=revoke 只需 token。kind 恒为 "ingest"（参与者元数据语义，与前端识别推流设备对应）。
+// grantPayload 通行证内容。op=publish 时带 room/identity/meta/offer（offer = 请求体
+// SHA256 hex，绑定 SDP 防重放挪用；identity 与 meta 由 hearth 组好，网关只透传）；
+// op=revoke 只需 token。meta.Kind 恒为 "ingest"（与前端识别推流设备对应）。
 type grantPayload struct {
-	V        int    `json:"v"`
-	Op       string `json:"op"` // publish / revoke
-	Token    string `json:"token"`
-	Room     string `json:"room,omitempty"`
-	Identity string `json:"identity,omitempty"`
-	Name     string `json:"name,omitempty"`
-	Kind     string `json:"kind,omitempty"`
-	Tag      string `json:"tag,omitempty"`
-	Offer    string `json:"offer,omitempty"`
-	Exp      int64  `json:"exp"`
+	V        int      `json:"v"`
+	Op       string   `json:"op"` // publish / revoke
+	Token    string   `json:"token"`
+	Room     string   `json:"room,omitempty"`
+	Identity string   `json:"identity,omitempty"`
+	Meta     rtc.Meta `json:"meta,omitempty"`
+	Offer    string   `json:"offer,omitempty"`
+	Exp      int64    `json:"exp"`
 }
 
 // signGrant 签发通行证：base64url(payload JSON) + "." + base64url(HMAC-SHA256)。
@@ -93,11 +93,11 @@ func offerHash(offer []byte) string {
 // ---- rtc.WHIPGrantIssuer（hearth 侧，远端形态下由接入层调用）----
 
 // IssueWHIPGrant 入场判定通过后为一次 WHIP POST 签发通行证（绑定令牌与 offer 哈希；
-// identity/name/tag 由接入层组好，远端只透传）。
-func (g *Gateway) IssueWHIPGrant(ctx context.Context, token, room, identity, name, tag string, offer []byte) (header, value string, err error) {
+// identity 与 meta 由接入层组好，远端只透传）。
+func (g *Gateway) IssueWHIPGrant(ctx context.Context, token, room, identity string, meta rtc.Meta, offer []byte) (header, value string, err error) {
 	v, err := signGrant(g.cfg(ctx, "bellows_shared_secret"), grantPayload{
-		V: 1, Op: "publish", Token: token, Room: room, Identity: identity, Name: name,
-		Kind: "ingest", Tag: tag, Offer: offerHash(offer), Exp: time.Now().Add(grantTTL).Unix(),
+		V: 1, Op: "publish", Token: token, Room: room, Identity: identity, Meta: meta,
+		Offer: offerHash(offer), Exp: time.Now().Add(grantTTL).Unix(),
 	})
 	if err != nil {
 		return "", "", err

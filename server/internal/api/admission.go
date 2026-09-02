@@ -10,12 +10,15 @@ import (
 	"net/http"
 	"time"
 
+	"hearth/server/internal/rtc"
 	"hearth/server/internal/store"
 )
 
-// admission 入场判定结果。
+// admission 入场判定结果。身份一律以 user_id 为准（identity 由 rtc.Identity 组），
+// 用户名只作为展示信息随参与者元数据下发。
 type admission struct {
-	Identity   string // 参与者用户名（内核侧 identity 前缀）
+	UID        int64  // 参与者归属用户 id
+	Username   string // 展示名
 	CanPublish bool   // 能否发布（未被禁言）
 }
 
@@ -33,7 +36,7 @@ func (a *API) admitUser(ctx context.Context, c *store.Channel, u *store.User) (a
 	if err != nil {
 		return admission{}, false, "", err
 	}
-	return admission{Identity: u.Username, CanPublish: !gagged}, true, "", nil
+	return admission{UID: u.ID, Username: u.Username, CanPublish: !gagged}, true, "", nil
 }
 
 // ---- ember 线一次性入场票 ----
@@ -42,12 +45,11 @@ func (a *API) admitUser(ctx context.Context, c *store.Channel, u *store.User) (a
 const voiceTicketTTL = 60 * time.Second
 
 type voiceTicket struct {
-	room     string // 频道名（与信令 URL 的 channel 参数比对）
-	identity string // 入会 identity（用户名+设备标签，joinToken 已算好）
-	name     string // 显示名（用户名）
-	userID   int64  // 持票人（与信令入口的会话用户比对，防票据挪用）
-	muted    bool   // 入会即禁言
-	expires  time.Time
+	room    string   // 频道名（与信令 URL 的 channel 参数比对）
+	meta    rtc.Meta // 入会身份与展示信息（joinToken 已组好，ember 据此建 identity）
+	userID  int64    // 持票人（与信令入口的会话用户比对，防票据挪用）
+	muted   bool     // 入会即禁言
+	expires time.Time
 }
 
 // issueVoiceTicket 签发一次性入场票，返回票号（拼进信令 URL query）。
@@ -90,13 +92,12 @@ func (a *API) cleanTicketsLocked() {
 // 由接入层解析）原样取回。
 type ingestCtxKey struct{}
 
-// ingestAdmission 推流入场判定结果：Room=频道名（=内核房间名），Identity={用户名}-{标签}，
-// Name=用户名（grant 与端点的 name 字段必须是用户名：前端 meta.username 取自它，不能塞显示名）。
+// ingestAdmission 推流入场判定结果：Room=频道名（=内核房间名），Identity 见 rtc.Identity，
+// Meta 是随参与者下发的元数据（前端据 meta.uid 认人、meta.username 展示）。
 type ingestAdmission struct {
 	Room     string
 	Identity string
-	Name     string
-	Tag      string
+	Meta     rtc.Meta
 	TokenID  int64 // ingest_tokens 主键（livekit-ingress 的端点记录按它归到令牌名下）
 }
 
@@ -156,6 +157,9 @@ func (a *API) admitIngest(ctx context.Context, w http.ResponseWriter, alias, cha
 		return ingestAdmission{}, false
 	}
 	return ingestAdmission{
-		Room: c.Name, Identity: u.Username + "-" + it.Tag, Name: u.Username, Tag: it.Tag, TokenID: it.ID,
+		Room:     c.Name,
+		Identity: rtc.Identity(u.ID, it.Tag),
+		Meta:     rtc.Meta{UID: u.ID, Username: u.Username, Kind: "ingest", Tag: it.Tag},
+		TokenID:  it.ID,
 	}, true
 }

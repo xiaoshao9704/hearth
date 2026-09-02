@@ -159,7 +159,8 @@ type Message struct {
 
 	ID        int64     `bun:",pk,autoincrement" json:"id"`
 	ChannelID int64     `json:"channel_id"`
-	Username  string    `bun:"-" json:"username"` // 发送者用户名（JOIN 填充）
+	UserID    int64     `json:"uid"`              // 发送者 user_id（右键菜单等管理操作的目标）
+	Username  string    `bun:"-" json:"username"` // 发送者用户名（JOIN 填充，纯展示）
 	Content   string    `json:"content"`
 	CreatedAt time.Time `json:"created_at"`
 }
@@ -343,8 +344,8 @@ func (s *Store) Unban(ctx context.Context, channelID, userID int64) error {
 }
 
 // ListBans 返回该频道被封禁的用户名列表。
-func (s *Store) ListBans(ctx context.Context, channelID int64) ([]string, error) {
-	return s.listUsernames(ctx, "channel_bans", channelID)
+func (s *Store) ListBans(ctx context.Context, channelID int64) ([]UserRef, error) {
+	return s.listUserRefs(ctx, "channel_bans", channelID)
 }
 
 // ---- 禁言 ----
@@ -369,8 +370,8 @@ func (s *Store) Ungag(ctx context.Context, channelID, userID int64) error {
 }
 
 // ListGags 返回该频道被禁言的用户名列表。
-func (s *Store) ListGags(ctx context.Context, channelID int64) ([]string, error) {
-	return s.listUsernames(ctx, "channel_gags", channelID)
+func (s *Store) ListGags(ctx context.Context, channelID int64) ([]UserRef, error) {
+	return s.listUserRefs(ctx, "channel_gags", channelID)
 }
 
 // ---- 成员（邀请制白名单）----
@@ -395,17 +396,34 @@ func (s *Store) RemoveMember(ctx context.Context, channelID, userID int64) error
 }
 
 // ListMembers 返回该频道白名单用户名列表。
-func (s *Store) ListMembers(ctx context.Context, channelID int64) ([]string, error) {
-	return s.listUsernames(ctx, "channel_members", channelID)
+func (s *Store) ListMembers(ctx context.Context, channelID int64) ([]UserRef, error) {
+	return s.listUserRefs(ctx, "channel_members", channelID)
 }
 
-// listUsernames 取 channel_bans/channel_gags/channel_members 里的用户名（三表结构相同）。
-func (s *Store) listUsernames(ctx context.Context, table string, channelID int64) ([]string, error) {
-	out := []string{}
-	err := s.bun.NewRaw(`
-SELECT u.username FROM `+table+` t JOIN users u ON u.id = t.user_id
-WHERE t.channel_id = ? ORDER BY t.created_at`, channelID).Scan(ctx, &out)
-	return out, err
+// UserRef 名单条目：id 是操作目标（解禁/移出白名单按它发），username 只用于展示。
+type UserRef struct {
+	ID       int64  `json:"id"`
+	Username string `json:"username"`
+}
+
+// listUserRefs 取 channel_bans/channel_gags/channel_members 的名单（三表结构相同）。
+func (s *Store) listUserRefs(ctx context.Context, table string, channelID int64) ([]UserRef, error) {
+	out := []UserRef{}
+	rows, err := s.bun.QueryContext(ctx, `
+SELECT u.id, u.username FROM `+table+` t JOIN users u ON u.id = t.user_id
+WHERE t.channel_id = ? ORDER BY t.created_at`, channelID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var ref UserRef
+		if err := rows.Scan(&ref.ID, &ref.Username); err != nil {
+			return nil, err
+		}
+		out = append(out, ref)
+	}
+	return out, rows.Err()
 }
 
 // CanJoin 进入权限：被封禁拒绝；邀请制频道仅房主与白名单可进（房主天然豁免）。
@@ -438,16 +456,16 @@ func (s *Store) AddMessage(ctx context.Context, channelID, userID int64, content
 	}
 	var m Message
 	err := s.bun.NewRaw(`
-SELECT m.id, m.channel_id, u.username, m.content, m.created_at
+SELECT m.id, m.channel_id, m.user_id, u.username, m.content, m.created_at
 FROM messages m JOIN users u ON u.id = m.user_id WHERE m.id = ?`, row.ID).
-		Scan(ctx, &m.ID, &m.ChannelID, &m.Username, &m.Content, &m.CreatedAt)
+		Scan(ctx, &m.ID, &m.ChannelID, &m.UserID, &m.Username, &m.Content, &m.CreatedAt)
 	return &m, err
 }
 
 // RecentMessages 返回频道最近 limit 条消息（按时间正序）。
 func (s *Store) RecentMessages(ctx context.Context, channelID int64, limit int) ([]Message, error) {
 	rows, err := s.bun.QueryContext(ctx, `
-SELECT m.id, m.channel_id, u.username, m.content, m.created_at
+SELECT m.id, m.channel_id, m.user_id, u.username, m.content, m.created_at
 FROM messages m JOIN users u ON u.id = m.user_id
 WHERE m.channel_id = ? ORDER BY m.id DESC LIMIT ?`, channelID, limit)
 	if err != nil {
@@ -457,7 +475,7 @@ WHERE m.channel_id = ? ORDER BY m.id DESC LIMIT ?`, channelID, limit)
 	var out []Message
 	for rows.Next() {
 		var m Message
-		if err := rows.Scan(&m.ID, &m.ChannelID, &m.Username, &m.Content, &m.CreatedAt); err != nil {
+		if err := rows.Scan(&m.ID, &m.ChannelID, &m.UserID, &m.Username, &m.Content, &m.CreatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, m)

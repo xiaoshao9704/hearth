@@ -47,7 +47,7 @@ func (a *API) voiceWS(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return
 	}
-	log.Printf("ember 入会: room=%s identity=%s", tk.room, tk.identity)
+	log.Printf("ember 入会: room=%s uid=%d tag=%s", tk.room, tk.meta.UID, tk.meta.Tag)
 	// hijack 后 r.Context() 会被 net/http 取消，连接生命周期用独立 context
-	a.ember.HandleJoin(context.WithoutCancel(r.Context()), tk.room, tk.identity, tk.name, tk.muted, conn)
+	a.ember.HandleJoin(context.WithoutCancel(r.Context()), tk.room, tk.meta, tk.muted, conn)
 }

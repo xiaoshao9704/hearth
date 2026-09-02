@@ -61,10 +61,10 @@ func RemoteKeys() []rtc.ConfigKey {
 	}
 }
 
-// ResolveFunc 按推流令牌反查归属（房间名 = 频道名；identity/name/tag 由接入层组好，
-// 网关只透传，不再拼设备后缀），由接入层注入，仅进程内形态使用。
+// ResolveFunc 按推流令牌反查归属（房间名 = 频道名；identity 与 meta 由接入层组好，
+// 网关只透传，不做任何身份拼装），由接入层注入，仅进程内形态使用。
 // 令牌不存在须返回 ErrUnknownKey；其余错误按内部故障处理。
-type ResolveFunc func(ctx context.Context, token string) (room, identity, name, tag string, err error)
+type ResolveFunc func(ctx context.Context, token string) (room, identity string, meta rtc.Meta, err error)
 
 // Gateway 同时实现 rtc.IngestProvider 与 rtc.WHIPServer（进程内处理 /w 请求，不反代）；
 // 远端形态下另实现 rtc.WHIPGrantIssuer（hearth 侧签发通行证、通知撤销远端会话）。
@@ -159,7 +159,7 @@ func (g *Gateway) RevokeToken(_ context.Context, token string) error {
 }
 
 // EnsureEndpoint Bellows 的实例凭证就是通行证，无上游端点要建（livekit-ingress 才有）。
-func (g *Gateway) EnsureEndpoint(context.Context, string, string, map[string]string) (id, upstreamKey string, err error) {
+func (g *Gateway) EnsureEndpoint(context.Context, string, string, rtc.Meta) (id, upstreamKey string, err error) {
 	return "", "", nil
 }
 
@@ -270,9 +270,10 @@ func (g *Gateway) handlePost(w http.ResponseWriter, r *http.Request, token strin
 	}
 	// 归属来源二选一：进程内形态反查接入层注入的 resolve；远端形态验 hearth 签发的
 	// 通行证（绑定令牌与 offer 哈希，判定已在 hearth 侧做完，这里不再问任何人）
-	var room, identity, name, tag string
+	var room, identity string
+	var meta rtc.Meta
 	if g.resolve != nil {
-		room, identity, name, tag, err = g.resolve(r.Context(), token)
+		room, identity, meta, err = g.resolve(r.Context(), token)
 		if errors.Is(err, ErrUnknownKey) {
 			http.Error(w, "推流令牌无效或已重置", http.StatusNotFound)
 			return
@@ -287,7 +288,7 @@ func (g *Gateway) handlePost(w http.ResponseWriter, r *http.Request, token strin
 			http.Error(w, errInvalidGrant.Error(), http.StatusUnauthorized)
 			return
 		}
-		room, identity, name, tag = p.Room, p.Identity, p.Name, p.Tag
+		room, identity, meta = p.Room, p.Identity, p.Meta
 	}
 	pub := g.publishSink(r.Context())
 	if pub == nil {
@@ -315,7 +316,7 @@ func (g *Gateway) handlePost(w http.ResponseWriter, r *http.Request, token strin
 		http.Error(w, "内部错误", http.StatusInternalServerError)
 		return
 	}
-	s := &session{gw: g, rid: rid, token: token, room: room, identity: identity, name: name, tag: tag, pc: pc}
+	s := &session{gw: g, rid: rid, token: token, room: room, identity: identity, meta: meta, pc: pc}
 	pc.OnTrack(func(tr *webrtc.TrackRemote, _ *webrtc.RTPReceiver) {
 		go s.handleTrack(tr)
 	})
@@ -482,12 +483,11 @@ func (g *Gateway) removeSession(s *session) {
 
 type session struct {
 	gw       *Gateway
-	rid      string // 会话资源 id（Location /w/sessions/{rid}）
-	token    string // 推流令牌（每用户一把）
-	room     string // 频道名 = 舞台内核房间名
-	identity string // 发布参与者 identity（{用户名}-{标签}，接入层组好）
-	name     string // 显示名
-	tag      string // 推流设备标签
+	rid      string   // 会话资源 id（Location /w/sessions/{rid}）
+	token    string   // 推流令牌（每用户一把）
+	room     string   // 频道名 = 舞台内核房间名
+	identity string   // 发布参与者 identity（接入层组好，见 rtc.Identity）
+	meta     rtc.Meta // 参与者元数据（接入层组好，网关只透传）
 	pc       *webrtc.PeerConnection
 
 	closed atomic.Bool // close 一开始就置位：handleTrack 据此拒绝为已关闭会话发布
@@ -521,8 +521,7 @@ func (s *session) handleTrack(tr *webrtc.TrackRemote) {
 	// 发布出口断了就拆会话：推流端据此重推（重推会走完整的建会话流程，重新连房）。
 	// 不拆的话轨只会一直写进死连接，永远等不到自愈
 	ctx = rtc.WithPublishLost(ctx, s.close)
-	meta := map[string]string{"username": s.name, "kind": "ingest", "tag": s.tag}
-	unpublish, err := pub.PublishRemote(ctx, s.room, s.identity, s.name, meta, tr)
+	unpublish, err := pub.PublishRemote(ctx, s.room, s.identity, s.meta.Username, s.meta, tr)
 	if err != nil {
 		log.Printf("bellows 发布轨失败: identity=%s 房间=%s: %v", s.identity, s.room, err)
 		s.close()

@@ -12,7 +12,7 @@ import {
   setInviteOnly,
   unbanUser,
 } from '../api';
-import type { RoomParticipant } from '../api';
+import type { RoomParticipant, UserRef } from '../api';
 import { avatarHtml, esc, icon, timeAgo, toast } from '../ui';
 
 type Tab = 'members' | 'bans' | 'allow';
@@ -22,8 +22,8 @@ export async function renderManage(root: HTMLElement, channel: string) {
   let tab: Tab = 'members';
   let inviteOnly = false;
   let participants: RoomParticipant[] = [];
-  let bans: string[] = [];
-  let allow: string[] = [];
+  let bans: UserRef[] = [];
+  let allow: UserRef[] = [];
 
   root.innerHTML = `
     <div style="height:100%;display:flex;flex-direction:column;background:var(--bg-1)">
@@ -74,13 +74,12 @@ export async function renderManage(root: HTMLElement, channel: string) {
     }
   }
 
-  // 参与者按用户名聚合
-  function byUser(): Map<string, typeof participants> {
-    const m = new Map<string, typeof participants>();
+  // 参与者按 user_id 聚合（同名不同人的歧义不存在；用户名只用于展示）
+  function byUser(): Map<number, typeof participants> {
+    const m = new Map<number, typeof participants>();
     for (const p of participants) {
-      const u = p.name || p.identity.split('-')[0];
-      if (!m.has(u)) m.set(u, []);
-      m.get(u)!.push(p);
+      if (!m.has(p.uid)) m.set(p.uid, []);
+      m.get(p.uid)!.push(p);
     }
     return m;
   }
@@ -132,8 +131,9 @@ export async function renderManage(root: HTMLElement, channel: string) {
               users.size === 0
                 ? '<div class="table-empty">现在没人在房里。</div>'
                 : [...users.entries()]
-                    .map(([uname, plist]) => {
-                      const isMe = uname === (me?.username ?? '');
+                    .map(([uid, plist]) => {
+                      const uname = plist[0].username || plist[0].name;
+                      const isMe = uid === (me?.id ?? 0);
                       // 推流设备按内核透传的 kind=ingest 判断（不再解析 identity 后缀），标签随行展示
                       const ing = plist.find((p) => p.kind === 'ingest');
                       const meta = [
@@ -157,8 +157,8 @@ export async function renderManage(root: HTMLElement, channel: string) {
                   isMe
                     ? ''
                     : `<div style="display:flex;gap:8px">
-                        <button class="hit btn btn-sm" data-kick="${esc(uname)}">踢出房间</button>
-                        <button class="hit btn btn-sm btn-danger" data-ban="${esc(uname)}">拉黑</button>
+                        <button class="hit btn btn-sm" data-kick="${uid}" data-name="${esc(uname)}">踢出房间</button>
+                        <button class="hit btn btn-sm btn-danger" data-ban="${uid}" data-name="${esc(uname)}">拉黑</button>
                       </div>`
                 }
               </div>`;
@@ -181,11 +181,11 @@ export async function renderManage(root: HTMLElement, channel: string) {
                 ? '<div class="table-empty">黑名单是空的。</div>'
                 : bans
                     .map(
-                      (name) => `
+                      (b) => `
               <div class="list-row">
-                <div class="avatar" style="width:28px;height:28px;font-size:10.5px;background:var(--bg-4);color:var(--text-2)">${esc(name.slice(0, 1))}</div>
-                <div style="flex-grow:1;font-size:13px">${esc(name)}</div>
-                <button class="hit btn btn-sm" data-unban="${esc(name)}">解封</button>
+                <div class="avatar" style="width:28px;height:28px;font-size:10.5px;background:var(--bg-4);color:var(--text-2)">${esc(b.username.slice(0, 1))}</div>
+                <div style="flex-grow:1;font-size:13px">${esc(b.username)}</div>
+                <button class="hit btn btn-sm" data-unban="${b.id}">解封</button>
               </div>`,
                     )
                     .join('')
@@ -210,11 +210,11 @@ export async function renderManage(root: HTMLElement, channel: string) {
             </div>
             ${allow
               .map(
-                (name) => `
+                (m) => `
             <div class="list-row" style="padding:11px 16px">
-              ${avatarHtml(name, 'avatar')}
-              <div style="flex-grow:1;font-size:13px">${esc(name)}</div>
-              <button class="hit btn btn-sm" data-remove="${esc(name)}">移出</button>
+              ${avatarHtml(m.username, 'avatar')}
+              <div style="flex-grow:1;font-size:13px">${esc(m.username)}</div>
+              <button class="hit btn btn-sm" data-remove="${m.id}">移出</button>
             </div>`,
               )
               .join('')}
@@ -244,8 +244,8 @@ export async function renderManage(root: HTMLElement, channel: string) {
     bodyEl.querySelectorAll<HTMLButtonElement>('[data-kick]').forEach((btn) =>
       btn.addEventListener('click', async () => {
         try {
-          await kickUser(channel, btn.dataset.kick!);
-          toast(`已把 ${btn.dataset.kick} 移出房间，对方可以重新进来。`, 'ok');
+          await kickUser(channel, Number(btn.dataset.kick));
+          toast(`已把 ${btn.dataset.name} 移出房间，对方可以重新进来。`, 'ok');
           await load();
         } catch (err) {
           toast((err as Error).message, 'bad');
@@ -255,8 +255,8 @@ export async function renderManage(root: HTMLElement, channel: string) {
     bodyEl.querySelectorAll<HTMLButtonElement>('[data-ban]').forEach((btn) =>
       btn.addEventListener('click', async () => {
         try {
-          await banUser(channel, btn.dataset.ban!);
-          toast(`已拉黑 ${btn.dataset.ban}，之后进不了「${channel}」。`, 'ok');
+          await banUser(channel, Number(btn.dataset.ban));
+          toast(`已拉黑 ${btn.dataset.name}，之后进不了「${channel}」。`, 'ok');
           await load();
         } catch (err) {
           toast((err as Error).message, 'bad');
@@ -266,7 +266,7 @@ export async function renderManage(root: HTMLElement, channel: string) {
     bodyEl.querySelectorAll<HTMLButtonElement>('[data-unban]').forEach((btn) =>
       btn.addEventListener('click', async () => {
         try {
-          await unbanUser(channel, btn.dataset.unban!);
+          await unbanUser(channel, Number(btn.dataset.unban));
           await load();
         } catch (err) {
           toast((err as Error).message, 'bad');
@@ -276,7 +276,7 @@ export async function renderManage(root: HTMLElement, channel: string) {
     bodyEl.querySelectorAll<HTMLButtonElement>('[data-remove]').forEach((btn) =>
       btn.addEventListener('click', async () => {
         try {
-          await removeMember(channel, btn.dataset.remove!);
+          await removeMember(channel, Number(btn.dataset.remove));
           await load();
         } catch (err) {
           toast((err as Error).message, 'bad');

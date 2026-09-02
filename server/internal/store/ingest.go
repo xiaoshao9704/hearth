@@ -85,7 +85,7 @@ func (s *Store) ResetIngestToken(ctx context.Context, userID int64) (*IngestToke
 	return s.IngestTokenByUser(ctx, userID)
 }
 
-// ImportIngestToken 仅供游标 v2 迁移用：按原值导入旧 stream_key 作为用户的推流令牌
+// ImportIngestToken 仅供游标 v3 迁移用：按原值导入旧 stream_key 作为用户的推流令牌
 // （升级后 OBS 沿用旧密钥，只需给服务器地址加频道段）。tag 落库默认值 obs。
 func (s *Store) ImportIngestToken(ctx context.Context, userID int64, token string) error {
 	_, err := s.bun.NewInsert().Model(&ingestTokenRow{UserID: userID, Token: token}).Exec(ctx)
@@ -152,9 +152,34 @@ func (s *Store) DeleteIngestEndpointsByToken(ctx context.Context, tokenID int64)
 	return err
 }
 
-// ---- 游标 v2 迁移专用（勿用于常规路径）----
+// AllIngestEndpoints 全表端点（游标 v4 迁移用：identity 换 user_id 后存量端点全部过期）。
+func (s *Store) AllIngestEndpoints(ctx context.Context) ([]IngestEndpoint, error) {
+	out := []IngestEndpoint{}
+	rows, err := s.bun.QueryContext(ctx,
+		"SELECT token_id, alias, ingress_id, upstream_key, bound_room FROM ingest_endpoints")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var ep IngestEndpoint
+		if err := rows.Scan(&ep.TokenID, &ep.Alias, &ep.IngressID, &ep.UpstreamKey, &ep.BoundRoom); err != nil {
+			return nil, err
+		}
+		out = append(out, ep)
+	}
+	return out, rows.Err()
+}
 
-// LegacyIngressTokens 仅供游标 v2 迁移用：读旧 ingresses 表，每用户取最近创建（id 最大）
+// DeleteAllIngestEndpoints 清空端点表（游标 v4 迁移用）。
+func (s *Store) DeleteAllIngestEndpoints(ctx context.Context) error {
+	_, err := s.bun.NewRaw("DELETE FROM ingest_endpoints").Exec(ctx)
+	return err
+}
+
+// ---- 游标迁移专用（勿用于常规路径）----
+
+// LegacyIngressTokens 仅供游标 v3 迁移用：读旧 ingresses 表，每用户取最近创建（id 最大）
 // 的一把 stream_key 作为其推流令牌，其余丢弃。旧表已删（v2 半途重入）视为空。
 func (s *Store) LegacyIngressTokens(ctx context.Context) (map[int64]string, error) {
 	rows, err := s.bun.QueryContext(ctx, `
@@ -179,7 +204,7 @@ WHERE id IN (SELECT MAX(id) FROM ingresses GROUP BY user_id)`)
 	return out, rows.Err()
 }
 
-// DropIngresses 仅供游标 v2 迁移用：数据搬迁完成后 DROP 旧 ingresses 表。
+// DropIngresses 仅供游标 v3 迁移用：数据搬迁完成后 DROP 旧 ingresses 表。
 func (s *Store) DropIngresses(ctx context.Context) error {
 	_, err := s.bun.NewDropTable().Model((*ingressRow)(nil)).IfExists().Exec(ctx)
 	return err

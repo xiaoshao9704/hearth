@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"time"
 
+	"hearth/server/internal/rtc"
+
 	"github.com/livekit/protocol/auth"
 	"github.com/livekit/protocol/livekit"
 )
@@ -43,8 +45,8 @@ func (c *Client) RoundTrip(req *http.Request) (*http.Response, error) {
 
 // Create 为该发布身份创建 WHIP ingress（enable_transcoding=false，bypass 转码省服务端 CPU）。
 // 房间是端点的可更新属性：创建时以 identity 占位，接入层随即用 UpdateRoom 改成真实房间。
-// meta 序列化为参与者元数据 JSON（至少含 username、kind=ingest、tag）。返回 ingressID 与 streamKey。
-func (c *Client) Create(ctx context.Context, identity, name string, meta map[string]string) (string, string, error) {
+// meta 序列化为参与者元数据 JSON（见 rtc.Meta）。返回 ingressID 与 streamKey。
+func (c *Client) Create(ctx context.Context, identity, name string, meta rtc.Meta) (string, string, error) {
 	rawMeta, err := json.Marshal(meta)
 	if err != nil {
 		return "", "", err
