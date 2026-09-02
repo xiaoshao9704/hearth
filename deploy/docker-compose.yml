@@ -16,13 +16,12 @@ services:
       DATABASE_URL: ${DATABASE_URL:-} # 空 = sqlite（/data 卷）；mysql:// 或 postgres:// 切换
       DB_PATH: /data/hearth.db
       STATIC_DIR: /app/web
-      # 空 = 按请求推导同源地址（/lk、/w/ 经 hearth 内置反代），一般无需设置
+      # 空 = 按请求推导同源地址（/providers/{alias} 信令/WHIP 经 hearth 内置反代），一般无需设置
       LIVEKIT_URL: ${LIVEKIT_URL:-}
-      INGRESS_PUBLIC_URL: ${INGRESS_PUBLIC_URL:-}
-      INGRESS_UPSTREAM_URL: ${INGRESS_UPSTREAM_URL:-} # 空 = Ingress 未启用
+      INGRESS_UPSTREAM_URL: ${INGRESS_UPSTREAM_URL:-} # 空 = 不合成 livekit-ingress 实例（Ingress 未启用）
       LIVEKIT_API_KEY: ${LIVEKIT_API_KEY}
       LIVEKIT_API_SECRET: ${LIVEKIT_API_SECRET}
-      LIVEKIT_API_URL: http://livekit:7880 # 容器网络内直连 Twirp（也是 /lk/ 代理上游）
+      LIVEKIT_API_URL: http://livekit:7880 # 容器网络内直连 Twirp（也是 /providers/livekit 信令代理上游）
       CORS_ORIGIN: "*" # 同源部署，宽放即可
     volumes:
       - hearth-data:/data

@@ -11,12 +11,17 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
-	"strconv"
 	"strings"
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
 	_ "github.com/jackc/pgx/v5/stdlib"
+	"github.com/uptrace/bun"
+	"github.com/uptrace/bun/dialect/mysqldialect"
+	"github.com/uptrace/bun/dialect/pgdialect"
+	"github.com/uptrace/bun/dialect/sqlitedialect"
+	"github.com/uptrace/bun/migrate"
+	"github.com/uptrace/bun/schema"
 	_ "modernc.org/sqlite"
 )
 
@@ -26,36 +31,6 @@ var ErrNotFound = errors.New("记录不存在")
 
 type dialect struct {
 	name string // sqlite | mysql | postgres
-}
-
-// rebind 把 ? 占位符转换为方言占位符（postgres 用 $1..$n，其余原样）。
-func (d dialect) rebind(q string) string {
-	if d.name != "postgres" {
-		return q
-	}
-	var b strings.Builder
-	n := 0
-	for _, r := range q {
-		if r == '?' {
-			n++
-			b.WriteString("$" + strconv.Itoa(n))
-		} else {
-			b.WriteRune(r)
-		}
-	}
-	return b.String()
-}
-
-// ignore 把 INSERT 语句变为"重复则忽略"的方言写法。
-func (d dialect) ignore(insertSQL string) string {
-	switch d.name {
-	case "mysql":
-		return strings.Replace(insertSQL, "INSERT", "INSERT IGNORE", 1)
-	case "postgres":
-		return insertSQL + " ON CONFLICT DO NOTHING"
-	default:
-		return strings.Replace(insertSQL, "INSERT", "INSERT OR IGNORE", 1)
-	}
 }
 
 // parseDBURL 解析 DATABASE_URL，返回方言、驱动名与 DSN。
@@ -70,8 +45,10 @@ func parseDBURL(dbURL string) (dialect, string, string, error) {
 		if pw, ok := u.User.Password(); ok {
 			auth += ":" + pw
 		}
-		// parseTime=true：DATETIME 直接扫成 time.Time
-		dsn := fmt.Sprintf("%s@tcp(%s)%s?parseTime=true", auth, u.Host, u.Path)
+		// parseTime=true：DATETIME 直接扫成 time.Time；
+		// clientFoundRows=true：RowsAffected 统一为「匹配行数」（默认只算实际改变的行，
+		// 同值 UPDATE 会误报 0，靠 RowsAffected 判存在的逻辑在 MySQL 下会误判）
+		dsn := fmt.Sprintf("%s@tcp(%s)%s?parseTime=true&clientFoundRows=true", auth, u.Host, u.Path)
 		return dialect{"mysql"}, "mysql", dsn, nil
 	case strings.HasPrefix(dbURL, "postgres://"), strings.HasPrefix(dbURL, "postgresql://"):
 		return dialect{"postgres"}, "pgx", dbURL, nil
@@ -89,8 +66,20 @@ func parseDBURL(dbURL string) (dialect, string, string, error) {
 }
 
 type Store struct {
-	db *sql.DB
-	d  dialect
+	bun *bun.DB // Bun 句柄（包在 *sql.DB 上），全部查询与 schema 迁移走它
+	d   dialect
+}
+
+// bunDialect 把方言名映射到 Bun 方言实现（驱动仍用原有三个纯 Go 驱动）。
+func (d dialect) bunDialect() schema.Dialect {
+	switch d.name {
+	case "mysql":
+		return mysqldialect.New()
+	case "postgres":
+		return pgdialect.New()
+	default:
+		return sqlitedialect.New()
+	}
 }
 
 func Open(dbURL string) (*Store, error) {
@@ -106,337 +95,63 @@ func Open(dbURL string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("数据库连接失败: %w", err)
 	}
-	s := &Store{db: db, d: d}
-	if err := s.migrate(); err != nil {
+	bunDB := bun.NewDB(db, d.bunDialect())
+	s := &Store{bun: bunDB, d: d}
+	// schema 迁移失败即启动失败（与旧 migrate() 语义一致）。
+	// WithMarkAppliedOnSuccess：Up 成功后才登记 bun_migrations——默认是先登记再执行，
+	// 中途失败会被永久跳过、库停在半迁移态；baselineUp 幂等，开此选项后重试安全。
+	migrator := migrate.NewMigrator(bunDB, Migrations, migrate.WithMarkAppliedOnSuccess(true))
+	ctx := context.Background()
+	if err := migrator.Init(ctx); err != nil {
 		db.Close()
-		return nil, err
+		return nil, fmt.Errorf("schema 迁移初始化失败: %w", err)
+	}
+	if _, err := migrator.Migrate(ctx); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("schema 迁移失败: %w", err)
 	}
 	return s, nil
 }
 
-func (s *Store) Close() error { return s.db.Close() }
+// Close 关闭底层连接（bun.Close 会关掉包在里面的 *sql.DB）。
+func (s *Store) Close() error { return s.bun.Close() }
 
-// q 是 rebind 的简写。
-func (s *Store) q(query string) string { return s.d.rebind(query) }
-
-// insertID 执行 INSERT 并返回自增主键：postgres 用 RETURNING id（pgx 不支持 LastInsertId），
-// sqlite/mysql 用 LastInsertId。
-func (s *Store) insertID(ctx context.Context, insertSQL string, args ...any) (int64, error) {
-	if s.d.name == "postgres" {
-		var id int64
-		err := s.db.QueryRowContext(ctx, s.q(insertSQL)+" RETURNING id", args...).Scan(&id)
-		return id, err
-	}
-	res, err := s.db.ExecContext(ctx, s.q(insertSQL), args...)
-	if err != nil {
-		return 0, err
-	}
-	return res.LastInsertId()
-}
-
-// ---- schema（按方言生成）----
-
-func (s *Store) migrate() error {
-	var ddl []string
-	switch s.d.name {
-	case "mysql":
-		ddl = mysqlDDL
-	case "postgres":
-		ddl = pgDDL
-	default:
-		ddl = sqliteDDL
-	}
-	for _, stmt := range ddl {
-		if _, err := s.db.Exec(stmt); err != nil {
-			return fmt.Errorf("建表失败: %w\nSQL: %s", err, stmt)
-		}
-	}
-	// 老库兼容加列：重复列则忽略
-	compat := []string{
-		`ALTER TABLE channels ADD COLUMN invite_only INTEGER NOT NULL DEFAULT 0`,
-		`ALTER TABLE users ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0`,
-		`ALTER TABLE users ADD COLUMN disabled INTEGER NOT NULL DEFAULT 0`,
-		`ALTER TABLE ingresses ADD COLUMN provider VARCHAR(32) NOT NULL DEFAULT 'livekit'`,
-	}
-	for _, stmt := range compat {
-		if _, err := s.db.Exec(stmt); err != nil {
-			msg := strings.ToLower(err.Error())
-			if !strings.Contains(msg, "duplicate column") && !strings.Contains(msg, "already exists") {
-				return err
-			}
-		}
-	}
-	return nil
-}
-
-var sqliteDDL = []string{
-	`CREATE TABLE IF NOT EXISTS users (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  username TEXT UNIQUE NOT NULL,
-  password_hash TEXT NOT NULL,
-  created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-)`,
-	`CREATE TABLE IF NOT EXISTS sessions (
-  token TEXT PRIMARY KEY,
-  user_id INTEGER NOT NULL REFERENCES users(id),
-  expires_at DATETIME NOT NULL,
-  created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-)`,
-	`CREATE TABLE IF NOT EXISTS channels (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  name TEXT UNIQUE NOT NULL,
-  created_by INTEGER NOT NULL REFERENCES users(id),
-  invite_only INTEGER NOT NULL DEFAULT 0,
-  created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-)`,
-	`CREATE TABLE IF NOT EXISTS messages (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  channel_id INTEGER NOT NULL REFERENCES channels(id),
-  user_id INTEGER NOT NULL REFERENCES users(id),
-  content TEXT NOT NULL,
-  created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-)`,
-	`CREATE INDEX IF NOT EXISTS idx_messages_channel ON messages(channel_id, id)`,
-	`CREATE TABLE IF NOT EXISTS devices (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  user_id INTEGER NOT NULL REFERENCES users(id),
-  device_id TEXT NOT NULL,
-  tag TEXT NOT NULL DEFAULT '',
-  first_seen DATETIME DEFAULT CURRENT_TIMESTAMP,
-  last_seen DATETIME DEFAULT CURRENT_TIMESTAMP,
-  UNIQUE(user_id, device_id)
-)`,
-	`CREATE TABLE IF NOT EXISTS ingresses (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  user_id INTEGER NOT NULL REFERENCES users(id),
-  channel_id INTEGER NOT NULL REFERENCES channels(id),
-  ingress_id TEXT NOT NULL,
-  stream_key TEXT NOT NULL,
-  provider VARCHAR(32) NOT NULL DEFAULT 'livekit',
-  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-  UNIQUE(user_id, channel_id)
-)`,
-	`CREATE TABLE IF NOT EXISTS channel_bans (
-  channel_id INTEGER NOT NULL REFERENCES channels(id),
-  user_id INTEGER NOT NULL REFERENCES users(id),
-  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-  UNIQUE(channel_id, user_id)
-)`,
-	`CREATE TABLE IF NOT EXISTS channel_gags (
-  channel_id INTEGER NOT NULL REFERENCES channels(id),
-  user_id INTEGER NOT NULL REFERENCES users(id),
-  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-  UNIQUE(channel_id, user_id)
-)`,
-	`CREATE TABLE IF NOT EXISTS channel_members (
-  channel_id INTEGER NOT NULL REFERENCES channels(id),
-  user_id INTEGER NOT NULL REFERENCES users(id),
-  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-  UNIQUE(channel_id, user_id)
-)`,
-	`CREATE TABLE IF NOT EXISTS invites (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  code TEXT UNIQUE NOT NULL,
-  note TEXT NOT NULL DEFAULT '',
-  max_uses INTEGER NOT NULL DEFAULT 1,
-  used INTEGER NOT NULL DEFAULT 0,
-  revoked INTEGER NOT NULL DEFAULT 0,
-  created_by INTEGER NOT NULL REFERENCES users(id),
-  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-  expires_at DATETIME NOT NULL
-)`,
-	`CREATE TABLE IF NOT EXISTS settings (
-  k TEXT PRIMARY KEY,
-  v TEXT NOT NULL
-)`,
-}
-
-var mysqlDDL = []string{
-	`CREATE TABLE IF NOT EXISTS users (
-  id BIGINT PRIMARY KEY AUTO_INCREMENT,
-  username VARCHAR(64) UNIQUE NOT NULL,
-  password_hash VARCHAR(255) NOT NULL,
-  created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-)`,
-	`CREATE TABLE IF NOT EXISTS sessions (
-  token VARCHAR(128) PRIMARY KEY,
-  user_id BIGINT NOT NULL,
-  expires_at DATETIME NOT NULL,
-  created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-)`,
-	`CREATE TABLE IF NOT EXISTS channels (
-  id BIGINT PRIMARY KEY AUTO_INCREMENT,
-  name VARCHAR(128) UNIQUE NOT NULL,
-  created_by BIGINT NOT NULL,
-  invite_only TINYINT NOT NULL DEFAULT 0,
-  created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-)`,
-	`CREATE TABLE IF NOT EXISTS messages (
-  id BIGINT PRIMARY KEY AUTO_INCREMENT,
-  channel_id BIGINT NOT NULL,
-  user_id BIGINT NOT NULL,
-  content TEXT NOT NULL,
-  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-  INDEX idx_messages_channel (channel_id, id)
-)`,
-	`CREATE TABLE IF NOT EXISTS devices (
-  id BIGINT PRIMARY KEY AUTO_INCREMENT,
-  user_id BIGINT NOT NULL,
-  device_id VARCHAR(32) NOT NULL,
-  tag VARCHAR(64) NOT NULL DEFAULT '',
-  first_seen DATETIME DEFAULT CURRENT_TIMESTAMP,
-  last_seen DATETIME DEFAULT CURRENT_TIMESTAMP,
-  UNIQUE KEY uk_devices (user_id, device_id)
-)`,
-	`CREATE TABLE IF NOT EXISTS ingresses (
-  id BIGINT PRIMARY KEY AUTO_INCREMENT,
-  user_id BIGINT NOT NULL,
-  channel_id BIGINT NOT NULL,
-  ingress_id VARCHAR(128) NOT NULL,
-  stream_key VARCHAR(128) NOT NULL,
-  provider VARCHAR(32) NOT NULL DEFAULT 'livekit',
-  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-  UNIQUE KEY uk_ingresses (user_id, channel_id)
-)`,
-	`CREATE TABLE IF NOT EXISTS channel_bans (
-  channel_id BIGINT NOT NULL,
-  user_id BIGINT NOT NULL,
-  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-  UNIQUE KEY uk_channel_bans (channel_id, user_id)
-)`,
-	`CREATE TABLE IF NOT EXISTS channel_gags (
-  channel_id BIGINT NOT NULL,
-  user_id BIGINT NOT NULL,
-  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-  UNIQUE KEY uk_channel_gags (channel_id, user_id)
-)`,
-	`CREATE TABLE IF NOT EXISTS channel_members (
-  channel_id BIGINT NOT NULL,
-  user_id BIGINT NOT NULL,
-  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-  UNIQUE KEY uk_channel_members (channel_id, user_id)
-)`,
-	`CREATE TABLE IF NOT EXISTS invites (
-  id BIGINT PRIMARY KEY AUTO_INCREMENT,
-  code VARCHAR(32) UNIQUE NOT NULL,
-  note VARCHAR(255) NOT NULL DEFAULT '',
-  max_uses INT NOT NULL DEFAULT 1,
-  used INT NOT NULL DEFAULT 0,
-  revoked TINYINT NOT NULL DEFAULT 0,
-  created_by BIGINT NOT NULL,
-  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-  expires_at DATETIME NOT NULL
-)`,
-	`CREATE TABLE IF NOT EXISTS settings (
-  k VARCHAR(64) PRIMARY KEY,
-  v TEXT NOT NULL
-)`,
-}
-
-var pgDDL = []string{
-	`CREATE TABLE IF NOT EXISTS users (
-  id BIGSERIAL PRIMARY KEY,
-  username TEXT UNIQUE NOT NULL,
-  password_hash TEXT NOT NULL,
-  created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
-)`,
-	`CREATE TABLE IF NOT EXISTS sessions (
-  token TEXT PRIMARY KEY,
-  user_id BIGINT NOT NULL REFERENCES users(id),
-  expires_at TIMESTAMPTZ NOT NULL,
-  created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
-)`,
-	`CREATE TABLE IF NOT EXISTS channels (
-  id BIGSERIAL PRIMARY KEY,
-  name TEXT UNIQUE NOT NULL,
-  created_by BIGINT NOT NULL REFERENCES users(id),
-  invite_only INTEGER NOT NULL DEFAULT 0,
-  created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
-)`,
-	`CREATE TABLE IF NOT EXISTS messages (
-  id BIGSERIAL PRIMARY KEY,
-  channel_id BIGINT NOT NULL REFERENCES channels(id),
-  user_id BIGINT NOT NULL REFERENCES users(id),
-  content TEXT NOT NULL,
-  created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
-)`,
-	`CREATE INDEX IF NOT EXISTS idx_messages_channel ON messages(channel_id, id)`,
-	`CREATE TABLE IF NOT EXISTS devices (
-  id BIGSERIAL PRIMARY KEY,
-  user_id BIGINT NOT NULL REFERENCES users(id),
-  device_id TEXT NOT NULL,
-  tag TEXT NOT NULL DEFAULT '',
-  first_seen TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
-  last_seen TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
-  UNIQUE(user_id, device_id)
-)`,
-	`CREATE TABLE IF NOT EXISTS ingresses (
-  id BIGSERIAL PRIMARY KEY,
-  user_id BIGINT NOT NULL REFERENCES users(id),
-  channel_id BIGINT NOT NULL REFERENCES channels(id),
-  ingress_id TEXT NOT NULL,
-  stream_key TEXT NOT NULL,
-  provider VARCHAR(32) NOT NULL DEFAULT 'livekit',
-  created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
-  UNIQUE(user_id, channel_id)
-)`,
-	`CREATE TABLE IF NOT EXISTS channel_bans (
-  channel_id BIGINT NOT NULL REFERENCES channels(id),
-  user_id BIGINT NOT NULL REFERENCES users(id),
-  created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
-  UNIQUE(channel_id, user_id)
-)`,
-	`CREATE TABLE IF NOT EXISTS channel_gags (
-  channel_id BIGINT NOT NULL REFERENCES channels(id),
-  user_id BIGINT NOT NULL REFERENCES users(id),
-  created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
-  UNIQUE(channel_id, user_id)
-)`,
-	`CREATE TABLE IF NOT EXISTS channel_members (
-  channel_id BIGINT NOT NULL REFERENCES channels(id),
-  user_id BIGINT NOT NULL REFERENCES users(id),
-  created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
-  UNIQUE(channel_id, user_id)
-)`,
-	`CREATE TABLE IF NOT EXISTS invites (
-  id BIGSERIAL PRIMARY KEY,
-  code TEXT UNIQUE NOT NULL,
-  note TEXT NOT NULL DEFAULT '',
-  max_uses INTEGER NOT NULL DEFAULT 1,
-  used INTEGER NOT NULL DEFAULT 0,
-  revoked INTEGER NOT NULL DEFAULT 0,
-  created_by BIGINT NOT NULL REFERENCES users(id),
-  created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
-  expires_at TIMESTAMPTZ NOT NULL
-)`,
-	`CREATE TABLE IF NOT EXISTS settings (
-  k TEXT PRIMARY KEY,
-  v TEXT NOT NULL
-)`,
+// isDuplicateErr 判"列/索引已存在"类错误（三方言文案不同），baseline 迁移吞掉建重错误。
+func isDuplicateErr(err error) bool {
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "duplicate column") ||
+		strings.Contains(msg, "already exists") ||
+		strings.Contains(msg, "duplicate key name") // mysql CREATE INDEX 无 IF NOT EXISTS
 }
 
 type User struct {
-	ID       int64  `json:"id"`
+	bun.BaseModel `bun:"table:users,alias:u"`
+
+	ID       int64  `bun:",pk,autoincrement" json:"id"`
 	Username string `json:"username"`
 	IsAdmin  bool   `json:"is_admin"`
 	Disabled bool   `json:"-"` // 停用账号（管理后台用，登录/会话校验时拦截）
 }
 
 type Channel struct {
-	ID         int64     `json:"id"`
+	bun.BaseModel `bun:"table:channels,alias:c"`
+
+	ID         int64     `bun:",pk,autoincrement" json:"id"`
 	Name       string    `json:"name"`
-	CreatedBy  string    `json:"created_by"`
+	CreatedBy  string    `bun:"-" json:"created_by"` // 房主用户名（JOIN 填充，列见 OwnerID）
 	CreatedAt  time.Time `json:"created_at"`
 	InviteOnly bool      `json:"invite_only"`
-	IsOwner    bool      `json:"is_owner"` // 对当前请求用户是否房主（接口层填充）
-	Online     int       `json:"online"`   // 当前在房人数（接口层从 LiveKit 填充）
-	OwnerID    int64     `json:"-"`        // 房主用户 ID（内部用）
+	IsOwner    bool      `bun:"-" json:"is_owner"`   // 对当前请求用户是否房主（接口层填充）
+	Online     int       `bun:"-" json:"online"`     // 当前在房人数（接口层从 LiveKit 填充）
+	OwnerID    int64     `bun:"created_by" json:"-"` // 房主用户 ID（内部用）
 }
 
 type Message struct {
-	ID        int64     `json:"id"`
+	bun.BaseModel `bun:"table:messages,alias:m"`
+
+	ID        int64     `bun:",pk,autoincrement" json:"id"`
 	ChannelID int64     `json:"channel_id"`
-	Username  string    `json:"username"`
+	Username  string    `bun:"-" json:"username"` // 发送者用户名（JOIN 填充）
 	Content   string    `json:"content"`
 	CreatedAt time.Time `json:"created_at"`
 }
@@ -444,27 +159,25 @@ type Message struct {
 // ---- 设备 ----
 
 // RecordDevice 记录用户设备：首次出现建档，之后刷新 last_seen 与设备标签。
+// upsert 的方言分叉是全 store 仅保留的两处之一（另一处是 admin.go 的 SetSetting）：mysql 无 ON CONFLICT，用 DUPLICATE KEY UPDATE + VALUES()。
 func (s *Store) RecordDevice(ctx context.Context, userID int64, deviceID, tag string) error {
-	var query string
-	switch s.d.name {
-	case "mysql":
-		query = `INSERT INTO devices (user_id, device_id, tag) VALUES (?, ?, ?)
-ON DUPLICATE KEY UPDATE last_seen = CURRENT_TIMESTAMP, tag = VALUES(tag)`
-	case "postgres":
-		query = `INSERT INTO devices (user_id, device_id, tag) VALUES (?, ?, ?)
-ON CONFLICT(user_id, device_id) DO UPDATE SET last_seen = CURRENT_TIMESTAMP, tag = excluded.tag`
-	default:
-		query = `INSERT INTO devices (user_id, device_id, tag) VALUES (?, ?, ?)
-ON CONFLICT(user_id, device_id) DO UPDATE SET last_seen = CURRENT_TIMESTAMP, tag = excluded.tag`
+	row := &deviceRow{UserID: userID, DeviceID: deviceID, Tag: tag}
+	q := s.bun.NewInsert().Model(row)
+	if s.d.name == "mysql" {
+		q = q.On("DUPLICATE KEY UPDATE").Set("last_seen = CURRENT_TIMESTAMP, tag = VALUES(tag)")
+	} else { // sqlite / postgres 同语法
+		q = q.On("CONFLICT (user_id, device_id) DO UPDATE").Set("last_seen = CURRENT_TIMESTAMP, tag = EXCLUDED.tag")
 	}
-	_, err := s.db.ExecContext(ctx, s.q(query), userID, deviceID, tag)
+	_, err := q.Exec(ctx)
 	return err
 }
 
 // ---- Ingress（每用户每频道一个 OBS WHIP 推流端点）----
 
 type Ingress struct {
-	ID        int64     `json:"id"`
+	bun.BaseModel `bun:"table:ingresses"`
+
+	ID        int64     `bun:",pk,autoincrement" json:"id"`
 	IngressID string    `json:"ingress_id"`
 	StreamKey string    `json:"stream_key"`
 	Provider  string    `json:"provider"` // 创建该端点的推流入口内核名（删除/失效判断按归属方路由）
@@ -474,10 +187,10 @@ type Ingress struct {
 // IngressByUserChannel 查该用户在该频道的 ingress，无记录返回 ErrNotFound。
 func (s *Store) IngressByUserChannel(ctx context.Context, userID, channelID int64) (*Ingress, error) {
 	var in Ingress
-	err := s.db.QueryRowContext(ctx, s.q(`
+	err := s.bun.NewRaw(`
 SELECT id, ingress_id, stream_key, provider, created_at FROM ingresses
-WHERE user_id = ? AND channel_id = ?`), userID, channelID).
-		Scan(&in.ID, &in.IngressID, &in.StreamKey, &in.Provider, &in.CreatedAt)
+WHERE user_id = ? AND channel_id = ?`, userID, channelID).
+		Scan(ctx, &in.ID, &in.IngressID, &in.StreamKey, &in.Provider, &in.CreatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -485,28 +198,27 @@ WHERE user_id = ? AND channel_id = ?`), userID, channelID).
 }
 
 func (s *Store) CreateIngress(ctx context.Context, userID, channelID int64, ingressID, streamKey, provider string) (*Ingress, error) {
-	id, err := s.insertID(ctx, `
-INSERT INTO ingresses (user_id, channel_id, ingress_id, stream_key, provider) VALUES (?, ?, ?, ?, ?)`,
-		userID, channelID, ingressID, streamKey, provider)
-	if err != nil {
+	row := &ingressRow{UserID: userID, ChannelID: channelID, IngressID: ingressID, StreamKey: streamKey, Provider: provider}
+	if _, err := s.bun.NewInsert().Model(row).Exec(ctx); err != nil {
 		return nil, err
 	}
-	return &Ingress{ID: id, IngressID: ingressID, StreamKey: streamKey, Provider: provider}, nil
+	return &Ingress{ID: row.ID, IngressID: ingressID, StreamKey: streamKey, Provider: provider}, nil
 }
 
-// IngressOwner 按推流密钥反查归属（/w 推流入口按 channel_gags 拦截被禁言者用）。
-func (s *Store) IngressOwner(ctx context.Context, streamKey string) (userID, channelID int64, err error) {
-	err = s.db.QueryRowContext(ctx, s.q(
-		"SELECT user_id, channel_id FROM ingresses WHERE stream_key = ?"), streamKey).Scan(&userID, &channelID)
+// IngressOwner 按推流密钥反查归属（含记录的归属实例 alias，WHIP 入口按它校验入口匹配）。
+func (s *Store) IngressOwner(ctx context.Context, streamKey string) (userID, channelID int64, provider string, err error) {
+	err = s.bun.NewRaw(
+		"SELECT user_id, channel_id, provider FROM ingresses WHERE stream_key = ?", streamKey).
+		Scan(ctx, &userID, &channelID, &provider)
 	if errors.Is(err, sql.ErrNoRows) {
-		return 0, 0, ErrNotFound
+		return 0, 0, "", ErrNotFound
 	}
-	return userID, channelID, err
+	return userID, channelID, provider, err
 }
 
 func (s *Store) DeleteIngress(ctx context.Context, userID, channelID int64) error {
-	_, err := s.db.ExecContext(ctx, s.q(
-		"DELETE FROM ingresses WHERE user_id = ? AND channel_id = ?"), userID, channelID)
+	_, err := s.bun.NewRaw(
+		"DELETE FROM ingresses WHERE user_id = ? AND channel_id = ?", userID, channelID).Exec(ctx)
 	return err
 }
 
@@ -515,28 +227,27 @@ func (s *Store) DeleteIngress(ctx context.Context, userID, channelID int64) erro
 // CreateUser 创建用户；服务器上的第一个账号自动成为管理员。
 func (s *Store) CreateUser(ctx context.Context, username, passwordHash string) (*User, error) {
 	var n int
-	if err := s.db.QueryRowContext(ctx, "SELECT COUNT(1) FROM users").Scan(&n); err != nil {
+	if err := s.bun.NewRaw("SELECT COUNT(1) FROM users").Scan(ctx, &n); err != nil {
 		return nil, err
 	}
 	isAdmin := 0
 	if n == 0 {
 		isAdmin = 1
 	}
-	id, err := s.insertID(ctx, "INSERT INTO users (username, password_hash, is_admin) VALUES (?, ?, ?)",
-		username, passwordHash, isAdmin)
-	if err != nil {
+	row := &userRow{Username: username, PasswordHash: passwordHash, IsAdmin: int64(isAdmin)}
+	if _, err := s.bun.NewInsert().Model(row).Exec(ctx); err != nil {
 		return nil, err
 	}
-	return &User{ID: id, Username: username, IsAdmin: isAdmin == 1}, nil
+	return &User{ID: row.ID, Username: username, IsAdmin: isAdmin == 1}, nil
 }
 
 func (s *Store) UserByName(ctx context.Context, username string) (*User, string, error) {
 	var u User
 	var hash string
 	var isAdmin, disabled int64
-	err := s.db.QueryRowContext(ctx, s.q(
-		"SELECT id, username, password_hash, is_admin, disabled FROM users WHERE username = ?"), username).
-		Scan(&u.ID, &u.Username, &hash, &isAdmin, &disabled)
+	err := s.bun.NewRaw(
+		"SELECT id, username, password_hash, is_admin, disabled FROM users WHERE username = ?", username).
+		Scan(ctx, &u.ID, &u.Username, &hash, &isAdmin, &disabled)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, "", ErrNotFound
 	}
@@ -555,9 +266,9 @@ func (s *Store) CreateSession(ctx context.Context, userID int64) (string, error)
 		return "", err
 	}
 	token := hex.EncodeToString(buf)
-	_, err := s.db.ExecContext(ctx, s.q(
-		"INSERT INTO sessions (token, user_id, expires_at) VALUES (?, ?, ?)"),
-		token, userID, time.Now().Add(sessionTTL))
+	_, err := s.bun.NewRaw(
+		"INSERT INTO sessions (token, user_id, expires_at) VALUES (?, ?, ?)",
+		token, userID, time.Now().Add(sessionTTL)).Exec(ctx)
 	return token, err
 }
 
@@ -565,10 +276,10 @@ func (s *Store) CreateSession(ctx context.Context, userID int64) (string, error)
 func (s *Store) UserByToken(ctx context.Context, token string) (*User, error) {
 	var u User
 	var isAdmin int64
-	err := s.db.QueryRowContext(ctx, s.q(`
+	err := s.bun.NewRaw(`
 SELECT u.id, u.username, u.is_admin FROM sessions s JOIN users u ON u.id = s.user_id
-WHERE s.token = ? AND s.expires_at > ? AND u.disabled = 0`), token, time.Now()).
-		Scan(&u.ID, &u.Username, &isAdmin)
+WHERE s.token = ? AND s.expires_at > ? AND u.disabled = 0`, token, time.Now()).
+		Scan(ctx, &u.ID, &u.Username, &isAdmin)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -577,7 +288,7 @@ WHERE s.token = ? AND s.expires_at > ? AND u.disabled = 0`), token, time.Now()).
 }
 
 func (s *Store) DeleteSession(ctx context.Context, token string) error {
-	_, err := s.db.ExecContext(ctx, s.q("DELETE FROM sessions WHERE token = ?"), token)
+	_, err := s.bun.NewRaw("DELETE FROM sessions WHERE token = ?", token).Exec(ctx)
 	return err
 }
 
@@ -594,19 +305,19 @@ func scanChannel(scanner interface{ Scan(...any) error }, c *Channel) error {
 const channelCols = `c.id, c.name, u.username, c.created_at, c.invite_only, c.created_by`
 
 func (s *Store) CreateChannel(ctx context.Context, name string, userID int64) (*Channel, error) {
-	id, err := s.insertID(ctx, "INSERT INTO channels (name, created_by) VALUES (?, ?)", name, userID)
-	if err != nil {
+	row := &channelRow{Name: name, CreatedBy: userID}
+	if _, err := s.bun.NewInsert().Model(row).Exec(ctx); err != nil {
 		return nil, err
 	}
-	return s.ChannelByID(ctx, id)
+	return s.ChannelByID(ctx, row.ID)
 }
 
 // ChannelByID 按 ID 取频道完整信息（含房主与邀请制标记）。
 func (s *Store) ChannelByID(ctx context.Context, id int64) (*Channel, error) {
 	var c Channel
-	err := scanChannel(s.db.QueryRowContext(ctx, s.q(`
+	err := scanChannel(s.bun.QueryRowContext(ctx, `
 SELECT `+channelCols+` FROM channels c
-JOIN users u ON u.id = c.created_by WHERE c.id = ?`), id), &c)
+JOIN users u ON u.id = c.created_by WHERE c.id = ?`, id), &c)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -614,9 +325,9 @@ JOIN users u ON u.id = c.created_by WHERE c.id = ?`), id), &c)
 }
 
 func (s *Store) ListChannels(ctx context.Context) ([]Channel, error) {
-	rows, err := s.db.QueryContext(ctx, s.q(`
+	rows, err := s.bun.QueryContext(ctx, `
 SELECT `+channelCols+` FROM channels c
-JOIN users u ON u.id = c.created_by ORDER BY c.id`))
+JOIN users u ON u.id = c.created_by ORDER BY c.id`)
 	if err != nil {
 		return nil, err
 	}
@@ -634,9 +345,9 @@ JOIN users u ON u.id = c.created_by ORDER BY c.id`))
 
 func (s *Store) ChannelByName(ctx context.Context, name string) (*Channel, error) {
 	var c Channel
-	err := scanChannel(s.db.QueryRowContext(ctx, s.q(`
+	err := scanChannel(s.bun.QueryRowContext(ctx, `
 SELECT `+channelCols+` FROM channels c
-JOIN users u ON u.id = c.created_by WHERE c.name = ?`), name), &c)
+JOIN users u ON u.id = c.created_by WHERE c.name = ?`, name), &c)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -648,7 +359,7 @@ func (s *Store) SetInviteOnly(ctx context.Context, channelID int64, enabled bool
 	if enabled {
 		v = 1
 	}
-	_, err := s.db.ExecContext(ctx, s.q("UPDATE channels SET invite_only = ? WHERE id = ?"), v, channelID)
+	_, err := s.bun.NewRaw("UPDATE channels SET invite_only = ? WHERE id = ?", v, channelID).Exec(ctx)
 	return err
 }
 
@@ -657,20 +368,19 @@ func (s *Store) SetInviteOnly(ctx context.Context, channelID int64, enabled bool
 // IsBanned 用户是否被该频道封禁。
 func (s *Store) IsBanned(ctx context.Context, channelID, userID int64) (bool, error) {
 	var n int
-	err := s.db.QueryRowContext(ctx, s.q(
-		"SELECT COUNT(1) FROM channel_bans WHERE channel_id = ? AND user_id = ?"), channelID, userID).Scan(&n)
+	err := s.bun.NewRaw(
+		"SELECT COUNT(1) FROM channel_bans WHERE channel_id = ? AND user_id = ?", channelID, userID).Scan(ctx, &n)
 	return n > 0, err
 }
 
 func (s *Store) Ban(ctx context.Context, channelID, userID int64) error {
-	_, err := s.db.ExecContext(ctx, s.q(s.d.ignore(
-		"INSERT INTO channel_bans (channel_id, user_id) VALUES (?, ?)")), channelID, userID)
+	_, err := s.bun.NewInsert().Model(&channelBanRow{ChannelID: channelID, UserID: userID}).Ignore().Exec(ctx)
 	return err
 }
 
 func (s *Store) Unban(ctx context.Context, channelID, userID int64) error {
-	_, err := s.db.ExecContext(ctx, s.q(
-		"DELETE FROM channel_bans WHERE channel_id = ? AND user_id = ?"), channelID, userID)
+	_, err := s.bun.NewRaw(
+		"DELETE FROM channel_bans WHERE channel_id = ? AND user_id = ?", channelID, userID).Exec(ctx)
 	return err
 }
 
@@ -684,20 +394,19 @@ func (s *Store) ListBans(ctx context.Context, channelID int64) ([]string, error)
 // IsGagged 用户是否被该频道禁言。
 func (s *Store) IsGagged(ctx context.Context, channelID, userID int64) (bool, error) {
 	var n int
-	err := s.db.QueryRowContext(ctx, s.q(
-		"SELECT COUNT(1) FROM channel_gags WHERE channel_id = ? AND user_id = ?"), channelID, userID).Scan(&n)
+	err := s.bun.NewRaw(
+		"SELECT COUNT(1) FROM channel_gags WHERE channel_id = ? AND user_id = ?", channelID, userID).Scan(ctx, &n)
 	return n > 0, err
 }
 
 func (s *Store) Gag(ctx context.Context, channelID, userID int64) error {
-	_, err := s.db.ExecContext(ctx, s.q(s.d.ignore(
-		"INSERT INTO channel_gags (channel_id, user_id) VALUES (?, ?)")), channelID, userID)
+	_, err := s.bun.NewInsert().Model(&channelGagRow{ChannelID: channelID, UserID: userID}).Ignore().Exec(ctx)
 	return err
 }
 
 func (s *Store) Ungag(ctx context.Context, channelID, userID int64) error {
-	_, err := s.db.ExecContext(ctx, s.q(
-		"DELETE FROM channel_gags WHERE channel_id = ? AND user_id = ?"), channelID, userID)
+	_, err := s.bun.NewRaw(
+		"DELETE FROM channel_gags WHERE channel_id = ? AND user_id = ?", channelID, userID).Exec(ctx)
 	return err
 }
 
@@ -711,20 +420,19 @@ func (s *Store) ListGags(ctx context.Context, channelID int64) ([]string, error)
 // IsMember 用户是否在该频道白名单内。
 func (s *Store) IsMember(ctx context.Context, channelID, userID int64) (bool, error) {
 	var n int
-	err := s.db.QueryRowContext(ctx, s.q(
-		"SELECT COUNT(1) FROM channel_members WHERE channel_id = ? AND user_id = ?"), channelID, userID).Scan(&n)
+	err := s.bun.NewRaw(
+		"SELECT COUNT(1) FROM channel_members WHERE channel_id = ? AND user_id = ?", channelID, userID).Scan(ctx, &n)
 	return n > 0, err
 }
 
 func (s *Store) AddMember(ctx context.Context, channelID, userID int64) error {
-	_, err := s.db.ExecContext(ctx, s.q(s.d.ignore(
-		"INSERT INTO channel_members (channel_id, user_id) VALUES (?, ?)")), channelID, userID)
+	_, err := s.bun.NewInsert().Model(&channelMemberRow{ChannelID: channelID, UserID: userID}).Ignore().Exec(ctx)
 	return err
 }
 
 func (s *Store) RemoveMember(ctx context.Context, channelID, userID int64) error {
-	_, err := s.db.ExecContext(ctx, s.q(
-		"DELETE FROM channel_members WHERE channel_id = ? AND user_id = ?"), channelID, userID)
+	_, err := s.bun.NewRaw(
+		"DELETE FROM channel_members WHERE channel_id = ? AND user_id = ?", channelID, userID).Exec(ctx)
 	return err
 }
 
@@ -735,22 +443,11 @@ func (s *Store) ListMembers(ctx context.Context, channelID int64) ([]string, err
 
 // listUsernames 取 channel_bans/channel_gags/channel_members 里的用户名（三表结构相同）。
 func (s *Store) listUsernames(ctx context.Context, table string, channelID int64) ([]string, error) {
-	rows, err := s.db.QueryContext(ctx, s.q(`
-SELECT u.username FROM `+table+` t JOIN users u ON u.id = t.user_id
-WHERE t.channel_id = ? ORDER BY t.created_at`), channelID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
 	out := []string{}
-	for rows.Next() {
-		var name string
-		if err := rows.Scan(&name); err != nil {
-			return nil, err
-		}
-		out = append(out, name)
-	}
-	return out, rows.Err()
+	err := s.bun.NewRaw(`
+SELECT u.username FROM `+table+` t JOIN users u ON u.id = t.user_id
+WHERE t.channel_id = ? ORDER BY t.created_at`, channelID).Scan(ctx, &out)
+	return out, err
 }
 
 // CanJoin 进入权限：被封禁拒绝；邀请制频道仅房主与白名单可进（房主天然豁免）。
@@ -777,25 +474,24 @@ func (s *Store) CanJoin(ctx context.Context, c *Channel, userID int64) (bool, st
 // ---- 消息 ----
 
 func (s *Store) AddMessage(ctx context.Context, channelID, userID int64, content string) (*Message, error) {
-	id, err := s.insertID(ctx,
-		"INSERT INTO messages (channel_id, user_id, content) VALUES (?, ?, ?)", channelID, userID, content)
-	if err != nil {
+	row := &messageRow{ChannelID: channelID, UserID: userID, Content: content}
+	if _, err := s.bun.NewInsert().Model(row).Exec(ctx); err != nil {
 		return nil, err
 	}
 	var m Message
-	err = s.db.QueryRowContext(ctx, s.q(`
+	err := s.bun.NewRaw(`
 SELECT m.id, m.channel_id, u.username, m.content, m.created_at
-FROM messages m JOIN users u ON u.id = m.user_id WHERE m.id = ?`), id).
-		Scan(&m.ID, &m.ChannelID, &m.Username, &m.Content, &m.CreatedAt)
+FROM messages m JOIN users u ON u.id = m.user_id WHERE m.id = ?`, row.ID).
+		Scan(ctx, &m.ID, &m.ChannelID, &m.Username, &m.Content, &m.CreatedAt)
 	return &m, err
 }
 
 // RecentMessages 返回频道最近 limit 条消息（按时间正序）。
 func (s *Store) RecentMessages(ctx context.Context, channelID int64, limit int) ([]Message, error) {
-	rows, err := s.db.QueryContext(ctx, s.q(`
+	rows, err := s.bun.QueryContext(ctx, `
 SELECT m.id, m.channel_id, u.username, m.content, m.created_at
 FROM messages m JOIN users u ON u.id = m.user_id
-WHERE m.channel_id = ? ORDER BY m.id DESC LIMIT ?`), channelID, limit)
+WHERE m.channel_id = ? ORDER BY m.id DESC LIMIT ?`, channelID, limit)
 	if err != nil {
 		return nil, err
 	}

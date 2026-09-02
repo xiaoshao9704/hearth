@@ -378,6 +378,50 @@ export function adminSetConfig(values: Record<string, string>): Promise<void> {
   return req('/api/admin/config', { method: 'POST', body: { values } });
 }
 
+// ---- 服务实例（内核注册表）----
+
+// 注册表单的字段模式（rtc.ConfigKey 形状）；当前三类可注册实例的字段均为自由文本
+export interface ProviderField {
+  name: string;
+  label: string;
+  hint: string;
+  secret: boolean;
+}
+
+export interface ProviderInstance {
+  alias: string;
+  type: string;
+  caps: string[]; // 槽位能力：voice / stage / ingest
+  locked: boolean; // 环境变量锁定，只读
+  builtin: boolean; // 内建（ember/bellows），只读
+  params: Record<string, string>; // Secret 字段掩码为空串
+  params_set: Record<string, boolean>; // Secret 字段是否已设置
+}
+
+export interface ProviderType {
+  type: string;
+  label: string;
+  fields: ProviderField[];
+}
+
+export async function adminListProviders(): Promise<{ instances: ProviderInstance[]; types: ProviderType[] }> {
+  const data = await req<{ instances: ProviderInstance[] | null; types: ProviderType[] | null }>('/api/admin/providers');
+  return { instances: data.instances ?? [], types: data.types ?? [] };
+}
+
+export function adminCreateProvider(body: { type: string; alias: string; params: Record<string, string> }): Promise<void> {
+  return req('/api/admin/providers', { method: 'POST', body });
+}
+
+// 全量替换语义：params 须含该类型全部字段；Secret 字段空串 = 保留旧值（livekit_url 空 = 清除）
+export function adminUpdateProvider(alias: string, params: Record<string, string>): Promise<void> {
+  return req(`/api/admin/providers/${encodeURIComponent(alias)}`, { method: 'PUT', body: { params } });
+}
+
+export function adminDeleteProvider(alias: string): Promise<void> {
+  return req(`/api/admin/providers/${encodeURIComponent(alias)}`, { method: 'DELETE' });
+}
+
 export function adminSetPolicy(policy: string): Promise<{ policy: string }> {
   return req('/api/admin/policy', { method: 'POST', body: { policy } });
 }

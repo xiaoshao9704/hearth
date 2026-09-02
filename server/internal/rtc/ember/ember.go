@@ -2,7 +2,7 @@
 // 设计取舍：
 //   - 只做 Opus 转发：无 simulcast / 关键帧 / 带宽估计，每参与者一条上行、N-1 条下行拷贝；
 //   - 服务器有公网 IP：ICE-Lite + 单端口 UDP mux，客户端不需要 STUN/TURN；
-//   - 信令走同源 WebSocket（api 层挂 /api/voice，鉴权与聊天 WS 同模式），协议自有；
+//   - 信令走同源 WebSocket（api 层挂 /providers/ember/voice，鉴权与聊天 WS 同模式），协议自有；
 //   - 说话检测：读 ssrc-audio-level RTP 头扩展，服务端聚合后广播 speakers。
 package ember
 
@@ -30,7 +30,9 @@ func ConfigKeys() []rtc.ConfigKey {
 		{Name: "ember_udp_port", Env: "EMBER_UDP_PORT", Group: "voice", Default: "47700",
 			Label: "媒体 UDP 端口", Hint: "单端口 mux，需在防火墙/安全组放行；改动重启生效"},
 		{Name: "ember_public_ip", Env: "EMBER_PUBLIC_IP", Group: "voice",
-			Label: "公网 IP", Hint: "留空 = 启动时 HTTP 自动探测（云主机一般留空即可）"},
+			Label: "公网 IP", Hint: "留空 = 自动宣告全部网卡地址与探测到的公网映射；显式设置则只通告该地址（覆盖）"},
+		{Name: "ember_stun_servers", Env: "EMBER_STUN_SERVERS", Group: "voice",
+			Label: "STUN 服务器", Hint: "逗号分隔；探测各网卡公网映射用，留空用内置默认（不可达时改填可用地址，探测全挂会回落 HTTP 探测）"},
 	}
 }
 
@@ -132,8 +134,8 @@ func New(cfg rtc.ConfigFunc) *Provider {
 func (p *Provider) Name() string { return "ember" }
 
 func (p *Provider) JoinCredentials(_ context.Context, _, _, _ string, _ bool) (rtc.Credentials, error) {
-	// URL/Token 留空：api 层推导同源 /api/voice 信令地址并透传会话 token；
-	// canPublish 此处在凭证层无处安放，禁言由 api 层在 /api/voice 入会时（HandleJoin muted 参数）生效
+	// URL/Token 留空：api 层推导同源 /providers/ember/voice 信令地址并透传会话 token；
+	// canPublish 此处在凭证层无处安放，禁言由 api 层在信令入会时（HandleJoin muted 参数）生效
 	return rtc.Credentials{Engine: "ember"}, nil
 }
 
@@ -240,10 +242,7 @@ func (p *Provider) ensureAPI(ctx context.Context) (*webrtc.API, error) {
 	if err != nil || port <= 0 || port > 65535 {
 		port = 47700
 	}
-	ip := p.cfg(ctx, "ember_public_ip")
-	if ip == "" {
-		ip = lite.ProbePublicIP()
-	}
+	rules := lite.AnnounceRules(p.cfg(ctx, "ember_public_ip"), p.cfg(ctx, "ember_stun_servers"))
 
 	m := &webrtc.MediaEngine{}
 	if err := m.RegisterCodec(webrtc.RTPCodecParameters{
@@ -261,12 +260,12 @@ func (p *Provider) ensureAPI(ctx context.Context) (*webrtc.API, error) {
 	}, webrtc.RTPCodecTypeAudio); err != nil {
 		return nil, err
 	}
-	api, err := lite.NewAPI(port, ip, m)
+	api, err := lite.NewAPI(port, rules, m)
 	if err != nil {
 		return nil, fmt.Errorf("语音%w", err)
 	}
 	p.api = api
-	log.Printf("ember 就绪: udp=%d 公网IP=%q", port, ip)
+	log.Printf("ember 就绪: udp=%d 公网映射=%v", port, lite.RuleExternals(rules))
 	return p.api, nil
 }
 

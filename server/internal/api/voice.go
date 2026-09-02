@@ -1,4 +1,4 @@
-// /api/voice：ember 语音内核的信令 WebSocket 入口。
+// /providers/ember/voice：ember 语音内核的信令 WebSocket 入口。
 // 鉴权与聊天 WS 同模式（浏览器 WS 设不了请求头，token 走 query）；
 // 入场判定不在此重做——joinToken 已判定并签发一次性入场票（见 admission.go），
 // 这里验票后把连接交给 ember.Provider 处理（阻塞至连接结束）。
@@ -13,7 +13,9 @@ import (
 )
 
 func (a *API) voiceWS(w http.ResponseWriter, r *http.Request) {
-	if a.dynVal(r.Context(), "voice_provider") != "ember" {
+	// 与 joinToken 的签发口径一致：按 voiceInstance 的解析结果判定
+	//（选择器取未知值时语音回落 ember，签的就是 ember 票，不能按原始选择器串拒）
+	if alias, _ := a.voiceInstance(r.Context()); alias != TypeEmber {
 		http.Error(w, "语音内核未启用 ember", http.StatusConflict)
 		return
 	}
