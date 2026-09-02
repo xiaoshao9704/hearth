@@ -8,9 +8,10 @@
 //
 // 两种部署形态（同一个 Gateway）：
 //   - 进程内：hearth 自己收流，/w 由接入层直接交给 ServeWHIP；
-//   - 远端：设 bellows_remote_url 后 hearth 不收流，OBS 直连远端的 cmd/bellows
-//     进程（通常在 LiveKit 同一局域网，视频不再经过 hearth 所在服务器），远端按 key 回调 hearth 的
-//     内部接口反查归属并做入场判定。
+//   - 远端：设 bellows_remote_url 后 hearth 不收流，/w 信令反代到远端的 cmd/bellows
+//     进程（通常在 LiveKit 同一局域网），媒体由推流端直达远端，视频不再经过 hearth
+//     所在服务器；远端按 key 回调 hearth 的内部接口反查归属并做入场判定。
+//     OBS 地址默认仍是 hearth 同源 /w（bellows_public_url 可改成直连远端）。
 package bellows
 
 import (
@@ -52,7 +53,9 @@ func ConfigKeys() []rtc.ConfigKey {
 		{Name: "bellows_public_ip", Env: "BELLOWS_PUBLIC_IP", Group: "ingress",
 			Label: "WHIP 公网 IP", Hint: "留空 = 启动时 HTTP 自动探测（云主机一般留空即可）"},
 		{Name: "bellows_remote_url", Env: "BELLOWS_REMOTE_URL", Group: "ingress",
-			Label: "远端 Bellows 地址", Hint: "设置后本进程不收流，OBS 直连该地址的 cmd/bellows（如 http://192.168.1.20:8090）；留空 = 进程内收流"},
+			Label: "远端 Bellows 地址", Hint: "设置后本进程不收流，/w 反代到该地址的 cmd/bellows（如 http://192.168.1.20:8090）；留空 = 进程内收流"},
+		{Name: "bellows_public_url", Env: "BELLOWS_PUBLIC_URL", Group: "ingress",
+			Label: "浏览器可见 WHIP 基地址", Hint: "留空 = 同源推流代理（推荐，OBS 地址不变、经 hearth TLS）；填远端直连地址可绕过 hearth"},
 		{Name: "bellows_shared_secret", Env: "BELLOWS_SHARED_SECRET", Group: "ingress", Secret: true,
 			Label: "远端 Bellows 共享密钥", Hint: "远端进程回调 hearth 反查推流密钥时的凭证，两边填同一值"},
 	}
@@ -122,16 +125,13 @@ func (g *Gateway) DeleteEndpoint(_ context.Context, id string) error {
 	return nil
 }
 
-// PublicBase 远端形态下 OBS 直连远端（视频不穿 hearth 所在机器）；进程内为同源 /w/。
+// PublicBase 浏览器可见的推流基地址；留空 = 同源 /w/（进程内直接处理，远端形态经 hearth
+// 反代信令、媒体仍直达远端）。与 livekit 的 ingress_public_url 同语义。
 func (g *Gateway) PublicBase(ctx context.Context) string {
-	if u := g.remoteURL(ctx); u != "" {
-		return u + "/w/"
-	}
-	return ""
+	return strings.TrimSpace(g.cfg(ctx, "bellows_public_url"))
 }
 
-// ProxyUpstream 远端形态下 hearth 的 /w 反代到远端，作为经 hearth TLS 的备用信令路径
-// （媒体仍直达远端）；进程内为空，接入层直接交给 ServeWHIP。
+// ProxyUpstream 远端形态下 hearth 的 /w 反代到远端 cmd/bellows；进程内为空，接入层直接交给 ServeWHIP。
 func (g *Gateway) ProxyUpstream(ctx context.Context) string { return g.remoteURL(ctx) }
 
 // Handler 独立进程用的 /w 处理器（令牌解析 + ServeWHIP）；进程内形态由接入层做同样的事。

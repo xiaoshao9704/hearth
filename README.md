@@ -104,15 +104,26 @@ docker run -d --name hearth \
 
 ### OBS 推流网关放到局域网（Bellows 远端形态）
 
-hearth 所在服务器上行有限、LiveKit 部署在别处时，OBS 的视频不该绕 hearth 一圈。Release 里有单文件 `bellows-linux-{amd64,arm64}`，放到 LiveKit 同一局域网的任意机器（低功耗 arm64 小主机即可）：
+hearth 所在服务器上行有限、LiveKit 部署在别处时，OBS 的视频不该绕 hearth 一圈。Bellows 远端进程随 hearth 镜像分发（`/app/bellows`，Release 里也有单文件 `bellows-linux-{amd64,arm64}`），放到 LiveKit 同一局域网的任意机器（低功耗 arm64 小主机即可）：
 
-```bash
-HEARTH_URL=https://hearth.example.com BELLOWS_SHARED_SECRET=<随机串> \
-LIVEKIT_API_URL=http://<livekit>:7880 LIVEKIT_API_KEY=… LIVEKIT_API_SECRET=… \
-./bellows-linux-arm64          # WHIP 监听 :8090，媒体 47710/udp，通告本机局域网 IP
+```yaml
+# 与 LiveKit 同一 compose，host 网络：端口即宿主端口
+bellows:
+  image: ghcr.io/xiaoshao9704/hearth:latest
+  entrypoint: ["/app/bellows"]
+  network_mode: host
+  environment:
+    HEARTH_URL: https://hearth.example.com      # 回调反查推流密钥 + 入场判定
+    BELLOWS_SHARED_SECRET: <随机串>              # 与 hearth 侧同值
+    LIVEKIT_API_URL: http://127.0.0.1:7880
+    LIVEKIT_API_KEY: …
+    LIVEKIT_API_SECRET: …
+    BELLOWS_ADDR: ":8090"                        # WHIP 信令
+    BELLOWS_UDP_PORT: "47710"                    # 媒体
+    BELLOWS_PUBLIC_IP: 192.168.1.20              # 向推流端通告的地址；留空 = 本机出口网卡 IP
 ```
 
-hearth 侧「管理后台 → 服务参数」：推流入口选 **Bellows**，`远端 Bellows 地址` 填 `http://<该机器内网IP>:8090`，共享密钥填同一值。之后用户拿到的推流地址直接指向这台机器：OBS → Bellows → LiveKit 全在局域网，hearth 只做一次密钥反查与入场判定。外网推流者才需要端口映射/TLS，见 `docs/plan-bellows-upnp.md`。
+hearth 侧「管理后台 → 服务参数」（或 compose 环境变量）：推流入口选 **Bellows**，`远端 Bellows 地址` 填 hearth 能访问到的该机器地址（如 `http://192.168.1.20:8090`），共享密钥填同一值。用户的推流地址**保持 hearth 同源 `/w`**：信令经 hearth 反代到远端（TLS 不变、OBS 地址不变），媒体按通告地址直达远端。想让 OBS 完全绕开 hearth 时再填 `浏览器可见 WHIP 基地址`。外网推流者才需要端口映射/TLS，见 `docs/plan-bellows-upnp.md`。
 
 多容器拆部署仍可用 `deploy/` 的 compose 一键起全家桶：
 

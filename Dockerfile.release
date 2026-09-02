@@ -4,6 +4,8 @@ FROM gcr.io/distroless/static-debian12:nonroot
 ARG TARGETARCH
 # artifact 传递会丢执行位，--chmod 补回
 COPY --chmod=755 out/hearth-linux-${TARGETARCH} /app/hearth
+# 远端推流网关同镜像分发：entrypoint 换成 /app/bellows 即可在 LiveKit 同一局域网跑
+COPY --chmod=755 out/bellows-linux-${TARGETARCH} /app/bellows
 COPY web/dist /app/web
 COPY --chown=65532:65532 out/data /data
 ENV ADDR=:8080 \
