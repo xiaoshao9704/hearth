@@ -20,7 +20,48 @@
 | `stage_provider` 舞台线 | 投屏、摄像头、OBS 推流及其伴音 | `livekit` / `none`（纯语音部署） |
 | `ingest_provider` 推流入口 | OBS WHIP 接入 | `livekit`（Ingress）/ `bellows`（Bellows，进程内或远端直通网关，支持 HEVC/AV1） |
 
-两线选同一内核时自动合并为单连接（combined，即传统单线形态）。典型混合部署：语音跑在公网服务器的内嵌 Ember（物理隔离、永远流畅），投屏走上行带宽充足的另一处 LiveKit。
+两线选同一内核时自动合并为单连接（combined，即传统单线形态）。推荐拓扑：
+
+```mermaid
+flowchart LR
+  subgraph clients["客户端"]
+    B["浏览器"]
+    O["OBS"]
+  end
+
+  subgraph hearth["hearth 进程（公网服务器，上行可以很小）"]
+    API["REST · 聊天 WS · 静态托管"]
+    ADM["入场判定 admitUser<br/>封禁 / 邀请制 / 禁言 · 唯一决策点"]
+    DB[("SQLite / MySQL / Postgres")]
+    EMB["Ember · 语音 SFU（进程内）<br/>Opus · ICE-Lite · UDP 单端口"]
+    PRX["同源反代 /lk · /w"]
+  end
+
+  subgraph media["媒体网络（可与 hearth 分离部署，如投屏者所在局域网）"]
+    LK["LiveKit · 舞台内核<br/>投屏 / 摄像头 / SVC 分层"]
+    BEL["Bellows · WHIP 推流网关<br/>零转码直通 H.264 / HEVC / AV1"]
+  end
+
+  B -- "登录 · 频道 · 进房令牌" --> API
+  API -- "每次进房 / 推流" --> ADM
+  ADM --- DB
+
+  B -- "语音信令 /api/voice" --> EMB
+  B -. "语音媒体 UDP" .-> EMB
+
+  B -- "舞台信令 /lk" --> PRX
+  PRX -- "反代" --> LK
+  B -. "投屏 / 摄像头媒体，直连" .-> LK
+  LK -. "观众订阅" .-> B
+
+  O -- "WHIP /w + 推流密钥" --> PRX
+  PRX -- "反代" --> BEL
+  O -. "RTP 直达，不经 hearth" .-> BEL
+  BEL -- "回调：反查密钥 + 入场判定" --> ADM
+  BEL -- "以 bot 参与者发布进房" --> LK
+```
+
+实线 = 信令 / 控制面，虚线 = 媒体。**视频媒体（投屏、OBS 推流）不经过 hearth**：hearth 只做鉴权、信令与同源反代，可以跑在上行很小的机器上；语音走进程内 Ember，与视频物理隔离，投屏挤爆上行时语音不陪葬。Bellows 也可跑在 hearth 进程内（单机形态）。
 
 内核抽象是中性的 `rtc.Provider` / `rtc.IngestProvider` 接口（`server/internal/rtc/`），配置键按实现命名空间隔离，换内核不迁移配置；前端按凭证里的引擎名动态加载对应客户端（代码分割，LiveKit SDK 只在用到时下载）。
 
