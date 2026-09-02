@@ -12,15 +12,15 @@
 
 ## 架构：双线内核插槽
 
-房间的媒体按角色拆成插槽，每个插槽独立选实现（管理后台可动态切换，即时生效）：
+房间的媒体按角色拆成插槽，每个插槽独立选**服务实例**（管理后台可动态切换，即时生效；选择器的值 = 实例 alias）：
 
-| 插槽 | 承载 | 可选实现 |
+| 插槽 | 承载 | 可选实例 |
 |------|------|----------|
-| `voice_provider` 语音线 | 麦克风音频、名册、说话检测 | `livekit` / `ember`（Ember，进程内纯音频 SFU，零外部依赖） |
-| `stage_provider` 舞台线 | 投屏、摄像头、OBS 推流及其伴音 | `livekit` / `none`（纯语音部署） |
-| `ingest_provider` 推流入口 | OBS WHIP 接入 | `livekit`（Ingress）/ `bellows`（Bellows，进程内或远端直通网关，支持 HEVC/AV1） |
+| `voice_provider` 语音线 | 麦克风音频、名册、说话检测 | 内建 `ember`（Ember，进程内纯音频 SFU，零外部依赖，默认）；或任一已注册 `livekit` 实例 |
+| `stage_provider` 舞台线 | 投屏、摄像头、OBS 推流及其伴音 | `none`（纯语音部署，默认）；或任一已注册 `livekit` 实例 |
+| `ingest_provider` 推流入口 | OBS WHIP 接入 | 内建 `bellows`（Bellows，进程内直通网关，支持 HEVC/AV1，默认）；或已注册 `livekit-ingress` / `bellows-remote` 实例 |
 
-两线选同一内核时自动合并为单连接（combined，即传统单线形态）。推荐拓扑：
+外部服务（LiveKit / LiveKit Ingress / 远端 Bellows）在管理后台「服务实例」按类型注册：alias 命名、同类型可注册多个；环境变量（`LIVEKIT_API_URL`、`INGRESS_UPSTREAM_URL`、`BELLOWS_REMOTE_URL`）配置了则自动合成同名锁定实例（后台只读）。两线选同一 livekit 实例时自动合并为单连接（combined，即传统单线形态）。推荐拓扑：
 
 ```mermaid
 flowchart LR
@@ -34,7 +34,7 @@ flowchart LR
     ADM["入场判定 admitUser<br/>封禁 / 邀请制 / 禁言 · 唯一决策点"]
     DB[("SQLite / MySQL / Postgres")]
     EMB["Ember · 语音 SFU（进程内）<br/>Opus · ICE-Lite · UDP 单端口"]
-    PRX["同源反代 /lk · /w"]
+    PRX["同源反代 /providers/{alias}"]
   end
 
   subgraph media["媒体网络（可与 hearth 分离部署，如投屏者所在局域网）"]
@@ -46,18 +46,18 @@ flowchart LR
   API -- "每次进房 / 推流" --> ADM
   ADM --- DB
 
-  B -- "语音信令 /api/voice" --> EMB
+  B -- "语音信令 /providers/ember/voice" --> EMB
   B -. "语音媒体 UDP" .-> EMB
 
-  B -- "舞台信令 /lk" --> PRX
+  B -- "舞台信令 /providers/livekit/rtc" --> PRX
   PRX -- "反代" --> LK
   B -. "投屏 / 摄像头媒体，直连" .-> LK
   LK -. "观众订阅" .-> B
 
-  O -- "WHIP /w + 推流密钥" --> PRX
+  O -- "WHIP /providers/{alias}/w + 推流密钥" --> PRX
   PRX -- "反代" --> BEL
   O -. "RTP 直达，不经 hearth" .-> BEL
-  BEL -- "回调：反查密钥 + 入场判定" --> ADM
+  BEL -- "验签通行证（hearth 反代前判定签发，远端不回调）" --> ADM
   BEL -- "以 bot 参与者发布进房" --> LK
 ```
 
@@ -73,7 +73,7 @@ flowchart LR
 - 文字聊天：频道内 WebSocket，断线重连
 - 管理：踢出、封禁、**服务端禁言**（落库持久、离房也可操作、全内核生效、推流入口同步拦截）、邀请制白名单；右键用户卡片直达操作
 - 注册：默认邀请制（管理员发有时效链接），首个账号自动管理员
-- 管理后台：内核切换、依赖服务动态配置（环境变量固定则只读，否则落库即时生效）、用户/频道/邀请管理、宿主资源监控
+- 管理后台：内核切换（选服务实例）、**服务实例注册**（LiveKit / LiveKit Ingress / 远端 Bellows，alias 命名、同类型可多个；env 配置的合成同名锁定实例、后台只读）、用户/频道/邀请管理、宿主资源监控
 
 ## 技术选型
 
@@ -125,7 +125,7 @@ docker run -d --name hearth \
 docker exec hearth /app/hearth adduser <用户名> <密码>   # 首账号自动管理员
 ```
 
-放行 `47700/udp`（语音媒体，公网 IP 自动探测），访问 `http://<主机>:8080` 即可开黑。要投屏/OBS 时再于管理后台把舞台线切到 LiveKit 并填写其配置——或直接选自包含档，内嵌服务开箱即用：
+放行 `47700/udp`（语音媒体，公网 IP 自动探测），访问 `http://<主机>:8080` 即可开黑。要投屏/OBS 时再于管理后台「服务实例」注册 LiveKit 实例并把舞台线切过去——或直接选自包含档，内嵌服务开箱即用：
 
 ```bash
 # -livekit 档：内嵌 LiveKit，投屏/摄像头全功能（放行 7881、7882/udp）
@@ -163,7 +163,7 @@ bellows:
     BELLOWS_PUBLIC_IP: 192.168.1.20              # 向推流端通告的地址；留空 = 本机出口网卡 IP
 ```
 
-hearth 侧「管理后台 → 服务参数」（或 compose 环境变量）：推流入口选 **Bellows**，`远端 Bellows 地址` 填 hearth 能访问到的该机器地址（如 `http://192.168.1.20:8090`），共享密钥填同一值。用户的推流地址**保持 hearth 同源 `/w`**：hearth 在反代前做完入场判定并签发短时效通行证随请求头带给远端，远端本地验签、**不需要访问 hearth**；信令经 hearth 反代（TLS 不变、OBS 地址不变），媒体按通告地址直达远端。外网推流者才需要端口映射/TLS，见 `docs/plan-bellows-upnp.md`。
+hearth 侧在「管理后台 → 服务实例」注册一个 **bellows-remote** 实例（或用环境变量 `BELLOWS_REMOTE_URL` / `BELLOWS_SHARED_SECRET` 合成同名锁定实例）：`remote_url` 填 hearth 能访问到的该机器地址（如 `http://192.168.1.20:8090`），共享密钥填同一值。用户的推流地址**保持 hearth 同源** `/providers/{alias}/w/{key}`（alias 即该实例名）：hearth 在反代前做完入场判定并签发短时效通行证随请求头带给远端，远端本地验签、**不需要访问 hearth**；信令经 hearth 反代（TLS 不变、OBS 地址不变），媒体按通告地址直达远端。外网推流者才需要端口映射/TLS，见 `docs/plan-bellows-upnp.md`。
 
 多容器拆部署仍可用 `deploy/` 的 compose 一键起全家桶：
 
@@ -174,8 +174,8 @@ cd deploy && cp .env.example .env && $EDITOR .env
 
 要点：
 
-- **反代内置**：`/lk` 信令、`/w` WHIP、Web、API 同端口，不强制 Caddy/nginx；TLS 可用 `--profile caddy` 或接入自己的网关
-- **动态配置**：环境变量（含 .env）设置的项在后台只读；未设置的可在「管理后台 → 服务参数」填写落库、保存即生效
+- **反代内置**：`/providers/{alias}` 下的内核信令与 WHIP、Web、API 同端口，不强制 Caddy/nginx；TLS 可用 `--profile caddy` 或接入自己的网关
+- **动态配置**：环境变量（含 .env）设置的项在后台只读（LiveKit / Ingress 的 env 会合成同名锁定服务实例）；未设置的可在管理后台注册服务实例、切换内核选择器，保存即生效
 - **媒体端口**：语音 `EMBER_UDP_PORT`（默认 47700/udp）、LiveKit RTC 端口需防火墙/安全组放行（媒体不经反代）
 - **数据库**：默认 sqlite（`/data` 卷）；`DATABASE_URL` 可切 MySQL/Postgres
 - **ARM64**：镜像含 arm64 变体，arm64 小主机可用

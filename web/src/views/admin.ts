@@ -1,20 +1,24 @@
 // 管理后台（服务器级，仅管理员）：服务状态 / 服务参数 / 用户 / 房间 / 邀请。
 import {
   adminCreateInvite,
+  adminCreateProvider,
   adminDeleteChannel,
   adminDeleteInvite,
+  adminDeleteProvider,
   adminDeleteUser,
   adminGetConfig,
   adminListInvites,
+  adminListProviders,
   adminListUsers,
   adminOverview,
   adminSetConfig,
   adminSetPolicy,
   adminSetUserDisabled,
+  adminUpdateProvider,
   getUser,
   listChannels,
 } from '../api';
-import type { AdminOverview, AdminUser, Channel, ConfigItem, Invite } from '../api';
+import type { AdminOverview, AdminUser, Channel, ConfigItem, Invite, ProviderField, ProviderInstance, ProviderType } from '../api';
 import { avatarHtml, copyText, esc, icon, timeAgo, toast } from '../ui';
 import { menuButtonHtml, wireMenuButton } from '../shell';
 
@@ -133,7 +137,7 @@ async function paintStatus(body: HTMLElement) {
     { name: 'hearth-server', meta: `Go 单体 · ${esc(ov.go_version)} · 已运行 ${fmtUptime(ov.uptime_seconds)}`, ok: true, state: 'running' },
     {
       name: `语音内核 · ${esc(ov.services.voice?.name ?? '?')}`,
-      meta: esc(ov.services.voice?.url ?? '') || '进程内嵌（/api/voice）',
+      meta: esc(ov.services.voice?.url ?? '') || '进程内嵌（/providers/<alias>/voice）',
       ok: ov.services.voice?.ok ?? false,
       state: ov.services.voice?.ok ? 'running' : 'unreachable',
     },
@@ -201,16 +205,155 @@ async function paintStatus(body: HTMLElement) {
 async function paintConfig(body: HTMLElement) {
   let ov: AdminOverview;
   let items: ConfigItem[] = [];
+  let provInstances: ProviderInstance[] = [];
+  let provTypes: ProviderType[] = [];
   try {
-    [ov, items] = await Promise.all([adminOverview(), adminGetConfig()]);
+    let provs: { instances: ProviderInstance[]; types: ProviderType[] };
+    [ov, items, provs] = await Promise.all([adminOverview(), adminGetConfig(), adminListProviders()]);
+    provInstances = provs.instances;
+    provTypes = provs.types;
   } catch (err) {
     body.innerHTML = `<div class="error-text">${esc((err as Error).message)}</div>`;
     return;
   }
   let policy = ov.policy;
 
+  // 实例表单状态：repaint 会重建 DOM，输入值先收进这里再重绘
+  let pForm: { mode: 'create' | 'edit'; alias: string; type: string; values: Record<string, string> } = {
+    mode: 'create',
+    alias: '',
+    type: provTypes[0]?.type ?? '',
+    values: {},
+  };
+
+  const CAP_LABELS: Record<string, string> = { voice: '语音', stage: '舞台', ingest: '推流' };
+  // 内建类型不在可注册类型列表里，展示名这里补
+  const TYPE_LABELS: Record<string, string> = { ember: 'Ember（内置语音）', bellows: 'Bellows（内置推流网关）' };
+  const typeLabel = (t: string) => provTypes.find((x) => x.type === t)?.label ?? TYPE_LABELS[t] ?? t;
+  const fieldsOf = (t: string) => provTypes.find((x) => x.type === t)?.fields ?? [];
+
+  // 实例增删改后选择器可选项跟着变，配置项一并重拉
+  const reloadProviders = async () => {
+    const provs = await adminListProviders();
+    provInstances = provs.instances;
+    provTypes = provs.types;
+    items = await adminGetConfig();
+  };
+
+  const collectProviderForm = () => {
+    const card = body.querySelector('#prov-card');
+    card?.querySelectorAll<HTMLInputElement>('input[data-pf]').forEach((inp) => {
+      pForm.values[inp.dataset.pf!] = inp.value;
+    });
+    const aliasInp = card?.querySelector<HTMLInputElement>('#prov-alias');
+    if (aliasInp) pForm.alias = aliasInp.value;
+  };
+
+  const resetProviderForm = () => {
+    pForm = { mode: 'create', alias: '', type: provTypes[0]?.type ?? '', values: {} };
+  };
+
+  const providersCard = () => {
+    const editing = pForm.mode === 'edit' ? provInstances.find((i) => i.alias === pForm.alias) : undefined;
+    const fields = fieldsOf(pForm.mode === 'edit' ? (editing?.type ?? '') : pForm.type);
+    const fieldInput = (f: ProviderField) => {
+      const placeholder =
+        f.secret && pForm.mode === 'edit' && editing?.params_set[f.name] ? '已设置（留空保持不变）' : f.hint;
+      return `
+        <div>
+          <div style="font-size:11px;color:var(--text-2);margin-bottom:6px">${esc(f.label)}</div>
+          <div class="field" style="height:38px;background:var(--bg-2)"><input class="mono" style="font-size:12px" data-pf="${esc(f.name)}" type="${f.secret ? 'password' : 'text'}" value="${esc(pForm.values[f.name] ?? '')}" placeholder="${esc(placeholder)}" autocomplete="off" /></div>
+        </div>`;
+    };
+    const rows = provInstances
+      .map((inst) => {
+        const readonly = inst.builtin || inst.locked;
+        const src = inst.builtin
+          ? '<span class="chip tag-ember">内建</span>'
+          : inst.locked
+            ? '<span class="chip" style="background:var(--bg-4);color:var(--text-1)" title="部署侧 .env / compose 里改，重启生效">环境锁定</span>'
+            : '<span class="chip tag-sage">DB</span>';
+        return `
+        <div class="table-row">
+          <div class="mono" style="width:170px;font-size:12.5px;font-weight:600;color:var(--text-0)">${esc(inst.alias)}</div>
+          <div style="width:170px;font-size:12px;color:var(--text-1)">${esc(typeLabel(inst.type))}</div>
+          <div style="flex-grow:1;font-size:12px;color:var(--text-1)">${inst.caps.map((c) => CAP_LABELS[c] ?? esc(c)).join(' / ') || '—'}</div>
+          <div style="width:90px">${src}</div>
+          <div style="width:150px;display:flex;gap:7px;justify-content:flex-end">
+            ${
+              readonly
+                ? ''
+                : `<button class="hit btn btn-sm" data-p-edit="${esc(inst.alias)}">编辑</button>
+                   <button class="hit btn btn-sm btn-danger" data-p-del="${esc(inst.alias)}">删除</button>`
+            }
+          </div>
+        </div>`;
+      })
+      .join('');
+    const formHtml =
+      pForm.mode === 'edit' && editing
+        ? `
+        <div style="margin-top:16px;border-top:1px solid var(--line-soft);padding-top:15px">
+          <div style="display:flex;align-items:baseline;gap:9px">
+            <div style="font-size:12.5px;font-weight:600">编辑实例 <span class="mono">${esc(editing.alias)}</span>（${esc(typeLabel(editing.type))}）</div>
+            <div style="font-size:11px;color:var(--text-3)">保存为全量替换；密钥留空 = 保持不变</div>
+            <div class="spacer"></div>
+            <button class="hit btn btn-sm" data-p-cancel>取消</button>
+          </div>
+          <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:11px;margin-top:12px">
+            ${fields.map(fieldInput).join('')}
+          </div>
+          <div style="display:flex;justify-content:flex-end;margin-top:13px">
+            <button class="hit btn btn-sm btn-primary" data-p-submit>保存并生效</button>
+          </div>
+        </div>`
+        : `
+        <div style="margin-top:16px;border-top:1px solid var(--line-soft);padding-top:15px">
+          <div style="display:flex;align-items:baseline;gap:9px">
+            <div style="font-size:12.5px;font-weight:600">注册新实例</div>
+            <div style="font-size:11px;color:var(--text-3)">注册后在「内核选择」里按 alias 选用</div>
+          </div>
+          <div style="display:flex;gap:20px;margin-top:12px;align-items:flex-end;flex-wrap:wrap">
+            <div>
+              <div style="font-size:11px;color:var(--text-2);margin-bottom:7px">类型</div>
+              <div class="seg-group" style="background:var(--bg-2)">${provTypes
+                .map((t) => `<button class="hit seg ${pForm.type === t.type ? 'on' : ''}" data-p-type="${esc(t.type)}">${esc(t.label)}</button>`)
+                .join('')}</div>
+            </div>
+            <div style="flex-grow:1;min-width:220px">
+              <div style="font-size:11px;color:var(--text-2);margin-bottom:7px">alias（小写字母数字与 -，会出现在 /providers/&lt;alias&gt; 连接路径里）</div>
+              <div class="field" style="height:38px;background:var(--bg-2)"><input class="mono" style="font-size:12px" id="prov-alias" value="${esc(pForm.alias)}" placeholder="如 lk-main" /></div>
+            </div>
+          </div>
+          <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:11px;margin-top:12px">
+            ${fields.map(fieldInput).join('')}
+          </div>
+          <div style="display:flex;justify-content:flex-end;margin-top:13px">
+            <button class="hit btn btn-sm btn-primary" data-p-submit>注册实例</button>
+          </div>
+        </div>`;
+    return `
+      <div class="card" id="prov-card" style="padding:18px 20px">
+        <div style="display:flex;align-items:baseline;gap:9px;margin-bottom:4px">
+          <div style="font-size:13px;font-weight:600">服务实例</div>
+          <div style="font-size:11px;color:var(--text-2)">语音 / 舞台 / 推流接入的内核实例；内建与环境变量锁定的只读</div>
+        </div>
+        <div class="table-box" style="margin-top:11px">
+          <div class="table-head">
+            <div style="width:170px">alias</div>
+            <div style="width:170px">类型</div>
+            <div style="flex-grow:1">能力</div>
+            <div style="width:90px">来源</div>
+            <div style="width:150px;text-align:right">操作</div>
+          </div>
+          ${rows || '<div class="table-empty">没有实例。</div>'}
+        </div>
+        ${formHtml}
+      </div>`;
+  };
+
   // 依赖服务配置卡片：环境变量固定的只读展示；未固定的可编辑，保存落库即时生效
-  // 枚举值的人话标签（值本身仍以英文存库）
+  // 枚举值的人话标签（值本身仍以英文存库）；选择器可选项是实例 alias，未知名直接显示原值
   const KERNEL_LABELS: Record<string, string> = {
     livekit: 'LiveKit',
     ember: 'Ember（内置语音）',
@@ -272,11 +415,12 @@ async function paintConfig(body: HTMLElement) {
       { id: 'open', label: '开放注册', desc: '任何人都能注册——公网上不建议' },
     ];
     body.innerHTML = `
+      ${providersCard()}
       <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:16px">
         ${[...new Set(items.map((it) => it.group))]
           .map((g) => {
             const meta: Record<string, [string, string]> = {
-              core: ['内核选择', '语音 / 舞台（投屏）/ 推流入口分别选实现，配置互不干扰'],
+              core: ['内核选择', '语音 / 舞台（投屏）/ 推流入口分别选服务实例'],
               livekit: ['LiveKit', '信令与令牌签发'],
               voice: ['Ember 内置语音', '本进程直出音频，UDP 单端口'],
               ingress: ['推流入口（OBS）', 'WHIP 上游与公开地址'],
@@ -314,6 +458,64 @@ async function paintConfig(body: HTMLElement) {
         });
       });
     });
+    // ---- 服务实例 ----
+    body.querySelectorAll<HTMLButtonElement>('[data-p-type]').forEach((btn) =>
+      btn.addEventListener('click', () => {
+        collectProviderForm();
+        pForm.type = btn.dataset.pType!;
+        pForm.values = {}; // 类型不同字段不同，已填值作废
+        paint();
+      }),
+    );
+    body.querySelectorAll<HTMLButtonElement>('[data-p-edit]').forEach((btn) =>
+      btn.addEventListener('click', () => {
+        const inst = provInstances.find((i) => i.alias === btn.dataset.pEdit);
+        if (!inst) return;
+        // params 里 Secret 已被服务端掩码为空串，提交时空串 = 保留旧值
+        pForm = { mode: 'edit', alias: inst.alias, type: inst.type, values: { ...inst.params } };
+        paint();
+      }),
+    );
+    body.querySelector('[data-p-cancel]')?.addEventListener('click', () => {
+      resetProviderForm();
+      paint();
+    });
+    body.querySelector('[data-p-submit]')?.addEventListener('click', async () => {
+      collectProviderForm();
+      const fields = fieldsOf(pForm.type);
+      // 全量替换语义：该类型全部字段都提交
+      const params: Record<string, string> = {};
+      for (const f of fields) params[f.name] = (pForm.values[f.name] ?? '').trim();
+      try {
+        if (pForm.mode === 'edit') {
+          await adminUpdateProvider(pForm.alias, params);
+          toast('实例已保存并生效', 'ok');
+        } else {
+          await adminCreateProvider({ type: pForm.type, alias: pForm.alias.trim(), params });
+          toast('实例已注册', 'ok');
+        }
+        resetProviderForm();
+        await reloadProviders();
+        paint();
+      } catch (err) {
+        toast((err as Error).message, 'bad');
+      }
+    });
+    body.querySelectorAll<HTMLButtonElement>('[data-p-del]').forEach((btn) =>
+      btn.addEventListener('click', async () => {
+        const alias = btn.dataset.pDel!;
+        if (!confirm(`删除实例 ${alias}？选择器仍引用它时服务端会拒绝；删除不可恢复。`)) return;
+        try {
+          await adminDeleteProvider(alias);
+          if (pForm.mode === 'edit' && pForm.alias === alias) resetProviderForm();
+          await reloadProviders();
+          paint();
+          toast('实例已删除', 'ok');
+        } catch (err) {
+          toast((err as Error).message, 'bad');
+        }
+      }),
+    );
     body.querySelectorAll<HTMLButtonElement>('[data-save]').forEach((btn) => {
       btn.addEventListener('click', async () => {
         const group = btn.dataset.save!;

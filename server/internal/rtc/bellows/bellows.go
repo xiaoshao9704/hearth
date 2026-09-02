@@ -8,7 +8,7 @@
 //
 // 两种部署形态（同一个 Gateway）：
 //   - 进程内：hearth 自己收流，/w 由接入层直接交给 ServeWHIP；
-//   - 远端：设 bellows_remote_url 后 hearth 不收流，/w 信令反代到远端的 cmd/bellows
+//   - 远端：注册 bellows-remote 实例（bellows_remote_url）后 hearth 不收流，/w 信令反代到远端的 cmd/bellows
 //     进程（通常在 LiveKit 同一局域网），媒体由推流端直达远端，视频不再经过 hearth
 //     所在服务器。入场判定在 hearth 反代前做完并签成短时效通行证（grant）塞进请求头，
 //     远端只本地验签（见 grant.go），无出站依赖；OBS 必须经 hearth 同源 /w 才有 grant。
@@ -42,15 +42,21 @@ import (
 // 其余错误视为内部故障 → 503，避免瞬时 DB 抖动被误报成「密钥已重置」。
 var ErrUnknownKey = errors.New("unknown stream key")
 
-// ConfigKeys 本实现声明的配置键（命名空间 bellows_*）。端口改动需重启生效。
+// ConfigKeys 内建进程内形态的全局配置键（命名空间 bellows_*）。端口改动需重启生效。
 func ConfigKeys() []rtc.ConfigKey {
 	return []rtc.ConfigKey{
 		{Name: "bellows_udp_port", Env: "BELLOWS_UDP_PORT", Group: "ingress", Default: "47710",
 			Label: "WHIP 媒体 UDP 端口", Hint: "单端口 mux，需在防火墙/安全组放行；改动重启生效"},
 		{Name: "bellows_public_ip", Env: "BELLOWS_PUBLIC_IP", Group: "ingress",
 			Label: "WHIP 公网 IP", Hint: "留空 = 启动时 HTTP 自动探测（云主机一般留空即可）"},
+	}
+}
+
+// RemoteKeys 远端形态（bellows-remote 实例）的注册表单字段，值存实例 params。
+func RemoteKeys() []rtc.ConfigKey {
+	return []rtc.ConfigKey{
 		{Name: "bellows_remote_url", Env: "BELLOWS_REMOTE_URL", Group: "ingress",
-			Label: "远端 Bellows 地址", Hint: "设置后本进程不收流，/w 反代到该地址的 cmd/bellows（如 http://192.168.1.20:8090）；留空 = 进程内收流"},
+			Label: "远端 Bellows 地址", Hint: "本进程不收流，/w 反代到该地址的 cmd/bellows（如 http://192.168.1.20:8090）"},
 		{Name: "bellows_shared_secret", Env: "BELLOWS_SHARED_SECRET", Group: "ingress", Secret: true,
 			Label: "远端 Bellows 共享密钥", Hint: "hearth 签发推流通行证、远端验签用的 HMAC 密钥，两边填同一值"},
 	}
@@ -125,10 +131,6 @@ func (g *Gateway) DeleteEndpoint(_ context.Context, id string) error {
 	g.closeSessionsByKey(id)
 	return nil
 }
-
-// PublicBase 恒为空（同源 /w/）：纯通行证模型下 OBS 必须经 hearth 反代才有 grant，
-// 直连远端的形态不存在。
-func (g *Gateway) PublicBase(context.Context) string { return "" }
 
 // ProxyUpstream 远端形态下 hearth 的 /w 反代到远端 cmd/bellows；进程内为空，接入层直接交给 ServeWHIP。
 func (g *Gateway) ProxyUpstream(ctx context.Context) string { return g.remoteURL(ctx) }

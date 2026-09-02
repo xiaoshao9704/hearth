@@ -88,8 +88,6 @@ type IngestProvider interface {
 	// CreateEndpoint 为「用户 × 房间」创建推流端点，返回内核侧 ID 与推流密钥。
 	CreateEndpoint(ctx context.Context, room, username string) (id, streamKey string, err error)
 	DeleteEndpoint(ctx context.Context, id string) error
-	// PublicBase 浏览器可见的推流基地址；空 = 由接入层推导同源推流代理地址。
-	PublicBase(ctx context.Context) string
 	// ProxyUpstream 同源推流代理的上游地址；空 = 该实现不需要推流代理。
 	ProxyUpstream(ctx context.Context) string
 }

@@ -53,7 +53,7 @@ func main() {
 	hub := chat.NewHub(st, cfg.CORSOrigin)
 	a := api.New(st, cfg, hub)
 
-	// chi 路由：API + 聊天 WS + /lk//w/ 反代；具体路由优先于静态通配，无 ServeMux 模式冲突问题
+	// chi 路由：API + 聊天 WS + /providers/* 接入分发；具体路由优先于静态通配，无 ServeMux 模式冲突问题
 	r := a.Router()
 	a.RegisterProxies(r)
 	r.Get("/api/chat", hub.ServeHTTP)

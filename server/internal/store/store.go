@@ -70,8 +70,10 @@ func parseDBURL(dbURL string) (dialect, string, string, error) {
 		if pw, ok := u.User.Password(); ok {
 			auth += ":" + pw
 		}
-		// parseTime=true：DATETIME 直接扫成 time.Time
-		dsn := fmt.Sprintf("%s@tcp(%s)%s?parseTime=true", auth, u.Host, u.Path)
+		// parseTime=true：DATETIME 直接扫成 time.Time；
+		// clientFoundRows=true：RowsAffected 统一为「匹配行数」（默认只算实际改变的行，
+		// 同值 UPDATE 会误报 0，靠 RowsAffected 判存在的逻辑在 MySQL 下会误判）
+		dsn := fmt.Sprintf("%s@tcp(%s)%s?parseTime=true&clientFoundRows=true", auth, u.Host, u.Path)
 		return dialect{"mysql"}, "mysql", dsn, nil
 	case strings.HasPrefix(dbURL, "postgres://"), strings.HasPrefix(dbURL, "postgresql://"):
 		return dialect{"postgres"}, "pgx", dbURL, nil
@@ -249,6 +251,13 @@ var sqliteDDL = []string{
   k TEXT PRIMARY KEY,
   v TEXT NOT NULL
 )`,
+	`CREATE TABLE IF NOT EXISTS providers (
+  alias VARCHAR(64) PRIMARY KEY,
+  type VARCHAR(32) NOT NULL,
+  params TEXT NOT NULL,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+)`,
 }
 
 var mysqlDDL = []string{
@@ -330,6 +339,13 @@ var mysqlDDL = []string{
 	`CREATE TABLE IF NOT EXISTS settings (
   k VARCHAR(64) PRIMARY KEY,
   v TEXT NOT NULL
+)`,
+	`CREATE TABLE IF NOT EXISTS providers (
+  alias VARCHAR(64) PRIMARY KEY,
+  type VARCHAR(32) NOT NULL,
+  params TEXT NOT NULL,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 )`,
 }
 
@@ -413,6 +429,13 @@ var pgDDL = []string{
   k TEXT PRIMARY KEY,
   v TEXT NOT NULL
 )`,
+	`CREATE TABLE IF NOT EXISTS providers (
+  alias VARCHAR(64) PRIMARY KEY,
+  type VARCHAR(32) NOT NULL,
+  params TEXT NOT NULL,
+  created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+)`,
 }
 
 type User struct {
@@ -494,14 +517,15 @@ INSERT INTO ingresses (user_id, channel_id, ingress_id, stream_key, provider) VA
 	return &Ingress{ID: id, IngressID: ingressID, StreamKey: streamKey, Provider: provider}, nil
 }
 
-// IngressOwner 按推流密钥反查归属（/w 推流入口按 channel_gags 拦截被禁言者用）。
-func (s *Store) IngressOwner(ctx context.Context, streamKey string) (userID, channelID int64, err error) {
+// IngressOwner 按推流密钥反查归属（含记录的归属实例 alias，WHIP 入口按它校验入口匹配）。
+func (s *Store) IngressOwner(ctx context.Context, streamKey string) (userID, channelID int64, provider string, err error) {
 	err = s.db.QueryRowContext(ctx, s.q(
-		"SELECT user_id, channel_id FROM ingresses WHERE stream_key = ?"), streamKey).Scan(&userID, &channelID)
+		"SELECT user_id, channel_id, provider FROM ingresses WHERE stream_key = ?"), streamKey).
+		Scan(&userID, &channelID, &provider)
 	if errors.Is(err, sql.ErrNoRows) {
-		return 0, 0, ErrNotFound
+		return 0, 0, "", ErrNotFound
 	}
-	return userID, channelID, err
+	return userID, channelID, provider, err
 }
 
 func (s *Store) DeleteIngress(ctx context.Context, userID, channelID int64) error {

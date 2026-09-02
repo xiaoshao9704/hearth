@@ -787,7 +787,7 @@ function renderStream(body: HTMLElement) {
       body.innerHTML = '<div class="pane-col pane-wide"><div class="hint-card">还没有频道。先在大厅建一个，推流地址是「每人每频道」一把 key。</div></div>';
       return;
     }
-    // OBS 的 WHIP 端点要求不带尾斜杠（bearer 模式 POST 精确 /w；/w/ 会 404）
+    // OBS 的 WHIP 端点要求不带尾斜杠（bearer 模式路径精确匹配，多一个 / 会 404）
     const base = url ? url.slice(0, url.lastIndexOf('/')) : '获取中…';
     const masked = key ? (reveal ? key : `${'•'.repeat(Math.max(0, key.length - 4))}${key.slice(-4)}`) : '获取中…';
     body.innerHTML = `

@@ -1,6 +1,6 @@
 # Hearth Server
 
-Go 后端：用户体系（bcrypt + Bearer 会话）、频道管理、LiveKit 令牌签发、频道聊天 WebSocket、内置反向代理（/lk、/w）。
+Go 后端：用户体系（bcrypt + Bearer 会话）、频道管理、LiveKit 令牌签发、频道聊天 WebSocket、内核接入反代（`/providers/{alias}` 下的信令与 WHIP）。
 
 - 存储：sqlite 默认（`modernc.org/sqlite`，纯 Go 无 cgo），`DATABASE_URL` 可切 MySQL/Postgres；可交叉编译到 linux/arm64
 - 路由：chi（`github.com/go-chi/chi/v5`），认证/房主校验为中间件
@@ -54,4 +54,4 @@ CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o hearth-server-arm64 ./cmd/serv
 
 ## 环境变量（.env）
 
-见 `.env.example`：`ADDR` 监听地址、`DB_PATH` 数据库文件、`LIVEKIT_URL`/`LIVEKIT_API_KEY`/`LIVEKIT_API_SECRET` LiveKit 接入、`LIVEKIT_API_URL` LiveKit Twirp API 地址（Ingress 管理，缺省从 `LIVEKIT_URL` 推导）、`INGRESS_PUBLIC_URL` WHIP 公开基地址、`CORS_ORIGIN` 跨域来源、`STATIC_DIR` 可选的前端产物托管目录（部署时指向 `../web/dist` 可单二进制运行）。
+见 `.env.example`：`ADDR` 监听地址、`DB_PATH` 数据库文件、`CORS_ORIGIN` 跨域来源、`STATIC_DIR` 可选的前端产物托管目录（部署时指向 `../web/dist` 可单二进制运行）。LiveKit / Ingress 相关 env 是服务实例的锁定来源：`LIVEKIT_API_URL`/`LIVEKIT_API_KEY`/`LIVEKIT_API_SECRET`（`LIVEKIT_API_URL` 缺省从 `LIVEKIT_URL` 推导）任一设置即合成 alias=`livekit` 的锁定实例，`INGRESS_UPSTREAM_URL` 合成 alias=`livekit-ingress`（管理后台「服务实例」里只读）；不配 env 则可在后台注册 DB 实例（同类型可多个）。

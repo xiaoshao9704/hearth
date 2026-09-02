@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"errors"
+	"strconv"
 	"time"
 )
 
@@ -92,6 +93,34 @@ func (s *Store) SetSetting(ctx context.Context, key, value string) error {
 		query = `INSERT INTO settings (k, v) VALUES (?, ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v`
 	}
 	_, err := s.db.ExecContext(ctx, s.q(query), key, value)
+	return err
+}
+
+// ---- 数据迁移游标（settings 键 migration_version，非配置项，管理后台不展示）----
+
+// MigrationVersion 读迁移游标；缺失或损坏视为 0。
+func (s *Store) MigrationVersion(ctx context.Context) (int, error) {
+	v, err := s.GetSetting(ctx, "migration_version")
+	if errors.Is(err, ErrNotFound) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		return 0, nil
+	}
+	return n, nil
+}
+
+func (s *Store) SetMigrationVersion(ctx context.Context, v int) error {
+	return s.SetSetting(ctx, "migration_version", strconv.Itoa(v))
+}
+
+// RewriteIngressProvider 把 ingress 记录的归属实例别名从 from 改为 to（版本迁移用）。
+func (s *Store) RewriteIngressProvider(ctx context.Context, from, to string) error {
+	_, err := s.db.ExecContext(ctx, s.q("UPDATE ingresses SET provider = ? WHERE provider = ?"), to, from)
 	return err
 }
 

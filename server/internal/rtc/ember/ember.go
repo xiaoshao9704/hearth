@@ -2,7 +2,7 @@
 // 设计取舍：
 //   - 只做 Opus 转发：无 simulcast / 关键帧 / 带宽估计，每参与者一条上行、N-1 条下行拷贝；
 //   - 服务器有公网 IP：ICE-Lite + 单端口 UDP mux，客户端不需要 STUN/TURN；
-//   - 信令走同源 WebSocket（api 层挂 /api/voice，鉴权与聊天 WS 同模式），协议自有；
+//   - 信令走同源 WebSocket（api 层挂 /providers/ember/voice，鉴权与聊天 WS 同模式），协议自有；
 //   - 说话检测：读 ssrc-audio-level RTP 头扩展，服务端聚合后广播 speakers。
 package ember
 
@@ -132,8 +132,8 @@ func New(cfg rtc.ConfigFunc) *Provider {
 func (p *Provider) Name() string { return "ember" }
 
 func (p *Provider) JoinCredentials(_ context.Context, _, _, _ string, _ bool) (rtc.Credentials, error) {
-	// URL/Token 留空：api 层推导同源 /api/voice 信令地址并透传会话 token；
-	// canPublish 此处在凭证层无处安放，禁言由 api 层在 /api/voice 入会时（HandleJoin muted 参数）生效
+	// URL/Token 留空：api 层推导同源 /providers/ember/voice 信令地址并透传会话 token；
+	// canPublish 此处在凭证层无处安放，禁言由 api 层在信令入会时（HandleJoin muted 参数）生效
 	return rtc.Credentials{Engine: "ember"}, nil
 }
 

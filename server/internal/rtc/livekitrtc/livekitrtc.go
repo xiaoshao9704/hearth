@@ -1,4 +1,4 @@
-// Package livekitrtc 是 rtc.Provider / rtc.IngestProvider 的 LiveKit 实现。
+// Package livekitrtc 是 rtc.Provider 的 LiveKit 实现（推流入口拆为独立的 Ingress 类型）。
 // 配置逐请求动态解析（环境变量 / 后台设置），客户端随配置变化重建。
 package livekitrtc
 
@@ -8,7 +8,6 @@ import (
 	"strings"
 	"sync"
 
-	"hearth/server/internal/lkingress"
 	"hearth/server/internal/lkroom"
 	"hearth/server/internal/lktoken"
 	"hearth/server/internal/rtc"
@@ -33,7 +32,7 @@ func apiURLDefault() string {
 	return scheme + "://" + u
 }
 
-// ConfigKeys 本实现声明的配置键（命名空间 livekit_* / ingress_*）。
+// ConfigKeys 本实现声明的配置键（命名空间 livekit_*；推流入口的键在 ingress.go）。
 func ConfigKeys() []rtc.ConfigKey {
 	return []rtc.ConfigKey{
 		{Name: "livekit_api_url", Env: "LIVEKIT_API_URL", Group: "livekit", Default: apiURLDefault(),
@@ -44,29 +43,24 @@ func ConfigKeys() []rtc.ConfigKey {
 			Label: "API Secret", Hint: "签发进房令牌用"},
 		{Name: "livekit_url", Env: "LIVEKIT_URL", Group: "livekit",
 			Label: "浏览器可见地址", Hint: "留空 = 同源信令代理（推荐）"},
-		{Name: "ingress_upstream_url", Env: "INGRESS_UPSTREAM_URL", Group: "ingress",
-			Label: "WHIP 上游地址", Hint: "留空 = 推流入口未启用（推流接口返回 503）"},
-		{Name: "ingress_public_url", Env: "INGRESS_PUBLIC_URL", Group: "ingress",
-			Label: "浏览器可见 WHIP 基地址", Hint: "留空 = 同源推流代理（推荐）"},
 	}
 }
 
-// Provider 同时实现房间内核与推流入口（LiveKit 二者同一套 API 凭证）。
+// Provider 是房间/舞台内核（推流入口由 Ingress 独立承担）。
 type Provider struct {
 	cfg rtc.ConfigFunc
 
 	mu               sync.Mutex
 	url, key, secret string
 	rooms            *lkroom.Client
-	ing              *lkingress.Client
 }
 
 func New(cfg rtc.ConfigFunc) *Provider {
 	return &Provider{cfg: cfg}
 }
 
-// clients 按当前生效配置取客户端；配置变了就重建。
-func (p *Provider) clients(ctx context.Context) (*lkingress.Client, *lkroom.Client) {
+// client 按当前生效配置取房间客户端；配置变了就重建。
+func (p *Provider) client(ctx context.Context) *lkroom.Client {
 	url := p.cfg(ctx, "livekit_api_url")
 	key := p.cfg(ctx, "livekit_api_key")
 	secret := p.cfg(ctx, "livekit_api_secret")
@@ -75,9 +69,8 @@ func (p *Provider) clients(ctx context.Context) (*lkingress.Client, *lkroom.Clie
 	if p.rooms == nil || url != p.url || key != p.key || secret != p.secret {
 		p.url, p.key, p.secret = url, key, secret
 		p.rooms = lkroom.NewClient(url, key, secret)
-		p.ing = lkingress.NewClient(url, key, secret)
 	}
-	return p.ing, p.rooms
+	return p.rooms
 }
 
 // ---- rtc.Provider ----
@@ -93,13 +86,11 @@ func (p *Provider) JoinCredentials(ctx context.Context, room, username, deviceTa
 }
 
 func (p *Provider) RoomCounts(ctx context.Context) (map[string]int, error) {
-	_, rooms := p.clients(ctx)
-	return rooms.RoomCounts(ctx)
+	return p.client(ctx).RoomCounts(ctx)
 }
 
 func (p *Provider) ListParticipants(ctx context.Context, room string) ([]rtc.Participant, error) {
-	_, rooms := p.clients(ctx)
-	ps, err := rooms.ListParticipants(ctx, room)
+	ps, err := p.client(ctx).ListParticipants(ctx, room)
 	if err != nil {
 		return nil, err
 	}
@@ -111,39 +102,13 @@ func (p *Provider) ListParticipants(ctx context.Context, room string) ([]rtc.Par
 }
 
 func (p *Provider) RemoveParticipantsOf(ctx context.Context, room, username string) (int, error) {
-	_, rooms := p.clients(ctx)
-	return rooms.RemoveParticipantsOf(ctx, room, username)
+	return p.client(ctx).RemoveParticipantsOf(ctx, room, username)
 }
 
 func (p *Provider) MuteUserAudio(ctx context.Context, room, username string, muted bool) error {
-	_, rooms := p.clients(ctx)
-	return rooms.MuteUserAudio(ctx, room, username, muted)
+	return p.client(ctx).MuteUserAudio(ctx, room, username, muted)
 }
 
 func (p *Provider) SignalProxyUpstream(ctx context.Context) string {
 	return p.cfg(ctx, "livekit_api_url")
-}
-
-// ---- rtc.IngestProvider ----
-
-func (p *Provider) Enabled(ctx context.Context) bool {
-	return p.cfg(ctx, "ingress_upstream_url") != ""
-}
-
-func (p *Provider) CreateEndpoint(ctx context.Context, room, username string) (string, string, error) {
-	ing, _ := p.clients(ctx)
-	return ing.Create(ctx, room, username)
-}
-
-func (p *Provider) DeleteEndpoint(ctx context.Context, id string) error {
-	ing, _ := p.clients(ctx)
-	return ing.Delete(ctx, id)
-}
-
-func (p *Provider) PublicBase(ctx context.Context) string {
-	return p.cfg(ctx, "ingress_public_url")
-}
-
-func (p *Provider) ProxyUpstream(ctx context.Context) string {
-	return p.cfg(ctx, "ingress_upstream_url")
 }

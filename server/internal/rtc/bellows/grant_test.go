@@ -82,11 +82,11 @@ func TestGrantReject(t *testing.T) {
 		header string
 	}{
 		"篡改 payload": {testSecret, tampered},
-		"错 secret":  {"wrong-secret", newGrant(nil)},
-		"空 secret":  {"", newGrant(nil)},
-		"过期":       {testSecret, newGrant(func(p *grantPayload) { p.Exp = time.Now().Add(-time.Hour).Unix() })},
-		"版本不符":     {testSecret, newGrant(func(p *grantPayload) { p.V = 2 })},
-		"格式错误":     {testSecret, "no-dot-here"},
+		"错 secret":   {"wrong-secret", newGrant(nil)},
+		"空 secret":   {"", newGrant(nil)},
+		"过期":         {testSecret, newGrant(func(p *grantPayload) { p.Exp = time.Now().Add(-time.Hour).Unix() })},
+		"版本不符":       {testSecret, newGrant(func(p *grantPayload) { p.V = 2 })},
+		"格式错误":       {testSecret, "no-dot-here"},
 	}
 	for name, c := range cases {
 		if _, err := verifyGrant(c.secret, c.header); err == nil {

@@ -17,7 +17,6 @@ import (
 	"hearth/server/internal/rtc"
 	"hearth/server/internal/rtc/bellows"
 	"hearth/server/internal/rtc/ember"
-	"hearth/server/internal/rtc/livekitrtc"
 	"hearth/server/internal/store"
 
 	"crypto/rand"
@@ -33,12 +32,15 @@ type API struct {
 	cfg config.Config
 	hub *chat.Hub
 
-	// 内核注册表：接入层只依赖 rtc 接口，具体实现按选择器配置取（见 dyncfg.go）
-	voiceKernels  map[string]rtc.Provider
-	stageKernels  map[string]rtc.StageProvider
-	ingestKernels map[string]rtc.IngestProvider
-	kernelKeys    []rtc.ConfigKey // 各实现自带的配置键汇总
-	ember         *ember.Provider // /api/voice 信令端点直连（进程内实现）
+	// 内核实例注册表：接入层只依赖 rtc 接口，按选择器（实例 alias）取实例对象（见 providers.go）
+	reloadMu      sync.Mutex // 串行化「写 DB → 重建注册表」（mutateProviders/reloadProviders）
+	providersMu   sync.RWMutex
+	providers     map[string]*ProviderInstance
+	providerOrder []string        // listInstances 顺序：内建 → env 锁定 → DB
+	kernelKeys    []rtc.ConfigKey // 内建实例的全局配置键汇总
+	ember         *ember.Provider // /providers/ember/voice 信令端点直连（进程内实现）
+	// ingressResolver 内建 bellows 的归属反查闭包（ingressOwner → ErrUnknownKey 映射）
+	ingressResolver bellows.ResolveFunc
 
 	// 在房人数缓存（大厅频道列表用，避免每次列表都打内核）
 	countsMu sync.Mutex
@@ -51,15 +53,14 @@ type API struct {
 }
 
 func New(st *store.Store, cfg config.Config, hub *chat.Hub) *API {
-	a := &API{st: st, cfg: cfg, hub: hub, tickets: map[string]voiceTicket{}}
-	// 注册内核实现：LiveKit 可同时任语音/舞台/推流入口；ember 是进程内纯音频语音内核；
-	// bellows 是进程内 WHIP 直通推流网关（OBS HEVC/AV1 的接入路径）
-	lk := livekitrtc.New(a.dynVal)
+	a := &API{st: st, cfg: cfg, hub: hub, tickets: map[string]voiceTicket{}, providers: map[string]*ProviderInstance{}}
+	// 内建实例：ember 是进程内纯音频语音内核；bellows 是进程内 WHIP 直通推流网关
+	//（OBS HEVC/AV1 的接入路径），其余形态由 env/DB 注册成实例（见 providers.go）
 	a.ember = ember.New(a.dynVal)
-	pw := bellows.New(a.dynVal, func(ctx context.Context, streamKey string) (string, string, error) {
+	a.ingressResolver = func(ctx context.Context, streamKey string) (string, string, error) {
 		// 查不到 → ErrUnknownKey（404）；瞬时 DB 故障原样透传（503），不能误报「密钥已重置」。
-		// 入场判定不在这里做：进程内形态由 /w 拦截（canPublishByStreamKey）先判过了
-		c, u, err := a.ingressOwner(ctx, streamKey)
+		// 入场判定不在这里做：进程内形态由 WHIP 拦截（canPublishByStreamKey）先判过了
+		c, u, _, err := a.ingressOwner(ctx, streamKey)
 		if errors.Is(err, store.ErrNotFound) {
 			return "", "", bellows.ErrUnknownKey
 		}
@@ -67,12 +68,17 @@ func New(st *store.Store, cfg config.Config, hub *chat.Hub) *API {
 			return "", "", err
 		}
 		return c.Name, u.Username, nil
-	})
-	a.voiceKernels = map[string]rtc.Provider{"livekit": lk, "ember": a.ember}
-	a.stageKernels = map[string]rtc.StageProvider{"livekit": lk}
-	a.ingestKernels = map[string]rtc.IngestProvider{"livekit": lk, "bellows": pw}
-	a.kernelKeys = append(append(livekitrtc.ConfigKeys(), ember.ConfigKeys()...), bellows.ConfigKeys()...)
-	a.warnLegacyConfig(context.Background())
+	}
+	a.kernelKeys = append(ember.ConfigKeys(), bellows.ConfigKeys()...)
+	// 注册表先种内建实例：启动期迁移或 ListProviders 失败（保留旧表）时，
+	// voiceInstance/ingestInstance 的回落路径仍有 ember/bellows 对象可用
+	for _, inst := range a.builtinInstances() {
+		a.providers[inst.Alias] = inst
+		a.providerOrder = append(a.providerOrder, inst.Alias)
+	}
+	ctx := context.Background()
+	a.runMigrations(ctx) // 版本游标迁移，末尾完成首次 reloadProviders
+	a.warnLegacyConfig(ctx)
 	return a
 }
 
@@ -84,7 +90,6 @@ func (a *API) Router() *chi.Mux {
 	r.Post("/api/register", a.registerWithPolicy)
 	r.Post("/api/login", a.login)
 	r.Get("/api/invites/{code}", a.inviteInfo)
-	r.Get("/api/voice", a.voiceWS)
 
 	// 需登录
 	r.Group(func(r chi.Router) {
@@ -146,6 +151,10 @@ func (a *API) Router() *chi.Mux {
 			r.Get("/invites", a.adminListInvites)
 			r.Post("/invites", a.adminCreateInvite)
 			r.Delete("/invites/{id}", a.adminRevokeInvite)
+			r.Get("/providers", a.adminListProviders)
+			r.Post("/providers", a.adminCreateProvider)
+			r.Put("/providers/{alias}", a.adminUpdateProvider)
+			r.Delete("/providers/{alias}", a.adminDeleteProvider)
 		})
 	})
 	return r
@@ -158,7 +167,8 @@ func (a *API) roomCounts(ctx context.Context) (map[string]int, error) {
 	if a.counts != nil && time.Since(a.countsAt) < 3*time.Second {
 		return a.counts, nil
 	}
-	counts, err := a.voiceProvider(ctx).RoomCounts(ctx)
+	_, vp := a.voiceInstance(ctx)
+	counts, err := vp.RoomCounts(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -264,7 +274,7 @@ func (a *API) requireModerator(next http.Handler) http.Handler {
 func (a *API) cors(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", a.cfg.CORSOrigin)
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
@@ -403,15 +413,15 @@ func (a *API) joinToken(w http.ResponseWriter, r *http.Request) {
 	}
 	tag := a.deviceTagFor(r, req.DeviceID, u.ID)
 	// 频道名即内核房间名，一一映射。语音线必发；舞台线可选；
-	// 两线同一内核时标记 combined，前端用一条连接承担两种角色（即旧单线形态）。
-	voiceP := a.voiceProvider(r.Context())
-	stageP := a.stageProvider(r.Context())
+	// 两线同一实例时标记 combined，前端用一条连接承担两种角色（即旧单线形态）。
+	voiceAlias, voiceP := a.voiceInstance(r.Context())
+	stageAlias, stageP := a.stageInstance(r.Context())
 	vc, err := voiceP.JoinCredentials(r.Context(), c.Name, adm.Identity, tag, adm.CanPublish)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "签发令牌失败")
 		return
 	}
-	// ember 信令走一次性入场票：判定结果在此定格，/api/voice 凭票直接入会（见 admission.go）
+	// ember 信令走一次性入场票：判定结果在此定格，/providers/ember/voice 凭票直接入会（见 admission.go）
 	ticket := ""
 	if vc.Engine == "ember" {
 		ticket = a.issueVoiceTicket(voiceTicket{
@@ -422,43 +432,44 @@ func (a *API) joinToken(w http.ResponseWriter, r *http.Request) {
 			muted:    !adm.CanPublish,
 		})
 	}
-	resp := map[string]any{"voice": a.fillCred(r, vc, c.Name, ticket)}
-	combined := stageP != nil && a.dynVal(r.Context(), "voice_provider") == a.dynVal(r.Context(), "stage_provider")
+	resp := map[string]any{"voice": a.fillCred(r, vc, c.Name, ticket, voiceAlias)}
+	combined := stageP != nil && voiceAlias == stageAlias
 	resp["combined"] = combined
 	if stageP != nil && !combined {
 		sc, serr := stageP.JoinCredentials(r.Context(), c.Name, adm.Identity, tag, adm.CanPublish)
 		if serr != nil {
 			log.Printf("舞台线签发失败（语音照常）: %v", serr)
 		} else {
-			resp["stage"] = a.fillCred(r, sc, c.Name, "")
+			resp["stage"] = a.fillCred(r, sc, c.Name, "", stageAlias)
 		}
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
 
-// fillCred 补全内核未声明的连接信息：ember 语音走同源 /api/voice 信令并透传会话 token
-// （附一次性入场票），livekit 走同源 /lk 代理。
-func (a *API) fillCred(r *http.Request, c rtc.Credentials, channel, ticket string) map[string]string {
-	url := c.URL
-	if url == "" {
+// fillCred 补全内核未声明的连接信息：ember 语音走同源 /providers/{alias}/voice 信令并
+// 透传会话 token（附一次性入场票），livekit 等走同源 /providers/{alias} 信令代理。
+func (a *API) fillCred(r *http.Request, c rtc.Credentials, channel, ticket, alias string) map[string]string {
+	u := c.URL
+	if u == "" {
 		if c.Engine == "ember" {
 			scheme := "ws"
 			if requestScheme(r) == "https" {
 				scheme = "wss"
 			}
-			url = scheme + "://" + r.Host + "/api/voice?channel=" + neturl.QueryEscape(channel)
+			q := neturl.Values{"channel": {channel}}
 			if ticket != "" {
-				url += "&ticket=" + neturl.QueryEscape(ticket)
+				q.Set("ticket", ticket)
 			}
+			u = (&neturl.URL{Scheme: scheme, Host: r.Host, Path: "/providers/" + alias + "/voice", RawQuery: q.Encode()}).String()
 		} else {
-			url = a.signalURL(r)
+			u = a.signalURL(r, alias)
 		}
 	}
 	token := c.Token
 	if token == "" {
 		token = BearerToken(r)
 	}
-	return map[string]string{"engine": c.Engine, "url": url, "token": token}
+	return map[string]string{"engine": c.Engine, "url": u, "token": token}
 }
 
 // deviceTagFor 设备标签 = UA 推断 + 前端持久设备 ID（缺省时随机，不建档）；
@@ -474,13 +485,13 @@ func (a *API) deviceTagFor(r *http.Request, deviceID string, userID int64) strin
 	return tag + "-" + randHex(2)
 }
 
-// signalURL 按请求推导同源信令代理地址（/lk 路由）。
-func (a *API) signalURL(r *http.Request) string {
+// signalURL 按请求推导同源信令代理地址（/providers/{alias} 路由）。
+func (a *API) signalURL(r *http.Request, alias string) string {
 	scheme := "ws"
 	if requestScheme(r) == "https" {
 		scheme = "wss"
 	}
-	return scheme + "://" + r.Host + "/lk"
+	return (&neturl.URL{Scheme: scheme, Host: r.Host, Path: "/providers/" + alias}).String()
 }
 
 // requestScheme 请求的外部协议：尊重 X-Forwarded-Proto（反代后），否则看 TLS。
@@ -542,13 +553,9 @@ type ingressResp struct {
 	StreamKey string `json:"stream_key"`
 }
 
-func (a *API) ingressURL(r *http.Request, streamKey string) string {
-	base := a.ingestProvider(r.Context()).PublicBase(r.Context())
-	if base == "" {
-		// 未配置时按请求推导同源 /w/ 代理地址
-		base = requestScheme(r) + "://" + r.Host + "/w/"
-	}
-	return strings.TrimSuffix(base, "/") + "/" + streamKey
+// ingressURL 按请求推导同源 /providers/{alias}/w/ 推流地址。
+func (a *API) ingressURL(r *http.Request, alias, streamKey string) string {
+	return (&neturl.URL{Scheme: requestScheme(r), Host: r.Host, Path: "/providers/" + alias + "/w/" + streamKey}).String()
 }
 
 // resolveIngressChannel 解析请求里的频道，不存在时写 404 并返回 nil。
@@ -571,10 +578,11 @@ func (a *API) resolveIngressChannel(w http.ResponseWriter, r *http.Request) *sto
 	return c
 }
 
-// getIngress 返回当前用户在该频道的推流地址；没有则调 LiveKit 创建并落库。
+// getIngress 返回当前用户在该频道的推流地址；没有则调推流实例创建并落库。
 func (a *API) getIngress(w http.ResponseWriter, r *http.Request) {
 	u := userFrom(r)
-	if !a.ingestProvider(r.Context()).Enabled(r.Context()) {
+	ingestAlias, ip, fellBack := a.ingestInstance(r.Context())
+	if !ip.Enabled(r.Context()) {
 		writeErr(w, http.StatusServiceUnavailable, "推流入口未启用（所选内核缺少必需配置）")
 		return
 	}
@@ -583,9 +591,21 @@ func (a *API) getIngress(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rec, err := a.st.IngressByUserChannel(r.Context(), u.ID, c.ID)
-	if err == nil && rec.Provider != a.ingestProvider(r.Context()).Name() {
-		// 换了推流入口内核：旧记录对新入口无效（key 不被上游认识），
-		// 清掉旧端点与记录后按当前内核重建，而不是把死地址原样返回
+	if err == nil && rec.Provider != ingestAlias {
+		if fellBack {
+			// 回落 = 选择器配置无效的临时态，不做归属自愈（不删端点不重建）：
+			// 按记录原归属实例返回地址；归属实例已注销则配置本身不可用
+			if orig := a.instance(rec.Provider); orig == nil || orig.Ingest == nil {
+				writeErr(w, http.StatusServiceUnavailable, "推流入口配置无效")
+				return
+			}
+			log.Printf("推流选择器 %q 无效已回落，保留既有记录（归属 %s）",
+				a.dynVal(r.Context(), "ingest_provider"), rec.Provider)
+			writeJSON(w, http.StatusOK, ingressResp{URL: a.ingressURL(r, rec.Provider, rec.StreamKey), StreamKey: rec.StreamKey})
+			return
+		}
+		// 换了推流入口实例：旧记录对新入口无效（key 不被上游认识），
+		// 清掉旧端点与记录后按当前实例重建，而不是把死地址原样返回
 		a.deleteOldEndpoint(r, rec)
 		a.st.DeleteIngress(r.Context(), u.ID, c.ID)
 		err = store.ErrNotFound
@@ -593,11 +613,16 @@ func (a *API) getIngress(w http.ResponseWriter, r *http.Request) {
 	if errors.Is(err, store.ErrNotFound) {
 		rec, err = a.createIngress(r, u, c)
 	}
+	if errors.Is(err, errIngestFallback) {
+		// 与 resetIngress 前置拦截同口径：回落 = 选择器配置无效，不创建端点
+		writeErr(w, http.StatusServiceUnavailable, "推流入口配置无效")
+		return
+	}
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "获取推流地址失败")
 		return
 	}
-	writeJSON(w, http.StatusOK, ingressResp{URL: a.ingressURL(r, rec.StreamKey), StreamKey: rec.StreamKey})
+	writeJSON(w, http.StatusOK, ingressResp{URL: a.ingressURL(r, ingestAlias, rec.StreamKey), StreamKey: rec.StreamKey})
 }
 
 // deleteOldEndpoint 尽力删除记录归属内核侧的旧端点：删除必须发给创建它的内核
@@ -605,15 +630,17 @@ func (a *API) getIngress(w http.ResponseWriter, r *http.Request) {
 // 归属内核是远端网关（WHIPGrantIssuer）时再通知其掐断该 key 的远端会话——
 // 通行证是短时效入场券不管会话生命周期，重置密钥要能把正在推的旧会话掐掉。
 func (a *API) deleteOldEndpoint(r *http.Request, rec *store.Ingress) {
-	ik := a.ingestKernels[rec.Provider]
-	if ik == nil {
-		ik = a.ingestProvider(r.Context())
+	inst := a.instance(rec.Provider)
+	if inst == nil || inst.Ingest == nil {
+		// 归属实例已注销：内核侧删除无从下手，只清库记录（旧 key 随反查不到归属自然失效）
+		log.Printf("旧 ingress %s 的归属实例 %s 已不存在，跳过内核侧删除", rec.IngressID, rec.Provider)
+		return
 	}
-	if derr := ik.DeleteEndpoint(r.Context(), rec.IngressID); derr != nil {
+	if derr := inst.Ingest.DeleteEndpoint(r.Context(), rec.IngressID); derr != nil {
 		// 内核侧删不掉不阻塞重建（记录可能已是残缺的）
 		log.Printf("删除旧 ingress %s（内核 %s）失败: %v", rec.IngressID, rec.Provider, derr)
 	}
-	if gi, ok := ik.(rtc.WHIPGrantIssuer); ok {
+	if gi, ok := inst.Ingest.(rtc.WHIPGrantIssuer); ok {
 		ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
 		defer cancel()
 		if rerr := gi.RevokeRemoteSessions(ctx, rec.StreamKey); rerr != nil {
@@ -622,10 +649,16 @@ func (a *API) deleteOldEndpoint(r *http.Request, rec *store.Ingress) {
 	}
 }
 
-// resetIngress 删除旧 ingress（LiveKit 侧 + 库记录）后重建，旧地址随之失效。
+// resetIngress 删除旧 ingress（内核侧 + 库记录）后重建，旧地址随之失效。
 func (a *API) resetIngress(w http.ResponseWriter, r *http.Request) {
 	u := userFrom(r)
-	if !a.ingestProvider(r.Context()).Enabled(r.Context()) {
+	ingestAlias, ip, fellBack := a.ingestInstance(r.Context())
+	if fellBack {
+		// 回落 = 选择器配置无效：重建会误用回落实例，拒绝到配置修正为止
+		writeErr(w, http.StatusServiceUnavailable, "推流入口配置无效（所选实例无推流能力）")
+		return
+	}
+	if !ip.Enabled(r.Context()) {
 		writeErr(w, http.StatusServiceUnavailable, "推流入口未启用（所选内核缺少必需配置）")
 		return
 	}
@@ -642,18 +675,24 @@ func (a *API) resetIngress(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "重置推流地址失败")
 		return
 	}
-	writeJSON(w, http.StatusOK, ingressResp{URL: a.ingressURL(r, rec.StreamKey), StreamKey: rec.StreamKey})
+	writeJSON(w, http.StatusOK, ingressResp{URL: a.ingressURL(r, ingestAlias, rec.StreamKey), StreamKey: rec.StreamKey})
 }
 
-// createIngress 调推流入口内核创建端点并落库（记录带上内核名，删除/失效判断按归属方路由）。
+// errIngestFallback 选择器回落状态下拒绝创建端点（回落实例不是管理员的选择）。
+var errIngestFallback = errors.New("推流入口配置无效")
+
+// createIngress 调推流实例创建端点并落库（记录带上实例 alias，删除/失效判断按归属方路由）。
 func (a *API) createIngress(r *http.Request, u *store.User, c *store.Channel) (*store.Ingress, error) {
-	ip := a.ingestProvider(r.Context())
+	alias, ip, fellBack := a.ingestInstance(r.Context())
+	if fellBack {
+		return nil, errIngestFallback
+	}
 	ingressID, streamKey, err := ip.CreateEndpoint(r.Context(), c.Name, u.Username)
 	if err != nil {
 		log.Printf("创建 ingress 失败: %v", err)
 		return nil, err
 	}
-	return a.st.CreateIngress(r.Context(), u.ID, c.ID, ingressID, streamKey, ip.Name())
+	return a.st.CreateIngress(r.Context(), u.ID, c.ID, ingressID, streamKey, alias)
 }
 
 // ---- 频道管理（房主操作）----
@@ -686,8 +725,9 @@ func (a *API) evict(r *http.Request, c *store.Channel, t *store.User, identity s
 	if identity != "" {
 		target = identity
 	}
-	n, err := a.voiceProvider(r.Context()).RemoveParticipantsOf(r.Context(), c.Name, target)
-	if sp := a.stageProvider(r.Context()); sp != nil {
+	_, vp := a.voiceInstance(r.Context())
+	n, err := vp.RemoveParticipantsOf(r.Context(), c.Name, target)
+	if _, sp := a.stageInstance(r.Context()); sp != nil {
 		if m, serr := sp.RemoveParticipantsOf(r.Context(), c.Name, target); serr == nil {
 			n += m
 		} else if err == nil {
@@ -765,7 +805,7 @@ func (a *API) unban(w http.ResponseWriter, r *http.Request) {
 }
 
 // setGag 禁言/解禁目标用户（模式同 ban：落库为权威，现场传播尽力）。
-// 落库（channel_gags）保证离房/重进都生效——joinToken 与 /api/voice 入会都按它签发/拦截；
+// 落库（channel_gags）保证离房/重进都生效——joinToken 与 ember 信令入会都按它签发/拦截；
 // 内核调用只负责让"当前在房"的设备立即失声，目标不在房（ErrNoParticipant）不算失败。
 func (a *API) setGag(w http.ResponseWriter, r *http.Request, muted bool) {
 	c := channelFrom(r)
@@ -783,10 +823,10 @@ func (a *API) setGag(w http.ResponseWriter, r *http.Request, muted bool) {
 		writeErr(w, http.StatusInternalServerError, "内部错误")
 		return
 	}
-	kernels := []rtc.Provider{a.voiceProvider(r.Context())}
-	// 舞台线是独立连接时同步（与语音同一内核时 combined 单连接已覆盖）
-	if sp := a.stageProvider(r.Context()); sp != nil &&
-		a.dynVal(r.Context(), "voice_provider") != a.dynVal(r.Context(), "stage_provider") {
+	vAlias, vp := a.voiceInstance(r.Context())
+	kernels := []rtc.Provider{vp}
+	// 舞台线是独立连接时同步（两线同一实例时 combined 单连接已覆盖）
+	if sAlias, sp := a.stageInstance(r.Context()); sp != nil && vAlias != sAlias {
 		kernels = append(kernels, sp)
 	}
 	for _, p := range kernels {

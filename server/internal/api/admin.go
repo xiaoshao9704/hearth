@@ -225,14 +225,15 @@ func (a *API) adminOverview(w http.ResponseWriter, r *http.Request) {
 		"go_version":     runtime.Version(),
 		"policy":         a.regPolicy(r),
 		"services": func() map[string]any {
-			vp := a.voiceProvider(r.Context())
+			_, vp := a.voiceInstance(r.Context())
+			_, ip, _ := a.ingestInstance(r.Context())
 			sv := map[string]any{
 				"voice": map[string]any{"name": vp.Name(), "ok": rtcOK, "url": vp.SignalProxyUpstream(r.Context())},
-				"ingest": map[string]any{"name": a.ingestProvider(r.Context()).Name(), "ok": a.ingestProvider(r.Context()).Enabled(r.Context()),
-					"url": a.ingestProvider(r.Context()).ProxyUpstream(r.Context())},
+				"ingest": map[string]any{"name": ip.Name(), "ok": ip.Enabled(r.Context()),
+					"url": ip.ProxyUpstream(r.Context())},
 				"db": map[string]any{"ok": true, "url": dbLabel(a.cfg.DatabaseDSN())},
 			}
-			if sp := a.stageProvider(r.Context()); sp != nil {
+			if _, sp := a.stageInstance(r.Context()); sp != nil {
 				stageOK := true
 				if _, err := sp.RoomCounts(r.Context()); err != nil {
 					stageOK = false
@@ -474,8 +475,9 @@ func (a *API) channelParticipants(w http.ResponseWriter, r *http.Request) {
 	// 两条线的参与者并集（OBS 推流只在舞台线；同一设备两线 identity 一致会去重）
 	seen := map[string]bool{}
 	ps := []rtc.Participant{}
-	providers := []rtc.Provider{a.voiceProvider(r.Context())}
-	if sp := a.stageProvider(r.Context()); sp != nil {
+	_, vp := a.voiceInstance(r.Context())
+	providers := []rtc.Provider{vp}
+	if _, sp := a.stageInstance(r.Context()); sp != nil {
 		providers = append(providers, sp)
 	}
 	for _, pr := range providers {
