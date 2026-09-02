@@ -48,7 +48,9 @@ func ConfigKeys() []rtc.ConfigKey {
 		{Name: "bellows_udp_port", Env: "BELLOWS_UDP_PORT", Group: "ingress", Default: "47710",
 			Label: "WHIP 媒体 UDP 端口", Hint: "单端口 mux，需在防火墙/安全组放行；改动重启生效"},
 		{Name: "bellows_public_ip", Env: "BELLOWS_PUBLIC_IP", Group: "ingress",
-			Label: "WHIP 公网 IP", Hint: "留空 = 启动时 HTTP 自动探测（云主机一般留空即可）"},
+			Label: "WHIP 公网 IP", Hint: "留空 = 自动宣告全部网卡地址与探测到的公网映射；显式设置则只通告该地址（覆盖）"},
+		{Name: "bellows_stun_servers", Env: "BELLOWS_STUN_SERVERS", Group: "ingress",
+			Label: "STUN 服务器", Hint: "逗号分隔；探测各网卡公网映射用，留空用内置默认（不可达时改填可用地址，探测全挂会回落 HTTP 探测）"},
 	}
 }
 
@@ -362,10 +364,7 @@ func (g *Gateway) ensureAPI(ctx context.Context) (*webrtc.API, error) {
 	if err != nil || port <= 0 || port > 65535 {
 		port = 47710
 	}
-	ip := g.cfg(ctx, "bellows_public_ip")
-	if ip == "" {
-		ip = lite.ProbePublicIP()
-	}
+	rules := lite.AnnounceRules(g.cfg(ctx, "bellows_public_ip"), g.cfg(ctx, "bellows_stun_servers"))
 
 	m := &webrtc.MediaEngine{}
 	if err := m.RegisterCodec(webrtc.RTPCodecParameters{
@@ -397,12 +396,12 @@ func (g *Gateway) ensureAPI(ctx context.Context) (*webrtc.API, error) {
 			return nil, err
 		}
 	}
-	api, err := lite.NewAPI(port, ip, m)
+	api, err := lite.NewAPI(port, rules, m)
 	if err != nil {
 		return nil, fmt.Errorf("WHIP %w", err)
 	}
 	g.api = api
-	log.Printf("bellows 就绪: udp=%d 公网IP=%q", port, ip)
+	log.Printf("bellows 就绪: udp=%d 公网映射=%v", port, lite.RuleExternals(rules))
 	return g.api, nil
 }
 

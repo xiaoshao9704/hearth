@@ -10,14 +10,14 @@
 //	LIVEKIT_API_URL / LIVEKIT_API_KEY / LIVEKIT_API_SECRET  必填，与 hearth 同名
 //	BELLOWS_ADDR            WHIP HTTP 监听地址，默认 :8090
 //	BELLOWS_UDP_PORT        媒体 UDP 端口，默认 47710
-//	BELLOWS_PUBLIC_IP       向推流端通告的 IP；默认本机出口网卡 IP（局域网推流），外网推流时填公网 IP
+//	BELLOWS_PUBLIC_IP       向推流端通告的 IP；留空 = 自动宣告全部网卡地址 + STUN/HTTP 探测的公网映射，显式设置则只通告该地址
+//	BELLOWS_STUN_SERVERS    逗号分隔的 STUN 服务器；探测各网卡公网映射用，留空用内置默认
 package main
 
 import (
 	"context"
 	"errors"
 	"log"
-	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -34,7 +34,8 @@ func main() {
 		"livekit_api_key":       need("LIVEKIT_API_KEY"),
 		"livekit_api_secret":    need("LIVEKIT_API_SECRET"),
 		"bellows_udp_port":      envOr("BELLOWS_UDP_PORT", "47710"),
-		"bellows_public_ip":     envOr("BELLOWS_PUBLIC_IP", localIP()),
+		"bellows_public_ip":     os.Getenv("BELLOWS_PUBLIC_IP"),
+		"bellows_stun_servers":  os.Getenv("BELLOWS_STUN_SERVERS"),
 	}
 	gw := bellows.NewRemote(func(_ context.Context, name string) string { return lk[name] })
 
@@ -45,7 +46,11 @@ func main() {
 	srv := &http.Server{Addr: envOr("BELLOWS_ADDR", ":8090"), Handler: mux}
 
 	go func() {
-		log.Printf("bellows 监听于 %s（通告IP=%s）", srv.Addr, lk["bellows_public_ip"])
+		announce := lk["bellows_public_ip"]
+		if announce == "" {
+			announce = "自动"
+		}
+		log.Printf("bellows 监听于 %s（通告IP=%s）", srv.Addr, announce)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Fatalf("监听失败: %v", err)
 		}
@@ -56,16 +61,6 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	srv.Shutdown(ctx)
-}
-
-// localIP 本机出口网卡 IP：UDP Dial 不发包，只借路由表选网卡。
-func localIP() string {
-	conn, err := net.Dial("udp", "8.8.8.8:53")
-	if err != nil {
-		return ""
-	}
-	defer conn.Close()
-	return conn.LocalAddr().(*net.UDPAddr).IP.String()
 }
 
 func need(k string) string {
