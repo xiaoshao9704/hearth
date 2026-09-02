@@ -1,9 +1,9 @@
 // Package lite 是进程内 ICE-Lite 内核（ember / bellows）共用的传输基建：
-// UDP 单端口 mux + ICE-Lite + 公网 IP 通告。各内核只带自己的 MediaEngine 与配置键。
+// UDP 单端口 Transport + ICE-Lite + 宣告地址探测缓存（Announcer）。
+// 各内核只带自己的 MediaEngine 与配置键。
 package lite
 
 import (
-	"fmt"
 	"net"
 	"strings"
 	"sync"
@@ -128,24 +128,15 @@ func appendRule(external, local string) webrtc.ICEAddressRewriteRule {
 	}
 }
 
-// AnnounceRules 计算 ICE 地址改写规则（复刻 LiveKit ingress 的 SetNAT1To1AddressRewriteRules
-// 思路：网卡地址照常自动收集宣告，探到的公网映射按 append 追加，对端各取可达者）：
+// announceRules 纯组合逻辑，探测函数注入以便离线单测（复刻 LiveKit ingress 的
+// SetNAT1To1AddressRewriteRules 思路：网卡地址照常自动收集宣告，探到的公网映射
+// 按 append 追加，对端各取可达者）：
 //   - 显式配置 publicIP：catch-all 替换规则，所有 host candidate 改写成它（覆盖语义）；
-//   - 留空：每张网卡并发 STUN 探测公网映射（servers 逗号分隔，空用 DefaultSTUNServers），
-//     探到的以 append 规则追加。
+//   - 留空：每张网卡按探测结果生成 append 规则。
 //
 // 探测用的是临时端口的映射，媒体端口的公网映射假定同 IP——1:1 NAT/端口转发生效，
 // 对称 NAT 不成立（与 LiveKit 同一假设）。
 // 返回 nil 表示无需改写（网卡直连公网或探测全失败），candidate 按网卡地址原样宣告。
-func AnnounceRules(publicIP, stunServers string) []webrtc.ICEAddressRewriteRule {
-	servers := splitTrim(stunServers)
-	if len(servers) == 0 {
-		servers = DefaultSTUNServers
-	}
-	return announceRules(publicIP, LocalIPs(), servers, probeAllSTUN)
-}
-
-// announceRules 纯组合逻辑，探测函数注入以便离线单测。语义见 AnnounceRules 注释。
 // 单网卡最坏耗时 = 单服务器超时（服务器并发）。
 func announceRules(publicIP string, locals, servers []string,
 	probe func(locals, servers []string, timeout time.Duration) map[string]string) []webrtc.ICEAddressRewriteRule {
@@ -194,21 +185,13 @@ func splitTrim(s string) []string {
 	return out
 }
 
-// NewAPI 监听 UDP 单端口并构建 ICE-Lite API：服务器公网直达，连通性检查由对端发起；
-// rules 非空时按规则改写/追加 host candidate 的宣告地址。监听失败原样返回（调用方决定是否重试）。
-func NewAPI(port int, rules []webrtc.ICEAddressRewriteRule, m *webrtc.MediaEngine) (*webrtc.API, error) {
-	udpConn, err := net.ListenUDP("udp", &net.UDPAddr{Port: port})
+// LoopbackRemote 判断请求来源是否回环地址：健康检查的刷新触发只接受容器内本机调用，
+// 经反代进来的外部请求即使带刷新参数也只回显不探测。
+func LoopbackRemote(remoteAddr string) bool {
+	host, _, err := net.SplitHostPort(remoteAddr)
 	if err != nil {
-		return nil, fmt.Errorf("媒体端口 %d 监听失败: %w", port, err)
+		host = remoteAddr
 	}
-	se := webrtc.SettingEngine{}
-	se.SetLite(true)
-	se.SetICEUDPMux(webrtc.NewICEUDPMux(nil, udpConn))
-	if len(rules) > 0 {
-		if err := se.SetICEAddressRewriteRules(rules...); err != nil {
-			udpConn.Close()
-			return nil, fmt.Errorf("地址改写规则: %w", err)
-		}
-	}
-	return webrtc.NewAPI(webrtc.WithMediaEngine(m), webrtc.WithSettingEngine(se)), nil
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }

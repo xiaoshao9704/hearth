@@ -91,6 +91,10 @@ func (a *API) Router() *chi.Mux {
 	r.Post("/api/login", a.login)
 	r.Get("/api/invites/{code}", a.inviteInfo)
 
+	// 健康检查（容器探活 + 宣告探测刷新触发）：健康只表示进程活着，
+	// 探测失败/映射为空不影响 200，防 autoheal 类工具误杀
+	r.Get("/healthz", a.healthz)
+
 	// 需登录
 	r.Group(func(r chi.Router) {
 		r.Use(a.auth)
