@@ -1,6 +1,13 @@
 # 计划：pionwhip——内嵌 WHIP 直通推流网关（OBS 高效编码的唯一路径）
 
-状态：计划落盘，待执行。2026-09-02。
+状态：P1+P2 核心已实现（2026-09-02）。已完成：WHIP 握手（POST/PATCH/DELETE、201+Location+显式
+Content-Length）、codec 白名单显式校验（opus/h264/h265/av1，VP8 等 400 拒绝）、pion 收流、
+lksdk bot（identity={user}-obs）零转码直通发布、PLI/FIR 桥接（lksdk `WithRTCPHandler` 回调）、
+同 key 重推顶替、断流/DELETE/DeleteEndpoint 清理、`ingest_provider=pion` 动态切换。
+已验证：`go build/vet/test` 全过；信令测试覆盖握手/白名单/DELETE；本机端到端实测
+（docker livekit v1.9.6 + ffmpeg 9 WHIP 推 h264+opus）：bot 进房、双轨发布成功、
+断流后会话自动清理（房间在线数回落）。未做：OBS HEVC 实测与 P3 部署收尾（-full 档退役等）。
+遗留坑：lksdk `PublishTrack` 的 opts 参数不能传 nil（内部日志行解引用 opts.Name 会 panic）。
 
 ## 动机（三合一）
 

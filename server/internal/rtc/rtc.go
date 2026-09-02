@@ -9,6 +9,7 @@ package rtc
 import (
 	"context"
 	"errors"
+	"net/http"
 	"strings"
 )
 
@@ -84,4 +85,12 @@ type IngestProvider interface {
 	PublicBase(ctx context.Context) string
 	// ProxyUpstream 同源推流代理的上游地址；空 = 该实现不需要推流代理。
 	ProxyUpstream(ctx context.Context) string
+}
+
+// WHIPServer 可选能力：进程内处理 WHIP 推流的 IngestProvider（ProxyUpstream 为空的
+// 实现若实现了本接口，接入层把 /w 请求直接交给它而不是反代到外部上游）。
+type WHIPServer interface {
+	// ServeWHIP 处理一个 WHIP 请求（POST 建会话 / PATCH trickle / DELETE 结束），
+	// streamKey 已由接入层从路径或 Bearer 头解析（含禁言拦截）。
+	ServeWHIP(w http.ResponseWriter, r *http.Request, streamKey string)
 }

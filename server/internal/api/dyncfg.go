@@ -20,8 +20,8 @@ var selectorKeys = []rtc.ConfigKey{
 		Label: "语音内核", Hint: "Hearth 内置 = 进程内纯音频 SFU（pion 实现），零外部依赖；两线都选 LiveKit 即单线形态"},
 	{Name: "stage_provider", Env: "STAGE_PROVIDER", Group: "core", Options: []string{"livekit", "none"},
 		Label: "舞台内核", Hint: "none = 纯语音部署，禁用投屏与摄像头"},
-	{Name: "ingest_provider", Env: "INGEST_PROVIDER", Group: "core", Options: []string{"livekit"},
-		Label: "推流入口", Hint: "OBS/WHIP 推流的接入实现"},
+	{Name: "ingest_provider", Env: "INGEST_PROVIDER", Group: "core", Options: []string{"livekit", "pion"},
+		Label: "推流入口", Hint: "OBS/WHIP 推流的接入实现；pion = 进程内直通网关（支持 HEVC/AV1，发进 LiveKit 房间）"},
 }
 
 func (a *API) allConfigKeys() []rtc.ConfigKey {

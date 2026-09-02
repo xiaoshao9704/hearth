@@ -17,6 +17,7 @@ import (
 	"hearth/server/internal/rtc"
 	"hearth/server/internal/rtc/livekitrtc"
 	"hearth/server/internal/rtc/pionvoice"
+	"hearth/server/internal/rtc/pionwhip"
 	"hearth/server/internal/store"
 
 	"crypto/rand"
@@ -51,13 +52,29 @@ type API struct {
 
 func New(st *store.Store, cfg config.Config, hub *chat.Hub) *API {
 	a := &API{st: st, cfg: cfg, hub: hub, tickets: map[string]voiceTicket{}}
-	// 注册内核实现：LiveKit 可同时任语音/舞台/推流入口；pion 是进程内纯音频语音内核
+	// 注册内核实现：LiveKit 可同时任语音/舞台/推流入口；pion 是进程内纯音频语音内核；
+	// pionwhip 是进程内 WHIP 直通推流网关（OBS HEVC/AV1 的接入路径）
 	lk := livekitrtc.New(a.dynVal)
 	a.pion = pionvoice.New(a.dynVal)
+	pw := pionwhip.New(a.dynVal, func(ctx context.Context, streamKey string) (string, string, error) {
+		userID, channelID, err := a.st.IngressOwner(ctx, streamKey)
+		if err != nil {
+			return "", "", err
+		}
+		c, err := a.st.ChannelByID(ctx, channelID)
+		if err != nil {
+			return "", "", err
+		}
+		u, err := a.st.UserByID(ctx, userID)
+		if err != nil {
+			return "", "", err
+		}
+		return c.Name, u.Username, nil
+	})
 	a.voiceKernels = map[string]rtc.Provider{"livekit": lk, "pion": a.pion}
 	a.stageKernels = map[string]rtc.Provider{"livekit": lk}
-	a.ingestKernels = map[string]rtc.IngestProvider{"livekit": lk}
-	a.kernelKeys = append(livekitrtc.ConfigKeys(), pionvoice.ConfigKeys()...)
+	a.ingestKernels = map[string]rtc.IngestProvider{"livekit": lk, "pion": pw}
+	a.kernelKeys = append(append(livekitrtc.ConfigKeys(), pionvoice.ConfigKeys()...), pionwhip.ConfigKeys()...)
 	return a
 }
 

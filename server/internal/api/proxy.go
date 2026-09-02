@@ -10,6 +10,8 @@ import (
 	"strings"
 
 	"github.com/go-chi/chi/v5"
+
+	"hearth/server/internal/rtc"
 )
 
 // RegisterProxies 注册内置反代路由（chi 的 "/lk/*" 通配匹配子树，比静态托管的 "/*" 更具体，优先命中）。
@@ -34,11 +36,11 @@ func (a *API) RegisterProxies(r chi.Router) {
 	// bearer 模式（服务器填 /w、密钥放 Authorization: Bearer——ingress 要求精确 /w，
 	// 带尾斜杠的 /w/ 会 404，这里做规范化宽容）。
 	whipHandler := http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		key := strings.Trim(strings.TrimPrefix(req.URL.Path, "/w"), "/")
+		if i := strings.IndexByte(key, '/'); i >= 0 {
+			key = key[:i]
+		}
 		if req.Method == http.MethodPost {
-			key := strings.Trim(strings.TrimPrefix(req.URL.Path, "/w"), "/")
-			if i := strings.IndexByte(key, '/'); i >= 0 {
-				key = key[:i]
-			}
 			if key == "" {
 				// bearer 模式：key 在 Authorization 头；端点规范化为精确 /w
 				key = strings.TrimPrefix(req.Header.Get("Authorization"), "Bearer ")
@@ -48,6 +50,11 @@ func (a *API) RegisterProxies(r chi.Router) {
 				writeErr(w, http.StatusForbidden, "你已被禁言，无法推流")
 				return
 			}
+		}
+		// 进程内 WHIP 实现（如 pionwhip）直接处理，不再反代
+		if ws, ok := a.ingestProvider(req.Context()).(rtc.WHIPServer); ok {
+			ws.ServeWHIP(w, req, key)
+			return
 		}
 		wProxy.ServeHTTP(w, req)
 	})
