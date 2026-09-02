@@ -71,6 +71,8 @@
 
 ## 5. 选择器回落不得触发推流端点的删除重建（`api.go` `getIngress`）
 
+> 注：本节已被 `plan-ingest-token.md` 取代（令牌用户维度后端点与归属前提消失），仅为历史记录保留。
+
 `ingestInstance` 对无推流能力的 alias（如 env 残留 `INGEST_PROVIDER=livekit`）静默回落内建 bellows，
 `getIngress` 把「记录归属 ≠ 生效 alias」当作管理员切换内核，走 `deleteOldEndpoint` 删掉上游端点并
 重建密钥——用户没有做任何选择就丢了推流地址，改正 env 后再丢一次。
@@ -81,6 +83,8 @@
 `getIngress` 不调用 `DeleteEndpoint`。
 
 ## 6. WHIP 判定校验记录归属与路径 alias 一致（`proxy.go` `admitWhipRemote`）
+
+> 注：本节已被 `plan-ingest-token.md` 取代（同上），仅为历史记录保留。
 
 推流密钥是全局命名空间，任何有效 key 经任一 `bellows-remote` 实例的路径都能过判定、用该实例的
 secret 签 grant，把流发进另一套 LiveKit 的同名房间。修法：`ingressOwner` 带回记录的 `Provider`，

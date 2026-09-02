@@ -70,6 +70,7 @@ type Participant struct {
 	Identity string `json:"identity"`
 	Name     string `json:"name"`
 	JoinedAt int64  `json:"joined_at"` // Unix 秒
+	Metadata string `json:"-"`         // 参与者元数据原文（hearth 自家发布者写的是 {"username","kind","tag"} JSON）
 }
 
 // ListParticipants 列出房间当前参与者。
@@ -81,7 +82,7 @@ func (c *Client) ListParticipants(ctx context.Context, room string) ([]Participa
 	}
 	out := make([]Participant, 0, len(resp.Participants))
 	for _, p := range resp.Participants {
-		out = append(out, Participant{Identity: p.Identity, Name: p.Name, JoinedAt: p.JoinedAt})
+		out = append(out, Participant{Identity: p.Identity, Name: p.Name, JoinedAt: p.JoinedAt, Metadata: p.Metadata})
 	}
 	return out, nil
 }

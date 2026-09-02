@@ -112,12 +112,6 @@ func (s *Store) SetMigrationVersion(ctx context.Context, v int) error {
 	return s.SetSetting(ctx, "migration_version", strconv.Itoa(v))
 }
 
-// RewriteIngressProvider 把 ingress 记录的归属实例别名从 from 改为 to（版本迁移用）。
-func (s *Store) RewriteIngressProvider(ctx context.Context, from, to string) error {
-	_, err := s.bun.NewRaw("UPDATE ingresses SET provider = ? WHERE provider = ?", to, from).Exec(ctx)
-	return err
-}
-
 // ---- 邀请链接 ----
 
 type Invite struct {
@@ -326,7 +320,7 @@ func (s *Store) SetUserDisabled(ctx context.Context, id int64, disabled bool) er
 
 var ErrOwnsChannels = errors.New("用户仍是频道房主")
 
-// DeleteUser 删除用户及其会话/设备/白名单/封禁/ingress 记录；
+// DeleteUser 删除用户及其会话/设备/白名单/封禁/推流令牌与端点记录；
 // 名下还有频道时拒绝（避免频道悬空），历史消息保留。
 func (s *Store) DeleteUser(ctx context.Context, id int64) error {
 	var n int
@@ -340,7 +334,8 @@ func (s *Store) DeleteUser(ctx context.Context, id int64) error {
 	for _, q := range []string{
 		"DELETE FROM sessions WHERE user_id = ?",
 		"DELETE FROM devices WHERE user_id = ?",
-		"DELETE FROM ingresses WHERE user_id = ?",
+		"DELETE FROM ingest_endpoints WHERE token_id IN (SELECT id FROM ingest_tokens WHERE user_id = ?)",
+		"DELETE FROM ingest_tokens WHERE user_id = ?",
 		"DELETE FROM channel_members WHERE user_id = ?",
 		"DELETE FROM channel_bans WHERE user_id = ?",
 		"DELETE FROM users WHERE id = ?",
@@ -354,13 +349,12 @@ func (s *Store) DeleteUser(ctx context.Context, id int64) error {
 
 // ---- 管理后台：频道 ----
 
-// DeleteChannel 删除频道及其消息/封禁/白名单/ingress 记录。
+// DeleteChannel 删除频道及其消息/封禁/白名单记录。
 func (s *Store) DeleteChannel(ctx context.Context, id int64) error {
 	for _, q := range []string{
 		"DELETE FROM messages WHERE channel_id = ?",
 		"DELETE FROM channel_bans WHERE channel_id = ?",
 		"DELETE FROM channel_members WHERE channel_id = ?",
-		"DELETE FROM ingresses WHERE channel_id = ?",
 		"DELETE FROM channels WHERE id = ?",
 	} {
 		if _, err := s.bun.NewRaw(q, id).Exec(ctx); err != nil {

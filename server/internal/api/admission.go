@@ -1,9 +1,13 @@
 // 入场判定统一：谁能进房、能否发布（封禁/邀请制/禁言）收敛到本文件，
-// joinToken、ember 信令（/providers/ember/voice）、WHIP 推流拦截（/providers/{alias}/w）三个入口共用同一套判定。
+// joinToken、ember 信令（/providers/ember/voice）与 WHIP 推流（/w POST 的 admitIngest）
+// 三个入口共用同一套判定。
 package api
 
 import (
 	"context"
+	"errors"
+	"log"
+	"net/http"
 	"time"
 
 	"hearth/server/internal/store"
@@ -30,43 +34,6 @@ func (a *API) admitUser(ctx context.Context, c *store.Channel, u *store.User) (a
 		return admission{}, false, "", err
 	}
 	return admission{Identity: u.Username, CanPublish: !gagged}, true, "", nil
-}
-
-// ingressOwner 按推流密钥反查频道、用户与记录的归属实例 alias；
-// 密钥不存在（或归属已被删）返回 store.ErrNotFound。
-func (a *API) ingressOwner(ctx context.Context, streamKey string) (*store.Channel, *store.User, string, error) {
-	userID, channelID, provider, err := a.st.IngressOwner(ctx, streamKey)
-	if err != nil {
-		return nil, nil, "", err
-	}
-	c, err := a.st.ChannelByID(ctx, channelID)
-	if err != nil {
-		return nil, nil, "", err
-	}
-	u, err := a.st.UserByID(ctx, userID)
-	if err != nil {
-		return nil, nil, "", err
-	}
-	return c, u, provider, nil
-}
-
-// canPublishByStreamKey WHIP 推流拦截：按 streamKey 反查归属后走 admitUser，
-// 封禁/邀请制/禁言与进房口径一致（被封禁者不能靠既有 key 继续推流）。
-// 密钥是全局命名空间：记录归属与路径 alias 不符时确定不属于本入口，拒绝（mismatch=true）；
-// 其余保持 fail-open：查不到 key 或判定出错时放行代理，仅确定不许时拒绝。
-func (a *API) canPublishByStreamKey(ctx context.Context, streamKey, alias string) (allow, mismatch bool) {
-	c, u, provider, err := a.ingressOwner(ctx, streamKey)
-	if err != nil {
-		return true, false
-	}
-	if provider != alias {
-		return false, true
-	}
-	adm, ok, _, err := a.admitUser(ctx, c, u)
-	if err != nil {
-		return true, false
-	}
-	return ok && adm.CanPublish, false
 }
 
 // ---- ember 线一次性入场票 ----
@@ -114,4 +81,81 @@ func (a *API) cleanTicketsLocked() {
 			delete(a.tickets, k)
 		}
 	}
+}
+
+// ---- 推流入场判定（/w POST，进程内 bellows / 远端 bellows / livekit-ingress 三条路径共用）----
+
+// ingestCtxKey 进程内 bellows 的判定结果传递：admitIngest 在 serveWHIP 做完后把组好的
+// 身份四元组挂到请求 ctx，ingressResolver（ResolveFunc 只有令牌参数，频道在 URL 里
+// 由接入层解析）原样取回。
+type ingestCtxKey struct{}
+
+// ingestAdmission 推流入场判定结果：Room=频道名（=内核房间名），Identity={用户名}-{标签}，
+// Name=用户名（grant 与端点的 name 字段必须是用户名：前端 meta.username 取自它，不能塞显示名）。
+type ingestAdmission struct {
+	Room     string
+	Identity string
+	Name     string
+	Tag      string
+	TokenID  int64 // ingest_tokens 主键（livekit-ingress 的端点记录按它归到令牌名下）
+}
+
+// admitIngest 统一推流入场判定（替代旧 canPublishByStreamKey 与 admitWhipRemote）：
+// 令牌反查用户 + URL 取频道 → admitUser（封禁/邀请制/禁言）。三条路径全部 definitive：
+// 令牌不存在 404、频道不存在 404、不许推（封禁/邀请制/禁言/账号停用）403、查询出错 503——
+// 不再有 fail-open：上游收到的已是 hearth 出示的实例凭证，不再承担鉴权。
+// 返回 false 时响应已写好。
+func (a *API) admitIngest(ctx context.Context, w http.ResponseWriter, alias, channel, token string) (ingestAdmission, bool) {
+	if token == "" {
+		writeErr(w, http.StatusBadRequest, "缺少推流令牌")
+		return ingestAdmission{}, false
+	}
+	fail := func(err error) (ingestAdmission, bool) {
+		log.Printf("推流入场判定查询失败（实例 %s）: %v", alias, err)
+		writeErr(w, http.StatusServiceUnavailable, "推流入口暂时不可用，请稍后再试")
+		return ingestAdmission{}, false
+	}
+	it, err := a.st.IngestTokenByToken(ctx, token)
+	if errors.Is(err, store.ErrNotFound) {
+		writeErr(w, http.StatusNotFound, "推流令牌无效或已重置")
+		return ingestAdmission{}, false
+	}
+	if err != nil {
+		return fail(err)
+	}
+	u, err := a.st.UserByID(ctx, it.UserID)
+	if errors.Is(err, store.ErrNotFound) { // 用户已删除，令牌等同失效
+		writeErr(w, http.StatusNotFound, "推流令牌无效或已重置")
+		return ingestAdmission{}, false
+	}
+	if err != nil {
+		return fail(err)
+	}
+	c, err := a.st.ChannelByName(ctx, channel)
+	if errors.Is(err, store.ErrNotFound) {
+		writeErr(w, http.StatusNotFound, "频道不存在")
+		return ingestAdmission{}, false
+	}
+	if err != nil {
+		return fail(err)
+	}
+	if u.Disabled {
+		writeErr(w, http.StatusForbidden, "账号已被停用")
+		return ingestAdmission{}, false
+	}
+	adm, ok, reason, err := a.admitUser(ctx, c, u)
+	if err != nil {
+		return fail(err)
+	}
+	if !ok {
+		writeErr(w, http.StatusForbidden, reason)
+		return ingestAdmission{}, false
+	}
+	if !adm.CanPublish {
+		writeErr(w, http.StatusForbidden, "你已被禁言，无法推流")
+		return ingestAdmission{}, false
+	}
+	return ingestAdmission{
+		Room: c.Name, Identity: u.Username + "-" + it.Tag, Name: u.Username, Tag: it.Tag, TokenID: it.ID,
+	}, true
 }

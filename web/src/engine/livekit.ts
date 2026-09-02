@@ -34,17 +34,27 @@ export class LiveKitEngine implements AVEngine {
 
   private toPart(p: Participant): EPart {
     const micPub = p.getTrackPublication(Track.Source.Microphone);
+    // 推流参与者的元数据是 hearth 下发的 JSON（username/kind=ingest/tag）；
+    // 识别与归属都走它，不再解析 identity 后缀（用户名允许含 -，剥后缀取用户名是错的）
+    let meta: { username?: string; kind?: string; tag?: string } | null = null;
+    if (p.metadata) {
+      try {
+        meta = JSON.parse(p.metadata);
+      } catch {
+        meta = null; // 非 JSON 元数据按普通参与者处理
+      }
+    }
+    const ingest = meta?.kind === 'ingest';
     return {
       identity: p.identity,
-      // OBS 参与者的 name 是 ingress 设置的显示名（"xxx(OBS)"），按用户名聚合/管理
-      // 操作（禁言/踢出）必须用真人用户名：identity 约定 {username}-obs，剥后缀取
-      username: p.identity.endsWith('-obs') ? p.identity.slice(0, -4) : p.name || p.identity.split('-')[0],
+      username: meta?.username || p.name || p.identity.split('-')[0],
       display: p.name || p.identity,
       isLocal: p.identity === this.room.localParticipant.identity,
       micOn: !!micPub && !micPub.isMuted,
       canPublish: p.permissions?.canPublish !== false, // 服务端禁言会收走发布权限
       sharing: !!p.getTrackPublication(Track.Source.ScreenShare),
-      obs: p.identity.endsWith('-obs'),
+      ingest,
+      tag: ingest ? (meta?.tag ?? '') : '',
     };
   }
 

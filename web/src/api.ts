@@ -148,21 +148,28 @@ export function fetchJoinCredentials(channel: string): Promise<JoinCredentials> 
   });
 }
 
-// ---- OBS WHIP 推流端点（每用户每频道一个）----
+// ---- WHIP 推流令牌（每用户一把，房间在 URL 里）----
 
-export interface IngressInfo {
-  url: string;
-  stream_key: string;
+export interface IngestTokenInfo {
+  token: string;
+  tag: string; // 推流设备标签（identity = {用户名}-{标签}）
+  base: string; // 同源 WHIP 基地址（/providers/{alias}/w/ 绝对地址），拼上频道名即完整服务器地址
+  enabled: boolean; // 推流入口当前是否可用（false 时地址照给，但推起来会被拒）
 }
 
-// 获取（首次自动创建）当前用户在该频道的推流地址
-export function getIngress(channel: string): Promise<IngressInfo> {
-  return req<IngressInfo>('/api/ingress', { method: 'POST', body: { channel } });
+// 获取（首次自动创建）当前用户的推流令牌
+export function getIngestToken(): Promise<IngestTokenInfo> {
+  return req<IngestTokenInfo>('/api/ingest/token');
 }
 
-// 重置推流地址（旧地址立即失效）
-export function resetIngress(channel: string): Promise<IngressInfo> {
-  return req<IngressInfo>('/api/ingress/reset', { method: 'POST', body: { channel } });
+// 重置令牌（旧令牌立即失效，进行中的推流会话全部掐断）
+export function resetIngestToken(): Promise<IngestTokenInfo> {
+  return req<IngestTokenInfo>('/api/ingest/token/reset', { method: 'POST' });
+}
+
+// 改推流设备标签（下次推流生效，进行中的会话不掐）
+export function setIngestTag(tag: string): Promise<IngestTokenInfo> {
+  return req<IngestTokenInfo>('/api/ingest/token', { method: 'PUT', body: { tag } });
 }
 
 // ---- 频道管理（房主）----
@@ -228,6 +235,8 @@ export interface RoomParticipant {
   identity: string;
   name: string;
   joined_at: number;
+  kind?: string; // 参与者类别（omitempty；ingest = 推流设备）
+  tag?: string; // 推流设备标签（kind=ingest 时有效）
 }
 
 export async function listParticipants(channel: string): Promise<RoomParticipant[]> {

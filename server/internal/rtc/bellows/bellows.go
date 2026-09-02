@@ -1,15 +1,13 @@
 // Package bellows 是 rtc.IngestProvider 的进程内 WHIP 直通推流网关：
-// OBS/ffmpeg 以 WHIP 推流（POST /w + Bearer 或 POST /w/{key}），进程内 pion
-// PeerConnection 收 RTP（ICE-Lite + UDP 单端口 mux），零转码原样转发，
-// 用 lksdk 以 bot 参与者（identity={user}-obs）PublishTrack 进 LiveKit 房间。
-//
-// 读 livekit_* 配置键是有意耦合：本实现本质是「发进 LiveKit 房间的网关」，
-// 观众侧舞台内核仍是 livekitrtc，二者必须指向同一 LiveKit 部署，复用其凭证。
+// OBS/ffmpeg 以 WHIP 推流（POST /w/{channel} + Bearer 或 POST /w/{channel}/{token}），
+// 进程内 pion PeerConnection 收 RTP（ICE-Lite + UDP 单端口 mux），零转码原样转发，
+// 出口走 rtc.Publisher 抽象（每次发布时从 sink 取当前舞台线实例，注册表切换即生效），
+// 对舞台内核中立。
 //
 // 两种部署形态（同一个 Gateway）：
 //   - 进程内：hearth 自己收流，/w 由接入层直接交给 ServeWHIP；
 //   - 远端：注册 bellows-remote 实例（bellows_remote_url）后 hearth 不收流，/w 信令反代到远端的 cmd/bellows
-//     进程（通常在 LiveKit 同一局域网），媒体由推流端直达远端，视频不再经过 hearth
+//     进程（通常在舞台内核同一局域网），媒体由推流端直达远端，视频不再经过 hearth
 //     所在服务器。入场判定在 hearth 反代前做完并签成短时效通行证（grant）塞进请求头，
 //     远端只本地验签（见 grant.go），无出站依赖；OBS 必须经 hearth 同源 /w 才有 grant。
 package bellows
@@ -29,9 +27,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/livekit/server-sdk-go/v2"
 	"github.com/pion/rtcp"
-	"github.com/pion/rtp"
 	"github.com/pion/sdp/v3"
 	"github.com/pion/webrtc/v4"
 
@@ -39,9 +35,9 @@ import (
 	"hearth/server/internal/rtc/lite"
 )
 
-// ResolveFunc 的哨兵错误：密钥不存在 → 404；
-// 其余错误视为内部故障 → 503，避免瞬时 DB 抖动被误报成「密钥已重置」。
-var ErrUnknownKey = errors.New("unknown stream key")
+// ResolveFunc 的哨兵错误：令牌不存在 → 404；
+// 其余错误视为内部故障 → 503，避免瞬时 DB 抖动被误报成「令牌已重置」。
+var ErrUnknownKey = errors.New("unknown ingest token")
 
 // ConfigKeys 内建进程内形态的全局配置键（命名空间 bellows_*）。端口改动需重启生效。
 func ConfigKeys() []rtc.ConfigKey {
@@ -65,15 +61,19 @@ func RemoteKeys() []rtc.ConfigKey {
 	}
 }
 
-// ResolveFunc 按推流密钥反查归属（房间名 = 频道名，用户名用于 bot identity），由接入层注入，
-// 仅进程内形态使用。密钥不存在须返回 ErrUnknownKey；其余错误按内部故障处理。
-type ResolveFunc func(ctx context.Context, streamKey string) (room, username string, err error)
+// ResolveFunc 按推流令牌反查归属（房间名 = 频道名；identity/name/tag 由接入层组好，
+// 网关只透传，不再拼设备后缀），由接入层注入，仅进程内形态使用。
+// 令牌不存在须返回 ErrUnknownKey；其余错误按内部故障处理。
+type ResolveFunc func(ctx context.Context, token string) (room, identity, name, tag string, err error)
 
 // Gateway 同时实现 rtc.IngestProvider 与 rtc.WHIPServer（进程内处理 /w 请求，不反代）；
 // 远端形态下另实现 rtc.WHIPGrantIssuer（hearth 侧签发通行证、通知撤销远端会话）。
 type Gateway struct {
 	cfg     rtc.ConfigFunc
 	resolve ResolveFunc
+	// sink 取发布出口（当前舞台线实例的 rtc.Publisher），每次发布时取，注册表切换即生效；
+	// 进程内形态必填，nil 或取不到 Publisher 时 Enabled=false。
+	sink func(ctx context.Context) rtc.Publisher
 
 	// initMu 只保护 transport 懒初始化；宣告探测在 Announcer 里（最长约 2s），
 	// 不拿 mu 顶着，否则首推期间所有会话操作（DELETE/状态回调清理）全被阻塞。
@@ -82,11 +82,11 @@ type Gateway struct {
 	announcer *lite.Announcer
 
 	mu       sync.Mutex
-	sessions map[string]*session // 键 = 会话资源 id（POST 应答 Location 的相对地址 {rid}），非推流密钥
+	sessions map[string]*session // 键 = 会话资源 id（POST 应答 Location /w/sessions/{rid}），非推流令牌
 }
 
-func New(cfg rtc.ConfigFunc, resolve ResolveFunc) *Gateway {
-	g := &Gateway{cfg: cfg, resolve: resolve, sessions: map[string]*session{}}
+func New(cfg rtc.ConfigFunc, resolve ResolveFunc, sink func(ctx context.Context) rtc.Publisher) *Gateway {
+	g := &Gateway{cfg: cfg, resolve: resolve, sink: sink, sessions: map[string]*session{}}
 	g.announcer = lite.NewAnnouncer(
 		func(ctx context.Context) string { return g.cfg(ctx, "bellows_public_ip") },
 		func(ctx context.Context) string { return g.cfg(ctx, "bellows_stun_servers") },
@@ -94,9 +94,10 @@ func New(cfg rtc.ConfigFunc, resolve ResolveFunc) *Gateway {
 	return g
 }
 
-// NewRemote 远端形态（cmd/bellows）：不做归属反查，handlePost 只验 hearth 签发的通行证。
-func NewRemote(cfg rtc.ConfigFunc) *Gateway {
-	g := &Gateway{cfg: cfg, sessions: map[string]*session{}}
+// NewRemote 远端形态（cmd/bellows）：不做归属反查，handlePost 只验 hearth 签发的通行证；
+// sink 编译时选定（BELLOWS_SINK），取不到 Publisher 时推流拒绝。
+func NewRemote(cfg rtc.ConfigFunc, sink func(ctx context.Context) rtc.Publisher) *Gateway {
+	g := &Gateway{cfg: cfg, sink: sink, sessions: map[string]*session{}}
 	g.announcer = lite.NewAnnouncer(
 		func(ctx context.Context) string { return g.cfg(ctx, "bellows_public_ip") },
 		func(ctx context.Context) string { return g.cfg(ctx, "bellows_stun_servers") },
@@ -142,66 +143,72 @@ func (g *Gateway) remoteURL(ctx context.Context) string {
 	return strings.TrimSuffix(strings.TrimSpace(g.cfg(ctx, "bellows_remote_url")), "/")
 }
 
-// Enabled 进程内形态的前提是能连进 LiveKit 房间；远端形态只需远端地址与共享密钥
-// （LiveKit 凭证在远端进程手里）。
+// Enabled 进程内形态的前提是发布出口可用（sink 取得到 Publisher）；远端形态只需远端地址
+// 与共享密钥（出口在远端进程手里）。
 func (g *Gateway) Enabled(ctx context.Context) bool {
 	if g.remoteURL(ctx) != "" {
 		return g.cfg(ctx, "bellows_shared_secret") != ""
 	}
-	return g.cfg(ctx, "livekit_api_key") != "" && g.cfg(ctx, "livekit_api_secret") != ""
+	return g.sink != nil && g.sink(ctx) != nil
 }
 
-// CreateEndpoint 端点是纯本地概念：密钥落库（接入层）即生效，内核侧无需预建资源。
-func (g *Gateway) CreateEndpoint(context.Context, string, string) (id, streamKey string, err error) {
-	key, err := randHex(16)
-	if err != nil {
-		return "", "", err
-	}
-	return key, key, nil
-}
-
-// DeleteEndpoint 密钥由接入层从库中删除（旧 key 此后反查不到归属即失效）；
-// 这里只需把还在推的同 key 会话断掉。id 即 streamKey（CreateEndpoint 的约定）。
-func (g *Gateway) DeleteEndpoint(_ context.Context, id string) error {
-	g.closeSessionsByKey(id)
+// RevokeToken 掐断该令牌名下的全部进行会话（令牌重置时调用；幂等）。
+func (g *Gateway) RevokeToken(_ context.Context, token string) error {
+	g.closeSessionsByToken(token)
 	return nil
 }
+
+// EnsureEndpoint Bellows 的实例凭证就是通行证，无上游端点要建（livekit-ingress 才有）。
+func (g *Gateway) EnsureEndpoint(context.Context, string, string, map[string]string) (id, upstreamKey string, err error) {
+	return "", "", nil
+}
+
+// BindRoom 无上游端点，空操作。
+func (g *Gateway) BindRoom(context.Context, string, string) error { return nil }
+
+// DeleteEndpoint 无上游端点，空操作（进行会话的掐断走 RevokeToken）。
+func (g *Gateway) DeleteEndpoint(context.Context, string) error { return nil }
 
 // ProxyUpstream 远端形态下 hearth 的 /w 反代到远端 cmd/bellows；进程内为空，接入层直接交给 ServeWHIP。
 func (g *Gateway) ProxyUpstream(ctx context.Context) string { return g.remoteURL(ctx) }
 
 // Handler 独立进程用的 /w 处理器（令牌解析 + ServeWHIP）；进程内形态由接入层做同样的事。
-// DELETE /w/sessions/{key} 是 hearth 通知撤销远端会话的端点（验 revoke 通行证），
-// 只服务于远端形态；会话资源 id 是随机 hex，不会与 "sessions" 前缀冲突。
+// DELETE /w/revoke/{token} 是 hearth 通知撤销远端会话的端点（验 revoke 通行证），
+// 只服务于远端形态；"revoke"/"sessions" 是保留频道名（接入层拒绝创建），不会与真频道冲突。
 func (g *Gateway) Handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/w/sessions/") {
-			g.handleRevoke(w, r, strings.TrimPrefix(r.URL.Path, "/w/sessions/"))
+		if r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/w/revoke/") {
+			g.handleRevoke(w, r, strings.TrimPrefix(r.URL.Path, "/w/revoke/"))
 			return
 		}
-		token, _ := rtc.WHIPToken(r)
-		g.ServeWHIP(w, r, token)
+		if r.Method == http.MethodPost {
+			_, token, _ := rtc.WHIPToken(r)
+			g.ServeWHIP(w, r, token)
+			return
+		}
+		g.ServeWHIP(w, r, rtc.WHIPSessionRID(r))
 	})
 }
 
-// handleRevoke 验 revoke 通行证后掐断该推流密钥名下的全部会话；幂等（无会话也 204）。
-func (g *Gateway) handleRevoke(w http.ResponseWriter, r *http.Request, streamKey string) {
+// handleRevoke 验 revoke 通行证后掐断该令牌名下的全部会话；幂等（无会话也 204）。
+func (g *Gateway) handleRevoke(w http.ResponseWriter, r *http.Request, token string) {
 	p, err := verifyGrant(g.cfg(r.Context(), "bellows_shared_secret"), r.Header.Get(GrantHeader))
-	if err != nil || p.Op != "revoke" || p.Key != streamKey {
+	if err != nil || p.Op != "revoke" || p.Token != token {
 		http.Error(w, errInvalidGrant.Error(), http.StatusUnauthorized)
 		return
 	}
-	g.closeSessionsByKey(streamKey)
+	g.closeSessionsByToken(token)
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// closeSessionsByKey 摘除并关闭该推流密钥名下的所有会话。
+// closeSessionsByToken 摘除并关闭该令牌名下的所有会话（同一令牌新 POST 顶掉旧会话：
+// 一台设备同时只推一个房间）。
 // close 内部会再抢 mu（removeSession），必须先出锁再关。
-func (g *Gateway) closeSessionsByKey(streamKey string) {
+func (g *Gateway) closeSessionsByToken(token string) {
 	g.mu.Lock()
 	var victims []*session
 	for rid, s := range g.sessions {
-		if s.key == streamKey {
+		if s.token == token {
 			delete(g.sessions, rid)
 			victims = append(victims, s)
 		}
@@ -245,9 +252,9 @@ func (g *Gateway) ServeWHIP(w http.ResponseWriter, r *http.Request, token string
 	}
 }
 
-func (g *Gateway) handlePost(w http.ResponseWriter, r *http.Request, streamKey string) {
-	if streamKey == "" {
-		http.Error(w, "缺少推流密钥", http.StatusBadRequest)
+func (g *Gateway) handlePost(w http.ResponseWriter, r *http.Request, token string) {
+	if token == "" {
+		http.Error(w, "缺少推流令牌", http.StatusBadRequest)
 		return
 	}
 	offer, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 256<<10))
@@ -262,12 +269,12 @@ func (g *Gateway) handlePost(w http.ResponseWriter, r *http.Request, streamKey s
 		return
 	}
 	// 归属来源二选一：进程内形态反查接入层注入的 resolve；远端形态验 hearth 签发的
-	// 通行证（绑定密钥与 offer 哈希，判定已在 hearth 侧做完，这里不再问任何人）
-	var room, username string
+	// 通行证（绑定令牌与 offer 哈希，判定已在 hearth 侧做完，这里不再问任何人）
+	var room, identity, name, tag string
 	if g.resolve != nil {
-		room, username, err = g.resolve(r.Context(), streamKey)
+		room, identity, name, tag, err = g.resolve(r.Context(), token)
 		if errors.Is(err, ErrUnknownKey) {
-			http.Error(w, "推流密钥无效或已重置", http.StatusNotFound)
+			http.Error(w, "推流令牌无效或已重置", http.StatusNotFound)
 			return
 		}
 		if err != nil {
@@ -276,11 +283,16 @@ func (g *Gateway) handlePost(w http.ResponseWriter, r *http.Request, streamKey s
 		}
 	} else {
 		p, verr := verifyGrant(g.cfg(r.Context(), "bellows_shared_secret"), r.Header.Get(GrantHeader))
-		if verr != nil || p.Op != "publish" || p.Key != streamKey || p.Offer != offerHash(offer) {
+		if verr != nil || p.Op != "publish" || p.Token != token || p.Identity == "" || p.Offer != offerHash(offer) {
 			http.Error(w, errInvalidGrant.Error(), http.StatusUnauthorized)
 			return
 		}
-		room, username = p.Room, p.User
+		room, identity, name, tag = p.Room, p.Identity, p.Name, p.Tag
+	}
+	pub := g.publishSink(r.Context())
+	if pub == nil {
+		http.Error(w, "推流出口不可用（舞台内核未配置发布能力）", http.StatusServiceUnavailable)
+		return
 	}
 	t, err := g.ensureTransport(r.Context())
 	if err != nil {
@@ -303,7 +315,7 @@ func (g *Gateway) handlePost(w http.ResponseWriter, r *http.Request, streamKey s
 		http.Error(w, "内部错误", http.StatusInternalServerError)
 		return
 	}
-	s := &session{gw: g, rid: rid, key: streamKey, room: room, user: username, pc: pc}
+	s := &session{gw: g, rid: rid, token: token, room: room, identity: identity, name: name, tag: tag, pc: pc}
 	pc.OnTrack(func(tr *webrtc.TrackRemote, _ *webrtc.RTPReceiver) {
 		go s.handleTrack(tr)
 	})
@@ -333,8 +345,8 @@ func (g *Gateway) handlePost(w http.ResponseWriter, r *http.Request, streamKey s
 	}
 	<-done // ICE-Lite + 单端口 mux 只有 host 候选，gathering 立即完成
 
-	// 同 key 重推（OBS 重连）先顶掉旧会话
-	g.closeSessionsByKey(streamKey)
+	// 同令牌重推（OBS 重连/换房间）先顶掉旧会话
+	g.closeSessionsByToken(token)
 	g.mu.Lock()
 	// 状态回调注册在入表之前，极端情况下会话可能在此前已被关闭：
 	// 关掉的会话不入表，避免留下无法清理的死条目
@@ -345,16 +357,21 @@ func (g *Gateway) handlePost(w http.ResponseWriter, r *http.Request, streamKey s
 
 	body := []byte(pc.LocalDescription().SDP)
 	w.Header().Set("Content-Type", "application/sdp")
-	// 资源地址用一次性会话 id：bearer 模式的密钥不能经 Location 回流进 URL/访问日志。
-	// 用相对形式（不带 /w/ 前缀）：OBS 按请求路径解析——直连 /w/{key} → /w/{rid}，
-	// 经 hearth 反代 /providers/{alias}/w/{key} → /providers/{alias}/w/{rid}，两种形态都对；
-	// 绝对形式 /w/{rid} 在反代形态下会解析到根路径导致 DELETE 405。
-	w.Header().Set("Location", rid)
+	// 资源地址用一次性会话 id：bearer 模式的令牌不能经 Location 回流进 URL/访问日志
+	w.Header().Set("Location", "/w/sessions/"+rid)
 	// ffmpeg 的 WHIP muxer 读不了 chunked 响应，必须显式 Content-Length
 	w.Header().Set("Content-Length", strconv.Itoa(len(body)))
 	w.WriteHeader(http.StatusCreated)
 	w.Write(body)
-	log.Printf("bellows 会话建立: 用户=%s 房间=%s", username, room)
+	log.Printf("bellows 会话建立: identity=%s 房间=%s", identity, room)
+}
+
+// publishSink 取当前发布出口；sink 未注入或取不到 Publisher 时返回 nil。
+func (g *Gateway) publishSink(ctx context.Context) rtc.Publisher {
+	if g.sink == nil {
+		return nil
+	}
+	return g.sink(ctx)
 }
 
 // offerWithinWhitelist offer 里每条启用的音频/视频 m-line 都必须至少有一个白名单编码
@@ -431,7 +448,7 @@ func whipMediaEngine() (*webrtc.MediaEngine, error) {
 		return nil, err
 	}
 	// 视频只收 packetization-mode=1 的 H264：OBS/ffmpeg 都发 pm=1，
-	// 直通进 LiveKit 后浏览器订阅端也按 pm=1 解包，收 pm=0 只会造出解不出的流
+	// 直通进舞台内核后浏览器订阅端也按 pm=1 解包，收 pm=0 只会造出解不出的流
 	videoFB := []webrtc.RTCPFeedback{{Type: "goog-remb"}, {Type: "ccm", Parameter: "fir"}, {Type: "nack"}, {Type: "nack", Parameter: "pli"}}
 	for _, c := range []webrtc.RTPCodecParameters{
 		{RTPCodecCapability: webrtc.RTPCodecCapability{
@@ -464,98 +481,63 @@ func (g *Gateway) removeSession(s *session) {
 // ---- 会话 ----
 
 type session struct {
-	gw   *Gateway
-	rid  string // 会话资源 id（Location 相对地址 {rid}）
-	key  string // 推流密钥
-	room string // 频道名 = LiveKit 房间名
-	user string
-	pc   *webrtc.PeerConnection
+	gw       *Gateway
+	rid      string // 会话资源 id（Location /w/sessions/{rid}）
+	token    string // 推流令牌（每用户一把）
+	room     string // 频道名 = 舞台内核房间名
+	identity string // 发布参与者 identity（{用户名}-{标签}，接入层组好）
+	name     string // 显示名
+	tag      string // 推流设备标签
+	pc       *webrtc.PeerConnection
 
-	closed atomic.Bool // close 一开始就置位：joinRoom 据此拒绝为已关闭会话连房
+	closed atomic.Bool // close 一开始就置位：handleTrack 据此拒绝为已关闭会话发布
 
-	mu     sync.Mutex
-	lkRoom *lksdk.Room
+	mu          sync.Mutex
+	unpublishes []func() // 各轨的 unpublish（close 时逐个调用）
 
 	closeOnce sync.Once
 }
 
-// handleTrack 首个 track 到达时懒连 LiveKit 房间，随后每条 track 直通发布。
+// handleTrack 每条到达的轨交给 Publisher 直通发布（track 转换与读取循环在 Publisher 内部，
+// 这里只透传 *webrtc.TrackRemote 与参与者身份）。
 func (s *session) handleTrack(tr *webrtc.TrackRemote) {
-	room, err := s.joinRoom()
-	if err != nil {
-		log.Printf("bellows 进 LiveKit 房间失败: %v", err)
-		s.close()
-		return
-	}
-	codec := tr.Codec().RTPCodecCapability
-	lt, err := lksdk.NewLocalTrack(codec, lksdk.WithRTCPHandler(func(pkt rtcp.Packet) {
-		// PLI/FIR 桥接：观众关键帧请求经 SFU 到这里，转成对 OBS 侧 SSRC 的 PLI；
-		// NACK 各段自理（pion 侧收、lksdk 侧发，互不桥接）
-		switch pkt.(type) {
-		case *rtcp.PictureLossIndication, *rtcp.FullIntraRequest:
-			s.pc.WriteRTCP([]rtcp.Packet{&rtcp.PictureLossIndication{MediaSSRC: uint32(tr.SSRC())}})
-		}
-	}))
-	if err != nil {
-		log.Printf("bellows 创建发布轨失败: %v", err)
-		s.close()
-		return
-	}
-	if _, err := room.LocalParticipant.PublishTrack(lt, &lksdk.TrackPublicationOptions{}); err != nil {
-		log.Printf("bellows 发布 %s 轨失败: %v", codec.MimeType, err)
-		s.close()
-		return
-	}
-	log.Printf("bellows 发布 %s 轨: 用户=%s 房间=%s", codec.MimeType, s.user, s.room)
-	// 热路径复用缓冲与包结构：ReadRTP 每包新分配 MTU 切片 + Packet，8Mbps 视频约 1000 包/秒，
-	// 会持续制造 GC 压力；lksdk 的 WriteRTP 同步写完即返回，不持有引用，可安全复用
-	buf := make([]byte, 1500)
-	var pkt rtp.Packet
-	for {
-		n, _, err := tr.Read(buf)
-		if err != nil {
-			return
-		}
-		if err := pkt.Unmarshal(buf[:n]); err != nil {
-			continue
-		}
-		if err := lt.WriteRTP(&pkt, nil); err != nil && err != io.ErrClosedPipe {
-			return
-		}
-	}
-}
-
-// joinRoom 懒连接：bot 参与者 identity={user}-obs（与既有归属约定一致，
-// 房主侧的 MuteUserAudio/RemoveParticipantsOf 对它天然生效）。
-func (s *session) joinRoom() (*lksdk.Room, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	// close 可能赶在连房前完成（ICE 失败与首 track 竞态）：此后连上的房间
-	// 没人会再断开，必须在这里拒绝，否则留下永不退房的幽灵参与者
+	// close 可能赶在发布前完成（ICE 失败与首 track 竞态）：此后发布的轨
+	// 没人会再收回，必须在这里拒绝，否则留下永不退房的幽灵参与者
 	if s.closed.Load() {
-		return nil, errors.New("会话已关闭")
+		return
 	}
-	if s.lkRoom != nil {
-		return s.lkRoom, nil
+	pub := s.gw.publishSink(context.Background())
+	if pub == nil {
+		log.Printf("bellows 推流出口不可用: identity=%s 房间=%s", s.identity, s.room)
+		s.close()
+		return
 	}
-	// 会话生命周期独立于 WHIP 请求（请求上下文在应答后即取消）
-	ctx := context.Background()
-	cb := lksdk.NewRoomCallback()
-	cb.OnDisconnected = func() { s.close() }
-	// livekit_api_url 原值直传：lksdk 内部会把 http(s) 规范成 ws(s)，
-	// ws(s) 原样通过（signalling.ToWebsocketURL），自己转换反而破坏 wss:// 输入
-	room, err := lksdk.ConnectToRoom(s.gw.cfg(ctx, "livekit_api_url"), lksdk.ConnectInfo{
-		APIKey:              s.gw.cfg(ctx, "livekit_api_key"),
-		APISecret:           s.gw.cfg(ctx, "livekit_api_secret"),
-		RoomName:            s.room,
-		ParticipantIdentity: s.user + "-obs",
-		ParticipantName:     s.user + "(OBS)",
-	}, cb)
+	// 会话生命周期独立于 WHIP 请求（请求上下文在应答后即取消）；
+	// 关键帧回执通道经 ctx 注入（TrackRemote 不暴露所属连接，无法走接口参数）
+	ctx := rtc.WithKeyframeRelay(context.Background(), func(ssrc uint32) {
+		// 观众关键帧请求（PLI/FIR）经 Publisher 到这里，转成对推流端 SSRC 的 PLI
+		s.pc.WriteRTCP([]rtcp.Packet{&rtcp.PictureLossIndication{MediaSSRC: ssrc}})
+	})
+	// 发布出口断了就拆会话：推流端据此重推（重推会走完整的建会话流程，重新连房）。
+	// 不拆的话轨只会一直写进死连接，永远等不到自愈
+	ctx = rtc.WithPublishLost(ctx, s.close)
+	meta := map[string]string{"username": s.name, "kind": "ingest", "tag": s.tag}
+	unpublish, err := pub.PublishRemote(ctx, s.room, s.identity, s.name, meta, tr)
 	if err != nil {
-		return nil, err
+		log.Printf("bellows 发布轨失败: identity=%s 房间=%s: %v", s.identity, s.room, err)
+		s.close()
+		return
 	}
-	s.lkRoom = room
-	return room, nil
+	s.mu.Lock()
+	// 与 close 串行化：发布完成前会话已关闭则立即收回，不入列表
+	if s.closed.Load() {
+		s.mu.Unlock()
+		unpublish()
+		return
+	}
+	s.unpublishes = append(s.unpublishes, unpublish)
+	s.mu.Unlock()
+	log.Printf("bellows 发布轨: identity=%s 房间=%s", s.identity, s.room)
 }
 
 func (s *session) close() {
@@ -563,13 +545,13 @@ func (s *session) close() {
 		s.closed.Store(true)
 		s.gw.removeSession(s)
 		s.pc.Close()
-		// 与 joinRoom 串行化：joinRoom 连房中则等它写完 lkRoom 再断开
 		s.mu.Lock()
-		room := s.lkRoom
+		unpublishes := s.unpublishes
+		s.unpublishes = nil
 		s.mu.Unlock()
-		if room != nil {
-			room.Disconnect()
+		for _, unpublish := range unpublishes {
+			unpublish()
 		}
-		log.Printf("bellows 会话结束: 用户=%s 房间=%s", s.user, s.room)
+		log.Printf("bellows 会话结束: identity=%s 房间=%s", s.identity, s.room)
 	})
 }

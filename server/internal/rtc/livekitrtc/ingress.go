@@ -51,8 +51,19 @@ func (i *Ingress) Enabled(ctx context.Context) bool {
 		i.cfg(ctx, "ingress_upstream_url") != ""
 }
 
-func (i *Ingress) CreateEndpoint(ctx context.Context, room, username string) (string, string, error) {
-	return i.client(ctx).Create(ctx, room, username)
+// RevokeToken livekit-ingress 无进行会话的内核侧句柄：令牌重置由接入层删端点
+// （DeleteIngestEndpointsByToken + DeleteEndpoint），上游会话随端点删除自然终止。
+func (i *Ingress) RevokeToken(context.Context, string) error { return nil }
+
+// EnsureEndpoint 创建「令牌 → 实例凭证」的上游端点（identity={用户名}-{标签}），
+// 返回 ingress_id 与 LiveKit 签发的 stream key；房间由 BindRoom 随后写入。
+func (i *Ingress) EnsureEndpoint(ctx context.Context, identity, name string, meta map[string]string) (id, upstreamKey string, err error) {
+	return i.client(ctx).Create(ctx, identity, name, meta)
+}
+
+// BindRoom 把端点的目标房间改为 room（UpdateIngress.room_name）。
+func (i *Ingress) BindRoom(ctx context.Context, id, room string) error {
+	return i.client(ctx).UpdateRoom(ctx, id, room)
 }
 
 func (i *Ingress) DeleteEndpoint(ctx context.Context, id string) error {

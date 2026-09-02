@@ -39,7 +39,8 @@ type API struct {
 	providerOrder []string        // listInstances 顺序：内建 → env 锁定 → DB
 	kernelKeys    []rtc.ConfigKey // 内建实例的全局配置键汇总
 	ember         *ember.Provider // /providers/ember/voice 信令端点直连（进程内实现）
-	// ingressResolver 内建 bellows 的归属反查闭包（ingressOwner → ErrUnknownKey 映射）
+	// ingressResolver 内建 bellows 的归属反查闭包：判定已在 serveWHIP 的 admitIngest
+	// 做完并挂到请求 ctx（ingestCtxKey），这里原样取回四元组；无判定结果按未知令牌处理。
 	ingressResolver bellows.ResolveFunc
 
 	// 在房人数缓存（大厅频道列表用，避免每次列表都打内核）
@@ -50,6 +51,9 @@ type API struct {
 	// ember 线一次性入场票表（见 admission.go）
 	ticketMu sync.Mutex
 	tickets  map[string]voiceTicket
+
+	// endpointMu 串行化上游推流端点的惰性创建（见 bindIngressEndpoint）
+	endpointMu sync.Mutex
 }
 
 func New(st *store.Store, cfg config.Config, hub *chat.Hub) *API {
@@ -57,17 +61,12 @@ func New(st *store.Store, cfg config.Config, hub *chat.Hub) *API {
 	// 内建实例：ember 是进程内纯音频语音内核；bellows 是进程内 WHIP 直通推流网关
 	//（OBS HEVC/AV1 的接入路径），其余形态由 env/DB 注册成实例（见 providers.go）
 	a.ember = ember.New(a.dynVal)
-	a.ingressResolver = func(ctx context.Context, streamKey string) (string, string, error) {
-		// 查不到 → ErrUnknownKey（404）；瞬时 DB 故障原样透传（503），不能误报「密钥已重置」。
-		// 入场判定不在这里做：进程内形态由 WHIP 拦截（canPublishByStreamKey）先判过了
-		c, u, _, err := a.ingressOwner(ctx, streamKey)
-		if errors.Is(err, store.ErrNotFound) {
-			return "", "", bellows.ErrUnknownKey
+	a.ingressResolver = func(ctx context.Context, _ string) (string, string, string, string, error) {
+		adm, ok := ctx.Value(ingestCtxKey{}).(ingestAdmission)
+		if !ok {
+			return "", "", "", "", bellows.ErrUnknownKey
 		}
-		if err != nil {
-			return "", "", err
-		}
-		return c.Name, u.Username, nil
+		return adm.Room, adm.Identity, adm.Name, adm.Tag, nil
 	}
 	a.kernelKeys = append(ember.ConfigKeys(), bellows.ConfigKeys()...)
 	// 注册表先种内建实例：启动期迁移或 ListProviders 失败（保留旧表）时，
@@ -103,14 +102,17 @@ func (a *API) Router() *chi.Mux {
 		r.Get("/api/channels", a.listChannels)
 		r.Post("/api/channels", a.createChannel)
 		r.Post("/api/token", a.joinToken)
-		r.Post("/api/ingress", a.getIngress)
-		r.Post("/api/ingress/reset", a.resetIngress)
 
 		// 账户设置
 		r.Post("/api/account/username", a.updateUsername)
 		r.Post("/api/account/password", a.updatePassword)
 		r.Get("/api/account/devices", a.listMyDevices)
 		r.Delete("/api/account/devices/{deviceID}", a.deleteMyDevice)
+
+		// 推流令牌（每用户一把，房间在 WHIP URL 里）
+		r.Get("/api/ingest/token", a.ingestTokenGet)
+		r.Post("/api/ingest/token/reset", a.ingestTokenReset)
+		r.Put("/api/ingest/token", a.ingestTokenTag)
 
 		// 频道管理：频道解析与权限校验收敛到子路由中间件
 		// （踢人/封禁/静音等管理操作 = 房主或管理员，其余 = 仅房主）
@@ -373,6 +375,11 @@ func (a *API) createChannel(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "频道名仅限 1-64 位字母数字、-、_")
 		return
 	}
+	// WHIP 路径保留字：/w/sessions/{rid} 会话收尾与 /w/revoke/{token} 远端撤销
+	if req.Name == "sessions" || req.Name == "revoke" {
+		writeErr(w, http.StatusBadRequest, "该频道名为保留字")
+		return
+	}
 	c, err := a.st.CreateChannel(r.Context(), req.Name, u.ID)
 	if store.IsUniqueViolation(err) {
 		writeErr(w, http.StatusConflict, "频道已存在")
@@ -548,155 +555,6 @@ func deviceTag(ua string) string {
 		tag += "-safari"
 	}
 	return tag
-}
-
-// ---- Ingress（OBS WHIP 推流端点，每用户每频道一个）----
-
-type ingressResp struct {
-	URL       string `json:"url"`
-	StreamKey string `json:"stream_key"`
-}
-
-// ingressURL 按请求推导同源 /providers/{alias}/w/ 推流地址。
-func (a *API) ingressURL(r *http.Request, alias, streamKey string) string {
-	return (&neturl.URL{Scheme: requestScheme(r), Host: r.Host, Path: "/providers/" + alias + "/w/" + streamKey}).String()
-}
-
-// resolveIngressChannel 解析请求里的频道，不存在时写 404 并返回 nil。
-func (a *API) resolveIngressChannel(w http.ResponseWriter, r *http.Request) *store.Channel {
-	var req struct {
-		Channel string `json:"channel"`
-	}
-	if !decode(w, r, &req) {
-		return nil
-	}
-	c, err := a.st.ChannelByName(r.Context(), req.Channel)
-	if errors.Is(err, store.ErrNotFound) {
-		writeErr(w, http.StatusNotFound, "频道不存在")
-		return nil
-	}
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "内部错误")
-		return nil
-	}
-	return c
-}
-
-// getIngress 返回当前用户在该频道的推流地址；没有则调推流实例创建并落库。
-func (a *API) getIngress(w http.ResponseWriter, r *http.Request) {
-	u := userFrom(r)
-	ingestAlias, ip, fellBack := a.ingestInstance(r.Context())
-	if !ip.Enabled(r.Context()) {
-		writeErr(w, http.StatusServiceUnavailable, "推流入口未启用（所选内核缺少必需配置）")
-		return
-	}
-	c := a.resolveIngressChannel(w, r)
-	if c == nil {
-		return
-	}
-	rec, err := a.st.IngressByUserChannel(r.Context(), u.ID, c.ID)
-	if err == nil && rec.Provider != ingestAlias {
-		if fellBack {
-			// 回落 = 选择器配置无效的临时态，不做归属自愈（不删端点不重建）：
-			// 按记录原归属实例返回地址；归属实例已注销则配置本身不可用
-			if orig := a.instance(rec.Provider); orig == nil || orig.Ingest == nil {
-				writeErr(w, http.StatusServiceUnavailable, "推流入口配置无效")
-				return
-			}
-			log.Printf("推流选择器 %q 无效已回落，保留既有记录（归属 %s）",
-				a.dynVal(r.Context(), "ingest_provider"), rec.Provider)
-			writeJSON(w, http.StatusOK, ingressResp{URL: a.ingressURL(r, rec.Provider, rec.StreamKey), StreamKey: rec.StreamKey})
-			return
-		}
-		// 换了推流入口实例：旧记录对新入口无效（key 不被上游认识），
-		// 清掉旧端点与记录后按当前实例重建，而不是把死地址原样返回
-		a.deleteOldEndpoint(r, rec)
-		a.st.DeleteIngress(r.Context(), u.ID, c.ID)
-		err = store.ErrNotFound
-	}
-	if errors.Is(err, store.ErrNotFound) {
-		rec, err = a.createIngress(r, u, c)
-	}
-	if errors.Is(err, errIngestFallback) {
-		// 与 resetIngress 前置拦截同口径：回落 = 选择器配置无效，不创建端点
-		writeErr(w, http.StatusServiceUnavailable, "推流入口配置无效")
-		return
-	}
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "获取推流地址失败")
-		return
-	}
-	writeJSON(w, http.StatusOK, ingressResp{URL: a.ingressURL(r, ingestAlias, rec.StreamKey), StreamKey: rec.StreamKey})
-}
-
-// deleteOldEndpoint 尽力删除记录归属内核侧的旧端点：删除必须发给创建它的内核
-// （比如 livekit 期间建的 ingress 切到 bellows 后仍要在 LiveKit 侧删掉，否则旧 key 一直有效）。
-// 归属内核是远端网关（WHIPGrantIssuer）时再通知其掐断该 key 的远端会话——
-// 通行证是短时效入场券不管会话生命周期，重置密钥要能把正在推的旧会话掐掉。
-func (a *API) deleteOldEndpoint(r *http.Request, rec *store.Ingress) {
-	inst := a.instance(rec.Provider)
-	if inst == nil || inst.Ingest == nil {
-		// 归属实例已注销：内核侧删除无从下手，只清库记录（旧 key 随反查不到归属自然失效）
-		log.Printf("旧 ingress %s 的归属实例 %s 已不存在，跳过内核侧删除", rec.IngressID, rec.Provider)
-		return
-	}
-	if derr := inst.Ingest.DeleteEndpoint(r.Context(), rec.IngressID); derr != nil {
-		// 内核侧删不掉不阻塞重建（记录可能已是残缺的）
-		log.Printf("删除旧 ingress %s（内核 %s）失败: %v", rec.IngressID, rec.Provider, derr)
-	}
-	if gi, ok := inst.Ingest.(rtc.WHIPGrantIssuer); ok {
-		ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
-		defer cancel()
-		if rerr := gi.RevokeRemoteSessions(ctx, rec.StreamKey); rerr != nil {
-			log.Printf("撤销远端会话（key 内核 %s）失败: %v", rec.Provider, rerr)
-		}
-	}
-}
-
-// resetIngress 删除旧 ingress（内核侧 + 库记录）后重建，旧地址随之失效。
-func (a *API) resetIngress(w http.ResponseWriter, r *http.Request) {
-	u := userFrom(r)
-	ingestAlias, ip, fellBack := a.ingestInstance(r.Context())
-	if fellBack {
-		// 回落 = 选择器配置无效：重建会误用回落实例，拒绝到配置修正为止
-		writeErr(w, http.StatusServiceUnavailable, "推流入口配置无效（所选实例无推流能力）")
-		return
-	}
-	if !ip.Enabled(r.Context()) {
-		writeErr(w, http.StatusServiceUnavailable, "推流入口未启用（所选内核缺少必需配置）")
-		return
-	}
-	c := a.resolveIngressChannel(w, r)
-	if c == nil {
-		return
-	}
-	if rec, err := a.st.IngressByUserChannel(r.Context(), u.ID, c.ID); err == nil {
-		a.deleteOldEndpoint(r, rec)
-		a.st.DeleteIngress(r.Context(), u.ID, c.ID)
-	}
-	rec, err := a.createIngress(r, u, c)
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "重置推流地址失败")
-		return
-	}
-	writeJSON(w, http.StatusOK, ingressResp{URL: a.ingressURL(r, ingestAlias, rec.StreamKey), StreamKey: rec.StreamKey})
-}
-
-// errIngestFallback 选择器回落状态下拒绝创建端点（回落实例不是管理员的选择）。
-var errIngestFallback = errors.New("推流入口配置无效")
-
-// createIngress 调推流实例创建端点并落库（记录带上实例 alias，删除/失效判断按归属方路由）。
-func (a *API) createIngress(r *http.Request, u *store.User, c *store.Channel) (*store.Ingress, error) {
-	alias, ip, fellBack := a.ingestInstance(r.Context())
-	if fellBack {
-		return nil, errIngestFallback
-	}
-	ingressID, streamKey, err := ip.CreateEndpoint(r.Context(), c.Name, u.Username)
-	if err != nil {
-		log.Printf("创建 ingress 失败: %v", err)
-		return nil, err
-	}
-	return a.st.CreateIngress(r.Context(), u.ID, c.ID, ingressID, streamKey, alias)
 }
 
 // ---- 频道管理（房主操作）----

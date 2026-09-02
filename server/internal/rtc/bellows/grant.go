@@ -30,16 +30,20 @@ const grantClockSkew = 30 * time.Second
 
 var errInvalidGrant = errors.New("通行证无效或已过期")
 
-// grantPayload 通行证内容。op=publish 时带 room/user/offer（offer = 请求体 SHA256 hex，
-// 绑定 SDP 防重放挪用）；op=revoke 只需 key。
+// grantPayload 通行证内容。op=publish 时带 room/identity/name/tag/offer（offer = 请求体
+// SHA256 hex，绑定 SDP 防重放挪用；identity/name/tag 由 hearth 组好，网关只透传）；
+// op=revoke 只需 token。kind 恒为 "ingest"（参与者元数据语义，与前端识别推流设备对应）。
 type grantPayload struct {
-	V     int    `json:"v"`
-	Op    string `json:"op"` // publish / revoke
-	Key   string `json:"key"`
-	Room  string `json:"room,omitempty"`
-	User  string `json:"user,omitempty"`
-	Offer string `json:"offer,omitempty"`
-	Exp   int64  `json:"exp"`
+	V        int    `json:"v"`
+	Op       string `json:"op"` // publish / revoke
+	Token    string `json:"token"`
+	Room     string `json:"room,omitempty"`
+	Identity string `json:"identity,omitempty"`
+	Name     string `json:"name,omitempty"`
+	Kind     string `json:"kind,omitempty"`
+	Tag      string `json:"tag,omitempty"`
+	Offer    string `json:"offer,omitempty"`
+	Exp      int64  `json:"exp"`
 }
 
 // signGrant 签发通行证：base64url(payload JSON) + "." + base64url(HMAC-SHA256)。
@@ -54,8 +58,8 @@ func signGrant(secret string, p grantPayload) (string, error) {
 	return body + "." + base64.RawURLEncoding.EncodeToString(mac.Sum(nil)), nil
 }
 
-// verifyGrant 验签并解析：常量时间比对签名 → exp 未过（容忍时钟偏差）。op/key/offer
-// 与请求的匹配由调用方按场景检查。
+// verifyGrant 验签并解析：常量时间比对签名 → exp 未过（容忍时钟偏差）。
+// token 缺失即拒（旧格式用 key 字段，天然验不过）；op/offer 与请求的匹配由调用方按场景检查。
 func verifyGrant(secret, header string) (*grantPayload, error) {
 	body, sig, ok := strings.Cut(header, ".")
 	if !ok || secret == "" {
@@ -72,7 +76,7 @@ func verifyGrant(secret, header string) (*grantPayload, error) {
 		return nil, errInvalidGrant
 	}
 	var p grantPayload
-	if err := json.Unmarshal(raw, &p); err != nil || p.V != 1 {
+	if err := json.Unmarshal(raw, &p); err != nil || p.V != 1 || p.Token == "" {
 		return nil, errInvalidGrant
 	}
 	if time.Now().Unix() > p.Exp+int64(grantClockSkew/time.Second) {
@@ -88,11 +92,12 @@ func offerHash(offer []byte) string {
 
 // ---- rtc.WHIPGrantIssuer（hearth 侧，远端形态下由接入层调用）----
 
-// IssueWHIPGrant 入场判定通过后为一次 WHIP POST 签发通行证（绑定推流密钥与 offer 哈希）。
-func (g *Gateway) IssueWHIPGrant(ctx context.Context, streamKey, room, username string, offer []byte) (header, value string, err error) {
+// IssueWHIPGrant 入场判定通过后为一次 WHIP POST 签发通行证（绑定令牌与 offer 哈希；
+// identity/name/tag 由接入层组好，远端只透传）。
+func (g *Gateway) IssueWHIPGrant(ctx context.Context, token, room, identity, name, tag string, offer []byte) (header, value string, err error) {
 	v, err := signGrant(g.cfg(ctx, "bellows_shared_secret"), grantPayload{
-		V: 1, Op: "publish", Key: streamKey, Room: room, User: username,
-		Offer: offerHash(offer), Exp: time.Now().Add(grantTTL).Unix(),
+		V: 1, Op: "publish", Token: token, Room: room, Identity: identity, Name: name,
+		Kind: "ingest", Tag: tag, Offer: offerHash(offer), Exp: time.Now().Add(grantTTL).Unix(),
 	})
 	if err != nil {
 		return "", "", err
@@ -103,20 +108,20 @@ func (g *Gateway) IssueWHIPGrant(ctx context.Context, streamKey, room, username 
 // revokeClient 撤销远端会话用；调用方一般用 ctx 控制更短的超时。
 var revokeClient = &http.Client{Timeout: 10 * time.Second}
 
-// RevokeRemoteSessions 通知远端 Bellows 掐断该推流密钥名下的全部会话（尽力）：
-// 签 revoke 通行证后 DELETE {remote_url}/w/sessions/{key}。进程内形态无远端可调，直接返回。
-func (g *Gateway) RevokeRemoteSessions(ctx context.Context, streamKey string) error {
+// RevokeRemoteSessions 通知远端 Bellows 掐断该令牌名下的全部会话（尽力）：
+// 签 revoke 通行证后 DELETE {remote_url}/w/revoke/{token}。进程内形态无远端可调，直接返回。
+func (g *Gateway) RevokeRemoteSessions(ctx context.Context, token string) error {
 	base := g.remoteURL(ctx)
 	if base == "" {
 		return nil
 	}
 	v, err := signGrant(g.cfg(ctx, "bellows_shared_secret"), grantPayload{
-		V: 1, Op: "revoke", Key: streamKey, Exp: time.Now().Add(grantTTL).Unix(),
+		V: 1, Op: "revoke", Token: token, Exp: time.Now().Add(grantTTL).Unix(),
 	})
 	if err != nil {
 		return err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, base+"/w/sessions/"+streamKey, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, base+"/w/revoke/"+token, nil)
 	if err != nil {
 		return err
 	}

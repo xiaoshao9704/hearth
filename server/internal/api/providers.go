@@ -91,12 +91,12 @@ func paramsCfg(params map[string]string, fields []rtc.ConfigKey) rtc.ConfigFunc 
 	}
 }
 
-// builtinInstances 内建实例：ember 语音；bellows 进程内 WHIP 直通（livekit_* 动态路由到舞台线实例）。
+// builtinInstances 内建实例：ember 语音；bellows 进程内 WHIP 直通（发布出口 = 当前舞台线实例的 Publisher）。
 func (a *API) builtinInstances() []*ProviderInstance {
 	return []*ProviderInstance{
 		{Alias: TypeEmber, Type: TypeEmber, Builtin: true, Cfg: a.dynVal, Voice: a.ember},
-		{Alias: TypeBellows, Type: TypeBellows, Builtin: true, Cfg: a.builtinBellowsCfg,
-			Ingest: bellows.New(a.builtinBellowsCfg, a.ingressResolver)},
+		{Alias: TypeBellows, Type: TypeBellows, Builtin: true, Cfg: a.dynVal,
+			Ingest: bellows.New(a.dynVal, a.ingressResolver, a.stagePublisherSink)},
 	}
 }
 
@@ -149,7 +149,7 @@ func (a *API) reloadProvidersLocked(ctx context.Context) {
 	if params := envLockedParams(a.providerTypeFields(TypeBellowsRemote), "bellows_remote_url"); params != nil {
 		cfg := paramsCfg(params, a.providerTypeFields(TypeBellowsRemote))
 		add(&ProviderInstance{Alias: TypeBellowsRemote, Type: TypeBellowsRemote, Params: params, Cfg: cfg, Locked: true,
-			Ingest: bellows.New(cfg, nil)})
+			Ingest: bellows.New(cfg, nil, nil)})
 	}
 
 	// DB 注册
@@ -230,7 +230,7 @@ func (a *API) instantiateProvider(rec *store.ProviderRecord) *ProviderInstance {
 	case TypeLivekitIngress:
 		inst.Ingest = livekitrtc.NewIngress(cfg)
 	case TypeBellowsRemote:
-		inst.Ingest = bellows.New(cfg, nil)
+		inst.Ingest = bellows.New(cfg, nil, nil)
 	default:
 		log.Printf("providers 表实例 %s 类型未知（%s），跳过", rec.Alias, rec.Type)
 		return nil
@@ -238,17 +238,15 @@ func (a *API) instantiateProvider(rec *store.ProviderRecord) *ProviderInstance {
 	return inst
 }
 
-// builtinBellowsCfg 内建 bellows 的 ConfigFunc：livekit_* 路由到舞台线生效的 livekit 实例
-// （二者必须指向同一 LiveKit 部署；经实例 Cfg 读，保留字段模式的 Default 兜底）；
-// 端口/IP 走全局 dynVal。
-func (a *API) builtinBellowsCfg(ctx context.Context, name string) string {
-	if strings.HasPrefix(name, "livekit_") {
-		if inst := a.instance(a.dynVal(ctx, "stage_provider")); inst != nil && inst.Type == TypeLivekit && inst.Stage != nil {
-			return inst.Cfg(ctx, name)
-		}
-		return ""
+// stagePublisherSink 进程内 bellows 的发布出口：当前舞台线实例的 rtc.Publisher
+// （每次发布时取，注册表/选择器切换即生效）；舞台线为 none 或实例不实现 Publisher 时返回 nil
+// （bellows 据此 Enabled=false）。
+func (a *API) stagePublisherSink(ctx context.Context) rtc.Publisher {
+	_, sp := a.stageInstance(ctx)
+	if pub, ok := sp.(rtc.Publisher); ok {
+		return pub
 	}
-	return a.dynVal(ctx, name)
+	return nil
 }
 
 // instance 按 alias 取实例，不存在返回 nil。
@@ -286,7 +284,7 @@ func (a *API) stageInstance(ctx context.Context) (string, rtc.StageProvider) {
 }
 
 // ingestInstance 按选择器取推流实例；未知 alias 或无推流能力回落内建 bellows（fellBack=true）。
-// 回落意味着选择器配置无效：调用方不得据此做端点删除/重建等破坏性自愈（见 getIngress）。
+// 回落意味着选择器配置无效：调用方不得据此做端点删除/重建等破坏性操作。
 func (a *API) ingestInstance(ctx context.Context) (alias string, ip rtc.IngestProvider, fellBack bool) {
 	if inst := a.instance(a.dynVal(ctx, "ingest_provider")); inst != nil && inst.Ingest != nil {
 		return inst.Alias, inst.Ingest, false
@@ -303,7 +301,7 @@ type migrationStep struct {
 // runMigrations 版本游标迁移入口：末尾照常重建注册表。
 // 以后所有跨版本兼容处理都作为新版本步挂在这里。
 func (a *API) runMigrations(ctx context.Context) {
-	a.runMigrationSteps(ctx, []migrationStep{{1, a.migrateProviders}, {2, a.importSelectorEnv}})
+	a.runMigrationSteps(ctx, []migrationStep{{1, a.migrateProviders}, {2, a.importSelectorEnv}, {3, a.migrateIngestTokens}})
 	a.reloadProviders(ctx)
 }
 
@@ -331,7 +329,7 @@ func (a *API) runMigrationSteps(ctx context.Context, steps []migrationStep) {
 }
 
 // migrateProviders v1：Provider 注册制迁移——旧全局 cfg_ 键导入为 DB 实例、旧选择器值改写、
-// ingress 记录归属改写（实现名 → 实例 alias）、老部署的选择器默认落库（升级后行为不变）。
+// 老部署的选择器默认落库（升级后行为不变）。
 // 各子步骤幂等；任一部分失败返回错误，游标不前进，下次启动整体重试。
 func (a *API) migrateProviders(ctx context.Context) error {
 	// 旧 cfg_ 键导入（params 复用旧键名）：env 已锁定同名实例时不建行（DB 行会被 env 实例
@@ -401,14 +399,7 @@ func (a *API) migrateProviders(ctx context.Context) error {
 	if remoteReady {
 		if v, _ := a.st.GetSetting(ctx, "cfg_ingest_provider"); v == TypeBellows {
 			a.st.SetSetting(ctx, "cfg_ingest_provider", TypeBellowsRemote)
-			if err := a.st.RewriteIngressProvider(ctx, TypeBellows, TypeBellowsRemote); err != nil {
-				return err
-			}
 		}
-	}
-	// ingress 记录归属：旧值 livekit 指 livekit-ingress 实例
-	if err := a.st.RewriteIngressProvider(ctx, "livekit", TypeLivekitIngress); err != nil {
-		return err
 	}
 
 	// 选择器默认落库：老部署（后台未选过）原来默认跑 livekit，注册表默认是内建
@@ -451,4 +442,24 @@ func (a *API) importSelectorEnv(ctx context.Context) error {
 		log.Printf("配置迁移: %s=%q 已落库（选择器不再读环境变量，请从部署侧删除）", env, v)
 	}
 	return nil
+}
+
+// migrateIngestTokens v3：推流令牌改为每用户一把——旧 ingresses 表每用户取最近创建的一把
+// stream_key 原值保留为其推流令牌（标签 obs；升级后 OBS 只需给服务器地址加频道段），
+// 其余丢弃，然后 DROP ingresses。ingest_tokens 表由 Bun 迁移 00002 建好；
+// 空库（无旧密钥）不建令牌。幂等：已有令牌的用户跳过，旧表已删视为空（半途重入安全）。
+func (a *API) migrateIngestTokens(ctx context.Context) error {
+	legacy, err := a.st.LegacyIngressTokens(ctx)
+	if err != nil {
+		return err
+	}
+	for userID, key := range legacy {
+		if _, err := a.st.IngestTokenByUser(ctx, userID); err == nil {
+			continue // 已有令牌（上次迁移半途重入或用户已新建），不覆盖
+		}
+		if err := a.st.ImportIngestToken(ctx, userID, key); err != nil {
+			return err
+		}
+	}
+	return a.st.DropIngresses(ctx)
 }

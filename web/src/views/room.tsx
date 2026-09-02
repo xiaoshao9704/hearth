@@ -44,7 +44,8 @@ interface VideoEntry {
   isLocal: boolean;
   username: string;
   display: string;
-  obs: boolean;
+  ingest: boolean; // 推流参与者（kind=ingest）：卡片角标与设备名按 tag 展示
+  tag: string;
   specTip: () => string; // 徽章 tooltip：本地=配置目标，远端=说明
   encTag: () => string; // 本地投屏实际生效的编码器（getStats 真值）；其余为空
   liveStats: () => VideoStats | null; // 实测：本地=发送侧，远端=本端实际接收（SVC 选层后）
@@ -75,7 +76,6 @@ export async function renderRoom(root: HTMLElement, channel: string) {
   shell.setConn(false, '正在协商…');
 
   const myUsername = getUser()?.username ?? '';
-  const obsIdentity = `${myUsername}-obs`;
 
   // ---- 连接层状态（非响应式）----
   const voiceLine: Line = { role: 'voice', engine: null, engineName: '', attempts: 0, timer: 0, inflight: false };
@@ -125,7 +125,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
   let chatInputEl!: HTMLInputElement;
   let vuBarEl: HTMLElement | undefined; // 麦克风 VU 条（micOn 时才在 DOM 里）
 
-  // 双线参与者合并：语音线是名册权威（micOn），舞台线补充 sharing/OBS
+  // 双线参与者合并：语音线是名册权威（micOn），舞台线补充 sharing/推流标记
   function parts(): EPart[] {
     const base = voiceLine.engine?.participants() ?? [];
     if (combined || !stageLine?.engine) return base;
@@ -135,7 +135,8 @@ export async function renderRoom(root: HTMLElement, channel: string) {
       const ex = map.get(s.identity);
       if (ex) {
         ex.sharing = ex.sharing || s.sharing;
-        ex.obs = ex.obs || s.obs;
+        ex.ingest = ex.ingest || s.ingest;
+        ex.tag = ex.tag || s.tag;
       } else {
         map.set(s.identity, { ...s }); // OBS 推流等仅舞台线的参与者
       }
@@ -143,7 +144,12 @@ export async function renderRoom(root: HTMLElement, channel: string) {
     return [...map.values()];
   }
 
-  const volumeFor = (identity: string) => volumes().get(identity) ?? (identity === obsIdentity ? 0 : 1);
+  // 自己的推流设备默认静音（自己的 OBS 不出声）；推流身份看名册，不再拼 identity 后缀
+  const isOwnIngest = (identity: string) => {
+    const p = parts().find((pp) => pp.identity === identity);
+    return !!p?.ingest && p.username === myUsername;
+  };
+  const volumeFor = (identity: string) => volumes().get(identity) ?? (isOwnIngest(identity) ? 0 : 1);
 
   function applyAudioPrefs() {
     const p = loadPrefs();
@@ -233,7 +239,8 @@ export async function renderRoom(root: HTMLElement, channel: string) {
         isLocal: part.isLocal,
         username: part.username,
         display: part.display,
-        obs: part.obs,
+        ingest: part.ingest,
+        tag: part.tag,
         specTip,
         encTag,
         liveStats,
@@ -273,9 +280,10 @@ export async function renderRoom(root: HTMLElement, channel: string) {
       (p) => !p.isLocal && p.username === username && (!deviceMode || p.identity === identity),
     );
     const muted = targets.some((p) => volumeFor(p.identity) === 0);
-    const devName = (p: EPart) => (p.obs ? 'OBS 推流' : p.identity.slice(username.length + 1) || p.identity);
-    // 禁言判定只看真人设备：OBS 推流参与者（ingress 自带发布权限）会污染 every() 推断
-    const voiceTargets = targets.filter((p) => !p.obs);
+    const devName = (p: EPart) =>
+      p.ingest ? `OBS 推流${p.tag ? ` · ${p.tag}` : ''}` : p.identity.slice(username.length + 1) || p.identity;
+    // 禁言判定只看真人设备：推流参与者（ingress 自带发布权限）会污染 every() 推断
+    const voiceTargets = targets.filter((p) => !p.ingest);
     const gagged = voiceTargets.length > 0 && voiceTargets.every((p) => !p.canPublish);
     const gagBtn = (on: boolean, label: string) =>
       `<button class="hit um-item${on ? ' danger' : ''}" data-gag="${on}">${micIcon(14, on, on ? 'var(--red)' : 'currentColor')}<span>${label}</span></button>`;
@@ -886,8 +894,8 @@ export async function renderRoom(root: HTMLElement, channel: string) {
               </Show>
             </div>
           </Show>
-          <Show when={e.obs}>
-            <div class="spec-badge">OBS · WHIP</div>
+          <Show when={e.ingest}>
+            <div class="spec-badge">{e.tag ? `OBS · ${e.tag}` : 'OBS · WHIP'}</div>
           </Show>
         </div>
         <div class="tile-label">
@@ -913,7 +921,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
   const AudioTileView = (p: { e: AudioEntry; spotlight: () => boolean; focusKey: () => string | null }) => {
     const part = createMemo(() => roster().find((pp) => pp.identity === p.e.identity));
     const isSpeaking = createMemo(() => speaking().has(p.e.identity));
-    const micOff = () => !(part()?.micOn ?? false) && !(part()?.obs ?? false);
+    const micOff = () => !(part()?.micOn ?? false) && !(part()?.ingest ?? false);
     return (
       <div
         class="tile tile-audio"
@@ -931,9 +939,9 @@ export async function renderRoom(root: HTMLElement, channel: string) {
           <span>{part()?.isLocal ? '你' : (part()?.display ?? '')}</span>
           {el(micIcon(13, micOff(), micOff() ? 'var(--red)' : isSpeaking() ? 'var(--ember)' : 'var(--text-2)'))}
         </div>
-        <Show when={part()?.obs}>
+        <Show when={part()?.ingest}>
           <div style="position:absolute;top:12px;right:12px" class="tag tag-ember mono">
-            OBS 推流
+            OBS 推流{part()?.tag ? ` · ${part()?.tag}` : ''}
           </div>
         </Show>
       </div>
@@ -1014,15 +1022,14 @@ export async function renderRoom(root: HTMLElement, channel: string) {
     const gridTiles = createMemo(() => (spotlight() ? tileEntries().filter((e) => e.key === focusKey()) : tileEntries()));
     const railTiles = createMemo(() => (spotlight() ? tileEntries().filter((e) => e.key !== focusKey()) : []));
 
-    // 成员按账号聚合（一个账号多台设备合一行）
     // 成员面板按设备维度平铺（与 tile/静音/踢出的操作粒度同构）：
-    // 同人排序相邻，本机最前、OBS 靠后；人数另行统计
+    // 同人排序相邻，本机最前、推流设备靠后；人数另行统计
     const memberDevices = createMemo(() =>
       [...roster()].sort(
         (a, b) =>
           a.username.localeCompare(b.username) ||
           Number(b.isLocal) - Number(a.isLocal) ||
-          Number(a.obs) - Number(b.obs) ||
+          Number(a.ingest) - Number(b.ingest) ||
           a.identity.localeCompare(b.identity),
       ),
     );
@@ -1226,14 +1233,16 @@ export async function renderRoom(root: HTMLElement, channel: string) {
                   {(p) => {
                     const uname = p.username;
                     const isMe = uname === myUsername;
-                    const dev = p.obs ? 'OBS 推流' : p.identity.slice(uname.length + 1) || p.identity;
+                    const dev = p.ingest
+                      ? `OBS 推流${p.tag ? ` · ${p.tag}` : ''}`
+                      : p.identity.slice(uname.length + 1) || p.identity;
                     const isSpeaking = () => speaking().has(p.identity);
                     const devMuted = () => volumeFor(p.identity) === 0;
                     const bits = () =>
                       [
                         p.sharing ? '投屏中' : '',
-                        isSpeaking() ? '说话中' : !p.micOn && !p.obs ? '已静音' : '',
-                        !p.canPublish && !p.obs ? '已禁言' : '',
+                        isSpeaking() ? '说话中' : !p.micOn && !p.ingest ? '已静音' : '',
+                        !p.canPublish && !p.ingest ? '已禁言' : '',
                         devMuted() && !p.isLocal ? '已本地屏蔽' : '',
                       ]
                         .filter(Boolean)

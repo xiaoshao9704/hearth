@@ -60,6 +60,12 @@ func (a *API) updateUsername(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "内部错误")
 		return
 	}
+	// 上游推流端点的 identity/name/metadata 在建端点时按用户名固化，改名后必须失效重建：
+	// 否则推流继续以旧用户名进房，房主对新用户名的踢出/禁言全部落空，
+	// 旧用户名被他人注册后这条流还会顶着别人的身份出现
+	if t, terr := a.st.IngestTokenByUser(r.Context(), u.ID); terr == nil {
+		a.teardownIngestEndpoints(r.Context(), t.ID)
+	}
 	u.Username = req.Username
 	writeJSON(w, http.StatusOK, u)
 }
