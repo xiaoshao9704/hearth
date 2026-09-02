@@ -327,7 +327,8 @@ func newFakeLivekit(t *testing.T) (twirpURL, whipURL string, calls *([]twirpCall
 	whipReqs = &[][2]string{}
 	whip := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		*whipReqs = append(*whipReqs, [2]string{r.Header.Get("Authorization"), r.URL.Path})
-		w.Header().Set("Location", "/w/sessions/upstream-rid")
+		// 真实 ingress 的 Location 形态不受我们控制，这里用绝对 URL（上游主机对客户端不可达）
+		w.Header().Set("Location", "http://"+r.Host+"/w/sessions/upstream-rid")
 		w.WriteHeader(201)
 	}))
 	t.Cleanup(whip.Close)

@@ -171,3 +171,27 @@ func TestReservedChannelNames(t *testing.T) {
 		}
 	}
 }
+
+// Location 改写要认三种形态：上游返什么由它自己决定（livekit-ingress 不受我们控制），
+// 只有纯相对形式本就落在代理路径下、不该动。
+func TestRewriteWHIPLocation(t *testing.T) {
+	const prefix = "/providers/ing1"
+	cases := []struct {
+		name, in, want string
+	}{
+		{"根相对", "/w/sessions/rid9", "/providers/ing1/w/sessions/rid9"},
+		{"绝对 URL 只取路径", "http://ingress:8080/w/abc", "/providers/ing1/w/abc"},
+		{"绝对 URL 带 query", "https://up.example.com/w/abc?k=1", "/providers/ing1/w/abc?k=1"},
+		{"纯相对不动", "sessions/rid9", "sessions/rid9"},
+		{"非 /w/ 路径不动", "/other/abc", "/other/abc"},
+		{"绝对 URL 非 /w/ 不动", "http://ingress:8080/other/abc", "http://ingress:8080/other/abc"},
+		{"空值不动", "", ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := rewriteWHIPLocation(c.in, prefix); got != c.want {
+				t.Fatalf("rewriteWHIPLocation(%q) = %q，期望 %q", c.in, got, c.want)
+			}
+		})
+	}
+}
