@@ -32,18 +32,39 @@ func (a *API) admitUser(ctx context.Context, c *store.Channel, u *store.User) (a
 	return admission{Identity: u.Username, CanPublish: !gagged}, true, "", nil
 }
 
-// canPublishByStreamKey /w 推流拦截专用的按 streamKey 判定（此处只有 key，没有用户/频道对象）。
-// 语义保持 fail-open：查不到 key 或判定出错时放行代理，仅确定被禁言时拒绝。
-func (a *API) canPublishByStreamKey(ctx context.Context, streamKey string) bool {
+// ingressOwner 按推流密钥反查频道与用户；密钥不存在（或归属已被删）返回 store.ErrNotFound。
+func (a *API) ingressOwner(ctx context.Context, streamKey string) (*store.Channel, *store.User, error) {
 	userID, channelID, err := a.st.IngressOwner(ctx, streamKey)
+	if err != nil {
+		return nil, nil, err
+	}
+	c, err := a.st.ChannelByID(ctx, channelID)
+	if err != nil {
+		return nil, nil, err
+	}
+	u, err := a.st.UserByID(ctx, userID)
+	if err != nil {
+		return nil, nil, err
+	}
+	return c, u, nil
+}
+
+// canPublishByStreamKey /w 推流拦截：按 streamKey 反查归属后走 admitUser，
+// 封禁/邀请制/禁言与进房口径一致（被封禁者不能靠既有 key 继续推流）。
+// 语义保持 fail-open：查不到 key 或判定出错时放行代理，仅确定不许时拒绝。
+func (a *API) canPublishByStreamKey(ctx context.Context, streamKey string) bool {
+	c, u, err := a.ingressOwner(ctx, streamKey)
 	if err != nil {
 		return true
 	}
-	gagged, err := a.st.IsGagged(ctx, channelID, userID)
-	return err != nil || !gagged
+	adm, ok, _, err := a.admitUser(ctx, c, u)
+	if err != nil {
+		return true
+	}
+	return ok && adm.CanPublish
 }
 
-// ---- pion 线一次性入场票 ----
+// ---- ember 线一次性入场票 ----
 // joinToken 完成入场判定后签发，/api/voice 信令入口凭票直接入会，不再二次判定。
 
 const voiceTicketTTL = 60 * time.Second

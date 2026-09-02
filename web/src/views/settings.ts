@@ -711,7 +711,7 @@ function renderScreen(body: HTMLElement, goStream: () => void) {
         <div class="mono" style="padding-left:66px;font-size:10.5px;color:var(--text-3);margin-top:-8px">${prefs.res} · ${prefs.fps}fps 建议 ${lim.min}–${lim.max} Mbps${prefs.bitrateAuto ? '（当前为自动推荐值）' : ''}</div>
         <div class="hint-card">
           ${icon('cube', 15, 'var(--text-2)')}
-          <div>VP9/AV1 走 SVC 分层：弱网观众自动降到低分辨率层，不拖累全场，也让家宽上行的观众数上限变成软性劣化；AV1 压缩率最高但软编极吃 CPU（实验）。H.264 单层兼容性最好。浏览器软编到 1080p60 为止——再往上是编码器的物理上限。<button class="hit" id="go-stream" style="color:var(--ember)">2K / 4K / 120fps 走 OBS 推流 →</button></div>
+          <div>VP9/AV1 走 SVC 分层：弱网观众自动降到低分辨率层，不拖累全场，也让上行带宽决定的观众数上限变成软性劣化；AV1 压缩率最高但软编极吃 CPU（实验）。H.264 单层兼容性最好。浏览器软编到 1080p60 为止——再往上是编码器的物理上限。<button class="hit" id="go-stream" style="color:var(--ember)">2K / 4K / 120fps 走 OBS 推流 →</button></div>
         </div>
       </div>`;
 

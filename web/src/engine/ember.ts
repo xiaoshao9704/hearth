@@ -1,4 +1,4 @@
-// AVEngine 的 pion-voice 实现：hearth 进程内纯音频 SFU 的客户端。
+// AVEngine 的 ember 实现：hearth 进程内纯音频 SFU 的客户端。
 // 信令走同源 WebSocket（自有 JSON 协议），媒体是与服务器（公网 ICE-Lite）的单条 PC——
 // 客户端不需要 STUN/TURN。视频类操作在本引擎不支持（由舞台线承担）。
 import { deviceId } from '../api';
@@ -20,7 +20,7 @@ interface SigMsg {
 
 const usernameOf = (identity: string, name: string) => name || identity.split('-')[0];
 
-export class PionVoiceEngine implements AVEngine {
+export class EmberEngine implements AVEngine {
   private cbs: EngineCallbacks;
   private ws: WebSocket | null = null;
   private pc: RTCPeerConnection | null = null;
@@ -190,7 +190,7 @@ export class PionVoiceEngine implements AVEngine {
               break;
           }
         } catch (err) {
-          console.warn('pion-voice 信令处理失败:', err);
+          console.warn('ember 信令处理失败:', err);
         }
       };
     });
@@ -214,7 +214,7 @@ export class PionVoiceEngine implements AVEngine {
       this.cbs.onAudioTrack(identity, el);
     };
     pc.onconnectionstatechange = () => {
-      console.info('pion-voice PC:', pc.connectionState);
+      console.info('ember PC:', pc.connectionState);
       if (pc.connectionState === 'connected') this.cbs.onReconnected(); // 首次连上也走这里刷新 UI
       if (pc.connectionState === 'failed') this.lost();
     };

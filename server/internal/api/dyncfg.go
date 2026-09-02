@@ -16,12 +16,24 @@ import (
 // 内核选择器：换实现只改这里的值，各实现的配置键互不干扰、原样保留。
 // 语音线（voice）与舞台线（stage：投屏/摄像头/OBS 推流及其伴音）各占一个槽位。
 var selectorKeys = []rtc.ConfigKey{
-	{Name: "voice_provider", Env: "VOICE_PROVIDER", Group: "core", Options: []string{"livekit", "pion"},
-		Label: "语音内核", Hint: "Hearth 内置 = 进程内纯音频 SFU（pion 实现），零外部依赖；两线都选 LiveKit 即单线形态"},
+	{Name: "voice_provider", Env: "VOICE_PROVIDER", Group: "core", Options: []string{"livekit", "ember"},
+		Label: "语音内核", Hint: "Ember = 进程内纯音频 SFU，零外部依赖；两线都选 LiveKit 即单线形态"},
 	{Name: "stage_provider", Env: "STAGE_PROVIDER", Group: "core", Options: []string{"livekit", "none"},
 		Label: "舞台内核", Hint: "none = 纯语音部署，禁用投屏与摄像头"},
-	{Name: "ingest_provider", Env: "INGEST_PROVIDER", Group: "core", Options: []string{"livekit", "pion"},
-		Label: "推流入口", Hint: "OBS/WHIP 推流的接入实现；pion = 进程内直通网关（支持 HEVC/AV1，发进 LiveKit 房间）"},
+	{Name: "ingest_provider", Env: "INGEST_PROVIDER", Group: "core", Options: []string{"livekit", "bellows"},
+		Label: "推流入口", Hint: "OBS/WHIP 推流的接入实现；Bellows = 进程内直通网关（支持 HEVC/AV1，发进 LiveKit 房间）"},
+}
+
+// 旧名兼容：自研内核改名（pion → ember / bellows）后，存量环境变量与 DB 配置继续生效。
+var legacySelectorValue = map[string]string{
+	"voice_provider":  "ember",
+	"ingest_provider": "bellows",
+}
+
+// 旧键兼容：ember_* 未设置时回退改名前的 pion_* 配置。
+var legacyKeyFallback = map[string]struct{ Name, Env string }{
+	"ember_udp_port":  {"pion_udp_port", "PION_UDP_PORT"},
+	"ember_public_ip": {"pion_public_ip", "PION_PUBLIC_IP"},
 }
 
 func (a *API) allConfigKeys() []rtc.ConfigKey {
@@ -41,21 +53,40 @@ func (a *API) findDynKey(name string) *rtc.ConfigKey {
 // envFixed 该项是否被环境变量固定（.env 在启动时已合入环境）。
 func envFixed(k *rtc.ConfigKey) bool { return k.Env != "" && os.Getenv(k.Env) != "" }
 
-// dynVal 取生效值：环境变量 > 数据库 > 实现声明的兜底默认（选择器默认 livekit）。
+// dynVal 取生效值：环境变量 > 数据库 > 旧名回退 > 实现声明的兜底默认（选择器默认 livekit）。
 func (a *API) dynVal(ctx context.Context, name string) string {
 	k := a.findDynKey(name)
 	if k == nil {
 		return ""
 	}
+	v := a.rawDynVal(ctx, k)
+	// 选择器里存量的 "pion" 映射到改名后的内核
+	if v == "pion" {
+		if nv, ok := legacySelectorValue[name]; ok {
+			return nv
+		}
+	}
+	return v
+}
+
+func (a *API) rawDynVal(ctx context.Context, k *rtc.ConfigKey) string {
 	if k.Env != "" {
 		if v := os.Getenv(k.Env); v != "" {
 			return v
 		}
 	}
-	if v, err := a.st.GetSetting(ctx, "cfg_"+name); err == nil && strings.TrimSpace(v) != "" {
+	if v, err := a.st.GetSetting(ctx, "cfg_"+k.Name); err == nil && strings.TrimSpace(v) != "" {
 		return strings.TrimSpace(v)
 	}
-	if name == "voice_provider" || name == "stage_provider" || name == "ingest_provider" {
+	if lk, ok := legacyKeyFallback[k.Name]; ok {
+		if v := os.Getenv(lk.Env); v != "" {
+			return v
+		}
+		if v, err := a.st.GetSetting(ctx, "cfg_"+lk.Name); err == nil && strings.TrimSpace(v) != "" {
+			return strings.TrimSpace(v)
+		}
+	}
+	if k.Name == "voice_provider" || k.Name == "stage_provider" || k.Name == "ingest_provider" {
 		return "livekit" // 默认实现（两线同一 LiveKit 即今天的单线形态）
 	}
 	return k.Default
@@ -70,7 +101,7 @@ func (a *API) voiceProvider(ctx context.Context) rtc.Provider {
 }
 
 // stageProvider 按选择器取舞台内核；"none" 返回 nil（纯语音部署）。
-func (a *API) stageProvider(ctx context.Context) rtc.Provider {
+func (a *API) stageProvider(ctx context.Context) rtc.StageProvider {
 	name := a.dynVal(ctx, "stage_provider")
 	if name == "none" {
 		return nil

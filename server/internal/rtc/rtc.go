@@ -27,11 +27,11 @@ type ConfigFunc func(ctx context.Context, name string) string
 
 // ConfigKey 实现声明自己的配置键：接入层据此渲染管理后台表单与判定环境锁定。
 type ConfigKey struct {
-	Name    string `json:"name"` // settings 键名（cfg_ 前缀存储），实现自定命名空间
-	Env     string `json:"env"`  // 对应环境变量（设置了则锁定为只读）
-	Label   string `json:"label"`
-	Hint    string `json:"hint"`
-	Secret  bool   `json:"secret"`
+	Name    string   `json:"name"` // settings 键名（cfg_ 前缀存储），实现自定命名空间
+	Env     string   `json:"env"`  // 对应环境变量（设置了则锁定为只读）
+	Label   string   `json:"label"`
+	Hint    string   `json:"hint"`
+	Secret  bool     `json:"secret"`
 	Group   string   `json:"group"`             // 管理后台分组
 	Options []string `json:"options,omitempty"` // 枚举可选值（管理后台渲染选择框）；空 = 自由文本
 	Default string   `json:"-"`                 // 环境与数据库都未设置时的兜底值，由实现声明
@@ -42,7 +42,7 @@ type ConfigKey struct {
 type Credentials struct {
 	URL    string // 浏览器连接地址；空 = 由接入层推导同源信令代理地址
 	Token  string
-	Engine string // 客户端引擎名：livekit / （将来）pion-voice …
+	Engine string // 客户端引擎名：livekit / ember …
 }
 
 // Participant 房间参与者的精简信息。
@@ -52,7 +52,7 @@ type Participant struct {
 	JoinedAt int64  `json:"joined_at"` // Unix 秒
 }
 
-// Provider 房间内核：签发进房凭证与房间管理。
+// Provider 语音（房间）内核：签发进房凭证与房间管理。语音槽位与舞台槽位都建立在它之上。
 type Provider interface {
 	Name() string
 	// JoinCredentials 为用户签发进入房间的凭证；deviceTag 用于区分同账号多设备；
@@ -73,6 +73,13 @@ type Provider interface {
 	SignalProxyUpstream(ctx context.Context) string
 }
 
+// StageProvider 舞台内核：投屏/摄像头等视频能力，**包含全部语音能力**（内嵌 Provider）。
+// 舞台槽位只接受本接口：纯语音内核（如 ember）不能被选作舞台线；
+// 语音内核补齐视频能力时实现本接口即可上舞台线，视频专属方法届时加在这里。
+type StageProvider interface {
+	Provider
+}
+
 // IngestProvider 推流入口（如 WHIP 协议的硬编推流），可整体停用。
 type IngestProvider interface {
 	Name() string
@@ -87,10 +94,27 @@ type IngestProvider interface {
 	ProxyUpstream(ctx context.Context) string
 }
 
-// WHIPServer 可选能力：进程内处理 WHIP 推流的 IngestProvider（ProxyUpstream 为空的
-// 实现若实现了本接口，接入层把 /w 请求直接交给它而不是反代到外部上游）。
+// WHIPToken 从 WHIP 请求取令牌：路径 /w/{token} 的首段；POST 且路径无段时取
+// Authorization: Bearer（OBS bearer 模式，bearer=true，端点应规范化为精确 /w）。
+func WHIPToken(r *http.Request) (token string, bearer bool) {
+	token = strings.Trim(strings.TrimPrefix(r.URL.Path, "/w"), "/")
+	if i := strings.IndexByte(token, '/'); i >= 0 {
+		token = token[:i]
+	}
+	if token == "" && r.Method == http.MethodPost {
+		return strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "), true
+	}
+	return token, false
+}
+
+// WHIPServer 可选能力：进程内处理 WHIP 推流的 IngestProvider（ProxyUpstream 为空时
+// 接入层把 /w 请求直接交给它；ProxyUpstream 非空则照常反代，实现可据配置在两者间切换）。
 type WHIPServer interface {
-	// ServeWHIP 处理一个 WHIP 请求（POST 建会话 / PATCH trickle / DELETE 结束），
-	// streamKey 已由接入层从路径或 Bearer 头解析（含禁言拦截）。
-	ServeWHIP(w http.ResponseWriter, r *http.Request, streamKey string)
+	// ServeWHIP 处理一个 WHIP 请求（POST 建会话 / PATCH trickle / DELETE 结束）。
+	// token 由接入层从路径解析（POST 另支持 Bearer 头，且已过禁言拦截）：
+	// POST 时是推流密钥，PATCH/DELETE 时是 POST 应答 Location 里的会话资源 id。
+	ServeWHIP(w http.ResponseWriter, r *http.Request, token string)
+	// HasSession 该会话资源 id 是否归本实现。推流中途切换 ingest_provider 时，
+	// 接入层据此把收尾请求路由给会话归属方而不是当前选中实现。
+	HasSession(token string) bool
 }

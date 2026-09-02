@@ -145,7 +145,7 @@ async function paintStatus(body: HTMLElement) {
     },
     {
       name: `推流入口 · ${esc(ov.services.ingest?.name ?? '?')}`,
-      meta: ov.services.ingest?.ok ? esc(ov.services.ingest.url) : '未启用（服务参数里配置上游地址）',
+      meta: ov.services.ingest?.ok ? esc(ov.services.ingest.url) : '未启用（在服务参数里补齐所选内核的配置）',
       ok: ov.services.ingest?.ok ?? false,
       state: ov.services.ingest?.ok ? 'running' : 'off',
     },
@@ -213,7 +213,8 @@ async function paintConfig(body: HTMLElement) {
   // 枚举值的人话标签（值本身仍以英文存库）
   const KERNEL_LABELS: Record<string, string> = {
     livekit: 'LiveKit',
-    pion: 'Hearth 内置',
+    ember: 'Ember（内置语音）',
+    bellows: 'Bellows（内置推流网关）',
     none: '关闭',
   };
 
@@ -277,7 +278,7 @@ async function paintConfig(body: HTMLElement) {
             const meta: Record<string, [string, string]> = {
               core: ['内核选择', '语音 / 舞台（投屏）/ 推流入口分别选实现，配置互不干扰'],
               livekit: ['LiveKit', '信令与令牌签发'],
-              voice: ['Hearth 内置语音', '本进程直出音频（pion 实现），UDP 单端口'],
+              voice: ['Ember 内置语音', '本进程直出音频，UDP 单端口'],
               ingress: ['推流入口（OBS）', 'WHIP 上游与公开地址'],
             };
             const [title, sub] = meta[g] ?? [g, ''];

@@ -1,5 +1,5 @@
 // AVEngine：房间音视频引擎的内核中立接口。
-// 房间视图（room.ts）只依赖本接口；每个内核（livekit / 将来的 pion-voice …）配一个实现，
+// 房间视图（room.ts）只依赖本接口；每个内核（livekit / ember …）配一个实现，
 // 由进房凭证里的 engine 字段选择、动态加载。信令协议是各内核私有的，全部封装在实现里。
 
 export type TrackSource = 'camera' | 'screen';

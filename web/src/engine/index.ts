@@ -3,7 +3,7 @@ import type { AVEngine, EngineCallbacks } from './types';
 
 const registry: Record<string, (cbs: EngineCallbacks) => Promise<AVEngine>> = {
   livekit: async (cbs) => new (await import('./livekit')).LiveKitEngine(cbs),
-  'pion-voice': async (cbs) => new (await import('./pionvoice')).PionVoiceEngine(cbs),
+  'ember': async (cbs) => new (await import('./ember')).EmberEngine(cbs),
 };
 
 export async function createEngine(name: string, cbs: EngineCallbacks): Promise<AVEngine> {

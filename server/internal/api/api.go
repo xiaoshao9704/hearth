@@ -15,9 +15,9 @@ import (
 	"hearth/server/internal/chat"
 	"hearth/server/internal/config"
 	"hearth/server/internal/rtc"
+	"hearth/server/internal/rtc/bellows"
+	"hearth/server/internal/rtc/ember"
 	"hearth/server/internal/rtc/livekitrtc"
-	"hearth/server/internal/rtc/pionvoice"
-	"hearth/server/internal/rtc/pionwhip"
 	"hearth/server/internal/store"
 
 	"crypto/rand"
@@ -35,46 +35,43 @@ type API struct {
 
 	// 内核注册表：接入层只依赖 rtc 接口，具体实现按选择器配置取（见 dyncfg.go）
 	voiceKernels  map[string]rtc.Provider
-	stageKernels  map[string]rtc.Provider
+	stageKernels  map[string]rtc.StageProvider
 	ingestKernels map[string]rtc.IngestProvider
 	kernelKeys    []rtc.ConfigKey // 各实现自带的配置键汇总
-	pion          *pionvoice.Provider // /api/voice 信令端点直连（进程内实现）
+	ember         *ember.Provider // /api/voice 信令端点直连（进程内实现）
 
 	// 在房人数缓存（大厅频道列表用，避免每次列表都打内核）
 	countsMu sync.Mutex
 	counts   map[string]int
 	countsAt time.Time
 
-	// pion 线一次性入场票表（见 admission.go）
+	// ember 线一次性入场票表（见 admission.go）
 	ticketMu sync.Mutex
 	tickets  map[string]voiceTicket
 }
 
 func New(st *store.Store, cfg config.Config, hub *chat.Hub) *API {
 	a := &API{st: st, cfg: cfg, hub: hub, tickets: map[string]voiceTicket{}}
-	// 注册内核实现：LiveKit 可同时任语音/舞台/推流入口；pion 是进程内纯音频语音内核；
-	// pionwhip 是进程内 WHIP 直通推流网关（OBS HEVC/AV1 的接入路径）
+	// 注册内核实现：LiveKit 可同时任语音/舞台/推流入口；ember 是进程内纯音频语音内核；
+	// bellows 是进程内 WHIP 直通推流网关（OBS HEVC/AV1 的接入路径）
 	lk := livekitrtc.New(a.dynVal)
-	a.pion = pionvoice.New(a.dynVal)
-	pw := pionwhip.New(a.dynVal, func(ctx context.Context, streamKey string) (string, string, error) {
-		userID, channelID, err := a.st.IngressOwner(ctx, streamKey)
-		if err != nil {
-			return "", "", err
+	a.ember = ember.New(a.dynVal)
+	pw := bellows.New(a.dynVal, func(ctx context.Context, streamKey string) (string, string, error) {
+		// 查不到 → ErrUnknownKey（404）；瞬时 DB 故障原样透传（503），不能误报「密钥已重置」。
+		// 入场判定不在这里做：进程内形态由 /w 拦截（canPublishByStreamKey）先判过了
+		c, u, err := a.ingressOwner(ctx, streamKey)
+		if errors.Is(err, store.ErrNotFound) {
+			return "", "", bellows.ErrUnknownKey
 		}
-		c, err := a.st.ChannelByID(ctx, channelID)
-		if err != nil {
-			return "", "", err
-		}
-		u, err := a.st.UserByID(ctx, userID)
 		if err != nil {
 			return "", "", err
 		}
 		return c.Name, u.Username, nil
 	})
-	a.voiceKernels = map[string]rtc.Provider{"livekit": lk, "pion": a.pion}
-	a.stageKernels = map[string]rtc.Provider{"livekit": lk}
-	a.ingestKernels = map[string]rtc.IngestProvider{"livekit": lk, "pion": pw}
-	a.kernelKeys = append(append(livekitrtc.ConfigKeys(), pionvoice.ConfigKeys()...), pionwhip.ConfigKeys()...)
+	a.voiceKernels = map[string]rtc.Provider{"livekit": lk, "ember": a.ember}
+	a.stageKernels = map[string]rtc.StageProvider{"livekit": lk}
+	a.ingestKernels = map[string]rtc.IngestProvider{"livekit": lk, "bellows": pw}
+	a.kernelKeys = append(append(livekitrtc.ConfigKeys(), ember.ConfigKeys()...), bellows.ConfigKeys()...)
 	return a
 }
 
@@ -87,6 +84,7 @@ func (a *API) Router() *chi.Mux {
 	r.Post("/api/login", a.login)
 	r.Get("/api/invites/{code}", a.inviteInfo)
 	r.Get("/api/voice", a.voiceWS)
+	r.Get("/api/internal/ingest/resolve", a.ingestResolve) // 远端 bellows 回调，共享密钥鉴权
 
 	// 需登录
 	r.Group(func(r chi.Router) {
@@ -413,9 +411,9 @@ func (a *API) joinToken(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "签发令牌失败")
 		return
 	}
-	// pion 信令走一次性入场票：判定结果在此定格，/api/voice 凭票直接入会（见 admission.go）
+	// ember 信令走一次性入场票：判定结果在此定格，/api/voice 凭票直接入会（见 admission.go）
 	ticket := ""
-	if vc.Engine == "pion-voice" {
+	if vc.Engine == "ember" {
 		ticket = a.issueVoiceTicket(voiceTicket{
 			room:     c.Name,
 			identity: adm.Identity + "-" + tag,
@@ -438,12 +436,12 @@ func (a *API) joinToken(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
-// fillCred 补全内核未声明的连接信息：pion 语音走同源 /api/voice 信令并透传会话 token
+// fillCred 补全内核未声明的连接信息：ember 语音走同源 /api/voice 信令并透传会话 token
 // （附一次性入场票），livekit 走同源 /lk 代理。
 func (a *API) fillCred(r *http.Request, c rtc.Credentials, channel, ticket string) map[string]string {
 	url := c.URL
 	if url == "" {
-		if c.Engine == "pion-voice" {
+		if c.Engine == "ember" {
 			scheme := "ws"
 			if requestScheme(r) == "https" {
 				scheme = "wss"
@@ -577,7 +575,7 @@ func (a *API) resolveIngressChannel(w http.ResponseWriter, r *http.Request) *sto
 func (a *API) getIngress(w http.ResponseWriter, r *http.Request) {
 	u := userFrom(r)
 	if !a.ingestProvider(r.Context()).Enabled(r.Context()) {
-		writeErr(w, http.StatusServiceUnavailable, "推流入口未启用（未配置上游地址）")
+		writeErr(w, http.StatusServiceUnavailable, "推流入口未启用（所选内核缺少必需配置）")
 		return
 	}
 	c := a.resolveIngressChannel(w, r)
@@ -585,6 +583,13 @@ func (a *API) getIngress(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rec, err := a.st.IngressByUserChannel(r.Context(), u.ID, c.ID)
+	if err == nil && rec.Provider != a.ingestProvider(r.Context()).Name() {
+		// 换了推流入口内核：旧记录对新入口无效（key 不被上游认识），
+		// 清掉旧端点与记录后按当前内核重建，而不是把死地址原样返回
+		a.deleteOldEndpoint(r, rec)
+		a.st.DeleteIngress(r.Context(), u.ID, c.ID)
+		err = store.ErrNotFound
+	}
 	if errors.Is(err, store.ErrNotFound) {
 		rec, err = a.createIngress(r, u, c)
 	}
@@ -595,11 +600,24 @@ func (a *API) getIngress(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, ingressResp{URL: a.ingressURL(r, rec.StreamKey), StreamKey: rec.StreamKey})
 }
 
+// deleteOldEndpoint 尽力删除记录归属内核侧的旧端点：删除必须发给创建它的内核
+// （比如 livekit 期间建的 ingress 切到 bellows 后仍要在 LiveKit 侧删掉，否则旧 key 一直有效）。
+func (a *API) deleteOldEndpoint(r *http.Request, rec *store.Ingress) {
+	ik := a.ingestKernels[rec.Provider]
+	if ik == nil {
+		ik = a.ingestProvider(r.Context())
+	}
+	if derr := ik.DeleteEndpoint(r.Context(), rec.IngressID); derr != nil {
+		// 内核侧删不掉不阻塞重建（记录可能已是残缺的）
+		log.Printf("删除旧 ingress %s（内核 %s）失败: %v", rec.IngressID, rec.Provider, derr)
+	}
+}
+
 // resetIngress 删除旧 ingress（LiveKit 侧 + 库记录）后重建，旧地址随之失效。
 func (a *API) resetIngress(w http.ResponseWriter, r *http.Request) {
 	u := userFrom(r)
 	if !a.ingestProvider(r.Context()).Enabled(r.Context()) {
-		writeErr(w, http.StatusServiceUnavailable, "推流入口未启用（未配置上游地址）")
+		writeErr(w, http.StatusServiceUnavailable, "推流入口未启用（所选内核缺少必需配置）")
 		return
 	}
 	c := a.resolveIngressChannel(w, r)
@@ -607,10 +625,7 @@ func (a *API) resetIngress(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if rec, err := a.st.IngressByUserChannel(r.Context(), u.ID, c.ID); err == nil {
-		if derr := a.ingestProvider(r.Context()).DeleteEndpoint(r.Context(), rec.IngressID); derr != nil {
-			// LiveKit 侧删不掉不阻塞重建（记录可能已是残缺的）
-			log.Printf("删除旧 ingress %s 失败: %v", rec.IngressID, derr)
-		}
+		a.deleteOldEndpoint(r, rec)
 		a.st.DeleteIngress(r.Context(), u.ID, c.ID)
 	}
 	rec, err := a.createIngress(r, u, c)
@@ -621,14 +636,15 @@ func (a *API) resetIngress(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, ingressResp{URL: a.ingressURL(r, rec.StreamKey), StreamKey: rec.StreamKey})
 }
 
-// createIngress 调推流入口内核创建端点并落库。
+// createIngress 调推流入口内核创建端点并落库（记录带上内核名，删除/失效判断按归属方路由）。
 func (a *API) createIngress(r *http.Request, u *store.User, c *store.Channel) (*store.Ingress, error) {
-	ingressID, streamKey, err := a.ingestProvider(r.Context()).CreateEndpoint(r.Context(), c.Name, u.Username)
+	ip := a.ingestProvider(r.Context())
+	ingressID, streamKey, err := ip.CreateEndpoint(r.Context(), c.Name, u.Username)
 	if err != nil {
 		log.Printf("创建 ingress 失败: %v", err)
 		return nil, err
 	}
-	return a.st.CreateIngress(r.Context(), u.ID, c.ID, ingressID, streamKey)
+	return a.st.CreateIngress(r.Context(), u.ID, c.ID, ingressID, streamKey, ip.Name())
 }
 
 // ---- 频道管理（房主操作）----

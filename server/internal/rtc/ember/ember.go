@@ -1,37 +1,35 @@
-// Package pionvoice 是 rtc.Provider 的进程内纯音频 SFU 实现（pion/webrtc）。
+// Package ember 是 rtc.Provider 的进程内纯音频 SFU 实现（pion/webrtc）。
 // 设计取舍：
 //   - 只做 Opus 转发：无 simulcast / 关键帧 / 带宽估计，每参与者一条上行、N-1 条下行拷贝；
 //   - 服务器有公网 IP：ICE-Lite + 单端口 UDP mux，客户端不需要 STUN/TURN；
 //   - 信令走同源 WebSocket（api 层挂 /api/voice，鉴权与聊天 WS 同模式），协议自有；
 //   - 说话检测：读 ssrc-audio-level RTP 头扩展，服务端聚合后广播 speakers。
-package pionvoice
+package ember
 
 import (
 	"context"
 	"fmt"
 	"io"
 	"log"
-	"net"
-	"net/http"
 	"strconv"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/pion/webrtc/v4"
 	"hearth/server/internal/rtc"
+	"hearth/server/internal/rtc/lite"
 
 	"nhooyr.io/websocket"
 	"nhooyr.io/websocket/wsjson"
 )
 
-// ConfigKeys 本实现声明的配置键（命名空间 pion_*）。端口改动需重启生效。
+// ConfigKeys 本实现声明的配置键（命名空间 ember_*）。端口改动需重启生效。
 func ConfigKeys() []rtc.ConfigKey {
 	return []rtc.ConfigKey{
-		{Name: "pion_udp_port", Env: "PION_UDP_PORT", Group: "voice", Default: "47700",
+		{Name: "ember_udp_port", Env: "EMBER_UDP_PORT", Group: "voice", Default: "47700",
 			Label: "媒体 UDP 端口", Hint: "单端口 mux，需在防火墙/安全组放行；改动重启生效"},
-		{Name: "pion_public_ip", Env: "PION_PUBLIC_IP", Group: "voice",
+		{Name: "ember_public_ip", Env: "EMBER_PUBLIC_IP", Group: "voice",
 			Label: "公网 IP", Hint: "留空 = 启动时 HTTP 自动探测（云主机一般留空即可）"},
 	}
 }
@@ -118,23 +116,25 @@ type vroom struct {
 type Provider struct {
 	cfg rtc.ConfigFunc
 
-	mu       sync.Mutex
-	rooms    map[string]*vroom
-	api      *webrtc.API
-	apiErr   error
-	publicIP string
+	mu    sync.Mutex
+	rooms map[string]*vroom
+
+	// initMu 只保护 api 懒初始化：公网 IP 探测最长约 10s，不能顶着 mu
+	// 让首个入会把名册/人数等房间操作一起卡住
+	initMu sync.Mutex
+	api    *webrtc.API
 }
 
 func New(cfg rtc.ConfigFunc) *Provider {
 	return &Provider{cfg: cfg, rooms: make(map[string]*vroom)}
 }
 
-func (p *Provider) Name() string { return "pion-voice" }
+func (p *Provider) Name() string { return "ember" }
 
 func (p *Provider) JoinCredentials(_ context.Context, _, _, _ string, _ bool) (rtc.Credentials, error) {
 	// URL/Token 留空：api 层推导同源 /api/voice 信令地址并透传会话 token；
 	// canPublish 此处在凭证层无处安放，禁言由 api 层在 /api/voice 入会时（HandleJoin muted 参数）生效
-	return rtc.Credentials{Engine: "pion-voice"}, nil
+	return rtc.Credentials{Engine: "ember"}, nil
 }
 
 func (p *Provider) RoomCounts(context.Context) (map[string]int, error) {
@@ -227,49 +227,22 @@ func (p *Provider) MuteUserAudio(_ context.Context, room, username string, muted
 
 func (p *Provider) SignalProxyUpstream(context.Context) string { return "" } // 进程内，无代理
 
-// ---- WebRTC API（懒初始化：UDP mux + ICE-Lite + 公网 IP 通告）----
+// ---- WebRTC API（懒初始化，传输基建见 rtc/lite）----
 
-func probePublicIP() string {
-	client := &http.Client{Timeout: 5 * time.Second}
-	for _, u := range []string{"http://ip.3322.net", "https://api.ipify.org"} {
-		if resp, err := client.Get(u); err == nil {
-			b, _ := io.ReadAll(io.LimitReader(resp.Body, 64))
-			resp.Body.Close()
-			ip := strings.TrimSpace(string(b))
-			if net.ParseIP(ip) != nil {
-				return ip
-			}
-		}
-	}
-	return ""
-}
-
+// ensureAPI 失败不缓存：端口被瞬时占用时下一次入会重试，不把内核永久卡在错误态。
 func (p *Provider) ensureAPI(ctx context.Context) (*webrtc.API, error) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if p.api != nil || p.apiErr != nil {
-		return p.api, p.apiErr
+	p.initMu.Lock()
+	defer p.initMu.Unlock()
+	if p.api != nil {
+		return p.api, nil
 	}
-	port, err := strconv.Atoi(p.cfg(ctx, "pion_udp_port"))
+	port, err := strconv.Atoi(p.cfg(ctx, "ember_udp_port"))
 	if err != nil || port <= 0 || port > 65535 {
 		port = 47700
 	}
-	udpConn, err := net.ListenUDP("udp", &net.UDPAddr{Port: port})
-	if err != nil {
-		p.apiErr = fmt.Errorf("语音媒体端口 %d 监听失败: %w", port, err)
-		return nil, p.apiErr
-	}
-	ip := p.cfg(ctx, "pion_public_ip")
+	ip := p.cfg(ctx, "ember_public_ip")
 	if ip == "" {
-		ip = probePublicIP()
-	}
-	p.publicIP = ip
-
-	se := webrtc.SettingEngine{}
-	se.SetLite(true) // 服务器公网直达：lite 模式由客户端做连通性检查
-	se.SetICEUDPMux(webrtc.NewICEUDPMux(nil, udpConn))
-	if ip != "" {
-		se.SetNAT1To1IPs([]string{ip}, webrtc.ICECandidateTypeHost)
+		ip = lite.ProbePublicIP()
 	}
 
 	m := &webrtc.MediaEngine{}
@@ -280,19 +253,20 @@ func (p *Provider) ensureAPI(ctx context.Context) (*webrtc.API, error) {
 		},
 		PayloadType: 111,
 	}, webrtc.RTPCodecTypeAudio); err != nil {
-		p.apiErr = err
 		return nil, err
 	}
 	// 说话检测靠这个头扩展
 	if err := m.RegisterHeaderExtension(webrtc.RTPHeaderExtensionCapability{
 		URI: "urn:ietf:params:rtp-hdrext:ssrc-audio-level",
 	}, webrtc.RTPCodecTypeAudio); err != nil {
-		p.apiErr = err
 		return nil, err
 	}
-
-	p.api = webrtc.NewAPI(webrtc.WithMediaEngine(m), webrtc.WithSettingEngine(se))
-	log.Printf("pion-voice 就绪: udp=%d 公网IP=%q", port, ip)
+	api, err := lite.NewAPI(port, ip, m)
+	if err != nil {
+		return nil, fmt.Errorf("语音%w", err)
+	}
+	p.api = api
+	log.Printf("ember 就绪: udp=%d 公网IP=%q", port, ip)
 	return p.api, nil
 }
 
@@ -412,7 +386,7 @@ func (p *Provider) readLoop(ctx context.Context, api *webrtc.API, r *vroom, part
 				}
 			})
 			if err := pc.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeOffer, SDP: m.SDP}); err != nil {
-				log.Printf("pion-voice SetRemoteDescription: %v", err)
+				log.Printf("ember SetRemoteDescription: %v", err)
 				return
 			}
 			answer, err := pc.CreateAnswer(nil)

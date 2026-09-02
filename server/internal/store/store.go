@@ -156,6 +156,7 @@ func (s *Store) migrate() error {
 		`ALTER TABLE channels ADD COLUMN invite_only INTEGER NOT NULL DEFAULT 0`,
 		`ALTER TABLE users ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0`,
 		`ALTER TABLE users ADD COLUMN disabled INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE ingresses ADD COLUMN provider VARCHAR(32) NOT NULL DEFAULT 'livekit'`,
 	}
 	for _, stmt := range compat {
 		if _, err := s.db.Exec(stmt); err != nil {
@@ -211,6 +212,7 @@ var sqliteDDL = []string{
   channel_id INTEGER NOT NULL REFERENCES channels(id),
   ingress_id TEXT NOT NULL,
   stream_key TEXT NOT NULL,
+  provider VARCHAR(32) NOT NULL DEFAULT 'livekit',
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
   UNIQUE(user_id, channel_id)
 )`,
@@ -292,6 +294,7 @@ var mysqlDDL = []string{
   channel_id BIGINT NOT NULL,
   ingress_id VARCHAR(128) NOT NULL,
   stream_key VARCHAR(128) NOT NULL,
+  provider VARCHAR(32) NOT NULL DEFAULT 'livekit',
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
   UNIQUE KEY uk_ingresses (user_id, channel_id)
 )`,
@@ -373,6 +376,7 @@ var pgDDL = []string{
   channel_id BIGINT NOT NULL REFERENCES channels(id),
   ingress_id TEXT NOT NULL,
   stream_key TEXT NOT NULL,
+  provider VARCHAR(32) NOT NULL DEFAULT 'livekit',
   created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
   UNIQUE(user_id, channel_id)
 )`,
@@ -463,6 +467,7 @@ type Ingress struct {
 	ID        int64     `json:"id"`
 	IngressID string    `json:"ingress_id"`
 	StreamKey string    `json:"stream_key"`
+	Provider  string    `json:"provider"` // 创建该端点的推流入口内核名（删除/失效判断按归属方路由）
 	CreatedAt time.Time `json:"created_at"`
 }
 
@@ -470,23 +475,23 @@ type Ingress struct {
 func (s *Store) IngressByUserChannel(ctx context.Context, userID, channelID int64) (*Ingress, error) {
 	var in Ingress
 	err := s.db.QueryRowContext(ctx, s.q(`
-SELECT id, ingress_id, stream_key, created_at FROM ingresses
+SELECT id, ingress_id, stream_key, provider, created_at FROM ingresses
 WHERE user_id = ? AND channel_id = ?`), userID, channelID).
-		Scan(&in.ID, &in.IngressID, &in.StreamKey, &in.CreatedAt)
+		Scan(&in.ID, &in.IngressID, &in.StreamKey, &in.Provider, &in.CreatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
 	return &in, err
 }
 
-func (s *Store) CreateIngress(ctx context.Context, userID, channelID int64, ingressID, streamKey string) (*Ingress, error) {
+func (s *Store) CreateIngress(ctx context.Context, userID, channelID int64, ingressID, streamKey, provider string) (*Ingress, error) {
 	id, err := s.insertID(ctx, `
-INSERT INTO ingresses (user_id, channel_id, ingress_id, stream_key) VALUES (?, ?, ?, ?)`,
-		userID, channelID, ingressID, streamKey)
+INSERT INTO ingresses (user_id, channel_id, ingress_id, stream_key, provider) VALUES (?, ?, ?, ?, ?)`,
+		userID, channelID, ingressID, streamKey, provider)
 	if err != nil {
 		return nil, err
 	}
-	return &Ingress{ID: id, IngressID: ingressID, StreamKey: streamKey}, nil
+	return &Ingress{ID: id, IngressID: ingressID, StreamKey: streamKey, Provider: provider}, nil
 }
 
 // IngressOwner 按推流密钥反查归属（/w 推流入口按 channel_gags 拦截被禁言者用）。

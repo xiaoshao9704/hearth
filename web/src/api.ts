@@ -111,7 +111,7 @@ export async function createChannel(name: string): Promise<Channel> {
 }
 
 export interface EngineCred {
-  engine: string; // 客户端引擎名（livekit / pion-voice …）
+  engine: string; // 客户端引擎名（livekit / ember …）
   url: string;
   token: string;
 }

@@ -1,5 +1,5 @@
 // 麦克风采集（按 prefs：设备、回声消除/增益、RNNoise/浏览器降噪、音乐模式）。
-// 给不自带采集封装的引擎用（pion-voice）；LiveKit 引擎沿用 SDK 内置路径。
+// 给不自带采集封装的引擎用（ember）；LiveKit 引擎沿用 SDK 内置路径。
 import { RnnoisePipeline } from '../audio';
 import { loadPrefs } from '../prefs';
 

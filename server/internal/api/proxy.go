@@ -36,23 +36,28 @@ func (a *API) RegisterProxies(r chi.Router) {
 	// bearer 模式（服务器填 /w、密钥放 Authorization: Bearer——ingress 要求精确 /w，
 	// 带尾斜杠的 /w/ 会 404，这里做规范化宽容）。
 	whipHandler := http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		key := strings.Trim(strings.TrimPrefix(req.URL.Path, "/w"), "/")
-		if i := strings.IndexByte(key, '/'); i >= 0 {
-			key = key[:i]
-		}
+		key, bearer := rtc.WHIPToken(req)
 		if req.Method == http.MethodPost {
-			if key == "" {
-				// bearer 模式：key 在 Authorization 头；端点规范化为精确 /w
-				key = strings.TrimPrefix(req.Header.Get("Authorization"), "Bearer ")
-				req.URL.Path = "/w"
+			if bearer {
+				req.URL.Path = "/w" // bearer 模式端点规范化为精确 /w
 			}
 			if !a.canPublishByStreamKey(req.Context(), key) {
 				writeErr(w, http.StatusForbidden, "你已被禁言，无法推流")
 				return
 			}
+		} else {
+			// 会话收尾按归属路由：推流中途切换 ingest_provider 时，
+			// PATCH/DELETE 仍要送达创建该会话的进程内网关
+			for _, ik := range a.ingestKernels {
+				if ws, ok := ik.(rtc.WHIPServer); ok && ws.HasSession(key) {
+					ws.ServeWHIP(w, req, key)
+					return
+				}
+			}
 		}
-		// 进程内 WHIP 实现（如 pionwhip）直接处理，不再反代
-		if ws, ok := a.ingestProvider(req.Context()).(rtc.WHIPServer); ok {
+		// 有上游就反代（外部 ingress / 远端 bellows）；没有上游且能进程内处理（bellows）就直接处理
+		ip := a.ingestProvider(req.Context())
+		if ws, ok := ip.(rtc.WHIPServer); ok && ip.ProxyUpstream(req.Context()) == "" {
 			ws.ServeWHIP(w, req, key)
 			return
 		}
