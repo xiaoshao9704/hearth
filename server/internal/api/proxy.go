@@ -204,16 +204,46 @@ func (a *API) bindIngressEndpoint(w http.ResponseWriter, req *http.Request, inst
 	return true
 }
 
-// whipLocationWriter 进程内 bellows 应答的 Location 改写：/w/... → {prefix}/w/...
-// （客户端 PATCH/DELETE 打回同源代理路径）。反代形态的等价处理见 proxyToLoc。
+// rewriteWHIPLocation 把 WHIP 应答的会话资源地址改写回同源代理路径，
+// 使客户端的 PATCH/DELETE 能打回 hearth 而不是上游。三种形态：
+//
+//	绝对 URL   http://ingress:8080/w/abc → {prefix}/w/abc（上游主机对客户端不可达，只取路径）
+//	根相对     /w/sessions/rid           → {prefix}/w/sessions/rid
+//	纯相对     sessions/rid              → 原样（客户端按请求路径解析，本就落在代理路径下）
+//
+// 上游返回什么形态由它自己决定（进程内/远端 bellows 是我们自己产的根相对形式，
+// livekit-ingress 则不受我们控制），所以三种都要认。非 /w/ 开头的一律不动。
+func rewriteWHIPLocation(loc, prefix string) string {
+	if loc == "" {
+		return loc
+	}
+	u, err := url.Parse(loc)
+	if err != nil {
+		return loc
+	}
+	// 纯相对（无 scheme/host 且不以 / 开头）本就相对请求路径解析，改写反而会错
+	if u.Scheme == "" && u.Host == "" && !strings.HasPrefix(loc, "/") {
+		return loc
+	}
+	if !strings.HasPrefix(u.Path, "/w/") {
+		return loc
+	}
+	out := prefix + u.Path
+	if u.RawQuery != "" {
+		out += "?" + u.RawQuery
+	}
+	return out
+}
+
+// whipLocationWriter 进程内 bellows 应答的 Location 改写（反代形态的等价处理见 proxyToLoc）。
 type whipLocationWriter struct {
 	http.ResponseWriter
 	prefix string
 }
 
 func (w whipLocationWriter) WriteHeader(code int) {
-	if loc := w.Header().Get("Location"); strings.HasPrefix(loc, "/w/") {
-		w.Header().Set("Location", w.prefix+loc)
+	if loc := w.Header().Get("Location"); loc != "" {
+		w.Header().Set("Location", rewriteWHIPLocation(loc, w.prefix))
 	}
 	w.ResponseWriter.WriteHeader(code)
 }
@@ -242,7 +272,7 @@ func (a *API) proxyToLoc(w http.ResponseWriter, req *http.Request, upstream, str
 // newReverseProxy 转发到 target；stripPrefix 非空时剥掉路径前缀。
 // 上游 URL 可带路径前缀与固定参数（如 http://host/sub?key=x）：
 // 路径拼在请求路径前，参数并入请求 query（与标准库单主机反代语义一致）。
-// locPrefix 非空时改写应答 Location 的 /w/ 前缀（WHIP POST 应答的会话资源地址）。
+// locPrefix 非空时把应答 Location 改写回同源代理路径（见 rewriteWHIPLocation）。
 func newReverseProxy(target *url.URL, stripPrefix, locPrefix string) http.Handler {
 	rp := &httputil.ReverseProxy{
 		Director: func(req *http.Request) {
@@ -275,8 +305,8 @@ func newReverseProxy(target *url.URL, stripPrefix, locPrefix string) http.Handle
 	}
 	if locPrefix != "" {
 		rp.ModifyResponse = func(resp *http.Response) error {
-			if loc := resp.Header.Get("Location"); strings.HasPrefix(loc, "/w/") {
-				resp.Header.Set("Location", locPrefix+loc)
+			if loc := resp.Header.Get("Location"); loc != "" {
+				resp.Header.Set("Location", rewriteWHIPLocation(loc, locPrefix))
 			}
 			return nil
 		}
