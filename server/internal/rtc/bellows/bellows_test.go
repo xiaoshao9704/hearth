@@ -83,9 +83,9 @@ func TestWHIPHandshakeH264(t *testing.T) {
 		t.Fatalf("Content-Type 应为 application/sdp，实际 %q", ct)
 	}
 	loc := rec.Header().Get("Location")
-	// 资源地址必须是不透明会话 id：bearer 模式的密钥不能经 Location 泄进 URL/日志
-	if !strings.HasPrefix(loc, "/w/") || strings.Contains(loc, "good") {
-		t.Fatalf("Location 应为 /w/{会话id} 且不含推流密钥，实际 %q", loc)
+	// 资源地址必须是不透明会话 id 的相对形式：bearer 模式的密钥不能经 Location 泄进 URL/日志
+	if strings.Contains(loc, "/") || strings.Contains(loc, "good") {
+		t.Fatalf("Location 应为相对会话 id 且不含推流密钥，实际 %q", loc)
 	}
 	rid := strings.TrimPrefix(loc, "/w/")
 	if !g.HasSession(rid) {
@@ -104,9 +104,9 @@ func TestWHIPHandshakeH264(t *testing.T) {
 		t.Fatal("answer 应带 ice-lite 标记")
 	}
 
-	// DELETE 资源地址清理会话 → 204，且幂等
+	// DELETE 资源地址清理会话 → 204，且幂等（Location 是相对 rid，客户端按请求路径解析后回发）
 	for i := 0; i < 2; i++ {
-		dreq := httptest.NewRequest("DELETE", loc, nil)
+		dreq := httptest.NewRequest("DELETE", "/w/"+rid, nil)
 		drec := httptest.NewRecorder()
 		g.ServeWHIP(drec, dreq, rid)
 		if drec.Code != 204 {
