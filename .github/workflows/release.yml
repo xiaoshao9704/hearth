@@ -53,6 +53,8 @@ jobs:
           for arch in amd64 arm64; do
             GOARCH=$arch go build -ldflags "-s -w" -o "$GITHUB_WORKSPACE/out/hearth-linux-$arch" ./cmd/server
             GOARCH=$arch go build -ldflags "-s -w" -o "$GITHUB_WORKSPACE/out/aioinit-linux-$arch" ./cmd/aioinit
+            # 远端 Bellows 推流网关：单文件，跑在 LiveKit 同一局域网的机器上
+            GOARCH=$arch go build -ldflags "-s -w" -o "$GITHUB_WORKSPACE/out/bellows-linux-$arch" ./cmd/bellows
           done
 
       - name: 打包 Release 产物
@@ -72,6 +74,7 @@ jobs:
           path: |
             out/hearth-linux-*
             out/aioinit-linux-*
+            out/bellows-linux-*
             web/dist
             hearth_*.tar.gz
           retention-days: 14
@@ -80,7 +83,9 @@ jobs:
         if: github.ref_type == 'tag'
         uses: softprops/action-gh-release@v3
         with:
-          files: hearth_*.tar.gz
+          files: |
+            hearth_*.tar.gz
+            out/bellows-linux-*
 
   image:
     runs-on: ubuntu-latest
