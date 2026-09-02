@@ -51,6 +51,7 @@ const PATHS: Record<string, string> = {
   menu: 'M3 5.5h14M3 10h14M3 14.5h14',
   sliders: 'M2.5 6h6.5M15 6h2.5M2.5 14H4M8 14h9.5M15 6a2 2 0 11-4 0 2 2 0 014 0M8 14a2 2 0 11-4 0 2 2 0 014 0',
   fullscreen: 'M3.5 7.5v-4h4M12.5 3.5h4v4M16.5 12.5v4h-4M7.5 16.5h-4v-4',
+  more: 'M3.4 10a1.1 1.1 0 102.2 0 1.1 1.1 0 10-2.2 0M8.9 10a1.1 1.1 0 102.2 0 1.1 1.1 0 10-2.2 0M14.4 10a1.1 1.1 0 102.2 0 1.1 1.1 0 10-2.2 0',
 };
 
 export function icon(name: string, size = 16, color = 'currentColor', strokeWidth = 1.7): string {
@@ -65,6 +66,7 @@ const LUCIDE: Record<string, string> = {
   timer: '<line x1="10" x2="14" y1="2" y2="2"/><line x1="12" x2="15" y1="14" y2="11"/><circle cx="12" cy="14" r="8"/>',
   gauge: '<path d="m12 14 4-4"/><path d="M3.34 19a10 10 0 1 1 17.32 0"/>',
   cpu: '<path d="M12 20v2"/><path d="M12 2v2"/><path d="M17 20v2"/><path d="M17 2v2"/><path d="M2 12h2"/><path d="M2 17h2"/><path d="M2 7h2"/><path d="M20 12h2"/><path d="M20 17h2"/><path d="M20 7h2"/><path d="M7 20v2"/><path d="M7 2v2"/><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="8" y="8" width="8" height="8" rx="1"/>',
+  pin: '<path d="M12 17v5"/><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V6h1a2 2 0 0 0 0-4H8a2 2 0 0 0 0 4h1z"/>',
 };
 
 export function licon(name: string, size = 12, color = 'currentColor'): string {
