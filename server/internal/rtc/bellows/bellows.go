@@ -48,9 +48,9 @@ func ConfigKeys() []rtc.ConfigKey {
 		{Name: "bellows_udp_port", Env: "BELLOWS_UDP_PORT", Group: "ingress", Default: "47710",
 			Label: "WHIP 媒体 UDP 端口", Hint: "单端口 mux，需在防火墙/安全组放行；改动重启生效"},
 		{Name: "bellows_public_ip", Env: "BELLOWS_PUBLIC_IP", Group: "ingress",
-			Label: "WHIP 公网 IP", Hint: "留空 = 自动宣告全部网卡地址与探测到的公网映射；显式设置则只通告该地址（覆盖）"},
+			Label: "WHIP 公网 IP", Hint: "留空 = 自动宣告全部网卡地址与 STUN 探测到的公网映射；显式设置则只通告该地址（覆盖）"},
 		{Name: "bellows_stun_servers", Env: "BELLOWS_STUN_SERVERS", Group: "ingress",
-			Label: "STUN 服务器", Hint: "逗号分隔；探测各网卡公网映射用，留空用内置默认（不可达时改填可用地址，探测全挂会回落 HTTP 探测）"},
+			Label: "STUN 服务器", Hint: "逗号分隔；探测各网卡公网映射用，留空用内置默认（不可达时改填可用地址）"},
 	}
 }
 

@@ -10,7 +10,7 @@
 //	LIVEKIT_API_URL / LIVEKIT_API_KEY / LIVEKIT_API_SECRET  必填，与 hearth 同名
 //	BELLOWS_ADDR            WHIP HTTP 监听地址，默认 :8090
 //	BELLOWS_UDP_PORT        媒体 UDP 端口，默认 47710
-//	BELLOWS_PUBLIC_IP       向推流端通告的 IP；留空 = 自动宣告全部网卡地址 + STUN/HTTP 探测的公网映射，显式设置则只通告该地址
+//	BELLOWS_PUBLIC_IP       向推流端通告的 IP；留空 = 自动宣告全部网卡地址 + STUN 探测的公网映射，显式设置则只通告该地址
 //	BELLOWS_STUN_SERVERS    逗号分隔的 STUN 服务器；探测各网卡公网映射用，留空用内置默认
 package main
 

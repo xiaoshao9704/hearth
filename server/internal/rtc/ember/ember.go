@@ -30,9 +30,9 @@ func ConfigKeys() []rtc.ConfigKey {
 		{Name: "ember_udp_port", Env: "EMBER_UDP_PORT", Group: "voice", Default: "47700",
 			Label: "媒体 UDP 端口", Hint: "单端口 mux，需在防火墙/安全组放行；改动重启生效"},
 		{Name: "ember_public_ip", Env: "EMBER_PUBLIC_IP", Group: "voice",
-			Label: "公网 IP", Hint: "留空 = 自动宣告全部网卡地址与探测到的公网映射；显式设置则只通告该地址（覆盖）"},
+			Label: "公网 IP", Hint: "留空 = 自动宣告全部网卡地址与 STUN 探测到的公网映射；显式设置则只通告该地址（覆盖）"},
 		{Name: "ember_stun_servers", Env: "EMBER_STUN_SERVERS", Group: "voice",
-			Label: "STUN 服务器", Hint: "逗号分隔；探测各网卡公网映射用，留空用内置默认（不可达时改填可用地址，探测全挂会回落 HTTP 探测）"},
+			Label: "STUN 服务器", Hint: "逗号分隔；探测各网卡公网映射用，留空用内置默认（不可达时改填可用地址）"},
 	}
 }
 
