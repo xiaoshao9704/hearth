@@ -105,8 +105,8 @@ func TestMigrateImportsLegacyCfg(t *testing.T) {
 		t.Fatalf("造 ingress 失败: %v", err)
 	}
 	a.runMigrations(ctx)
-	if v, _ := a.st.MigrationVersion(ctx); v != 1 {
-		t.Fatalf("迁移成功后游标应为 1，实际 %d", v)
+	if v, _ := a.st.MigrationVersion(ctx); v != 2 {
+		t.Fatalf("迁移成功后游标应为最新版本 2，实际 %d", v)
 	}
 	if a.instance("livekit") == nil || a.instance("livekit").Locked {
 		t.Fatal("旧 cfg_livekit_* 应导入为 DB 实例 livekit")
@@ -186,8 +186,8 @@ func TestMigratePinsLegacySelectors(t *testing.T) {
 }
 
 // 老远端形态（ingest_provider=bellows + bellows_remote_url）：v1 改写选择器与
-// 存量 ingress 记录归属到 bellows-remote。env 组合（INGRESS_PROVIDER=bellows 且
-// BELLOWS_REMOTE_URL 已设）无法改写 env，由部署侧手动改配置解决，不加告警。
+// 存量 ingress 记录归属到 bellows-remote。部署侧用 INGEST_PROVIDER env 固定的旧组合
+// 由迁移 v2 把 env 值一次性落库（此后选择器不再读 env）。
 func TestMigrateRemoteBellowsSelector(t *testing.T) {
 	maskProviderEnv(t)
 	a := testAPI(t)
@@ -337,15 +337,18 @@ func TestLivekitAPIURLDefaultOnInstancePaths(t *testing.T) {
 	}
 }
 
-// env 残留 INGEST_PROVIDER=livekit（无推流能力 → 回落内建 bellows）时：
+// 选择器指向无推流能力的实例（livekit → 回落内建 bellows）时：
 // getIngress 不做归属自愈——不删端点、不换 key，按记录原归属实例返回地址。
 func TestGetIngressFallbackKeepsEndpoint(t *testing.T) {
 	maskProviderEnv(t)
 	t.Setenv("LIVEKIT_API_KEY", "k")
 	t.Setenv("LIVEKIT_API_SECRET", "s")
-	t.Setenv("INGEST_PROVIDER", "livekit") // 旧 env 残留：livekit 已无推流能力
 	a := testAPI(t)
 	ctx := context.Background()
+	// 选择器不再读环境变量，从 DB 把推流入口指向无推流能力的 livekit 实例
+	if err := a.st.SetSetting(ctx, "cfg_ingest_provider", "livekit"); err != nil {
+		t.Fatalf("写选择器失败: %v", err)
+	}
 	u, err := a.st.CreateUser(ctx, "alice", "x")
 	if err != nil {
 		t.Fatalf("造用户失败: %v", err)

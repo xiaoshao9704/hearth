@@ -38,7 +38,7 @@
 
 ### 动态配置（server/internal/api/dyncfg.go）
 
-优先级：环境变量（锁定，后台只读）> DB settings（`cfg_` 前缀，保存即生效）> 实现声明的默认值。带 `Options` 的键后端校验枚举值。
+优先级：环境变量（锁定，后台只读）> DB settings（`cfg_` 前缀，保存即生效）> 实现声明的默认值。带 `Options` 的键后端校验枚举值。例外：三个内核选择器（`*_provider`）不读环境变量——env 的职责只是把 provider 实例合成进可选列表，选择一律走管理后台落库；部署侧旧的选择器 env 由迁移 v2 一次性导入后不再读取。
 
 ### 前端（web/）
 
@@ -70,5 +70,5 @@
 
 - 服务端：`cd server && go build ./... && go vet ./...` 必须通过。
 - 前端：`cd web && npx tsc --noEmit && npm run build` 必须通过。
-- 行为改动尽量本地起服务验证：`VOICE_PROVIDER=ember STAGE_PROVIDER=none go run ./cmd/server` 零外部依赖。
+- 行为改动尽量本地起服务验证：`go run ./cmd/server` 零外部依赖（选择器默认 ember 语音 + 关闭舞台线）。
 - 发布：打 `v*` tag 触发 CI（`.github/workflows/release.yml`，原生交叉编译 + 纯装配镜像，无 QEMU）。

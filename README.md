@@ -114,12 +114,11 @@ hearth/
 | `X-livekit` | + 内嵌 LiveKit（投屏/摄像头/弱网 SVC） | ~110MB |
 | `X-full` | + 内嵌 redis + ingress（OBS WHIP 推流） | ~600MB |
 
-最小形态**只需要 hearth 一个容器**（语音内核选 ember，舞台线关闭）：
+最小形态**只需要 hearth 一个容器**（选择器默认即 ember 语音 + 关闭舞台线，内核选择在管理后台改）：
 
 ```bash
 docker run -d --name hearth \
   -p 8080:8080 -p 47700:47700/udp \
-  -e VOICE_PROVIDER=ember -e STAGE_PROVIDER=none \
   -v hearth-data:/data \
   ghcr.io/xiaoshao9704/hearth:latest
 docker exec hearth /app/hearth adduser <用户名> <密码>   # 首账号自动管理员
@@ -194,7 +193,7 @@ cd deploy && cp .env.example .env && $EDITOR .env
 ```bash
 # 后端（终端一）——纯语音开发零外部依赖
 cd server
-VOICE_PROVIDER=ember STAGE_PROVIDER=none go run ./cmd/server   # :8080
+go run ./cmd/server   # :8080（选择器默认即 ember 语音 + 关闭舞台线）
 
 # 前端（终端二）
 cd web && npm install && npm run dev                          # :5173

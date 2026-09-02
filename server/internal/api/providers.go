@@ -303,7 +303,7 @@ type migrationStep struct {
 // runMigrations 版本游标迁移入口：末尾照常重建注册表。
 // 以后所有跨版本兼容处理都作为新版本步挂在这里。
 func (a *API) runMigrations(ctx context.Context) {
-	a.runMigrationSteps(ctx, []migrationStep{{1, a.migrateProviders}})
+	a.runMigrationSteps(ctx, []migrationStep{{1, a.migrateProviders}, {2, a.importSelectorEnv}})
 	a.reloadProviders(ctx)
 }
 
@@ -398,8 +398,7 @@ func (a *API) migrateProviders(ctx context.Context) error {
 	}
 	// 老远端形态（ingest_provider=bellows + bellows_remote_url）：内建 bellows 不再读远端键，
 	// 选择器改写指向 bellows-remote 实例，存量 ingress 记录归属一并改写
-	// （INGEST_PROVIDER env 锁定时 DB 值与记录都不动，由部署侧改 env 解决）
-	if os.Getenv("INGEST_PROVIDER") == "" && remoteReady {
+	if remoteReady {
 		if v, _ := a.st.GetSetting(ctx, "cfg_ingest_provider"); v == TypeBellows {
 			a.st.SetSetting(ctx, "cfg_ingest_provider", TypeBellowsRemote)
 			if err := a.st.RewriteIngressProvider(ctx, TypeBellows, TypeBellowsRemote); err != nil {
@@ -412,8 +411,8 @@ func (a *API) migrateProviders(ctx context.Context) error {
 		return err
 	}
 
-	// 选择器默认落库：老部署（env 未锁定选择器且后台未选）原来默认跑 livekit，
-	// 注册表默认是内建 ember/bellows，这里把旧默认写死，保证升级后行为不变。
+	// 选择器默认落库：老部署（后台未选过）原来默认跑 livekit，注册表默认是内建
+	// ember/bellows，这里把旧默认写死，保证升级后行为不变。
 	// 只随 v1 跑一次：管理员之后清空选择器恢复默认不会被重启撤销。
 	hasProvider := func(alias, envProbe string) bool {
 		if _, err := a.st.ProviderByAlias(ctx, alias); err == nil {
@@ -421,20 +420,35 @@ func (a *API) migrateProviders(ctx context.Context) error {
 		}
 		return envProbe != "" && os.Getenv(envProbe) != ""
 	}
-	if os.Getenv("VOICE_PROVIDER") == "" {
-		if v, _ := a.st.GetSetting(ctx, "cfg_voice_provider"); strings.TrimSpace(v) == "" && hasProvider(TypeLivekit, "LIVEKIT_API_KEY") {
-			a.st.SetSetting(ctx, "cfg_voice_provider", TypeLivekit)
-		}
+	if v, _ := a.st.GetSetting(ctx, "cfg_voice_provider"); strings.TrimSpace(v) == "" && hasProvider(TypeLivekit, "LIVEKIT_API_KEY") {
+		a.st.SetSetting(ctx, "cfg_voice_provider", TypeLivekit)
 	}
-	if os.Getenv("STAGE_PROVIDER") == "" {
-		if v, _ := a.st.GetSetting(ctx, "cfg_stage_provider"); strings.TrimSpace(v) == "" && hasProvider(TypeLivekit, "LIVEKIT_API_KEY") {
-			a.st.SetSetting(ctx, "cfg_stage_provider", TypeLivekit)
-		}
+	if v, _ := a.st.GetSetting(ctx, "cfg_stage_provider"); strings.TrimSpace(v) == "" && hasProvider(TypeLivekit, "LIVEKIT_API_KEY") {
+		a.st.SetSetting(ctx, "cfg_stage_provider", TypeLivekit)
 	}
-	if os.Getenv("INGEST_PROVIDER") == "" {
-		if v, _ := a.st.GetSetting(ctx, "cfg_ingest_provider"); strings.TrimSpace(v) == "" && hasProvider(TypeLivekitIngress, "INGRESS_UPSTREAM_URL") {
-			a.st.SetSetting(ctx, "cfg_ingest_provider", TypeLivekitIngress)
+	if v, _ := a.st.GetSetting(ctx, "cfg_ingest_provider"); strings.TrimSpace(v) == "" && hasProvider(TypeLivekitIngress, "INGRESS_UPSTREAM_URL") {
+		a.st.SetSetting(ctx, "cfg_ingest_provider", TypeLivekitIngress)
+	}
+	return nil
+}
+
+// importSelectorEnv 迁移 v2：选择器不再读环境变量（env 只负责把 provider 实例带进
+// 可选列表）。为保证旧部署升级后行为不变，部署侧还设着的选择器 env 在后台从未选过时
+// 把 env 值一次性落库；改名前残留（pion）与无对应能力的值（ingest 的 livekit）跳过，
+// 由 warnLegacyConfig 打告警。只随 v2 跑一次：之后管理员清空恢复默认不被撤销。
+func (a *API) importSelectorEnv(ctx context.Context) error {
+	for name, env := range selectorEnv {
+		v := strings.TrimSpace(os.Getenv(env))
+		if v == "" || v == "pion" || (name == "ingest_provider" && v == "livekit") {
+			continue
 		}
+		if cur, _ := a.st.GetSetting(ctx, "cfg_"+name); strings.TrimSpace(cur) != "" {
+			continue
+		}
+		if err := a.st.SetSetting(ctx, "cfg_"+name, v); err != nil {
+			return err
+		}
+		log.Printf("配置迁移: %s=%q 已落库（选择器不再读环境变量，请从部署侧删除）", env, v)
 	}
 	return nil
 }

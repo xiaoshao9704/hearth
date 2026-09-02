@@ -2,6 +2,8 @@
 // 配置键 = 内核选择器（voice_provider / stage_provider / ingest_provider）+ 内建实例的全局命名空间键。
 // 规则：环境变量（含 .env，进程启动时已加载）设置了 → 以环境为准，管理后台只读展示；
 // 未设置 → 管理后台可填，落库 settings（cfg_ 前缀），保存后即时生效。
+// 例外：三个选择器不读环境变量（env 的职责只是把 provider 实例带进可选列表）；
+// 部署侧旧的选择器 env 由迁移 v2 一次性落库，此后以管理后台为准。
 package api
 
 import (
@@ -15,29 +17,48 @@ import (
 )
 
 // 内核选择器：值是注册表里的实例 alias（见 providers.go），合法性由 adminSetConfig 的
-// 选择器钩子按实例能力校验（Options 在 adminGetConfig 里按当前实例动态填充）。
-// 语音线（voice）与舞台线（stage：投屏/摄像头/OBS 推流及其伴音）各占一个槽位。
+// 选择器钩子按实例能力校验（Options 在 adminGetConfig 里按当前实例动态填充，注册新实例
+// 即进可选列表）。语音线（voice）与舞台线（stage：投屏/摄像头/OBS 推流及其伴音）各占一个槽位。
 var selectorKeys = []rtc.ConfigKey{
-	{Name: "voice_provider", Env: "VOICE_PROVIDER", Group: "core",
+	{Name: "voice_provider", Group: "core",
 		Label: "语音内核", Hint: "实例 alias；内建 ember = 进程内纯音频 SFU，零外部依赖；语音舞台同选一套 livekit 即单线形态"},
-	{Name: "stage_provider", Env: "STAGE_PROVIDER", Group: "core",
+	{Name: "stage_provider", Group: "core",
 		Label: "舞台内核", Hint: "实例 alias；none = 纯语音部署，禁用投屏与摄像头"},
-	{Name: "ingest_provider", Env: "INGEST_PROVIDER", Group: "core",
+	{Name: "ingest_provider", Group: "core",
 		Label: "推流入口", Hint: "OBS/WHIP 推流的接入实例 alias；内建 bellows = 进程内直通网关（支持 HEVC/AV1，发进 LiveKit 房间）"},
 }
 
-// warnLegacyConfig 启动时检查改名前的旧配置（0.3.0 曾做兼容映射，0.3.1 起不再识别）：
-// 选择器里的 "pion" 按未知值回落默认实例（voice→ember、ingest→bellows），pion_* 键被忽略
-// 回落 ember_* 默认值，这里只打一次日志提示管理员改配置，不做静默迁移。
+// selectorEnv 选择器对应的旧环境变量名：只供迁移 v2 一次性导入与启动告警，不参与取值。
+var selectorEnv = map[string]string{
+	"voice_provider":  "VOICE_PROVIDER",
+	"stage_provider":  "STAGE_PROVIDER",
+	"ingest_provider": "INGEST_PROVIDER",
+}
+
+// warnLegacyConfig 启动时检查已废弃/不再读取的旧配置，打一次日志提示管理员，不做静默迁移：
+//   - 选择器 env（VOICE/STAGE/INGEST_PROVIDER）：不再读取（迁移 v2 已把旧值一次性落库），
+//     提醒从部署侧删除；值是改名前残留（pion / ingest 的 livekit）时说明回落口径；
+//   - 选择器 DB 值是 "pion"：按未知值回落默认实例（voice→ember、ingest→bellows）；
+//   - pion_* 键：被忽略回落 ember_* 默认值。
 func (a *API) warnLegacyConfig(ctx context.Context) {
-	for _, sel := range []string{"voice_provider", "ingest_provider"} {
-		if a.dynVal(ctx, sel) == "pion" {
-			log.Printf("配置告警: %s=pion 已不再支持（改名为 ember/bellows），当前按默认实例运行，请在管理后台重新选择", sel)
+	for name, env := range selectorEnv {
+		v := strings.TrimSpace(os.Getenv(env))
+		if v == "" {
+			continue
+		}
+		switch {
+		case v == "pion":
+			log.Printf("配置告警: %s=pion 是改名前的残留（语音/推流内核现名 ember/bellows）；选择器已不再读环境变量，当前按管理后台所选实例运行", env)
+		case name == "ingest_provider" && v == "livekit":
+			log.Printf("配置告警: %s=livekit 无推流能力（推流入口已拆为独立类型 livekit-ingress/bellows-remote）；选择器已不再读环境变量，当前按管理后台所选实例运行", env)
+		default:
+			log.Printf("配置告警: %s 已不再读取（选择器以管理后台为准；旧值已在首次启动时落库导入），请从部署侧删除该环境变量", env)
 		}
 	}
-	// env 里的旧值无法改写（DB 值已由 migrateProviders 改写为 livekit-ingress），只告警
-	if os.Getenv("INGEST_PROVIDER") == "livekit" {
-		log.Printf("配置告警: INGEST_PROVIDER=livekit 已不再有效（推流入口已拆为独立类型），请改为 livekit-ingress，当前回落到默认实例 bellows")
+	for _, sel := range []string{"voice_provider", "ingest_provider"} {
+		if v, _ := a.st.GetSetting(ctx, "cfg_"+sel); strings.TrimSpace(v) == "pion" {
+			log.Printf("配置告警: %s=pion 已不再支持（改名为 ember/bellows），当前按默认实例运行，请在管理后台重新选择", sel)
+		}
 	}
 	for _, old := range []struct{ Env, Name, New string }{
 		{"PION_UDP_PORT", "pion_udp_port", "ember_udp_port"},
@@ -70,7 +91,7 @@ func (a *API) findDynKey(name string) *rtc.ConfigKey {
 // envFixed 该项是否被环境变量固定（.env 在启动时已合入环境）。
 func envFixed(k *rtc.ConfigKey) bool { return k.Env != "" && os.Getenv(k.Env) != "" }
 
-// dynVal 取生效值：环境变量 > 数据库 > 实现声明的兜底默认。
+// dynVal 取生效值：环境变量（选择器除外） > 数据库 > 实现声明的兜底默认。
 // 选择器默认：voice→ember、stage→none、ingest→bellows（内建实例兜底，零外部依赖）；
 // 选择器取到未注册或无对应能力的 alias 时由各 *Instance 取值函数回落（见 providers.go）。
 func (a *API) dynVal(ctx context.Context, name string) string {
