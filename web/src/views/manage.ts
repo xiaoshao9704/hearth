@@ -12,6 +12,7 @@ import {
   setInviteOnly,
   unbanUser,
 } from '../api';
+import type { RoomParticipant } from '../api';
 import { avatarHtml, esc, icon, timeAgo, toast } from '../ui';
 
 type Tab = 'members' | 'bans' | 'allow';
@@ -20,7 +21,7 @@ export async function renderManage(root: HTMLElement, channel: string) {
   const me = getUser();
   let tab: Tab = 'members';
   let inviteOnly = false;
-  let participants: { identity: string; name: string; joined_at: number }[] = [];
+  let participants: RoomParticipant[] = [];
   let bans: string[] = [];
   let allow: string[] = [];
 
@@ -133,9 +134,10 @@ export async function renderManage(root: HTMLElement, channel: string) {
                 : [...users.entries()]
                     .map(([uname, plist]) => {
                       const isMe = uname === (me?.username ?? '');
-                      const obs = plist.some((p) => p.identity.endsWith('-obs'));
+                      // 推流设备按内核透传的 kind=ingest 判断（不再解析 identity 后缀），标签随行展示
+                      const ing = plist.find((p) => p.kind === 'ingest');
                       const meta = [
-                        obs ? 'OBS 推流中 · 踢出会同时断掉推流' : '',
+                        ing ? `OBS 推流中${ing.tag ? `（${ing.tag}）` : ''} · 踢出会同时断掉推流` : '',
                         `进房 ${timeAgo(new Date(Math.min(...plist.map((p) => p.joined_at * 1000))).toISOString()).replace('前', '')}`,
                         plist.length > 1 ? `${plist.length} 台设备` : '',
                       ]

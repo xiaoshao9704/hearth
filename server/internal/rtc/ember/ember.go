@@ -52,6 +52,9 @@ type sigMsg struct {
 type peerInfo struct {
 	Identity string `json:"identity"`
 	Name     string `json:"name"`
+	Username string `json:"username"`       // 归属用户名（语音参与者 = 显示名；前端据此聚合设备，不再解析 identity 前缀）
+	Kind     string `json:"kind,omitempty"` // 参与者类别（ingest = 推流设备）；ember 是纯语音内核，恒为空
+	Tag      string `json:"tag,omitempty"`  // 推流设备标签（kind=ingest 时有效）
 	MicOn    bool   `json:"micOn"`
 	Muted    bool   `json:"muted,omitempty"` // 服务端禁言（channel_gags）
 }
@@ -595,7 +598,7 @@ func (r *vroom) roster(exclude string) []peerInfo {
 		if pt.identity == exclude {
 			continue
 		}
-		out = append(out, peerInfo{Identity: pt.identity, Name: pt.name, MicOn: pt.micOn, Muted: pt.muted.Load()})
+		out = append(out, peerInfo{Identity: pt.identity, Name: pt.name, Username: pt.name, MicOn: pt.micOn, Muted: pt.muted.Load()})
 	}
 	return out
 }

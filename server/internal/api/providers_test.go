@@ -2,10 +2,8 @@ package api
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"net/http/httptest"
-	"strings"
 	"testing"
 
 	"hearth/server/internal/chat"
@@ -85,28 +83,16 @@ func TestMigrateImportsLegacyCfg(t *testing.T) {
 	maskProviderEnv(t)
 	a := testAPI(t)
 	ctx := context.Background()
-	// testAPI 的 New 已跑过 v1（空库游标 0→1）；重置游标模拟从旧版本升级
+	// testAPI 的 New 已跑过全部迁移（空库游标 0→3）；重置游标模拟从旧版本升级
 	a.st.SetMigrationVersion(ctx, 0)
 	a.st.SetSetting(ctx, "cfg_livekit_api_url", "http://old:7880")
 	a.st.SetSetting(ctx, "cfg_livekit_api_key", "k")
 	a.st.SetSetting(ctx, "cfg_livekit_api_secret", "s")
 	a.st.SetSetting(ctx, "cfg_ingest_provider", "livekit") // 旧值：livekit 的 ingress 面
 	a.st.SetSetting(ctx, "cfg_ingress_upstream_url", "http://old:58080")
-	// 旧库里归属为实现名 livekit 的 ingress 记录
-	u, err := a.st.CreateUser(ctx, "alice", "x")
-	if err != nil {
-		t.Fatalf("造用户失败: %v", err)
-	}
-	c, err := a.st.CreateChannel(ctx, "chan1", u.ID)
-	if err != nil {
-		t.Fatalf("造频道失败: %v", err)
-	}
-	if _, err := a.st.CreateIngress(ctx, u.ID, c.ID, "ing1", "key1", "livekit"); err != nil {
-		t.Fatalf("造 ingress 失败: %v", err)
-	}
 	a.runMigrations(ctx)
-	if v, _ := a.st.MigrationVersion(ctx); v != 2 {
-		t.Fatalf("迁移成功后游标应为最新版本 2，实际 %d", v)
+	if v, _ := a.st.MigrationVersion(ctx); v != 3 {
+		t.Fatalf("迁移成功后游标应为最新版本 3，实际 %d", v)
 	}
 	if a.instance("livekit") == nil || a.instance("livekit").Locked {
 		t.Fatal("旧 cfg_livekit_* 应导入为 DB 实例 livekit")
@@ -120,10 +106,6 @@ func TestMigrateImportsLegacyCfg(t *testing.T) {
 	}
 	if v, _ := a.st.GetSetting(ctx, "cfg_ingest_provider"); v != "livekit-ingress" {
 		t.Fatalf("旧选择器值应改写为 livekit-ingress，实际 %q", v)
-	}
-	rec, err := a.st.IngressByUserChannel(ctx, u.ID, c.ID)
-	if err != nil || rec.Provider != "livekit-ingress" {
-		t.Fatalf("ingress 记录归属应改写为 livekit-ingress: %+v err=%v", rec, err)
 	}
 }
 
@@ -196,24 +178,9 @@ func TestMigrateRemoteBellowsSelector(t *testing.T) {
 	a.st.SetSetting(ctx, "cfg_ingest_provider", "bellows")
 	a.st.SetSetting(ctx, "cfg_bellows_remote_url", "http://10.0.0.5:8090")
 	a.st.SetSetting(ctx, "cfg_bellows_shared_secret", "sec")
-	u, err := a.st.CreateUser(ctx, "alice", "x")
-	if err != nil {
-		t.Fatalf("造用户失败: %v", err)
-	}
-	c, err := a.st.CreateChannel(ctx, "chan1", u.ID)
-	if err != nil {
-		t.Fatalf("造频道失败: %v", err)
-	}
-	if _, err := a.st.CreateIngress(ctx, u.ID, c.ID, "ing1", "key1", "bellows"); err != nil {
-		t.Fatalf("造 ingress 失败: %v", err)
-	}
 	a.runMigrations(ctx)
 	if v, _ := a.st.GetSetting(ctx, "cfg_ingest_provider"); v != "bellows-remote" {
 		t.Fatalf("老远端形态选择器应改写为 bellows-remote，实际 %q", v)
-	}
-	rec, err := a.st.IngressByUserChannel(ctx, u.ID, c.ID)
-	if err != nil || rec.Provider != "bellows-remote" {
-		t.Fatalf("ingress 记录归属应改写为 bellows-remote: %+v err=%v", rec, err)
 	}
 	inst := a.instance("bellows-remote")
 	if inst == nil || inst.Params["bellows_remote_url"] != "http://10.0.0.5:8090" {
@@ -262,7 +229,7 @@ func TestMigrationFailureKeepsCursor(t *testing.T) {
 func TestMigrateFreshDeployKeepsBuiltinDefaults(t *testing.T) {
 	// 屏蔽真实环境里可能存在的内核变量，保证「全新部署」前提
 	maskProviderEnv(t)
-	a := testAPI(t) // New 里已完成全新部署的首次迁移（游标 0→1）
+	a := testAPI(t) // New 里已完成全新部署的首次迁移（游标 0→3）
 	ctx := context.Background()
 	a.runMigrations(ctx) // 重跑幂等
 	for _, k := range []string{"cfg_voice_provider", "cfg_stage_provider", "cfg_ingest_provider"} {
@@ -313,8 +280,9 @@ func TestReloadKeepsRegistryOnListFailure(t *testing.T) {
 	}
 }
 
-// env 只设 LIVEKIT_URL+KEY+SECRET（不设 LIVEKIT_API_URL）时，livekit-ingress 实例与
-// 内建 bellows 读到的 livekit_api_url 都应回落字段模式声明的 Default（apiURLDefault 推导值）。
+// env 只设 LIVEKIT_URL+KEY+SECRET（不设 LIVEKIT_API_URL）时，livekit-ingress 实例读到的
+// livekit_api_url 应回落字段模式声明的 Default（apiURLDefault 推导值）；
+// 内建 bellows 的发布出口应解析到该 env 锁定 livekit 实例的 Publisher。
 func TestLivekitAPIURLDefaultOnInstancePaths(t *testing.T) {
 	maskProviderEnv(t)
 	t.Setenv("LIVEKIT_URL", "wss://lk.example.com")
@@ -331,79 +299,10 @@ func TestLivekitAPIURLDefaultOnInstancePaths(t *testing.T) {
 	if got := ing.Cfg(ctx, "livekit_api_url"); got != want {
 		t.Fatalf("livekit-ingress 的 api_url 应取 Default 推导值 %q，实际 %q", want, got)
 	}
-	// v1 已把 stage 选择器落库 livekit（env 探测到凭证），内建 bellows 路由到该实例
-	if got := a.builtinBellowsCfg(ctx, "livekit_api_url"); got != want {
-		t.Fatalf("内建 bellows 的 api_url 应取 Default 推导值 %q，实际 %q", want, got)
-	}
-}
-
-// 选择器指向无推流能力的实例（livekit → 回落内建 bellows）时：
-// getIngress 不做归属自愈——不删端点、不换 key，按记录原归属实例返回地址。
-func TestGetIngressFallbackKeepsEndpoint(t *testing.T) {
-	maskProviderEnv(t)
-	t.Setenv("LIVEKIT_API_KEY", "k")
-	t.Setenv("LIVEKIT_API_SECRET", "s")
-	a := testAPI(t)
-	ctx := context.Background()
-	// 选择器不再读环境变量，从 DB 把推流入口指向无推流能力的 livekit 实例
-	if err := a.st.SetSetting(ctx, "cfg_ingest_provider", "livekit"); err != nil {
-		t.Fatalf("写选择器失败: %v", err)
-	}
-	u, err := a.st.CreateUser(ctx, "alice", "x")
-	if err != nil {
-		t.Fatalf("造用户失败: %v", err)
-	}
-	c, err := a.st.CreateChannel(ctx, "chan1", u.ID)
-	if err != nil {
-		t.Fatalf("造频道失败: %v", err)
-	}
-	if _, err := a.st.CreateIngress(ctx, u.ID, c.ID, "ing1", "keepkey", "livekit-ingress"); err != nil {
-		t.Fatalf("造 ingress 失败: %v", err)
-	}
-	// 记录归属的实例在册（否则按「配置无效」503）
-	if err := a.st.CreateProvider(ctx, &store.ProviderRecord{Alias: "livekit-ingress", Type: TypeLivekitIngress,
-		Params: map[string]string{"livekit_api_url": "http://x", "livekit_api_key": "k",
-			"livekit_api_secret": "s", "ingress_upstream_url": "http://up"}}); err != nil {
-		t.Fatalf("造实例失败: %v", err)
-	}
-	token, err := a.st.CreateSession(ctx, u.ID)
-	if err != nil {
-		t.Fatalf("签发会话失败: %v", err)
-	}
-	a.reloadProviders(ctx)
-	r := a.Router()
-
-	rec := doReq(t, r, "POST", "/api/ingress", token, map[string]any{"channel": "chan1"})
-	if rec.Code != 200 {
-		t.Fatalf("回落保护下应返回既有地址 200，实际 %d: %s", rec.Code, rec.Body.String())
-	}
-	var resp ingressResp
-	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("解析响应失败: %v", err)
-	}
-	if resp.StreamKey != "keepkey" {
-		t.Fatalf("回落状态下不得重建密钥，实际 %q", resp.StreamKey)
-	}
-	if !strings.Contains(resp.URL, "/providers/livekit-ingress/w/keepkey") {
-		t.Fatalf("地址应按记录原归属实例推导，实际 %q", resp.URL)
-	}
-	dbRec, err := a.st.IngressByUserChannel(ctx, u.ID, c.ID)
-	if err != nil || dbRec.Provider != "livekit-ingress" || dbRec.IngressID != "ing1" {
-		t.Fatalf("回落状态下不得删除重建端点: %+v err=%v", dbRec, err)
-	}
-
-	// 回落且无存量记录：不创建端点，503「推流入口配置无效」（与 resetIngress 前置拦截同口径）
-	u2, err := a.st.CreateUser(ctx, "bob", "x")
-	if err != nil {
-		t.Fatalf("造用户失败: %v", err)
-	}
-	tok2, err := a.st.CreateSession(ctx, u2.ID)
-	if err != nil {
-		t.Fatalf("签发会话失败: %v", err)
-	}
-	rec = doReq(t, r, "POST", "/api/ingress", tok2, map[string]any{"channel": "chan1"})
-	if rec.Code != 503 || !strings.Contains(rec.Body.String(), "推流入口配置无效") {
-		t.Fatalf("回落状态下创建端点应 503 配置无效，实际 %d: %s", rec.Code, rec.Body.String())
+	// v1 已把 stage 选择器落库 livekit（env 探测到凭证），内建 bellows 的发布出口
+	// 即该舞台线实例的 Publisher（livekit Provider 实现 rtc.Publisher）
+	if pub := a.stagePublisherSink(ctx); pub == nil {
+		t.Fatal("舞台线为 livekit 时 bellows 发布出口应非 nil")
 	}
 }
 

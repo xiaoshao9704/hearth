@@ -12,13 +12,24 @@ interface SigMsg {
   sdp?: string;
   mids?: Record<string, string>;
   identity?: string;
-  peers?: { identity: string; name: string; micOn: boolean; muted?: boolean }[];
+  // 名册条目：username/kind/tag 标识推流参与者（kind=ingest），缺省时回落 name/identity 推断
+  peers?: { identity: string; name: string; micOn: boolean; muted?: boolean; username?: string; kind?: string; tag?: string }[];
   on?: boolean;
   speakers?: string[];
   reason?: string;
 }
 
 const usernameOf = (identity: string, name: string) => name || identity.split('-')[0];
+
+// 名册条目（身份之外的展示/管理信息）
+interface RosterEntry {
+  name: string;
+  micOn: boolean;
+  muted: boolean;
+  username: string; // 归属用户名（推流参与者由服务端给出，其余按 name/identity 推断）
+  ingest: boolean;
+  tag: string;
+}
 
 export class EmberEngine implements AVEngine {
   private cbs: EngineCallbacks;
@@ -29,7 +40,7 @@ export class EmberEngine implements AVEngine {
   private selfId = '';
   private micOn = false;
   private gagged = false; // 服务端禁言：welcome.on 带入，gag 消息实时更新
-  private roster = new Map<string, { name: string; micOn: boolean; muted: boolean }>();
+  private roster = new Map<string, RosterEntry>();
   private midMap: Record<string, string> = {};
   private trackEls = new Map<string, HTMLMediaElement[]>();
   private closed = false;
@@ -73,22 +84,38 @@ export class EmberEngine implements AVEngine {
         micOn: this.micOn,
         canPublish: !this.gagged,
         sharing: false,
-        obs: false,
+        ingest: false,
+        tag: '',
       },
     ];
     this.roster.forEach((v, identity) => {
       out.push({
         identity,
-        username: usernameOf(identity, v.name),
+        username: v.username,
         display: v.name || identity,
         isLocal: false,
         micOn: v.micOn,
         canPublish: !v.muted,
         sharing: false,
-        obs: false,
+        ingest: v.ingest,
+        tag: v.tag,
       });
     });
     return out;
+  }
+
+  // 名册条目落库：推流参与者（kind=ingest）的 username/tag 由服务端给出，
+  // 缺字段的旧服务端按 name/identity 推断（普通参与者两条路殊途同归）
+  private static peerEntry(p: NonNullable<SigMsg['peers']>[number]): RosterEntry {
+    const ingest = p.kind === 'ingest';
+    return {
+      name: p.name,
+      micOn: p.micOn,
+      muted: p.muted === true,
+      username: p.username || usernameOf(p.identity, p.name),
+      ingest,
+      tag: ingest ? (p.tag ?? '') : '',
+    };
   }
 
   private send(m: SigMsg) {
@@ -146,7 +173,7 @@ export class EmberEngine implements AVEngine {
             case 'welcome': {
               this.selfId = m.identity ?? '';
               this.gagged = m.on === true; // 持久禁言：入会即被告知
-              (m.peers ?? []).forEach((p) => this.roster.set(p.identity, { name: p.name, micOn: p.micOn, muted: p.muted === true }));
+              (m.peers ?? []).forEach((p) => this.roster.set(p.identity, EmberEngine.peerEntry(p)));
               await this.setupPC();
               break;
             }
@@ -169,7 +196,7 @@ export class EmberEngine implements AVEngine {
             }
             case 'roster':
               this.roster.clear();
-              (m.peers ?? []).forEach((p) => this.roster.set(p.identity, { name: p.name, micOn: p.micOn, muted: p.muted === true }));
+              (m.peers ?? []).forEach((p) => this.roster.set(p.identity, EmberEngine.peerEntry(p)));
               this.pruneGone();
               this.cbs.onRoster();
               break;

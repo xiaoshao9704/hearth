@@ -9,6 +9,7 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
+	"errors"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -137,7 +138,7 @@ func remoteTableNames(t *testing.T, db *sql.DB, dialectName string) []string {
 	return out
 }
 
-// remoteMigrationRows 数 bun_migrations 行数（baseline 应恰登记 1 行）。
+// remoteMigrationRows 数 bun_migrations 行数（当前应恰登记 baseline 与 00002 两行）。
 func remoteMigrationRows(t *testing.T, db *sql.DB) int {
 	t.Helper()
 	var n int
@@ -147,7 +148,7 @@ func remoteMigrationRows(t *testing.T, db *sql.DB) int {
 	return n
 }
 
-// ---- 自增主键回填（CreateUser/CreateChannel/CreateIngress/AddMessage/CreateInvite）----
+// ---- 自增主键回填（CreateUser/CreateChannel/CreateIngestToken/AddMessage/CreateInvite）----
 
 func TestDialectAutoincrementBackfill(t *testing.T) {
 	forEachStore(t, func(t *testing.T, s *Store, _ string) {
@@ -166,12 +167,12 @@ func TestDialectAutoincrementBackfill(t *testing.T) {
 		if c.ID <= 0 {
 			t.Fatalf("频道 ID 未回填: %+v", c)
 		}
-		ing, err := s.CreateIngress(ctx, u.ID, c.ID, "ing1", "key1", "livekit")
+		tk, err := s.CreateIngestToken(ctx, u.ID, "obs")
 		if err != nil {
 			t.Fatal(err)
 		}
-		if ing.ID <= 0 {
-			t.Fatalf("ingress ID 未回填: %+v", ing)
+		if tk.ID <= 0 {
+			t.Fatalf("推流令牌 ID 未回填: %+v", tk)
 		}
 		m, err := s.AddMessage(ctx, c.ID, u.ID, "hello")
 		if err != nil {
@@ -277,6 +278,123 @@ func TestDialectSetSettingUpsert(t *testing.T) {
 	})
 }
 
+// ---- 推流令牌（ingest_tokens / ingest_endpoints）----
+
+func TestDialectIngestTokenLifecycle(t *testing.T) {
+	forEachStore(t, func(t *testing.T, s *Store, _ string) {
+		ctx := context.Background()
+		u, err := s.CreateUser(ctx, "alice", "h")
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		// 未创建前两条反查路径都 ErrNotFound
+		if _, err := s.IngestTokenByUser(ctx, u.ID); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("无令牌时 ByUser 应 ErrNotFound，实际 %v", err)
+		}
+		if _, err := s.IngestTokenByToken(ctx, "nope"); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("无令牌时 ByToken 应 ErrNotFound，实际 %v", err)
+		}
+
+		tk, err := s.CreateIngestToken(ctx, u.ID, "obs")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if tk.ID <= 0 || len(tk.Token) != 64 || tk.Tag != "obs" || tk.CreatedAt.IsZero() {
+			t.Fatalf("令牌创建异常: %+v", tk)
+		}
+		// 两条反查路径命中同一条
+		byUser, err := s.IngestTokenByUser(ctx, u.ID)
+		if err != nil || byUser.Token != tk.Token {
+			t.Fatalf("ByUser 反查异常: %+v err=%v", byUser, err)
+		}
+		byToken, err := s.IngestTokenByToken(ctx, tk.Token)
+		if err != nil || byToken.UserID != u.ID {
+			t.Fatalf("ByToken 反查异常: %+v err=%v", byToken, err)
+		}
+		// 每用户一把：重复创建触发唯一冲突
+		if _, err := s.CreateIngestToken(ctx, u.ID, "obs"); !IsUniqueViolation(err) {
+			t.Fatalf("重复创建应唯一冲突，实际 %v", err)
+		}
+
+		// 重置：token 变、tag 保留，旧 token 反查失效
+		tk2, err := s.ResetIngestToken(ctx, u.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if tk2.Token == tk.Token || tk2.Tag != "obs" || tk2.ID != tk.ID {
+			t.Fatalf("重置后应换 token 保留 tag: %+v → %+v", tk, tk2)
+		}
+		if _, err := s.IngestTokenByToken(ctx, tk.Token); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("旧 token 应失效，实际 %v", err)
+		}
+
+		// 改标签：tag 变、token 保留
+		if err := s.UpdateIngestTokenTag(ctx, u.ID, "cam"); err != nil {
+			t.Fatal(err)
+		}
+		got, err := s.IngestTokenByUser(ctx, u.ID)
+		if err != nil || got.Tag != "cam" || got.Token != tk2.Token {
+			t.Fatalf("改标签后应只变 tag: %+v err=%v", got, err)
+		}
+	})
+}
+
+func TestDialectIngestEndpoints(t *testing.T) {
+	forEachStore(t, func(t *testing.T, s *Store, _ string) {
+		ctx := context.Background()
+		u, err := s.CreateUser(ctx, "alice", "h")
+		if err != nil {
+			t.Fatal(err)
+		}
+		tk, err := s.CreateIngestToken(ctx, u.ID, "obs")
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if _, err := s.IngestEndpoint(ctx, tk.ID, "lk"); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("无端点时应 ErrNotFound，实际 %v", err)
+		}
+		// upsert 插入
+		ep := &IngestEndpoint{TokenID: tk.ID, Alias: "lk", IngressID: "in1", UpstreamKey: "uk1"}
+		if err := s.UpsertIngestEndpoint(ctx, ep); err != nil {
+			t.Fatal(err)
+		}
+		got, err := s.IngestEndpoint(ctx, tk.ID, "lk")
+		if err != nil || got.IngressID != "in1" || got.UpstreamKey != "uk1" || got.BoundRoom != "" {
+			t.Fatalf("端点回读异常: %+v err=%v", got, err)
+		}
+		// upsert 更新（含 BoundRoom 绑定）
+		ep.BoundRoom = "chan1"
+		if err := s.UpsertIngestEndpoint(ctx, ep); err != nil {
+			t.Fatal(err)
+		}
+		got, err = s.IngestEndpoint(ctx, tk.ID, "lk")
+		if err != nil || got.BoundRoom != "chan1" {
+			t.Fatalf("upsert 应更新 bound_room: %+v err=%v", got, err)
+		}
+		// 另一实例 alias 独立成行
+		if err := s.UpsertIngestEndpoint(ctx,
+			&IngestEndpoint{TokenID: tk.ID, Alias: "r2", IngressID: "in2", UpstreamKey: "uk2"}); err != nil {
+			t.Fatal(err)
+		}
+
+		// 按令牌清空全部实例端点（重置/改标签路径）
+		if err := s.DeleteIngestEndpointsByToken(ctx, tk.ID); err != nil {
+			t.Fatal(err)
+		}
+		for _, alias := range []string{"lk", "r2"} {
+			if _, err := s.IngestEndpoint(ctx, tk.ID, alias); !errors.Is(err, ErrNotFound) {
+				t.Fatalf("端点 %s 应已删除，实际 %v", alias, err)
+			}
+		}
+		// 删除幂等
+		if err := s.DeleteIngestEndpointsByToken(ctx, tk.ID); err != nil {
+			t.Fatal(err)
+		}
+	})
+}
+
 // ---- 时间字段往返非零 ----
 
 func TestDialectTimeRoundTrip(t *testing.T) {
@@ -360,8 +478,8 @@ func TestBaselineReopenNoop(t *testing.T) {
 		if err != nil {
 			t.Fatalf("重复 Open 失败: %v", err)
 		}
-		if n := remoteMigrationRows(t, s2.bun.DB); n != 1 {
-			t.Fatalf("重复 Open 后 bun_migrations 应仍为 1 行，实际 %d", n)
+		if n := remoteMigrationRows(t, s2.bun.DB); n != 2 {
+			t.Fatalf("重复 Open 后 bun_migrations 应仍为 2 行，实际 %d", n)
 		}
 		// 数据无损
 		if _, _, err := s2.UserByName(ctx, "alice"); err != nil {
@@ -623,13 +741,14 @@ func TestLegacyUpgradeRemote(t *testing.T) {
 			defer s.Close()
 
 			after := remoteTableNames(t, s.bun.DB, tc.name)
-			want := append(slices.Clone(before), "bun_migration_locks", "bun_migrations")
+			want := append(slices.Clone(before),
+				"bun_migration_locks", "bun_migrations", "ingest_endpoints", "ingest_tokens")
 			slices.Sort(want)
 			if !slices.Equal(after, want) {
 				t.Fatalf("升级后表集合不符:\n got %v\nwant %v", after, want)
 			}
-			if n := remoteMigrationRows(t, s.bun.DB); n != 1 {
-				t.Fatalf("bun_migrations 应有 1 行，实际 %d", n)
+			if n := remoteMigrationRows(t, s.bun.DB); n != 2 {
+				t.Fatalf("bun_migrations 应有 2 行，实际 %d", n)
 			}
 
 			// compat 加列生效：旧库 users 无 is_admin/disabled，由 baseline 的 ALTER 补齐

@@ -75,6 +75,31 @@ type ingressRow struct {
 	CreatedAt time.Time `bun:",notnull,default:current_timestamp"`
 }
 
+// ingestTokenRow 每用户一把推流令牌（00002 迁移建表；不分频道/设备，频道在 WHIP URL 里）。
+// tag 是可改的设备标签属性（默认 obs），token 是全局唯一的用户凭证。
+type ingestTokenRow struct {
+	bun.BaseModel `bun:"table:ingest_tokens"`
+
+	ID        int64     `bun:",pk,autoincrement"`
+	UserID    int64     `bun:",notnull,unique"`
+	Tag       string    `bun:",notnull,default:'obs',type:varchar(32)"`
+	Token     string    `bun:",notnull,unique,type:varchar(64)"`
+	CreatedAt time.Time `bun:",notnull,default:current_timestamp"`
+}
+
+// ingestEndpointRow livekit-ingress 实例按（令牌, alias）持有的上游端点凭证（00002 迁移建表）。
+// bound_room 空 = 未绑定/已解绑；令牌重置/改标签时整行清空（应用层删除）。
+type ingestEndpointRow struct {
+	bun.BaseModel `bun:"table:ingest_endpoints"`
+
+	ID          int64  `bun:",pk,autoincrement"`
+	TokenID     int64  `bun:",notnull,unique:uk_ingest_endpoints"`
+	Alias       string `bun:",notnull,unique:uk_ingest_endpoints,type:varchar(64)"`
+	IngressID   string `bun:",notnull,type:varchar(128)"`
+	UpstreamKey string `bun:",notnull,type:varchar(128)"`
+	BoundRoom   string `bun:",notnull,default:'',type:varchar(128)"`
+}
+
 // channel_bans / channel_gags / channel_members 三表结构相同，各立一个行结构体（表名不同）。
 type channelBanRow struct {
 	bun.BaseModel `bun:"table:channel_bans"`

@@ -4,6 +4,7 @@ package lkingress
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"time"
@@ -40,22 +41,40 @@ func (c *Client) RoundTrip(req *http.Request) (*http.Response, error) {
 	return http.DefaultTransport.RoundTrip(req)
 }
 
-// Create 为 username 在 room 创建 WHIP ingress（enable_transcoding=false，bypass 转码省服务端 CPU）。
-// 返回 ingressID 与 streamKey。
-func (c *Client) Create(ctx context.Context, room, username string) (string, string, error) {
-	identity := username + "-obs"
+// Create 为该发布身份创建 WHIP ingress（enable_transcoding=false，bypass 转码省服务端 CPU）。
+// 房间是端点的可更新属性：创建时以 identity 占位，接入层随即用 UpdateRoom 改成真实房间。
+// meta 序列化为参与者元数据 JSON（至少含 username、kind=ingest、tag）。返回 ingressID 与 streamKey。
+func (c *Client) Create(ctx context.Context, identity, name string, meta map[string]string) (string, string, error) {
+	rawMeta, err := json.Marshal(meta)
+	if err != nil {
+		return "", "", err
+	}
 	info, err := c.api.CreateIngress(ctx, &livekit.CreateIngressRequest{
 		InputType:           livekit.IngressInput_WHIP_INPUT,
 		Name:                identity,
-		RoomName:            room,
+		RoomName:            identity, // 占位，创建后由 UpdateRoom 改写
 		ParticipantIdentity: identity,
-		ParticipantName:     username + "(OBS)",
+		ParticipantName:     name,
+		ParticipantMetadata: string(rawMeta),
 		EnableTranscoding:   boolPtr(false),
 	})
 	if err != nil {
 		return "", "", fmt.Errorf("创建 ingress 失败: %w", err)
 	}
 	return info.IngressId, info.StreamKey, nil
+}
+
+// UpdateRoom 把 ingress 的目标房间改为 room（UpdateIngress.room_name；稳态推流零控制面调用，
+// 只在 bound_room 与 URL 频道不一致时由接入层触发）。
+func (c *Client) UpdateRoom(ctx context.Context, ingressID, room string) error {
+	_, err := c.api.UpdateIngress(ctx, &livekit.UpdateIngressRequest{
+		IngressId: ingressID,
+		RoomName:  room,
+	})
+	if err != nil {
+		return fmt.Errorf("更新 ingress 房间失败: %w", err)
+	}
+	return nil
 }
 
 // Delete 按 ingressID 删除 ingress。

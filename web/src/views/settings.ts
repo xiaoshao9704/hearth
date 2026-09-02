@@ -4,12 +4,13 @@ import {
   clearSession,
   deleteMyDevice,
   deviceId,
-  getIngress,
+  getIngestToken,
   getUser,
   listChannels,
   listMyDevices,
   logout,
-  resetIngress,
+  resetIngestToken,
+  setIngestTag,
   updatePassword,
   updateUsername,
 } from '../api';
@@ -34,7 +35,7 @@ const PANES: { id: Pane; label: string; icon: string; sub: string }[] = [
   { id: 'appearance', label: '外观', icon: 'moon', sub: '浅色 / 深色 / 跟随系统' },
   { id: 'av', label: '语音与视频', icon: 'mic', sub: '输入输出设备与处理链' },
   { id: 'screen', label: '投屏画质', icon: 'screen', sub: '分辨率、帧率与码率联动' },
-  { id: 'stream', label: '推流', icon: 'stream', sub: 'OBS 的 WHIP 地址与密钥' },
+  { id: 'stream', label: '推流', icon: 'stream', sub: 'OBS 的 WHIP 地址与令牌' },
   { id: 'devices', label: '我的设备', icon: 'device', sub: '同账号在线的设备' },
 ];
 
@@ -149,7 +150,7 @@ function renderAccount(body: HTMLElement) {
           </div>
           ${user?.is_admin ? '<span class="tag tag-ember" style="font-size:10.5px;padding:4px 9px">管理员</span>' : ''}
         </div>
-        <div style="margin-top:13px;padding-top:13px;border-top:1px solid var(--line-soft);font-size:11.5px;line-height:1.65;color:var(--text-2);text-wrap:pretty">系统内部一律按 <span class="mono" style="color:var(--text-1)">user_id</span> 认人：改用户名不会动它，历史消息、设备档案、每个频道的推流 key 都还挂在同一个 id 上。</div>
+        <div style="margin-top:13px;padding-top:13px;border-top:1px solid var(--line-soft);font-size:11.5px;line-height:1.65;color:var(--text-2);text-wrap:pretty">系统内部一律按 <span class="mono" style="color:var(--text-1)">user_id</span> 认人：改用户名不会动它，历史消息、设备档案、推流令牌都还挂在同一个 id 上。</div>
       </div>
 
       <div class="card">
@@ -774,39 +775,46 @@ function renderScreen(body: HTMLElement, goStream: () => void) {
 function renderStream(body: HTMLElement) {
   let channels: string[] = [];
   let current = '';
-  let url = '';
-  let key = '';
+  let base = ''; // WHIP 基地址（…/providers/{alias}/w/），拼上频道名即完整服务器地址
+  let token = ''; // 推流令牌（每用户一把，不区分频道和设备）
+  let tag = ''; // 已保存的设备标签（identity = {用户名}-{标签}）
+  let enabled = true; // 推流入口是否可用（false 时地址照给，但推起来会被拒）
   let reveal = false;
   let confirming = false;
   let notice = '';
 
-  body.innerHTML = '<div class="muted">加载频道…</div>';
+  body.innerHTML = '<div class="muted">加载推流信息…</div>';
+
+  // 与服务端 ingestTagRe 一致；频道名只含字母数字 - _（channelNameRe），直接拼路径段
+  const TAG_RE = /^[a-z0-9][a-z0-9-]{0,31}$/;
+  const serverAddr = () => (base && current ? `${base}${current}` : '在大厅建一个频道后生成');
 
   const paint = () => {
-    if (channels.length === 0) {
-      body.innerHTML = '<div class="pane-col pane-wide"><div class="hint-card">还没有频道。先在大厅建一个，推流地址是「每人每频道」一把 key。</div></div>';
-      return;
-    }
-    // OBS 的 WHIP 端点要求不带尾斜杠（bearer 模式路径精确匹配，多一个 / 会 404）
-    const base = url ? url.slice(0, url.lastIndexOf('/')) : '获取中…';
-    const masked = key ? (reveal ? key : `${'•'.repeat(Math.max(0, key.length - 4))}${key.slice(-4)}`) : '获取中…';
+    if (!token) return; // 首屏等加载
+    const masked = reveal ? token : `${'•'.repeat(Math.max(0, token.length - 4))}${token.slice(-4)}`;
     body.innerHTML = `
       <div class="pane-col pane-wide">
+        ${
+          enabled
+            ? ''
+            : `<div class="notice-bad"><span style="font-size:12px;line-height:1.55">推流入口当前不可用：管理后台的推流内核缺少必需配置，或舞台线已关闭。地址和令牌照常可用，但现在推会被拒。</span></div>`
+        }
         <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap">
           <div style="font-size:12.5px;color:var(--text-1)">频道</div>
           <div class="seg-group">
             ${channels.map((c) => `<button class="hit seg ${c === current ? 'on' : ''}" data-ch="${esc(c)}">${esc(c)}</button>`).join('')}
           </div>
+          ${channels.length === 0 ? '<div style="font-size:12px;color:var(--text-2)">还没有频道，先在大厅建一个</div>' : ''}
         </div>
         <div style="display:flex;flex-direction:column;gap:7px">
-          <div class="section-label" style="letter-spacing:0.1em">服务器地址</div>
+          <div class="section-label" style="letter-spacing:0.1em">服务器地址（已含房间名）</div>
           <div class="copy-line">
-            <span class="val mono">${esc(base)}</span>
-            <button class="hit btn btn-sm" data-copy="url">${icon('copy', 13)} 复制</button>
+            <span class="val mono">${esc(serverAddr())}</span>
+            ${current ? `<button class="hit btn btn-sm" data-copy="url">${icon('copy', 13)} 复制</button>` : ''}
           </div>
         </div>
         <div style="display:flex;flex-direction:column;gap:7px">
-          <div class="section-label" style="letter-spacing:0.1em">推流密钥 · ${esc(current)}</div>
+          <div class="section-label" style="letter-spacing:0.1em">推流令牌 · 全频道通用</div>
           <div class="copy-line">
             <span class="val mono">${esc(masked)}</span>
             <button class="hit mini-btn" data-act="reveal" style="width:30px;height:30px;border-radius:7px;display:flex;align-items:center;justify-content:center">${icon(reveal ? 'eye' : 'eyeOff', 15, reveal ? 'var(--ember)' : 'var(--text-2)', 1.6)}</button>
@@ -817,18 +825,26 @@ function renderStream(body: HTMLElement) {
         ${
           confirming
             ? `<div class="notice-bad" style="gap:12px">
-                 <span style="flex-grow:1;font-size:12px;line-height:1.55">重置「${esc(current)}」的 key？旧 key 立即失效，OBS 里要重新填一次。</span>
+                 <span style="flex-grow:1;font-size:12px;line-height:1.55">重置推流令牌？旧令牌立即失效、进行中的推流会被掐断，OBS 里要重新填一次。</span>
                  <button class="hit btn btn-sm" data-act="cancel-reset">取消</button>
                  <button class="hit btn btn-sm btn-danger-solid" data-act="do-reset">确认重置</button>
                </div>`
             : ''
         }
+        <div style="display:flex;flex-direction:column;gap:7px">
+          <div class="section-label" style="letter-spacing:0.1em">设备标签</div>
+          <div style="display:flex;align-items:center;gap:10px">
+            <div class="field" style="flex-grow:1;height:40px;max-width:280px;background:var(--bg-2)"><input id="tag-input" value="${esc(tag)}" /></div>
+            <button class="hit btn btn-primary disabled" id="tag-save" style="height:40px;padding:0 16px">保存</button>
+          </div>
+          <div id="tag-hint" style="font-size:11.5px;color:var(--text-2)">推流设备在房间里显示为「用户名-标签」；改完下次推流生效。端点要按新标签重建，正在推的流可能被中断，建议停播后再改</div>
+        </div>
         ${notice ? `<div class="notice-ok">${icon('check', 15, 'var(--sage)', 1.8)}<span>${esc(notice)}</span></div>` : ''}
         <div class="hint-card" style="border-color:var(--line-soft)">
           ${icon('check', 16, 'var(--sage)')}
           <div style="display:flex;flex-direction:column;gap:6px">
             <div style="font-size:12.5px;font-weight:600;color:var(--text-0)">OBS 里怎么填</div>
-            <div style="font-size:12px;line-height:1.7">设置 → 直播 → 服务选 <span class="mono" style="color:var(--text-1)">WHIP</span>，服务器填上面那行，Bearer Token 填密钥。视频编码器<span style="color:var(--ember)">必须选 H.264</span>（如 Apple VT H.264 / NVENC H.264，硬编即可）——HEVC / AV1 服务端不收。规格随便挑，服务端不转码，<span style="color:var(--sage)">2K / 4K / 120fps 原样透传</span>。</div>
+            <div style="font-size:12px;line-height:1.7">设置 → 直播 → 服务选 <span class="mono" style="color:var(--text-1)">WHIP</span>，服务器填上面那行（换房间在上面切换频道后重新复制即可，令牌不变），Bearer Token 填推流令牌。编码器 H.264 / HEVC / AV1 均可，服务端直通不转码，<span style="color:var(--sage)">2K / 4K / 120fps 原样透传</span>。ffmpeg 等不支持 Bearer 的工具用路径模式：服务器地址末尾再拼一段 <span class="mono" style="color:var(--text-1)">/令牌</span>。</div>
           </div>
         </div>
       </div>`;
@@ -836,17 +852,12 @@ function renderStream(body: HTMLElement) {
     body.querySelectorAll<HTMLButtonElement>('[data-ch]').forEach((btn) => {
       btn.addEventListener('click', () => {
         current = btn.dataset.ch!;
-        reveal = false;
-        confirming = false;
-        notice = '';
-        url = key = '';
         paint();
-        void load(false);
       });
     });
     body.querySelectorAll<HTMLButtonElement>('[data-copy]').forEach((btn) => {
       btn.addEventListener('click', async () => {
-        const text = btn.dataset.copy === 'url' ? url.slice(0, url.lastIndexOf('/') + 1) : key;
+        const text = btn.dataset.copy === 'url' ? (current ? serverAddr() : '') : token;
         if (!text) return;
         if (await copyText(text)) toast('已复制', 'ok', 1400);
       });
@@ -866,38 +877,70 @@ function renderStream(body: HTMLElement) {
     });
     body.querySelector('[data-act="do-reset"]')?.addEventListener('click', () => {
       confirming = false;
-      void load(true);
+      void (async () => {
+        try {
+          const info = await resetIngestToken();
+          token = info.token;
+          tag = info.tag;
+          base = info.base;
+          enabled = info.enabled;
+          reveal = false;
+          notice = '已生成新令牌，旧令牌名下的推流已掐断。';
+          setTimeout(() => {
+            notice = '';
+            paint();
+          }, 2600);
+        } catch (err) {
+          toast((err as Error).message, 'bad');
+        }
+        paint();
+      })();
+    });
+
+    const tagInput = body.querySelector<HTMLInputElement>('#tag-input')!;
+    const tagSave = body.querySelector<HTMLButtonElement>('#tag-save')!;
+    const tagHint = body.querySelector<HTMLDivElement>('#tag-hint')!;
+    const syncTag = () => {
+      const v = tagInput.value.trim();
+      const valid = TAG_RE.test(v);
+      tagSave.classList.toggle('disabled', !valid || v === tag);
+      if (v && !valid) {
+        tagHint.textContent = '标签仅限 1-32 位小写字母、数字、-，且以字母或数字开头';
+        tagHint.style.color = 'var(--red-text)';
+      } else {
+        tagHint.textContent = '推流设备在房间里显示为「用户名-标签」；改完下次推流生效。端点要按新标签重建，正在推的流可能被中断，建议停播后再改';
+        tagHint.style.color = 'var(--text-2)';
+      }
+    };
+    tagInput.addEventListener('input', syncTag);
+    tagSave.addEventListener('click', async () => {
+      const v = tagInput.value.trim();
+      if (tagSave.classList.contains('disabled')) return;
+      try {
+        const info = await setIngestTag(v);
+        tag = info.tag;
+        toast(`设备标签已改成「${tag}」，下次推流生效。`, 'ok');
+        paint();
+      } catch (err) {
+        toast((err as Error).message, 'bad');
+      }
     });
   };
 
-  async function load(reset: boolean) {
-    try {
-      const info = reset ? await resetIngress(current) : await getIngress(current);
-      url = info.url;
-      key = info.stream_key;
-      if (reset) {
-        reveal = false;
-        notice = '已生成新的 key，旧 key 已失效。';
-        setTimeout(() => {
-          notice = '';
-          paint();
-        }, 2600);
-      }
-    } catch (err) {
-      toast((err as Error).message, 'bad');
-    }
-    paint();
-  }
-
   void (async () => {
     try {
-      channels = (await listChannels()).map((c) => c.name);
-    } catch {
-      channels = [];
+      const [chs, info] = await Promise.all([listChannels(), getIngestToken()]);
+      channels = chs.map((c) => c.name);
+      token = info.token;
+      tag = info.tag;
+      base = info.base;
+      enabled = info.enabled;
+    } catch (err) {
+      toast((err as Error).message, 'bad');
+      return;
     }
     current = channels[0] ?? '';
     paint();
-    if (current) void load(false);
   })();
 }
 

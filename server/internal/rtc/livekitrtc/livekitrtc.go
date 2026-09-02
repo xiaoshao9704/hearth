@@ -4,6 +4,7 @@ package livekitrtc
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"strings"
 	"sync"
@@ -46,17 +47,21 @@ func ConfigKeys() []rtc.ConfigKey {
 	}
 }
 
-// Provider 是房间/舞台内核（推流入口由 Ingress 独立承担）。
+// Provider 是房间/舞台内核（推流入口由 Ingress 独立承担），兼作 rtc.Publisher
+// （WHIP 直通的 LiveKit 出口，见 publisher.go）。
 type Provider struct {
 	cfg rtc.ConfigFunc
 
 	mu               sync.Mutex
 	url, key, secret string
 	rooms            *lkroom.Client
+
+	pubMu    sync.Mutex
+	pubRooms map[string]*pubRoom // WHIP 直通发布：同（房间, identity）共享一次房间连接
 }
 
 func New(cfg rtc.ConfigFunc) *Provider {
-	return &Provider{cfg: cfg}
+	return &Provider{cfg: cfg, pubRooms: map[string]*pubRoom{}}
 }
 
 // client 按当前生效配置取房间客户端；配置变了就重建。
@@ -96,7 +101,17 @@ func (p *Provider) ListParticipants(ctx context.Context, room string) ([]rtc.Par
 	}
 	out := make([]rtc.Participant, 0, len(ps))
 	for _, x := range ps {
-		out = append(out, rtc.Participant{Identity: x.Identity, Name: x.Name, JoinedAt: x.JoinedAt})
+		pt := rtc.Participant{Identity: x.Identity, Name: x.Name, JoinedAt: x.JoinedAt}
+		// 元数据是 hearth 发布者写入的 {"username","kind","tag"} JSON（publisher.go）；
+		// 非 JSON 或缺字段按普通参与者处理
+		var meta struct {
+			Kind string `json:"kind"`
+			Tag  string `json:"tag"`
+		}
+		if json.Unmarshal([]byte(x.Metadata), &meta) == nil {
+			pt.Kind, pt.Tag = meta.Kind, meta.Tag
+		}
+		out = append(out, pt)
 	}
 	return out, nil
 }

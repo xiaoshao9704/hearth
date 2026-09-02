@@ -2,6 +2,11 @@ package api
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -10,8 +15,7 @@ import (
 	"hearth/server/internal/store"
 )
 
-// 分发：未知 alias 404；livekit /rtc 反代到实例 api_url；ember /voice 无 token → 401；
-// WHIP POST 按路径 alias 裁决（bellows-remote 实例：假 key 404、真 key 带 grant 头反代）
+// 分发：未知 alias 404；livekit /rtc 反代到实例 api_url；ember /voice 无 token → 401
 func TestProviderDispatch(t *testing.T) {
 	a := testAPI(t)
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -47,62 +51,120 @@ func TestProviderDispatch(t *testing.T) {
 	}
 }
 
-// WHIP 按 alias：bellows-remote 实例的 POST 走 definitive 判定 + 签 grant 头
+// WHIP 按 alias：bellows-remote 实例的 POST 先过 admitIngest（definitive），签 grant
+// 随反代带给远端；应答 Location /w/sessions/{rid} 改写成 /providers/{alias}/w/sessions/{rid}；
+// 未知令牌 404 且不到达上游；PATCH/DELETE 按 rid 路由反代。
 func TestWhipPerAlias(t *testing.T) {
 	a := testAPI(t)
-	var gotGrant string
+	ctx := context.Background()
+	u, err := a.st.CreateUser(ctx, "alice", "x")
+	if err != nil {
+		t.Fatalf("建用户失败: %v", err)
+	}
+	if _, err := a.st.CreateChannel(ctx, "chan1", u.ID); err != nil {
+		t.Fatalf("建频道失败: %v", err)
+	}
+	it, err := a.st.CreateIngestToken(ctx, u.ID, "obs")
+	if err != nil {
+		t.Fatalf("建令牌失败: %v", err)
+	}
+
+	type whipReq struct {
+		method, path, grant, auth string
+		body                      string
+	}
+	var got []whipReq
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotGrant = r.Header.Get("X-Bellows-Grant")
+		b, _ := io.ReadAll(r.Body)
+		got = append(got, whipReq{r.Method, r.URL.Path, r.Header.Get("X-Bellows-Grant"), r.Header.Get("Authorization"), string(b)})
+		w.Header().Set("Location", "/w/sessions/rid9")
 		w.WriteHeader(201)
 	}))
 	defer upstream.Close()
-	ctx := context.Background()
 	a.st.CreateProvider(ctx, &store.ProviderRecord{Alias: "r1", Type: TypeBellowsRemote, Params: map[string]string{
 		"bellows_remote_url": upstream.URL, "bellows_shared_secret": "sec"}})
-	// 造一个用户+频道+ingress 记录（provider 存 alias "r1"）
-	u, err := a.st.CreateUser(ctx, "alice", "x")
-	if err != nil {
-		t.Fatalf("造用户失败: %v", err)
-	}
-	c, err := a.st.CreateChannel(ctx, "chan1", u.ID)
-	if err != nil {
-		t.Fatalf("造频道失败: %v", err)
-	}
-	rec0, err := a.st.CreateIngress(ctx, u.ID, c.ID, "ing1", "goodkey", "r1")
-	if err != nil {
-		t.Fatalf("造 ingress 失败: %v", err)
-	}
-	key := rec0.StreamKey
 	a.reloadProviders(ctx)
 	r := a.Router()
 	a.RegisterProxies(r)
 
-	// 假 key → 404（不到达上游）
+	// 未知令牌：404 且不到达上游
 	rec := httptest.NewRecorder()
-	r.ServeHTTP(rec, httptest.NewRequest("POST", "/providers/r1/w/badkey", strings.NewReader("sdp")))
-	if rec.Code != 404 {
-		t.Fatalf("假 key 应 404，实际 %d", rec.Code)
-	}
-	// 真 key → 反代且带 grant
-	rec = httptest.NewRecorder()
-	r.ServeHTTP(rec, httptest.NewRequest("POST", "/providers/r1/w/"+key, strings.NewReader("sdp")))
-	if rec.Code != 201 || gotGrant == "" {
-		t.Fatalf("应 201 且带 grant: %d grant=%q", rec.Code, gotGrant)
+	r.ServeHTTP(rec, httptest.NewRequest("POST", "/providers/r1/w/chan1/badtoken", strings.NewReader("sdp")))
+	if rec.Code != 404 || len(got) != 0 {
+		t.Fatalf("未知令牌应 404 且不到达上游: %d reached=%d", rec.Code, len(got))
 	}
 
-	// 归属校验：r1 的 key 经其他实例路径 → 404（密钥是全局命名空间，跨实例串流必须拒）
-	a.st.CreateProvider(ctx, &store.ProviderRecord{Alias: "r2", Type: TypeBellowsRemote, Params: map[string]string{
-		"bellows_remote_url": upstream.URL, "bellows_shared_secret": "sec2"}})
-	a.reloadProviders(ctx)
+	// 路径模式：admitIngest 通过 → 带 grant 反代，Location 改写
 	rec = httptest.NewRecorder()
-	r.ServeHTTP(rec, httptest.NewRequest("POST", "/providers/r2/w/"+key, strings.NewReader("sdp")))
-	if rec.Code != 404 {
-		t.Fatalf("key 归属与路径实例不符应 404（definitive），实际 %d", rec.Code)
+	r.ServeHTTP(rec, httptest.NewRequest("POST", "/providers/r1/w/chan1/"+it.Token, strings.NewReader("sdp")))
+	if rec.Code != 201 {
+		t.Fatalf("真令牌应反代成功，实际 %d: %s", rec.Code, rec.Body.String())
 	}
-	// fail-open 路径（内建 bellows，无上游）同样校验归属
+	if loc := rec.Header().Get("Location"); loc != "/providers/r1/w/sessions/rid9" {
+		t.Fatalf("Location 应改写为 /providers/r1/w/sessions/rid9，实际 %q", loc)
+	}
+	if len(got) != 1 || got[0].path != "/w/chan1/"+it.Token || got[0].body != "sdp" {
+		t.Fatalf("上游收到的请求不符: %+v", got)
+	}
+	// grant payload：新字段（op/token/room/identity/name/tag/offer）齐全，name 是用户名
+	var p struct {
+		Op, Token, Room, Identity, Name, Kind, Tag, Offer string
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(strings.SplitN(got[0].grant, ".", 2)[0])
+	if err != nil || json.Unmarshal(raw, &p) != nil {
+		t.Fatalf("grant 解码失败: %v", err)
+	}
+	sum := sha256.Sum256([]byte("sdp"))
+	if p.Op != "publish" || p.Token != it.Token || p.Room != "chan1" || p.Identity != "alice-obs" ||
+		p.Name != "alice" || p.Kind != "ingest" || p.Tag != "obs" || p.Offer != hex.EncodeToString(sum[:]) {
+		t.Fatalf("grant payload 不符: %+v", p)
+	}
+
+	// bearer 模式：令牌在 Authorization，反代时原样带上（远端验签要比对 grant.token）
 	rec = httptest.NewRecorder()
-	r.ServeHTTP(rec, httptest.NewRequest("POST", "/providers/bellows/w/"+key, strings.NewReader("sdp")))
-	if rec.Code != 404 {
-		t.Fatalf("key 归属与路径实例不符应 404（fail-open），实际 %d", rec.Code)
+	req := httptest.NewRequest("POST", "/providers/r1/w/chan1", strings.NewReader("sdp"))
+	req.Header.Set("Authorization", "Bearer "+it.Token)
+	r.ServeHTTP(rec, req)
+	if rec.Code != 201 || len(got) != 2 || got[1].path != "/w/chan1" || got[1].auth != "Bearer "+it.Token {
+		t.Fatalf("bearer 模式反代不符: %d %+v", rec.Code, got)
+	}
+
+	// 会话收尾：PATCH/DELETE 按 /w/sessions/{rid} 反代
+	rec = httptest.NewRecorder()
+	r.ServeHTTP(rec, httptest.NewRequest("PATCH", "/providers/r1/w/sessions/rid9", strings.NewReader("a=x")))
+	if len(got) != 3 || got[2].method != "PATCH" || got[2].path != "/w/sessions/rid9" {
+		t.Fatalf("PATCH 应反代到 /w/sessions/rid9: %+v", got)
+	}
+}
+
+// sessions/revoke 是 WHIP 路径保留字（/w/sessions/{rid} 会话收尾、/w/revoke/{token} 远端撤销），
+// 创建频道须在 channelNameRe 之后拒绝这两个字面值。
+func TestReservedChannelNames(t *testing.T) {
+	a := testAPI(t)
+	ctx := context.Background()
+	u, err := a.st.CreateUser(ctx, "alice", "x")
+	if err != nil {
+		t.Fatalf("建用户失败: %v", err)
+	}
+	tok, err := a.st.CreateSession(ctx, u.ID)
+	if err != nil {
+		t.Fatalf("建会话失败: %v", err)
+	}
+	r := a.Router()
+	for _, c := range []struct {
+		name string
+		want int
+	}{
+		{"sessions", 400},
+		{"revoke", 400},
+		{"normal-chan", 201},
+	} {
+		req := httptest.NewRequest("POST", "/api/channels", strings.NewReader(`{"name":"`+c.name+`"}`))
+		req.Header.Set("Authorization", "Bearer "+tok)
+		rec := httptest.NewRecorder()
+		r.ServeHTTP(rec, req)
+		if rec.Code != c.want {
+			t.Fatalf("频道 %q 期望 %d，实际 %d: %s", c.name, c.want, rec.Code, rec.Body.String())
+		}
 	}
 }

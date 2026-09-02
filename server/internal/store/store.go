@@ -1,4 +1,4 @@
-// 存储层：用户、会话、频道、聊天消息、设备、ingress、封禁、白名单。
+// 存储层：用户、会话、频道、聊天消息、设备、推流令牌、封禁、白名单。
 // 多后端：DATABASE_URL 决定方言 —— 空/file:/sqlite: 路径 = sqlite（modernc.org/sqlite，无 cgo）；
 // mysql:// = go-sql-driver/mysql；postgres:// = jackc/pgx/v5。三种驱动均为纯 Go，可交叉编译。
 package store
@@ -124,6 +124,14 @@ func isDuplicateErr(err error) bool {
 		strings.Contains(msg, "duplicate key name") // mysql CREATE INDEX 无 IF NOT EXISTS
 }
 
+// isMissingTableErr 判"表不存在"（三方言文案不同），游标 v2 重入时旧 ingresses 表已删属正常。
+func isMissingTableErr(err error) bool {
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "no such table") || // sqlite
+		strings.Contains(msg, "doesn't exist") || // mysql
+		strings.Contains(msg, "does not exist") // postgres
+}
+
 type User struct {
 	bun.BaseModel `bun:"table:users,alias:u"`
 
@@ -169,56 +177,6 @@ func (s *Store) RecordDevice(ctx context.Context, userID int64, deviceID, tag st
 		q = q.On("CONFLICT (user_id, device_id) DO UPDATE").Set("last_seen = CURRENT_TIMESTAMP, tag = EXCLUDED.tag")
 	}
 	_, err := q.Exec(ctx)
-	return err
-}
-
-// ---- Ingress（每用户每频道一个 OBS WHIP 推流端点）----
-
-type Ingress struct {
-	bun.BaseModel `bun:"table:ingresses"`
-
-	ID        int64     `bun:",pk,autoincrement" json:"id"`
-	IngressID string    `json:"ingress_id"`
-	StreamKey string    `json:"stream_key"`
-	Provider  string    `json:"provider"` // 创建该端点的推流入口内核名（删除/失效判断按归属方路由）
-	CreatedAt time.Time `json:"created_at"`
-}
-
-// IngressByUserChannel 查该用户在该频道的 ingress，无记录返回 ErrNotFound。
-func (s *Store) IngressByUserChannel(ctx context.Context, userID, channelID int64) (*Ingress, error) {
-	var in Ingress
-	err := s.bun.NewRaw(`
-SELECT id, ingress_id, stream_key, provider, created_at FROM ingresses
-WHERE user_id = ? AND channel_id = ?`, userID, channelID).
-		Scan(ctx, &in.ID, &in.IngressID, &in.StreamKey, &in.Provider, &in.CreatedAt)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, ErrNotFound
-	}
-	return &in, err
-}
-
-func (s *Store) CreateIngress(ctx context.Context, userID, channelID int64, ingressID, streamKey, provider string) (*Ingress, error) {
-	row := &ingressRow{UserID: userID, ChannelID: channelID, IngressID: ingressID, StreamKey: streamKey, Provider: provider}
-	if _, err := s.bun.NewInsert().Model(row).Exec(ctx); err != nil {
-		return nil, err
-	}
-	return &Ingress{ID: row.ID, IngressID: ingressID, StreamKey: streamKey, Provider: provider}, nil
-}
-
-// IngressOwner 按推流密钥反查归属（含记录的归属实例 alias，WHIP 入口按它校验入口匹配）。
-func (s *Store) IngressOwner(ctx context.Context, streamKey string) (userID, channelID int64, provider string, err error) {
-	err = s.bun.NewRaw(
-		"SELECT user_id, channel_id, provider FROM ingresses WHERE stream_key = ?", streamKey).
-		Scan(ctx, &userID, &channelID, &provider)
-	if errors.Is(err, sql.ErrNoRows) {
-		return 0, 0, "", ErrNotFound
-	}
-	return userID, channelID, provider, err
-}
-
-func (s *Store) DeleteIngress(ctx context.Context, userID, channelID int64) error {
-	_, err := s.bun.NewRaw(
-		"DELETE FROM ingresses WHERE user_id = ? AND channel_id = ?", userID, channelID).Exec(ctx)
 	return err
 }
 

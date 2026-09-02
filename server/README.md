@@ -50,8 +50,6 @@ go test -race -count=1 ./internal/store/
 | POST | `/api/channels` | 创建频道 `{name}`（1-64 位 `[a-zA-Z0-9_-]`，唯一） |
 | POST | `/api/token` | 获取频道对应的 LiveKit JWT `{channel}`，grant 带 canPublish/canSubscribe/canPublishData，24h 过期；频道名即 room 名 |
 | GET | `/api/chat?channel=xx&token=xx` | 聊天 WebSocket，进房推最近 50 条历史，消息落库并广播 |
-| POST | `/api/ingress` | 获取（首次自动创建）当前用户在该频道的 OBS WHIP 推流地址 `{channel}` → `{url, stream_key}`；每用户每频道一个 |
-| POST | `/api/ingress/reset` | 删除旧 ingress 并重建，返回新 `{url, stream_key}`，旧地址立即失效 |
 | POST | `/api/channels/{channel}/kick` | （房主）踢出 `{username}`：LiveKit 侧移除其全部设备 + 断开聊天 WS |
 | POST | `/api/channels/{channel}/ban` | （房主）封禁 `{username}`：加入黑名单并立即踢出；被封后 `/api/token` 与聊天 WS 均 403 |
 | POST | `/api/channels/{channel}/unban` | （房主）解除封禁 |

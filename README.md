@@ -54,7 +54,7 @@ flowchart LR
   B -. "投屏 / 摄像头媒体，直连" .-> LK
   LK -. "观众订阅" .-> B
 
-  O -- "WHIP /providers/{alias}/w + 推流密钥" --> PRX
+  O -- "WHIP /providers/{alias}/w/{频道} + 令牌" --> PRX
   PRX -- "反代" --> BEL
   O -. "RTP 直达，不经 hearth" .-> BEL
   BEL -- "验签通行证（hearth 反代前判定签发，远端不回调）" --> ADM
@@ -69,7 +69,7 @@ flowchart LR
 
 - 频道语音房：说话高亮、本地电平表、多设备同账号、断线自动重连（含服务重启自愈）
 - 投屏/摄像头：编码三档（VP9/AV1 SVC、H.264 单层）、码率/帧率/分辨率可调、软/硬编实时标注（浏览器 API 真值）
-- OBS WHIP 推流：每用户每频道独立推流密钥，服务端不转码原样透传（2K/4K/120fps）
+- OBS WHIP 推流：每用户一把推流令牌、频道写在 URL 里（换房间只改服务器地址，令牌不动），服务端不转码原样透传（2K/4K/120fps）
 - 文字聊天：频道内 WebSocket，断线重连
 - 管理：踢出、封禁、**服务端禁言**（落库持久、离房也可操作、全内核生效、推流入口同步拦截）、邀请制白名单；右键用户卡片直达操作
 - 注册：默认邀请制（管理员发有时效链接），首个账号自动管理员
@@ -161,6 +161,7 @@ bellows:
     BELLOWS_UDP_PORT: "47710"                    # 媒体
     BELLOWS_PUBLIC_IP: 192.168.1.20              # 显式指定 = 只通告该地址（覆盖）；留空 = 自动宣告全部网卡地址 + STUN 探测的公网映射
     # BELLOWS_STUN_SERVERS: stun.miwifi.com:3478 # 公网映射探测用，逗号分隔；留空用内置默认
+    # BELLOWS_SINK: livekit                      # 发布出口（rtc.Publisher 实现），默认 livekit，一般不设
   healthcheck:                                   # 兼做宣告探测的刷新触发：公网 IP 变化后新会话在 interval 内拿到新候选，无需重启
     test: ["CMD", "/app/bellows", "healthcheck"]        # 镜像无 shell/curl，用 exec 形式
     interval: 60s
@@ -171,7 +172,9 @@ bellows:
 
 要让局域网与外网推流者都能连，**删掉 `BELLOWS_PUBLIC_IP`** 让它自动宣告（STUN 不可达时配 `BELLOWS_STUN_SERVERS`），而不是改成公网 IP——显式配置是覆盖语义，改成公网 IP 会让局域网推流绕 NAT 回环。
 
-hearth 侧在「管理后台 → 服务实例」注册一个 **bellows-remote** 实例（或用环境变量 `BELLOWS_REMOTE_URL` / `BELLOWS_SHARED_SECRET` 合成同名锁定实例）：`remote_url` 填 hearth 能访问到的该机器地址（如 `http://192.168.1.20:8090`），共享密钥填同一值。用户的推流地址**保持 hearth 同源** `/providers/{alias}/w/{key}`（alias 即该实例名）：hearth 在反代前做完入场判定并签发短时效通行证随请求头带给远端，远端本地验签、**不需要访问 hearth**；信令经 hearth 反代（TLS 不变、OBS 地址不变），媒体按通告地址直达远端。外网推流者才需要端口映射/TLS，见 `docs/plan-bellows-upnp.md`。
+hearth 侧在「管理后台 → 服务实例」注册一个 **bellows-remote** 实例（或用环境变量 `BELLOWS_REMOTE_URL` / `BELLOWS_SHARED_SECRET` 合成同名锁定实例）：`remote_url` 填 hearth 能访问到的该机器地址（如 `http://192.168.1.20:8090`），共享密钥填同一值。用户的推流地址**保持 hearth 同源**（alias 即该实例名）：推流令牌每用户一把（设置页可取、可重置），频道写在 URL 里——bearer 模式（OBS）服务器填 `/providers/{alias}/w/{频道}`、Bearer 令牌填推流令牌；路径模式（ffmpeg 等）直接用 `/providers/{alias}/w/{频道}/{令牌}`。hearth 在反代前做完入场判定并签发短时效通行证随请求头带给远端，远端本地验签、**不需要访问 hearth**；信令经 hearth 反代（TLS 不变、OBS 地址不变），媒体按通告地址直达远端。外网推流者才需要端口映射/TLS，见 `docs/plan-bellows-upnp.md`。
+
+从旧版（每用户每频道一把密钥）升级时注意三点：hearth 与远端 bellows **同版本一起升级**（通行证字段变了，旧远端不认新 grant）；启动迁移自动把每用户最近创建的一把旧密钥保留为新令牌，其余丢弃；OBS 只需给服务器地址加上频道段（`/providers/{alias}/w/{频道}`），令牌沿用迁移保留的那把。
 
 多容器拆部署仍可用 `deploy/` 的 compose 一键起全家桶：
 

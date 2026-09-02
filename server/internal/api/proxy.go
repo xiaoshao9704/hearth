@@ -6,6 +6,7 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"log"
@@ -61,57 +62,71 @@ func (a *API) serveProvider(w http.ResponseWriter, r *http.Request) {
 }
 
 // serveWHIP WHIP 推流处理（实例来自路径 alias）。
-// 反代保留完整 /w/{streamKey} 路径（推流端点需要 key 在路径里）。两种推流填法都支持：
-// 路径含 key（POST /w/{key}，ffmpeg 等）与 OBS 官方的 bearer 模式（服务器填 /w、密钥放
-// Authorization: Bearer——ingress 要求精确 /w，带尾斜杠的 /w/ 会 404，这里做规范化宽容）。
-// WHIP publish（POST）按路径 alias 的实例裁决：远端 Bellows（实现了通行证签发且有上游）
-// 判定在反代前做完并签成 grant 带给远端，definitive（404/403/503），不再 fail-open；
-// 其他类型保持 fail-open 拦截（channel_gags：被禁言者不能靠重推 OBS 绕过禁言——
-// ingress 参与者自带发布权限，不经过 joinToken 的 canPublish 检查）。
+// 两种推流填法都支持：路径含令牌（POST /w/{channel}/{token}，ffmpeg 等）与 OBS 官方的
+// bearer 模式（服务器填 /w/{channel}、令牌放 Authorization: Bearer）。
+// 令牌是每用户一把的用户凭证，房间在 URL 里；POST 一律先过 admitIngest（definitive：
+// 404/403/503，不再 fail-open），通过后按实例形态出示凭证：
+//   - 进程内 bellows：判定结果挂 ctx 交给 ServeWHIP（resolver 原样取回四元组）；
+//   - 远端 bellows：读体回填后签通行证（grant）塞进请求头反代，远端只验签；
+//   - livekit-ingress：确保（令牌, 实例）的上游端点并按需换房后，把 Bearer 改写为
+//     上游 stream key 反代——hearth 终结用户令牌，向上游出示实例凭证。
+//
+// bellows 应答的 Location（/w/sessions/{rid}）两种形态都改写成
+// /providers/{alias}/w/sessions/{rid} 再回给客户端。
 func (a *API) serveWHIP(w http.ResponseWriter, req *http.Request, inst *ProviderInstance) {
-	key, bearer := rtc.WHIPToken(req)
 	if req.Method == http.MethodPost {
-		if bearer {
-			req.URL.Path = "/w" // bearer 模式端点规范化为精确 /w
-		}
-		if gi, ok := inst.Ingest.(rtc.WHIPGrantIssuer); ok && inst.Ingest.ProxyUpstream(req.Context()) != "" {
-			if !a.admitWhipRemote(w, req, gi, inst.Alias, key) {
-				return
-			}
-		} else if allow, mismatch := a.canPublishByStreamKey(req.Context(), key, inst.Alias); !allow {
-			if mismatch {
-				writeErr(w, http.StatusNotFound, "推流密钥与该入口不匹配")
-			} else {
-				writeErr(w, http.StatusForbidden, "你已被禁言，无法推流")
-			}
+		channel, token, _ := rtc.WHIPToken(req)
+		adm, ok := a.admitIngest(req.Context(), w, inst.Alias, channel, token)
+		if !ok {
 			return
 		}
-	} else {
-		// 会话收尾按归属路由：推流中途切换 ingest_provider 时，
-		// PATCH/DELETE 仍要送达创建该会话的进程内网关
-		for _, other := range a.listInstances(req.Context()) {
-			if other.Ingest == nil {
-				continue
-			}
-			if ws, ok := other.Ingest.(rtc.WHIPServer); ok && ws.HasSession(key) {
-				ws.ServeWHIP(w, req, key)
+		upstream := inst.Ingest.ProxyUpstream(req.Context())
+		if upstream == "" {
+			ws, ok := inst.Ingest.(rtc.WHIPServer)
+			if !ok {
+				writeErr(w, http.StatusServiceUnavailable, "上游未配置")
 				return
 			}
+			req = req.WithContext(context.WithValue(req.Context(), ingestCtxKey{}, adm))
+			ws.ServeWHIP(whipLocationWriter{w, "/providers/" + inst.Alias}, req, token)
+			return
+		}
+		if gi, ok := inst.Ingest.(rtc.WHIPGrantIssuer); ok {
+			if !a.grantWHIP(w, req, gi, token, adm) {
+				return
+			}
+			a.proxyToLoc(w, req, upstream, "", "/providers/"+inst.Alias)
+			return
+		}
+		if !a.bindIngressEndpoint(w, req, inst, adm) {
+			return
+		}
+		a.proxyToLoc(w, req, upstream, "", "/providers/"+inst.Alias)
+		return
+	}
+	// 会话收尾（/w/sessions/{rid}）按归属路由：推流中途切换 ingest_provider 时，
+	// PATCH/DELETE 仍要送达创建该会话的进程内网关
+	rid := rtc.WHIPSessionRID(req)
+	for _, other := range a.listInstances(req.Context()) {
+		if other.Ingest == nil {
+			continue
+		}
+		if ws, ok := other.Ingest.(rtc.WHIPServer); ok && ws.HasSession(rid) {
+			ws.ServeWHIP(w, req, rid)
+			return
 		}
 	}
 	// 有上游就反代（外部 ingress / 远端 bellows）；没有上游且能进程内处理（bellows）就直接处理
 	if ws, ok := inst.Ingest.(rtc.WHIPServer); ok && inst.Ingest.ProxyUpstream(req.Context()) == "" {
-		ws.ServeWHIP(w, req, key)
+		ws.ServeWHIP(w, req, rid)
 		return
 	}
 	a.proxyTo(w, req, inst.Ingest.ProxyUpstream(req.Context()), "")
 }
 
-// admitWhipRemote 远端 Bellows 的 POST 处理：读取并回填请求体（保持显式 ContentLength，
-// 避免反代变 chunked），definitive 入场判定后签发通行证随反代带给远端。
-// 通行证模型下远端不再回调，这里就是最终裁决：密钥不存在 404、归属与路径 alias 不符 404、
-// 不许推 403、查询出错 503。返回 false 时响应已写好。
-func (a *API) admitWhipRemote(w http.ResponseWriter, req *http.Request, gi rtc.WHIPGrantIssuer, alias, key string) bool {
+// grantWHIP 远端 bellows 的 POST 前置：读取并回填请求体（保持显式 ContentLength，
+// 避免反代变 chunked），签发通行证塞进请求头。返回 false 时响应已写好。
+func (a *API) grantWHIP(w http.ResponseWriter, req *http.Request, gi rtc.WHIPGrantIssuer, token string, adm ingestAdmission) bool {
 	offer, err := io.ReadAll(http.MaxBytesReader(w, req.Body, 256<<10))
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, "读取 SDP offer 失败")
@@ -119,35 +134,7 @@ func (a *API) admitWhipRemote(w http.ResponseWriter, req *http.Request, gi rtc.W
 	}
 	req.Body = io.NopCloser(bytes.NewReader(offer))
 	req.ContentLength = int64(len(offer))
-	c, u, provider, err := a.ingressOwner(req.Context(), key)
-	if errors.Is(err, store.ErrNotFound) {
-		writeErr(w, http.StatusNotFound, "推流密钥无效或已重置")
-		return false
-	}
-	if err != nil {
-		writeErr(w, http.StatusServiceUnavailable, "推流网关暂时不可用，请稍后再试")
-		return false
-	}
-	// 密钥是全局命名空间：记录归属必须等于路径实例，否则能用任一远端实例的
-	// secret 签 grant 把流发进另一套 LiveKit 的同名房间
-	if provider != alias {
-		writeErr(w, http.StatusNotFound, "推流密钥与该入口不匹配")
-		return false
-	}
-	adm, ok, reason, err := a.admitUser(req.Context(), c, u)
-	if err != nil {
-		writeErr(w, http.StatusServiceUnavailable, "推流网关暂时不可用，请稍后再试")
-		return false
-	}
-	if !ok {
-		writeErr(w, http.StatusForbidden, reason)
-		return false
-	}
-	if !adm.CanPublish {
-		writeErr(w, http.StatusForbidden, "你已被禁言，无法推流")
-		return false
-	}
-	h, v, err := gi.IssueWHIPGrant(req.Context(), key, c.Name, u.Username, offer)
+	h, v, err := gi.IssueWHIPGrant(req.Context(), token, adm.Room, adm.Identity, adm.Name, adm.Tag, offer)
 	if err != nil {
 		log.Printf("签发推流通行证失败: %v", err)
 		writeErr(w, http.StatusInternalServerError, "内部错误")
@@ -157,8 +144,89 @@ func (a *API) admitWhipRemote(w http.ResponseWriter, req *http.Request, gi rtc.W
 	return true
 }
 
+// bindIngressEndpoint livekit-ingress 的 POST 前置：确保（令牌, 实例）的上游端点存在
+// （无记录时 EnsureEndpoint 惰性创建并落库 ingest_endpoints）；端点绑定房间 ≠ URL 频道时
+// BindRoom 换房（稳态推流零控制面调用）；最后把 Authorization Bearer 改写为上游
+// stream key、路径规范为精确 /w（ingress 的 bearer 端点，/w/ 会 404）。
+// 返回 false 时响应已写好。
+func (a *API) bindIngressEndpoint(w http.ResponseWriter, req *http.Request, inst *ProviderInstance, adm ingestAdmission) bool {
+	ctx := req.Context()
+	ep, err := a.st.IngestEndpoint(ctx, adm.TokenID, inst.Alias)
+	if errors.Is(err, store.ErrNotFound) {
+		// 惰性建端点必须串行：并发首推（OBS 超时重试、两个工具推同一把令牌）会各建一个上游端点，
+		// 只有后写的进库，先建的那个带着有效 stream key 永久残留、重置令牌也删不到。
+		// 建端点是每令牌每实例一次的低频操作，一把全局锁足够，不值得引入按键分片
+		a.endpointMu.Lock()
+		defer a.endpointMu.Unlock()
+		// 持锁后重查：等锁期间可能已被并发请求建好
+		ep, err = a.st.IngestEndpoint(ctx, adm.TokenID, inst.Alias)
+		if errors.Is(err, store.ErrNotFound) {
+			id, key, cerr := inst.Ingest.EnsureEndpoint(ctx, adm.Identity, adm.Name,
+				map[string]string{"username": adm.Name, "kind": "ingest", "tag": adm.Tag})
+			if cerr != nil {
+				log.Printf("创建 ingress 端点失败（实例 %s）: %v", inst.Alias, cerr)
+				writeErr(w, http.StatusBadGateway, "推流上游不可用")
+				return false
+			}
+			ep = &store.IngestEndpoint{TokenID: adm.TokenID, Alias: inst.Alias, IngressID: id, UpstreamKey: key}
+			if uerr := a.st.UpsertIngestEndpoint(ctx, ep); uerr != nil {
+				// 落库失败必须把刚建的上游端点收回，否则同样残留
+				if derr := inst.Ingest.DeleteEndpoint(ctx, id); derr != nil {
+					log.Printf("回收未落库的 ingress 端点 %s（实例 %s）失败: %v", id, inst.Alias, derr)
+				}
+				log.Printf("落库 ingress 端点失败（实例 %s）: %v", inst.Alias, uerr)
+				writeErr(w, http.StatusServiceUnavailable, "推流入口暂时不可用，请稍后再试")
+				return false
+			}
+		} else if err != nil {
+			log.Printf("查询 ingress 端点失败（实例 %s）: %v", inst.Alias, err)
+			writeErr(w, http.StatusServiceUnavailable, "推流入口暂时不可用，请稍后再试")
+			return false
+		}
+	} else if err != nil {
+		log.Printf("查询 ingress 端点失败（实例 %s）: %v", inst.Alias, err)
+		writeErr(w, http.StatusServiceUnavailable, "推流入口暂时不可用，请稍后再试")
+		return false
+	}
+	if ep.BoundRoom != adm.Room {
+		if berr := inst.Ingest.BindRoom(ctx, ep.IngressID, adm.Room); berr != nil {
+			log.Printf("ingress 端点换房失败（实例 %s）: %v", inst.Alias, berr)
+			writeErr(w, http.StatusBadGateway, "推流上游不可用")
+			return false
+		}
+		ep.BoundRoom = adm.Room
+		// 内核侧已改，落库失败不阻断推流：下条推流按旧 bound_room 再 BindRoom 一次（幂等）
+		if uerr := a.st.UpsertIngestEndpoint(ctx, ep); uerr != nil {
+			log.Printf("更新 ingress 端点绑定房间失败（实例 %s）: %v", inst.Alias, uerr)
+		}
+	}
+	req.Header.Set("Authorization", "Bearer "+ep.UpstreamKey)
+	req.URL.Path = "/w"
+	return true
+}
+
+// whipLocationWriter 进程内 bellows 应答的 Location 改写：/w/... → {prefix}/w/...
+// （客户端 PATCH/DELETE 打回同源代理路径）。反代形态的等价处理见 proxyToLoc。
+type whipLocationWriter struct {
+	http.ResponseWriter
+	prefix string
+}
+
+func (w whipLocationWriter) WriteHeader(code int) {
+	if loc := w.Header().Get("Location"); strings.HasPrefix(loc, "/w/") {
+		w.Header().Set("Location", w.prefix+loc)
+	}
+	w.ResponseWriter.WriteHeader(code)
+}
+
 // proxyTo 反代到逐请求解析的上游；未配置 503，地址无效 502。stripPrefix 非空时剥路径前缀。
 func (a *API) proxyTo(w http.ResponseWriter, req *http.Request, upstream, stripPrefix string) {
+	a.proxyToLoc(w, req, upstream, stripPrefix, "")
+}
+
+// proxyToLoc 同 proxyTo；locPrefix 非空时把应答 Location 的 /w/... 改写为
+// {locPrefix}/w/...（WHIP 会话资源地址回指同源代理路径，进程内形态见 whipLocationWriter）。
+func (a *API) proxyToLoc(w http.ResponseWriter, req *http.Request, upstream, stripPrefix, locPrefix string) {
 	if upstream == "" {
 		writeErr(w, http.StatusServiceUnavailable, "上游未配置")
 		return
@@ -169,14 +237,15 @@ func (a *API) proxyTo(w http.ResponseWriter, req *http.Request, upstream, stripP
 		writeErr(w, http.StatusBadGateway, "上游地址无效")
 		return
 	}
-	newReverseProxy(target, stripPrefix).ServeHTTP(w, req)
+	newReverseProxy(target, stripPrefix, locPrefix).ServeHTTP(w, req)
 }
 
 // newReverseProxy 转发到 target；stripPrefix 非空时剥掉路径前缀。
 // 上游 URL 可带路径前缀与固定参数（如 http://host/sub?key=x）：
 // 路径拼在请求路径前，参数并入请求 query（与标准库单主机反代语义一致）。
-func newReverseProxy(target *url.URL, stripPrefix string) http.Handler {
-	return &httputil.ReverseProxy{
+// locPrefix 非空时改写应答 Location 的 /w/ 前缀（WHIP POST 应答的会话资源地址）。
+func newReverseProxy(target *url.URL, stripPrefix, locPrefix string) http.Handler {
+	rp := &httputil.ReverseProxy{
 		Director: func(req *http.Request) {
 			req.URL.Scheme = target.Scheme
 			req.URL.Host = target.Host
@@ -205,4 +274,13 @@ func newReverseProxy(target *url.URL, stripPrefix string) http.Handler {
 			writeErr(w, http.StatusBadGateway, "上游不可达")
 		},
 	}
+	if locPrefix != "" {
+		rp.ModifyResponse = func(resp *http.Response) error {
+			if loc := resp.Header.Get("Location"); strings.HasPrefix(loc, "/w/") {
+				resp.Header.Set("Location", locPrefix+loc)
+			}
+			return nil
+		}
+	}
+	return rp
 }

@@ -21,7 +21,8 @@ export interface EPart {
   micOn: boolean;
   canPublish: boolean; // false = 被服务端禁言（channel_gags）：无法开麦/推流
   sharing: boolean; // 有投屏轨
-  obs: boolean; // OBS 推流参与者（identity 以 -obs 结尾）
+  ingest: boolean; // 推流参与者（参与者元数据 kind=ingest，不再解析 identity 后缀）
+  tag: string; // 推流设备标签（identity = {username}-{tag}）；非推流参与者为空
 }
 
 // 引擎 → 房间视图的事件回调。引擎负责把媒体轨变成可挂载的元素；

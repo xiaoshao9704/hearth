@@ -1,4 +1,4 @@
-// baseline 迁移验收：存量库升级只多 bun_migrations/bun_migration_locks 两张表，数据无损；
+// baseline 迁移验收：存量库升级只多 bun_migrations/bun_migration_locks 与后续迁移的新表，数据无损；
 // 新库由模型生成全套 schema 并可正常读写。
 package store
 
@@ -188,9 +188,10 @@ func TestOpenUpgradesLegacyDB(t *testing.T) {
 		t.Fatalf("存量库升级失败: %v", err)
 	}
 
-	// schema 对比：只多 bun_migrations / bun_migration_locks
+	// schema 对比：只多 bun_migrations / bun_migration_locks 与 00002 的两张 ingest 表
 	after := tableNames(t, s.bun.DB)
-	want := append(slices.Clone(before), "bun_migration_locks", "bun_migrations")
+	want := append(slices.Clone(before),
+		"bun_migration_locks", "bun_migrations", "ingest_endpoints", "ingest_tokens")
 	slices.Sort(want)
 	if !slices.Equal(after, want) {
 		t.Fatalf("升级后表集合不符:\n got %v\nwant %v", after, want)
@@ -233,18 +234,18 @@ func TestOpenUpgradesLegacyDB(t *testing.T) {
 	if len(msgs) != 1 || msgs[0].Content != "hello" || msgs[0].CreatedAt.IsZero() {
 		t.Fatalf("消息数据不符: %+v", msgs)
 	}
-	if n := migrationRows(t, s.bun.DB); n != 1 {
-		t.Fatalf("bun_migrations 应有 1 行，实际 %d", n)
+	if n := migrationRows(t, s.bun.DB); n != 2 {
+		t.Fatalf("bun_migrations 应有 2 行，实际 %d", n)
 	}
 	s.Close()
 
-	// 再次 Open 是空操作（baseline 已登记）
+	// 再次 Open 是空操作（迁移已登记）
 	s2, err := Open("sqlite:" + path)
 	if err != nil {
 		t.Fatalf("重复 Open 失败: %v", err)
 	}
-	if n := migrationRows(t, s2.bun.DB); n != 1 {
-		t.Fatalf("重复 Open 后 bun_migrations 应仍为 1 行，实际 %d", n)
+	if n := migrationRows(t, s2.bun.DB); n != 2 {
+		t.Fatalf("重复 Open 后 bun_migrations 应仍为 2 行，实际 %d", n)
 	}
 	s2.Close()
 }
@@ -260,7 +261,8 @@ func TestOpenFreshDB(t *testing.T) {
 	want := []string{
 		"bun_migration_locks", "bun_migrations",
 		"channel_bans", "channel_gags", "channel_members", "channels", "devices",
-		"ingresses", "invites", "messages", "providers", "sessions", "settings", "users",
+		"ingest_endpoints", "ingest_tokens", "ingresses", "invites", "messages",
+		"providers", "sessions", "settings", "users",
 	}
 	if got := tableNames(t, s.bun.DB); !slices.Equal(got, want) {
 		t.Fatalf("新库表集合不符:\n got %v\nwant %v", got, want)
