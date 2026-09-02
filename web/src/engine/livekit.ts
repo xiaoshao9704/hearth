@@ -55,7 +55,7 @@ export class LiveKitEngine implements AVEngine {
       canPublish: p.permissions?.canPublish !== false, // 服务端禁言会收走发布权限
       sharing: !!p.getTrackPublication(Track.Source.ScreenShare),
       ingest,
-      tag: ingest ? (meta?.tag ?? '') : '',
+      tag: meta?.tag ?? '', // 浏览器参与者也有设备标签，展示设备名要用它
     };
   }
 

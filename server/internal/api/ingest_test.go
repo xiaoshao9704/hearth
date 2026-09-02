@@ -778,3 +778,47 @@ func TestModerationTargetsUserID(t *testing.T) {
 		t.Fatalf("设备不属于目标用户应 400，实际 %d: %s", rec.Code, rec.Body.String())
 	}
 }
+
+// v4 必须在生产启动顺序下也真的删掉上游端点：runMigrationSteps 跑在 New() 的
+// reloadProviders 之前，注册表此刻只有内建实例——迁移不自己重建的话，
+// livekit-ingress 类实例一个都取不到，端点连同有效 stream key 全部残留在上游。
+func TestMigrateEndpointIdentityV4ProductionOrdering(t *testing.T) {
+	maskProviderEnv(t)
+	a := testAPI(t)
+	ctx := context.Background()
+	_, it := seedIngestUser(t, a, "alice", "chan1")
+	twirpURL, whipURL, calls, _ := newFakeLivekit(t)
+	a.st.CreateProvider(ctx, &store.ProviderRecord{Alias: "ing1", Type: TypeLivekitIngress, Params: map[string]string{
+		"livekit_api_url": twirpURL, "livekit_api_key": "k", "livekit_api_secret": "s",
+		"ingress_upstream_url": whipURL}})
+	if err := a.st.UpsertIngestEndpoint(ctx, &store.IngestEndpoint{
+		TokenID: it.ID, Alias: "ing1", IngressID: "old-in", UpstreamKey: "old-sk", BoundRoom: "chan1"}); err != nil {
+		t.Fatalf("造端点失败: %v", err)
+	}
+
+	// 把注册表退回「只有内建实例」的启动态：不预先 reload，复现 New() 的真实顺序
+	a.providersMu.Lock()
+	a.providers = map[string]*ProviderInstance{}
+	a.providerOrder = nil
+	for _, inst := range a.builtinInstances() {
+		a.providers[inst.Alias] = inst
+		a.providerOrder = append(a.providerOrder, inst.Alias)
+	}
+	a.providersMu.Unlock()
+
+	a.st.SetMigrationVersion(ctx, 3)
+	a.runMigrations(ctx)
+
+	deleted := 0
+	for _, c := range *calls {
+		if c.op == "delete" && c.body["ingress_id"] == "old-in" {
+			deleted++
+		}
+	}
+	if deleted != 1 {
+		t.Fatalf("生产启动顺序下 v4 应删掉上游端点，实际 delete 次数 = %d（记录清空但上游残留）", deleted)
+	}
+	if ep, err := a.st.IngestEndpoint(ctx, it.ID, "ing1"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("端点记录应清空: %+v %v", ep, err)
+	}
+}

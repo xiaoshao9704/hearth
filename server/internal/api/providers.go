@@ -470,6 +470,11 @@ func (a *API) migrateIngestTokens(ctx context.Context) error {
 // 后清空 ingest_endpoints，下次推流按新 identity 惰性重建。
 // 幂等：表已空时两步都是空操作。
 func (a *API) migrateEndpointIdentity(ctx context.Context) error {
+	// 必须先重建注册表：runMigrationSteps 跑在 New() 的 reloadProviders 之前，
+	// 此刻注册表里只有内建实例，而持有上游端点的 livekit-ingress 是 env/DB 注册的——
+	// 不重建就每条都取不到实例，一次 DeleteEndpoint 也不发，端点连同有效 stream key
+	// 全部残留在上游且此后再也删不到。v1 建的 provider 行也要靠这次重建才可见。
+	a.reloadProviders(ctx)
 	eps, err := a.st.AllIngestEndpoints(ctx)
 	if err != nil {
 		return err

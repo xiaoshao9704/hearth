@@ -342,14 +342,19 @@ a:hover { color: var(--ember-soft); }
 .spec-badge { padding: 4px 9px; border-radius: 5px; background: var(--scrim); color: #cdc3ba; font-size: 10.5px; }
 .spec-badge.stat-strip { display: flex; align-items: center; gap: 8px; }
 .spec-badge .stat { display: inline-flex; align-items: center; gap: 3px; }
-.tile .tile-fs {
-  position: absolute; top: 10px; right: 10px; width: 30px; height: 30px; border-radius: 7px;
-  background: var(--scrim); color: var(--on-stage); display: flex; align-items: center; justify-content: center;
-  opacity: 0; transition: opacity 0.15s ease; z-index: 3; font-size: 15px;
+/* tile 右上角操作组：置顶 / 全屏，悬停显现，置顶后常驻 */
+.tile .tile-actions { position: absolute; top: 10px; right: 10px; z-index: 3; display: flex; gap: 6px; }
+.tile .tact {
+  width: 30px; height: 30px; border-radius: 8px; display: flex; align-items: center; justify-content: center;
+  background: var(--scrim); border: 1px solid var(--stage-line); color: var(--on-stage);
+  backdrop-filter: blur(6px); opacity: 0;
+  transition: opacity 0.15s ease, color 0.12s ease, border-color 0.12s ease;
 }
-.tile:hover .tile-fs { opacity: 1; }
-.tile .tile-pin { position: absolute; top: 12px; right: 48px; z-index: 2; display: none; font-size: 13px; }
-.tile.pinned .tile-pin { display: block; }
+.tile:hover .tact { opacity: 1; }
+.tile .tact:hover { color: var(--ember-soft); border-color: rgba(255, 255, 255, 0.22); }
+.tile .tact-pin.pinned { opacity: 1; background: var(--ember); border-color: transparent; color: var(--on-ember); }
+.tile .tact-pin.pinned:hover { color: var(--on-ember); }
+.tile .tact-pin.pinned svg { fill: currentColor; }
 
 /* 无视频参与者的音频块 */
 .tile.tile-audio {
@@ -372,6 +377,8 @@ a:hover { color: var(--ember-soft); }
 .video-grid.spotlight .rail .tile .avatar { width: 46px; height: 46px; font-size: 15px; }
 .video-grid.spotlight .rail .tile .tile-label { left: 8px; bottom: 8px; padding: 3px 8px; font-size: 11px; }
 .video-grid.spotlight .rail .tile .tile-badges { display: none; }
+.video-grid.spotlight .rail .tile .tile-actions { top: 8px; right: 8px; }
+.video-grid.spotlight .rail .tile .tact { width: 24px; height: 24px; border-radius: 7px; }
 
 /* 房间底部控制栏 */
 .control-bar {
@@ -411,14 +418,36 @@ a:hover { color: var(--ember-soft); }
   border-bottom: 1px solid var(--line-soft); font-size: 13px; font-weight: 600;
 }
 .side-panel .panel-body { flex-grow: 1; padding: 14px 10px; display: flex; flex-direction: column; gap: 16px; overflow-y: auto; min-height: 0; }
+/* 成员列表按用户分组：组间留距，组内用户行 + 树形设备子行 */
+.mgroup { display: flex; flex-direction: column; gap: 2px; margin-bottom: 10px; }
+.mgroup:last-child { margin-bottom: 0; }
 .member-row { display: flex; align-items: center; gap: 10px; padding: 7px 8px; border-radius: 8px; }
+.member-row:hover { background: var(--bg-2); }
 .member-row.owner-row { background: var(--bg-4); }
 .member-row .m-name { font-size: 13px; font-weight: 500; display: flex; align-items: center; gap: 6px; min-width: 0; }
 .member-row .m-name > :first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .member-row .m-status { font-size: 11px; color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .member-row .m-status.hot { color: var(--ember); }
 .member-row .m-btn { width: 26px; height: 26px; flex-shrink: 0; border-radius: 6px; display: flex; align-items: center; justify-content: center; color: var(--text-2); }
+.member-row .m-btn:hover { background: var(--bg-4); color: var(--text-0); }
 .member-row .m-btn.muted-on { background: var(--red-tint); color: var(--red); }
+.member-row .m-btn.muted-on:hover { background: var(--red-tint); color: var(--red); }
+/* 设备子行：缩进 + 连接线；竖线贯穿兄弟行，末行带弧度收口成 └ */
+.member-row.mdev { position: relative; margin-left: 17px; padding: 5px 8px 5px 22px; gap: 8px; }
+.member-row.mdev::before { content: ''; position: absolute; left: 0; top: -3px; bottom: 0; border-left: 1.5px solid var(--line); }
+.member-row.mdev::after { content: ''; position: absolute; left: 0; top: 50%; width: 12px; border-bottom: 1.5px solid var(--line); }
+.member-row.muser + .member-row.mdev::before { top: 0; }
+.member-row.mdev:last-child::before { bottom: 50%; width: 12px; border-bottom: 1.5px solid var(--line); border-bottom-left-radius: 6px; }
+.member-row.mdev:last-child::after { content: none; }
+.member-row .d-ico {
+  width: 24px; height: 24px; border-radius: 7px; flex-shrink: 0;
+  background: var(--bg-3); border: 1px solid var(--line); color: var(--text-1);
+  display: flex; align-items: center; justify-content: center;
+}
+.member-row .d-ico.local { background: var(--ember-tint); border-color: var(--ember-line); color: var(--ember); }
+.member-row .d-name { font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.member-row .d-status { font-size: 10.5px; color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.member-row .d-status.hot { color: var(--ember); }
 
 .chat-log { flex-grow: 1; padding: 16px 16px 8px; display: flex; flex-direction: column; gap: 15px; overflow-y: auto; min-height: 0; }
 .chat-day { display: flex; align-items: center; gap: 10px; font-size: 10px; color: var(--text-2); }

@@ -144,6 +144,11 @@ export async function renderRoom(root: HTMLElement, channel: string) {
     return [...map.values()];
   }
 
+  // 分组/归属键：正常取 uid；拿不到元数据的参与者（滚动升级窗口里的旧连接、
+  // 非 hearth 签发的连接）uid 为 0，退回 identity——否则这些互不相干的人会被
+  // 并成同一个账号的多台设备，右键菜单的批量操作会误伤
+  const groupKey = (p: EPart): number | string => (p.uid > 0 ? p.uid : p.identity);
+
   // 自己的推流设备默认静音（自己的 OBS 不出声）；推流身份看名册，不再拼 identity 后缀
   const isOwnIngest = (identity: string) => {
     const p = parts().find((pp) => pp.identity === identity);
@@ -277,7 +282,10 @@ export async function renderRoom(root: HTMLElement, channel: string) {
     const isSelf = uid === myUid;
     const deviceMode = !!identity;
     const targets = parts().filter(
-      (p) => !p.isLocal && p.uid === uid && (!deviceMode || p.identity === identity),
+      (p) =>
+        !p.isLocal &&
+        (uid > 0 ? p.uid === uid : p.identity === identity) &&
+        (!deviceMode || p.identity === identity),
     );
     const muted = targets.some((p) => volumeFor(p.identity) === 0);
     const devName = (p: EPart) => (p.ingest ? `OBS 推流${p.tag ? ` · ${p.tag}` : ''}` : p.tag || p.identity);
@@ -1060,14 +1068,15 @@ export async function renderRoom(root: HTMLElement, channel: string) {
           a.identity.localeCompare(b.identity),
       ),
     );
-    const memberUserCount = createMemo(() => new Set(roster().map((p) => p.uid)).size);
+    const memberUserCount = createMemo(() => new Set(roster().map(groupKey)).size);
     // 展示层按用户分组：单设备用户平铺一行，多设备用户展开树形设备子行
     const memberGroups = createMemo(() => {
-      const groups = new Map<number, EPart[]>();
+      const groups = new Map<number | string, EPart[]>();
       for (const p of memberDevices()) {
-        const g = groups.get(p.uid);
+        const k = groupKey(p);
+        const g = groups.get(k);
         if (g) g.push(p);
-        else groups.set(p.uid, [p]);
+        else groups.set(k, [p]);
       }
       return [...groups.values()];
     });
