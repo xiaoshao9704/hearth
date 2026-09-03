@@ -71,11 +71,18 @@ func TestSelectorResolutionAndFallback(t *testing.T) {
 	if alias, _ := a.voiceInstance(ctx); alias != "lk2" {
 		t.Fatalf("voice 应解析到 lk2，实际 %q", alias)
 	}
-	// 选了无对应槽位能力的实例 → 回落
-	a.st.SetSetting(ctx, "cfg_voice_provider", "lk2")
-	a.st.SetSetting(ctx, "cfg_ingest_provider", "lk2") // livekit 无推流能力
-	if alias, _, fellBack := a.ingestInstance(ctx); alias != "bellows" || !fellBack {
-		t.Fatalf("无推流能力的实例应回落 bellows 且 fellBack=true，实际 %q fellBack=%v", alias, fellBack)
+	// livekit 实例三面齐全：推流槽位选中它即生效（推流走它自带的 WHIP 入口）
+	a.st.SetSetting(ctx, "cfg_ingest_provider", "lk2")
+	if alias, _, fellBack := a.ingestInstance(ctx); alias != "lk2" || fellBack {
+		t.Fatalf("ingest 应解析到 lk2，实际 %q fellBack=%v", alias, fellBack)
+	}
+	// 选了无对应槽位能力的实例 → 回落（livekit-ingress 只有推流面）
+	a.st.CreateProvider(ctx, &store.ProviderRecord{Alias: "ing2", Type: TypeLivekitIngress,
+		Params: map[string]string{"ingress_upstream_url": "http://x:58080"}})
+	a.reloadProviders(ctx)
+	a.st.SetSetting(ctx, "cfg_voice_provider", "ing2")
+	if alias, _ := a.voiceInstance(ctx); alias != TypeEmber {
+		t.Fatalf("无语音能力的实例应回落 ember，实际 %q", alias)
 	}
 }
 
