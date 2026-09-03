@@ -9,6 +9,7 @@ import (
 	"net/netip"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/huin/goupnp"
@@ -219,6 +220,90 @@ func localAddrFor(loc *url.URL) (netip.Addr, error) {
 		return netip.Addr{}, err
 	}
 	return netip.ParseAddr(host)
+}
+
+// upnp6NoSuchEntry WANIPv6FirewallControl 的 704 NoSuchEntry：UniqueID 已不存在。
+const upnp6NoSuchEntry = 704
+
+// upnpFaultCode 取 SOAP 错误码；不是 SOAP 错误返回 0。
+func upnpFaultCode(err error) int {
+	var fault *soap.SOAPFaultError
+	if errors.As(err, &fault) {
+		return fault.Detail.UPnPError.Errorcode
+	}
+	return 0
+}
+
+// upnp6Client 用 IGDv2 的 WANIPv6FirewallControl:1 开 v6 防火墙 pinhole。
+// 不依赖网关 v6 地址（走 SOAP，是最稳的一条）；续租优先 UpdatePinhole，报 704
+// unknown id 就重新 AddPinhole。ids 按 (协议, 端口, GUA) 存 UniqueID，供续租/删除认领。
+type upnp6Client struct {
+	fw *internetgateway2.WANIPv6FirewallControl1
+
+	mu  sync.Mutex
+	ids map[string]uint16
+}
+
+func newUPnP6Client(fw *internetgateway2.WANIPv6FirewallControl1) *upnp6Client {
+	return &upnp6Client{fw: fw, ids: make(map[string]uint16)}
+}
+
+// discoverUPnP6 发现暴露 WANIPv6FirewallControl:1 的 IGD（IGDv2 才有）。
+func discoverUPnP6(ctx context.Context) (pinholeClient, error) {
+	if clients, _, err := internetgateway2.NewWANIPv6FirewallControl1ClientsCtx(ctx); err == nil && len(clients) > 0 {
+		return newUPnP6Client(clients[0]), nil
+	}
+	return nil, ErrUnsupported
+}
+
+func (u *upnp6Client) Method() string { return "upnp6" }
+
+func (u *upnp6Client) Open(ctx context.Context, proto string, port int, gua netip.Addr, lifetime time.Duration) (pinhole, error) {
+	protoNum, err := protoNumber(proto)
+	if err != nil {
+		return pinhole{}, err
+	}
+	seconds := uint32(lifetime / time.Second)
+	key := pinNonceKey(proto, port, gua)
+
+	u.mu.Lock()
+	id, have := u.ids[key]
+	u.mu.Unlock()
+	if have {
+		// 续租：更新已有 pinhole 的租期，网关才不会每轮换 UniqueID、堆满 pinhole 空间。
+		err := u.fw.UpdatePinholeCtx(ctx, id, seconds)
+		if err == nil {
+			return pinhole{proto: proto, port: port, gua: gua, method: "upnp6", id: id, hasID: true}, nil
+		}
+		if upnpFaultCode(err) != upnp6NoSuchEntry {
+			return pinhole{}, classifyUPnPError(err)
+		}
+		// 704：这条 pinhole 已被网关回收，落到下面重新 AddPinhole。
+		u.mu.Lock()
+		delete(u.ids, key)
+		u.mu.Unlock()
+	}
+
+	// RemoteHost 空 + RemotePort 0 = 任意源；InternalClient 是本机 GUA、外部端口 == 内部端口。
+	id, err = u.fw.AddPinholeCtx(ctx, "", 0, gua.String(), uint16(port), uint16(protoNum), seconds)
+	if err != nil {
+		return pinhole{}, classifyUPnPError(err)
+	}
+	u.mu.Lock()
+	u.ids[key] = id
+	u.mu.Unlock()
+	return pinhole{proto: proto, port: port, gua: gua, method: "upnp6", id: id, hasID: true}, nil
+}
+
+func (u *upnp6Client) Close(ctx context.Context, h pinhole) error {
+	u.mu.Lock()
+	delete(u.ids, pinNonceKey(h.proto, h.port, h.gua))
+	u.mu.Unlock()
+	err := u.fw.DeletePinholeCtx(ctx, h.id)
+	if err == nil || upnpFaultCode(err) == upnp6NoSuchEntry {
+		return nil // 已不存在视为已删除
+	}
+	return classifyUPnPError(err)
 }
 
 // classifyUPnPError 把 SOAP 错误码映射成 portmap 的哨兵错误；不认识的错误码

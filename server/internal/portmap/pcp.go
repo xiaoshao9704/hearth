@@ -185,16 +185,8 @@ func (c *pcpClient) pcpExchange(ctx context.Context, conn *net.UDPConn, local ne
 	if resp[0] == natpmpVer {
 		return Mapping{}, errUnsuppVersion
 	}
-	switch code := resp[3]; code {
-	case 0:
-	case pcpResultUnsuppVersion:
-		return Mapping{}, errUnsuppVersion
-	case pcpResultNotAuthorized:
-		return Mapping{}, fmt.Errorf("%w: pcp NOT_AUTHORIZED", ErrNotAuthorized)
-	case pcpResultNoResources:
-		return Mapping{}, fmt.Errorf("%w: pcp NO_RESOURCES", ErrNoResources)
-	default:
-		return Mapping{}, fmt.Errorf("pcp 结果码 %d", code)
+	if err := pcpResultErr(resp[3]); err != nil {
+		return Mapping{}, err
 	}
 	if len(resp) < 60 {
 		return Mapping{}, errors.New("pcp 响应长度不足")
@@ -279,6 +271,22 @@ func (c *pcpClient) natpmpExternalIP(ctx context.Context, conn *net.UDPConn) (ne
 	return netip.AddrFrom4([4]byte(resp[8:12])), nil
 }
 
+// pcpResultErr 把 PCP MAP 响应的结果码映射成哨兵错误；v4 与 v6 pinhole 共用。
+func pcpResultErr(code byte) error {
+	switch code {
+	case 0:
+		return nil
+	case pcpResultUnsuppVersion:
+		return errUnsuppVersion
+	case pcpResultNotAuthorized:
+		return fmt.Errorf("%w: pcp NOT_AUTHORIZED", ErrNotAuthorized)
+	case pcpResultNoResources:
+		return fmt.Errorf("%w: pcp NO_RESOURCES", ErrNoResources)
+	default:
+		return fmt.Errorf("pcp 结果码 %d", code)
+	}
+}
+
 func natpmpResult(code uint16) error {
 	switch code {
 	case 0:
@@ -301,6 +309,93 @@ func protoNumber(proto string) (byte, error) {
 	default:
 		return 0, fmt.Errorf("未知协议 %q", proto)
 	}
+}
+
+// pcp6Client 用同一份 PCP MAP 报文做 IPv6 防火墙 pinhole：IPv6 下 MAP 就是「放行入站」
+// 而非端口翻译。与 v4 的两处区别——地址族走 udp6，且请求头 client IP 与 MAP 的建议外部
+// 地址都填本机 GUA（不是 dial 取到的源地址）：真机核实过 PCP 反欺骗要求报文源、头里的
+// client IP、建议外部地址三者都是本机 GUA，网关才授予租约（发链路本地地址无回应）。
+// 没有 NAT-PMP 回落（那是 v4 专属）。
+type pcp6Client struct {
+	gw netip.AddrPort // 网关的 GUA（不是链路本地），端口 5351
+
+	mu     sync.Mutex
+	nonces map[string][12]byte // (协议, 端口, GUA) → nonce：续租与删除复用它认领同一条放行
+}
+
+func newPCPPinhole(gw netip.AddrPort) pinholeClient {
+	return &pcp6Client{gw: gw, nonces: make(map[string][12]byte)}
+}
+
+func (c *pcp6Client) Method() string { return "pcp6" }
+
+func (c *pcp6Client) Open(ctx context.Context, proto string, port int, gua netip.Addr, lifetime time.Duration) (pinhole, error) {
+	if lifetime <= 0 {
+		lifetime = leaseDuration // 0 是「删除」的表达，Open 收到属误用，按最长租期处理
+	}
+	if err := c.exchange(ctx, proto, port, gua, lifetime); err != nil {
+		return pinhole{}, err
+	}
+	return pinhole{proto: proto, port: port, gua: gua, method: "pcp6"}, nil
+}
+
+// Close 删除 = lifetime 0，复用同一 nonce 认领。
+func (c *pcp6Client) Close(ctx context.Context, h pinhole) error {
+	return c.exchange(ctx, h.proto, h.port, h.gua, 0)
+}
+
+func (c *pcp6Client) nonce(proto string, port int, gua netip.Addr) [12]byte {
+	key := pinNonceKey(proto, port, gua)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if n, ok := c.nonces[key]; ok {
+		return n
+	}
+	var n [12]byte
+	rand.Read(n[:])
+	c.nonces[key] = n
+	return n
+}
+
+func (c *pcp6Client) exchange(ctx context.Context, proto string, port int, gua netip.Addr, lifetime time.Duration) error {
+	protoNum, err := protoNumber(proto)
+	if err != nil {
+		return err
+	}
+	conn, err := net.DialUDP("udp6", nil, net.UDPAddrFromAddrPort(c.gw))
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+
+	nonce := c.nonce(proto, port, gua)
+	ip := gua.As16()
+
+	// 24 字节公共头 + 36 字节 MAP 数据，与 v4 逐字段相同，只是地址填本机 GUA。
+	req := make([]byte, 60)
+	req[0] = pcpVersion
+	req[1] = pcpOpcodeMap
+	binary.BigEndian.PutUint32(req[4:8], uint32(lifetime/time.Second))
+	copy(req[8:24], ip[:]) // 请求头 client IP = 本机 GUA
+	copy(req[24:36], nonce[:])
+	req[36] = protoNum
+	binary.BigEndian.PutUint16(req[40:42], uint16(port)) // 内部端口
+	binary.BigEndian.PutUint16(req[42:44], uint16(port)) // 建议外部端口 == 内部端口
+	copy(req[44:60], ip[:])                              // 建议外部地址 = 本机 GUA
+
+	resp, err := roundTrip(ctx, conn, req, func(b []byte) bool {
+		if len(b) < 24 || b[0] != pcpVersion || b[1] != pcpRespBit|pcpOpcodeMap {
+			return false
+		}
+		if b[3] != 0 {
+			return true // 出错响应可能不带完整 MAP 数据，交给结果码处理
+		}
+		return len(b) >= 60 && [12]byte(b[24:36]) == nonce && binary.BigEndian.Uint16(b[40:42]) == uint16(port)
+	})
+	if err != nil {
+		return err
+	}
+	return pcpResultErr(resp[3])
 }
 
 // roundTrip 发请求等第一个匹配的响应：250ms 起指数退避、最多 3 次（约 1.75s 见分晓）。

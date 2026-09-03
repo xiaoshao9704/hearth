@@ -66,6 +66,10 @@ type Status struct {
 	Detail    string // 人读文案：诊断含义 + 下一步该做什么
 	Mappings  []Mapping
 	Hops      []Hop // 级联申请实际走通的每一跳，第一跳是默认网关
+	// Pinholes v6 防火墙放行，与 v4 映射并列、独立维护（见 pinhole.go）。V6Detail 是它的
+	// 人读诊断（如「没有 GUA」「未发现 v6 网关」「已放行」），不进 Diagnosis——那是 v4 的语义。
+	Pinholes  []Pinhole
+	V6Detail  string
 	UpdatedAt time.Time
 }
 

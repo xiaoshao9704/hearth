@@ -28,6 +28,11 @@ type Mapper struct {
 	newPCP   func(netip.AddrPort) client
 	upnp     func(context.Context) (client, error)
 	hopFound hopDiscoverFunc // 级联时发现上游那一跳，见 chain.go
+	// v6 pinhole 侧的发现途径（与 v4 并列、互不影响，见 pinhole.go）。
+	gateway6 func() (netip.Addr, bool)
+	newPCP6  func(netip.AddrPort) pinholeClient
+	upnp6    func(context.Context) (pinholeClient, error)
+	gua6     func() []netip.Addr
 	sleep    func(context.Context, time.Duration) bool
 	now      func() time.Time
 	logf     func(string, ...any)
@@ -38,6 +43,11 @@ type Mapper struct {
 	st      Status
 	backoff time.Duration
 	closed  bool
+
+	// v6 pinhole 的锁定客户端与在放行、退避——与 v4 各记各的，发现失败不互相干扰。
+	phcl      pinholeClient
+	pinholes  map[pinKey]pinhole
+	phBackoff time.Duration
 }
 
 type mapKey struct {
@@ -51,10 +61,15 @@ func New() *Mapper {
 		newPCP:   newPCPClient,
 		upnp:     discoverUPnP,
 		hopFound: discoverHop,
+		gateway6: defaultGateway6,
+		newPCP6:  newPCPPinhole,
+		upnp6:    discoverUPnP6,
+		gua6:     globalUnicastV6,
 		sleep:    sleepCtx,
 		now:      time.Now,
 		logf:     log.Printf,
 		active:   make(map[mapKey]Mapping),
+		pinholes: make(map[pinKey]pinhole),
 		st:       Status{Diagnosis: DiagOff},
 	}
 }
@@ -108,13 +123,14 @@ func (m *Mapper) Close(ctx context.Context) {
 	m.mu.Unlock()
 
 	m.unmapAll(ctx)
+	m.unmapAllPinholes(ctx)
 
 	m.mu.Lock()
 	m.st = Status{Diagnosis: DiagOff, Detail: "端口映射已停止", UpdatedAt: m.now()}
 	m.mu.Unlock()
 }
 
-// round 跑一轮申请/续租，返回距下一轮的等待时长。
+// round 跑一轮：v4 端口映射与 v6 pinhole 并列，各自维护、互不影响，返回两者里更早的下一轮时刻。
 func (m *Mapper) round(ctx context.Context, wants func(context.Context) []Want) time.Duration {
 	if ctx.Err() != nil {
 		return 0
@@ -126,11 +142,30 @@ func (m *Mapper) round(ctx context.Context, wants func(context.Context) []Want) 
 
 	if len(ws) == 0 {
 		m.unmapAll(ctx)
+		m.unmapAllPinholes(ctx)
 		m.commit(nil, DiagOff, "未启用端口映射（没有待映射的端口）")
+		m.setPinholes(nil, "")
 		// 端口来自动态配置，配上之后要尽快生效，不等一个续租周期。
 		return minBackoff
 	}
 
+	v4 := m.roundV4(ctx, ws)
+	if ctx.Err() != nil {
+		return 0
+	}
+	v6 := m.roundPinhole(ctx, ws)
+	return minDuration(v4, v6)
+}
+
+func minDuration(a, b time.Duration) time.Duration {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+// roundV4 跑一轮 v4 端口映射（申请/续租），返回距下一轮的等待时长。
+func (m *Mapper) roundV4(ctx context.Context, ws []Want) time.Duration {
 	m.dropStale(ctx, ws)
 
 	var (
@@ -196,6 +231,233 @@ func (m *Mapper) round(ctx context.Context, wants func(context.Context) []Want) 
 	}
 	m.reset()
 	return renewInterval
+}
+
+// roundPinhole 跑一轮 v6 防火墙 pinhole：对每个本机 GUA × 每个 Want 幂等放行/续租。
+// 与 v4 完全独立——退避各记各的，发现失败不影响 v4、不影响 healthz。返回距下一轮等待时长。
+func (m *Mapper) roundPinhole(ctx context.Context, ws []Want) time.Duration {
+	guas := m.gua6()
+	if len(guas) == 0 {
+		// 没有 GUA 就没有要放行的 v6 候选，撤掉可能残留的放行，安静等下一轮。
+		m.unmapAllPinholes(ctx)
+		m.setPinholes(nil, detailNoV6)
+		m.resetPinhole()
+		return renewInterval
+	}
+
+	want := make(map[pinKey]Want, len(ws)*len(guas))
+	for _, w := range ws {
+		for _, g := range guas {
+			want[pinKey{w.Proto, w.Port, g}] = w
+		}
+	}
+	m.dropStalePinholes(ctx, want) // GUA 变化（临时地址轮换）或 want 变化时撤掉旧放行
+
+	var (
+		opened []Pinhole
+		errs   []error
+	)
+	for k, w := range want {
+		if ctx.Err() != nil {
+			return renewInterval
+		}
+		m.mu.Lock()
+		cl := m.phcl
+		m.mu.Unlock()
+
+		var (
+			h   pinhole
+			err error
+		)
+		if cl != nil {
+			h, err = cl.Open(ctx, w.Proto, w.Port, k.gua, leaseDuration)
+		} else {
+			// 发现与第一条放行是同一件事（同 pick）：拿不到任何 v6 途径就退避。
+			cl, h, err = m.discoverPinhole(ctx, w, k.gua)
+			if cl == nil {
+				m.setPinholes(opened, detailNoGateway6)
+				return m.bumpPinhole()
+			}
+			m.mu.Lock()
+			m.phcl = cl
+			m.mu.Unlock()
+		}
+		if err != nil {
+			errs = append(errs, fmt.Errorf("%s/%d@%s: %w", w.Proto, w.Port, k.gua, err))
+			continue
+		}
+		m.mu.Lock()
+		m.pinholes[k] = h
+		m.mu.Unlock()
+		opened = append(opened, Pinhole{Proto: w.Proto, Port: w.Port, GUA: k.gua, Method: cl.Method()})
+	}
+
+	if anyIs(errs, ErrUnsupported) {
+		// 锁定的 v6 网关不再应答：丢掉客户端，下一轮重新发现。
+		m.mu.Lock()
+		m.phcl = nil
+		m.mu.Unlock()
+	}
+	if len(errs) > 0 {
+		m.setPinholes(opened, detailPinholeErr(errs))
+		return m.bumpPinhole()
+	}
+	m.setPinholes(opened, detailPinholeOK(opened))
+	m.resetPinhole()
+	return renewInterval
+}
+
+// discoverPinhole 发现并锁定 v6 pinhole 客户端，用一条真实 Open 当探测（与 pick 同思路）。
+// PCP-v6 优先（不依赖设备宣告版本）：拿到网关 GUA 就先试它，ErrUnsupported 或没有网关 GUA
+// 才退到 UPnP 的 WANIPv6FirewallControl。w/gua 是这条探测放行的目标。
+func (m *Mapper) discoverPinhole(ctx context.Context, w Want, gua netip.Addr) (pinholeClient, pinhole, error) {
+	if gw, ok := m.gateway6(); ok {
+		pc := m.newPCP6(netip.AddrPortFrom(gw, pcpPort))
+		h, err := pc.Open(ctx, w.Proto, w.Port, gua, leaseDuration)
+		if !errors.Is(err, ErrUnsupported) {
+			return pc, h, err
+		}
+		if ctx.Err() != nil {
+			return nil, pinhole{}, ctx.Err()
+		}
+	}
+	uctx, cancel := context.WithTimeout(ctx, upnpDiscoveryTimeout)
+	defer cancel()
+	uc, err := m.upnp6(uctx)
+	if err != nil {
+		return nil, pinhole{}, err
+	}
+	h, err := uc.Open(uctx, w.Proto, w.Port, gua, leaseDuration)
+	return uc, h, err
+}
+
+// dropStalePinholes 撤销已不在 want 集合里的放行（GUA 轮换或端口改了）。
+func (m *Mapper) dropStalePinholes(ctx context.Context, want map[pinKey]Want) {
+	m.mu.Lock()
+	cl := m.phcl
+	var stale []pinKey
+	for k := range m.pinholes {
+		if _, ok := want[k]; !ok {
+			stale = append(stale, k)
+		}
+	}
+	drop := make(map[pinKey]pinhole, len(stale))
+	for _, k := range stale {
+		drop[k] = m.pinholes[k]
+		delete(m.pinholes, k)
+	}
+	m.mu.Unlock()
+	if cl == nil {
+		return
+	}
+	for _, h := range drop {
+		m.closePinhole(ctx, cl, h)
+	}
+}
+
+func (m *Mapper) unmapAllPinholes(ctx context.Context) {
+	m.mu.Lock()
+	cl := m.phcl
+	active := m.pinholes
+	m.pinholes = make(map[pinKey]pinhole)
+	m.mu.Unlock()
+	if cl == nil || len(active) == 0 {
+		return
+	}
+	for _, h := range active {
+		m.closePinhole(ctx, cl, h)
+	}
+}
+
+func (m *Mapper) closePinhole(ctx context.Context, cl pinholeClient, h pinhole) {
+	if err := cl.Close(ctx, h); err != nil {
+		m.logf("portmap: 撤销 v6 放行 %s/%d @ %s 失败: %v", h.proto, h.port, h.gua, err)
+	}
+}
+
+// setPinholes 落 v6 侧状态，建立/撤销时各打一次日志；续租轮集合不变则不刷屏。
+func (m *Mapper) setPinholes(list []Pinhole, detail string) {
+	slices.SortFunc(list, func(a, b Pinhole) int {
+		if a.Proto != b.Proto {
+			return strings.Compare(a.Proto, b.Proto)
+		}
+		if a.Port != b.Port {
+			return a.Port - b.Port
+		}
+		return a.GUA.Compare(b.GUA)
+	})
+	m.mu.Lock()
+	if m.closed {
+		m.mu.Unlock()
+		return
+	}
+	old := m.st.Pinholes
+	m.st.Pinholes = list
+	m.st.V6Detail = detail
+	logf := m.logf
+	m.mu.Unlock()
+
+	oldSet := pinholeSet(old)
+	curSet := pinholeSet(list)
+	for _, p := range list {
+		if _, ok := oldSet[pinKey{p.Proto, p.Port, p.GUA}]; !ok {
+			logf("portmap: v6 放行 %s/%d @ %s（%s）", p.Proto, p.Port, p.GUA, p.Method)
+		}
+	}
+	for _, p := range old {
+		if _, ok := curSet[pinKey{p.Proto, p.Port, p.GUA}]; !ok {
+			logf("portmap: v6 放行已撤销 %s/%d @ %s", p.Proto, p.Port, p.GUA)
+		}
+	}
+}
+
+func pinholeSet(ps []Pinhole) map[pinKey]struct{} {
+	s := make(map[pinKey]struct{}, len(ps))
+	for _, p := range ps {
+		s[pinKey{p.Proto, p.Port, p.GUA}] = struct{}{}
+	}
+	return s
+}
+
+func (m *Mapper) bumpPinhole() time.Duration {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	switch {
+	case m.phBackoff == 0:
+		m.phBackoff = minBackoff
+	default:
+		m.phBackoff *= 2
+	}
+	if m.phBackoff > maxBackoff {
+		m.phBackoff = maxBackoff
+	}
+	return m.phBackoff
+}
+
+func (m *Mapper) resetPinhole() {
+	m.mu.Lock()
+	m.phBackoff = 0
+	m.mu.Unlock()
+}
+
+const detailNoV6 = "本机没有全局 IPv6 地址，无需放行 v6 入站"
+
+const detailNoGateway6 = "未发现支持 v6 pinhole 的网关：PCP 需要网关的 GUA（默认路由若指向链路本地地址则不可用），" +
+	"UPnP 需要 IGDv2 暴露 WANIPv6FirewallControl（常被以 IGDv1 身份宣告或单独禁用挡住）。"
+
+func detailPinholeOK(ps []Pinhole) string {
+	if len(ps) == 0 {
+		return "没有要放行的 v6 端口"
+	}
+	parts := make([]string, 0, len(ps))
+	for _, p := range ps {
+		parts = append(parts, fmt.Sprintf("%s/%d @ %s", p.Proto, p.Port, p.GUA))
+	}
+	return "v6 入站已放行（" + ps[0].Method + "）：" + strings.Join(parts, "，")
+}
+
+func detailPinholeErr(errs []error) string {
+	return "v6 放行部分失败（不影响 v4 与启动）：" + errors.Join(errs...).Error()
 }
 
 // pick 发现网关并锁定协议客户端：PCP（含 NAT-PMP 回落）只要网关有响应就锁定，
@@ -423,6 +685,7 @@ func (m *Mapper) reset() {
 func (s Status) clone() Status {
 	s.Mappings = slices.Clone(s.Mappings)
 	s.Hops = slices.Clone(s.Hops)
+	s.Pinholes = slices.Clone(s.Pinholes)
 	return s
 }
 

@@ -88,6 +88,9 @@ func testMapper(c client) *Mapper {
 	m.hopFound = func(context.Context, netip.Addr, Want, int, time.Duration) (client, netip.Addr, Mapping, error) {
 		return nil, netip.Addr{}, Mapping{}, ErrUnsupported
 	}
+	// v6 pinhole 默认关掉：不去读真实网卡地址，v4 用例才有确定的时序。需要验 v6 的用例
+	// 单独注入 gua6/gateway6/newPCP6/upnp6（见 pinhole 相关测试）。
+	m.gua6 = func() []netip.Addr { return nil }
 	m.logf = func(string, ...any) {}
 	return m
 }

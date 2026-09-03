@@ -11,3 +11,7 @@ import (
 func defaultGateway() (netip.Addr, error) {
 	return netip.Addr{}, fmt.Errorf("%w：%s 未实现网关发现", errNoGateway, runtime.GOOS)
 }
+
+func defaultGateway6() (netip.Addr, bool) {
+	return netip.Addr{}, false
+}
