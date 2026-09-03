@@ -42,9 +42,11 @@ type API struct {
 	providerOrder []string        // listInstances 顺序：内建 → env 锁定 → DB
 	kernelKeys    []rtc.ConfigKey // 内建实例的全局配置键汇总
 	ember         *ember.Provider // /providers/ember/voice 信令端点直连（进程内实现）
-	// ingressResolver 内建 bellows 的归属反查闭包：判定已在 serveWHIP 的 admitIngest
+	// ingressResolver 进程内推流网关的归属反查闭包：判定已在 serveWHIP 的 admitIngest
 	// 做完并挂到请求 ctx（ingestCtxKey），这里原样取回四元组；无判定结果按未知令牌处理。
-	ingressResolver bellows.ResolveFunc
+	// 写成无名函数类型是为了同时喂给 bellows.ResolveFunc 与 livekitrtc.ResolveFunc
+	//（两个具名类型之间不能直接赋值，无名类型对两者都可赋）。
+	ingressResolver func(ctx context.Context, token string) (room, identity string, meta rtc.Meta, err error)
 
 	// 在房人数缓存（大厅频道列表用，避免每次列表都打内核）
 	countsMu sync.Mutex
@@ -62,10 +64,12 @@ type API struct {
 	mapped lite.MappedFunc
 
 	// 进程内 LiveKit（内建实例 lkembed，见 lkembed.go）：实例对象常在，服务端只在
-	// stage_provider 选中它时才跑
-	lkembed  *livekitrtc.Provider
-	embedMu  sync.Mutex
-	embedSrv *livekitembed.Server
+	// stage_provider 选中它时才跑。lkembedWHIP 是同一实例的推流面（反代到 LiveKit
+	// 自带的 WHIP 入口），与 Stage 面共用 embedCfg
+	lkembed     *livekitrtc.Provider
+	lkembedWHIP *livekitrtc.WHIP
+	embedMu     sync.Mutex
+	embedSrv    *livekitembed.Server
 }
 
 func New(st *store.Store, cfg config.Config, hub *chat.Hub, mapped lite.MappedFunc) *API {
@@ -82,6 +86,7 @@ func New(st *store.Store, cfg config.Config, hub *chat.Hub, mapped lite.MappedFu
 		return adm.Room, adm.Identity, adm.Meta, nil
 	}
 	a.lkembed = livekitrtc.New(a.embedCfg)
+	a.lkembedWHIP = livekitrtc.NewWHIP(a.embedCfg, a.ingressResolver, a.stageKernelRunning)
 	a.kernelKeys = append(ember.ConfigKeys(), bellows.ConfigKeys()...)
 	a.kernelKeys = append(a.kernelKeys, livekitembed.ConfigKeys()...)
 	// 注册表先种内建实例：启动期迁移或 ListProviders 失败（保留旧表）时，

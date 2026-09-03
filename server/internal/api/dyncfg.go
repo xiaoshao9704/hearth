@@ -28,7 +28,8 @@ var selectorKeys = []rtc.ConfigKey{
 	{Name: "stage_provider", Group: "core",
 		Label: "舞台内核", Hint: "实例 alias；none = 纯语音部署，禁用投屏与摄像头"},
 	{Name: "ingest_provider", Group: "core",
-		Label: "推流入口", Hint: "OBS/WHIP 推流的接入实例 alias；内建 bellows = 进程内直通网关（支持 HEVC/AV1，发进 LiveKit 房间）"},
+		Label: "推流入口", Hint: "OBS/WHIP 推流的接入实例 alias；内建 bellows = 进程内直通网关（支持 HEVC/AV1，发进舞台内核）；" +
+			"舞台线选 lkembed 时也可把这里一并选 lkembed，推流直接进进程内 LiveKit 自带的 WHIP 入口，少一跳回环 PeerConnection"},
 }
 
 // portmapKeys 自动端口映射：进程内网络基建，与 bellows_udp_port 同类的全局键（不进实例 params）。

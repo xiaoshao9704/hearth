@@ -132,3 +132,11 @@ func (a *API) StopStageKernel() {
 		srv.Stop()
 	}
 }
+
+// stageKernelRunning 进程内 LiveKit 当前是否在跑（推流面 lkembed 的 Enabled 据此判断：
+// 舞台线没选中 lkembed 时服务端根本没起，推过来只会撞连接失败）。
+func (a *API) stageKernelRunning(context.Context) bool {
+	a.embedMu.Lock()
+	defer a.embedMu.Unlock()
+	return a.embedSrv != nil
+}

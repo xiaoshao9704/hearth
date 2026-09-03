@@ -103,7 +103,8 @@ func (a *API) builtinInstances() []*ProviderInstance {
 		{Alias: TypeEmber, Type: TypeEmber, Builtin: true, Cfg: a.dynVal, Voice: a.ember},
 		{Alias: TypeBellows, Type: TypeBellows, Builtin: true, Cfg: a.dynVal,
 			Ingest: bellows.New(a.dynVal, a.ingressResolver, a.stagePublisherSink, a.mapped)},
-		{Alias: AliasLkembed, Type: TypeLivekitEmbedded, Builtin: true, Cfg: a.embedCfg, Stage: a.lkembed},
+		{Alias: AliasLkembed, Type: TypeLivekitEmbedded, Builtin: true, Cfg: a.embedCfg,
+			Stage: a.lkembed, Ingest: a.lkembedWHIP},
 	}
 }
 
