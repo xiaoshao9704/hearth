@@ -34,7 +34,8 @@
 | 嵌入的规范写法 | 就是 `cmd/server/main.go` 与 `test/integration_helpers.go` 的三步：`config.NewConfig(yaml, true, nil, nil)`（`c` 可为 nil，从 `DefaultConfig` 起叠加 YAML 字符串）→ `routing.NewLocalNode(conf)` → `service.InitializeServer(conf, node)` → `Start()` / `Stop(force)` |
 | 无 redis | `pkg/service/wire.go:183`：`!conf.Redis.IsConfigured()` 即走本地 router |
 | HTTP/信令 | `Start()` 自建 `http.NewServeMux()`，注册 Room/Egress/Ingress/SIP/AgentDispatch 的 twirp 与 `rtcService.SetupRoutes(mux)`，监听 `conf.Port`；`RTCService.SetupRoutes` 是导出的。**本计划让它监听回环、hearth 反代**，不挂外部 mux（`Start()` 是整体的，挂外部 mux 省不掉它自己的监听） |
-| 候选宣告落点（补丁二） | `pkg/rtc/transport.go:427-440`：每建一个 transport 时，从 `params.Config.NAT1To1IPs`（启动时算好的静态切片）取值，`se := params.Config.SettingEngine`（**值拷贝，本来就是每 PC 一份**）后调 `rtcconfig.SetNAT1To1AddressRewriteRules(&se, ips, false)` |
+| 候选宣告的「钉死」在哪 | `mediatransportutil/pkg/rtcconfig.NewWebRTCConfig`：启动时只在 `node_ip` 非空且（`use_external_ip` 或非自动生成）时把 NAT1To1 规则烧进 `SettingEngine`；两者都不设（DefaultConfig：`UseExternalIP=false`、`STUNServers=[]`）则**没有任何启动规则**。每建一个 transport 时 `transport.go:357` 做 `se := params.Config.SettingEngine`（**值拷贝，本来就是每 PC 一份**）。`transport.go:427-446` 那段只是给不支持 prflx-over-relay 的老客户端的特例，读的是启动时的 `NAT1To1IPs`（我们为空，跳过） |
+| `SetNAT1To1AddressRewriteRules(se, ips, includeInternal)` 的 bool | `includeInternal=true` → pion `ICEAddressRewriteAppend`（保留 host 候选、追加外部地址为 host 型候选）；false → 替换。**我们用 true**。`ips` 可以是裸 IP（catch-all）或 `外部/本机` 对 |
 
 ## 分叉 diff 清单（2026-09-03，逐文件对比，直接采信）
 
@@ -83,14 +84,18 @@ portmap.Mapper：把 lkembed 的 UDP（与可选 TCP）端口映射到网关；v
   `replace github.com/livekit/livekit-server => github.com/<fork>/livekit-server <fork 上的 tag，如 v1.13.6-hearth.1>`。
 - **补丁 1（一行）**：删 `pkg/rtc/transport.go:387` 的 `se.EnableSped(true)`，守卫 `if params.EnableWarp { ... }` 与其中的
   `EnableSctpSnap` 保留（上游 pion 有）。配置里 warp 保持默认关；即便有人打开，也只是少了 sped 这一半，不报错。
-- **补丁 2（二三十行）**：外部地址来源改为可注入回调。
-  - `rtc.WebRTCConfig`（`pkg/rtc/config.go`）加字段 `ExternalIPs func() []string`（名字随意，语义：返回当前应宣告的外部 IPv4 列表，空 = 不改写）。
-  - `transport.go:427-440` 那段：若回调非空，用回调返回值替代 `params.Config.NAT1To1IPs`；其余逻辑原样。因为 `se` 本来就是每 PC 一份拷贝，
-    **这一改天然就是「每建新 PC 取一次当前值」**，不需要任何缓存失效机制。
-  - **实施检查点**：`SetNAT1To1AddressRewriteRules(&se, ips, false)` 第三个 bool 的语义要读 `mediatransportutil/pkg/rtcconfig` 源码确认。
-    我们要的是 **srflx 追加、保留本机 host 候选**（LAN 观众直连、公网观众走外部地址，二者并存），若该 bool/该函数是 host 替换语义，
-    在补丁里改成 `SetNAT1To1IPs(ips, webrtc.ICECandidateTypeSrflx)` 或等价的追加规则。这一点决定 LAN 推流者能否直连，必须验。
-  - LiveKit 自己的 `rtc.use_external_ip` 置 false、`node_ip` 不设：探测交给 hearth，避免两套探测打架。
+- **补丁 2（21 行，已写好并验证）**：外部地址来源改为可注入回调。
+  - `config.RTCConfig` 加 `ExternalIPs func() []string \`yaml:"-"\``（宿主在 `config.NewConfig` 之后、`InitializeServer` 之前赋值）
+    → `rtc.NewWebRTCConfig` 透传到 `rtc.WebRTCConfig.ExternalIPs`
+    → `transport.go` 在 `se := params.Config.SettingEngine` 拷贝之后：回调非空且返回非空时 `SetNAT1To1AddressRewriteRules(&se, ips, true)`。
+    `SetICEAddressRewriteRules` 是整体替换，所以它覆盖启动规则；`se` 是每 PC 一份拷贝，所以**天然就是「每建新 PC 取一次当前值」**，
+    不需要缓存失效机制，也不影响其他 transport。
+  - bool 已确认为 `includeInternal`，用 `true`：保留本机 host 候选（LAN 直连）并追加外部地址（公网观众）。不需要改成 srflx；
+    LiveKit 一贯用 host 型追加（`advertise_internal_ip` 语义），与 hearth 在 P1 之前的做法相同。
+  - hearth 侧 YAML：`rtc.use_external_ip: false`、不设 `node_ip`、`rtc.stun_servers: []`（DefaultConfig 本就如此，显式写上防上游改默认）——
+    探测与打洞交给 hearth，避免 LiveKit 自己去 gather STUN（国内 Google STUN 不可达会拖慢每个 PC）。
+  - **两个补丁的权威副本在 `server/livekit-patches/`**（`git format-patch` 产物 + 重建 fork 的步骤），fork 上的 tag 为 `v1.13.6-hearth.1`。
+    已验证：贴上两个补丁的整个服务端对上游 pion 在 darwin / linux / windows 编译通过。
 - 许可证：Apache-2.0，fork 与嵌入合法，保留 LICENSE/NOTICE。
 
 ## hearth 侧接线

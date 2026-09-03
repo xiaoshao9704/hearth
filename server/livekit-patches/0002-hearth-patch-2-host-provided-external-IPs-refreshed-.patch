@@ -1,0 +1,85 @@
+From c514da24265dfb220db10da063f96eb2d31aab92 Mon Sep 17 00:00:00 2001
+From: XiaoShao <26596822+xiaoshao9704@users.noreply.github.com>
+Date: Fri, 4 Sep 2026 00:38:33 +0800
+Subject: [PATCH 2/2] hearth patch 2: host-provided external IPs, refreshed per
+ transport
+
+Adds RTCConfig.ExternalIPs (not a YAML field) that an embedding host sets to a
+callback returning the external IPv4 addresses to advertise. It is consulted on
+every transport creation and applied to that transport's SettingEngine copy via
+SetNAT1To1AddressRewriteRules with includeInternal=true, so:
+- a changed public IP or port mapping reaches new sessions without a restart;
+- host candidates are kept, LAN peers keep connecting directly;
+- other transports are untouched.
+nil keeps upstream behaviour (rules frozen at startup from node_ip / use_external_ip).
+---
+ pkg/config/config.go |  6 ++++++
+ pkg/rtc/config.go    |  4 ++++
+ pkg/rtc/transport.go | 12 ++++++++++++
+ 3 files changed, 22 insertions(+)
+
+diff --git a/pkg/config/config.go b/pkg/config/config.go
+index 2ef6a3ef..74a3e8a0 100644
+--- a/pkg/config/config.go
++++ b/pkg/config/config.go
+@@ -122,6 +122,12 @@ type RTCConfig struct {
+ 
+ 	TURNServers []TURNServer `yaml:"turn_servers,omitempty"`
+ 
++	// hearth patch 2: host-provided source of the external IPv4 addresses to advertise.
++	// Consulted every time a transport (PeerConnection) is created, so a changed public IP
++	// or port mapping reaches new sessions without a restart; nil keeps upstream behaviour
++	// (NAT1To1 rules frozen at startup from node_ip / use_external_ip). Not a YAML field.
++	ExternalIPs func() []string `yaml:"-"`
++
+ 	// EnableWarp turns on WARP = SPED (DTLS-in-STUN, saves DTLS round-trip) +
+ 	// SNAP (SCTP INIT in SDP, saves SCTP/data-channel init round-trip).
+ 	// Off by default; experimental.
+diff --git a/pkg/rtc/config.go b/pkg/rtc/config.go
+index 2f30060f..4a788513 100644
+--- a/pkg/rtc/config.go
++++ b/pkg/rtc/config.go
+@@ -33,6 +33,9 @@ const (
+ type WebRTCConfig struct {
+ 	rtcconfig.WebRTCConfig
+ 
++	// hearth patch 2: see config.RTCConfig.ExternalIPs.
++	ExternalIPs func() []string
++
+ 	BufferFactory *buffer.Factory
+ 	Receiver      ReceiverConfig
+ 	Publisher     DirectionConfig
+@@ -82,6 +85,7 @@ func NewWebRTCConfig(conf *config.Config) (*WebRTCConfig, error) {
+ 
+ 	return &WebRTCConfig{
+ 		WebRTCConfig: *webRTCConfig,
++		ExternalIPs:  rtcConf.ExternalIPs,
+ 		Receiver: ReceiverConfig{
+ 			PacketBufferSizeVideo: rtcConf.PacketBufferSizeVideo,
+ 			PacketBufferSizeAudio: rtcConf.PacketBufferSizeAudio,
+diff --git a/pkg/rtc/transport.go b/pkg/rtc/transport.go
+index d300a573..ab2c2d53 100644
+--- a/pkg/rtc/transport.go
++++ b/pkg/rtc/transport.go
+@@ -360,6 +360,18 @@ func newPeerConnection(
+ 	// so disable rid pause in SDP
+ 	se.SetIgnoreRidPauseForRecv(true)
+ 
++	// hearth patch 2: refresh the advertised external addresses per transport. `se` is a
++	// per-transport copy, so this overrides whatever NAT1To1 rules were baked in at startup
++	// without touching other transports. includeInternal=true keeps the host candidates so
++	// LAN peers still connect directly while remote peers use the external address.
++	if params.Config.ExternalIPs != nil {
++		if ips := params.Config.ExternalIPs(); len(ips) > 0 {
++			if err := rtcconfig.SetNAT1To1AddressRewriteRules(&se, ips, true); err != nil {
++				params.Logger.Warnw("failed to apply host-provided external IPs", err, "ips", ips)
++			}
++		}
++	}
++
+ 	// Change elliptic curve to improve connectivity
+ 	// https://github.com/pion/dtls/pull/474
+ 	se.SetDTLSEllipticCurves(elliptic.X25519, elliptic.P384, elliptic.P256)
+-- 
+2.50.1 (Apple Git-155)
+
