@@ -223,9 +223,16 @@ func (s *Server) logf(format string, args ...any) {
 	}
 }
 
-// buildYAML 只写我们关心的键，其余全部落在 config.DefaultConfig 上。不配 redis 即本地
-// router；显式写死 use_external_ip / stun_servers 是防上游改默认值——探测与打洞由 hearth
-// 的 portmap/lite 负责，LiveKit 自己去 gather STUN 只会拖慢每个 PeerConnection。
+// buildYAML 只写我们关心的键，其余全部落在 config.DefaultConfig 上。不配 redis 即本地 router。
+//
+// use_ice_lite 必须开：LiveKit 只在「非 ICE-Lite 且 node_ip 未显式指定且 use_external_ip=false」
+// 时给服务端 PeerConnection 挂 STUN 服务器，而 stun_servers 为空时挂的是它内置的默认列表
+//（写 `stun_servers: []` 挡不住，见 mediatransportutil/rtcconfig.NewWebRTCConfig）。默认列表不可达的
+// 网络里，WHIP 的一次性信令要等 gathering 完成才出 answer，实测一次 POST 拖到 13s（推流端会超时）。
+// 开 ICE-Lite 后服务端不再 gather STUN；WHIP 参与者由 LiveKit 自己按需退回完整 ICE
+//（whipservice 的 DisableICELite），此时 Configuration 里已没有 STUN 服务器，gathering 立即完成。
+// 外部地址由补丁二从 hearth 的 Announcer 取（探测与打洞本就归 portmap/lite 负责），
+// 与 ember/bellows 两个进程内 ICE-Lite 内核同一模型。
 func buildYAML(o Options) string {
 	return fmt.Sprintf(`port: %d
 bind_addresses: ["127.0.0.1"]
@@ -235,6 +242,7 @@ rtc:
   udp_port: %d
   tcp_port: %d
   use_external_ip: false
+  use_ice_lite: true
   stun_servers: []
 room:
   auto_create: true
