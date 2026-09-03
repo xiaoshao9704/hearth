@@ -1,6 +1,8 @@
 // 主题管理：浅色 / 深色 / 跟随系统，存 localStorage，落到 html[data-theme]。
 export type Theme = 'light' | 'dark' | 'auto';
 
+export const THEME_ICONS: Record<Theme, string> = { light: 'sun', dark: 'moon', auto: 'autoTheme' };
+
 const KEY = 'hearth_theme';
 
 export function getTheme(): Theme {

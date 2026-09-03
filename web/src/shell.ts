@@ -3,7 +3,10 @@ import { getUser, listChannels } from './api';
 import type { Channel } from './api';
 import { loadPrefs, savePrefs, notifyPrefsChanged, prefsBus } from './prefs';
 import { avatarHtml, esc, flameLogo, icon, micIcon } from './ui';
+import { cycleTheme, getTheme, THEME_ICONS } from './theme';
 import { openSettings } from './views/settings';
+
+const THEME_LABELS: Record<string, string> = { light: '浅色', dark: '深色', auto: '跟随系统' };
 
 export interface ShellOptions {
   activeChannel?: string; // 当前所在频道（高亮 + 连接状态）
@@ -52,6 +55,7 @@ export function renderShell(root: HTMLElement, opts: ShellOptions = {}): Shell {
             <div class="meta mono">本机</div>
           </div>
           <button class="hit mini-btn" id="side-mic" title="麦克风偏好" style="${opts.activeChannel ? 'display:none' : ''}"></button>
+          <button class="hit mini-btn" id="side-theme" title="外观：${THEME_LABELS[getTheme()]}">${icon(THEME_ICONS[getTheme()], 16, 'var(--text-1)', 1.6)}</button>
           <button class="hit mini-btn boxed" id="side-gear" title="设置">${icon('gear', 16, 'var(--text-1)', 1.6)}</button>
         </div>
       </aside>
@@ -97,6 +101,13 @@ export function renderShell(root: HTMLElement, opts: ShellOptions = {}): Shell {
 
   root.querySelector('#side-gear')!.addEventListener('click', () => {
     openSettings('av', { channel: opts.activeChannel });
+  });
+
+  const themeBtn = root.querySelector<HTMLButtonElement>('#side-theme')!;
+  themeBtn.addEventListener('click', () => {
+    const next = cycleTheme();
+    themeBtn.innerHTML = icon(THEME_ICONS[next], 16, 'var(--text-1)', 1.6);
+    themeBtn.title = `外观：${THEME_LABELS[next]}`;
   });
 
   function paintChannels(channels: Channel[]) {

@@ -99,6 +99,7 @@ a:hover { color: var(--ember-soft); }
   display: inline-flex; align-items: center; justify-content: center; gap: 7px;
   height: 38px; padding: 0 15px; border-radius: 9px; font-size: 13px; font-weight: 500;
   border: 1px solid var(--line); background: var(--bg-3); color: var(--text-1);
+  white-space: nowrap; flex-shrink: 0;
 }
 .btn-primary { background: var(--ember); border-color: transparent; color: var(--on-ember); font-weight: 600; }
 .btn-danger { background: var(--red-tint); border-color: var(--red-line); color: var(--red-text); }
@@ -575,7 +576,7 @@ a:hover { color: var(--ember-soft); }
 .res-bar > div.hot { background: var(--red); }
 
 .mtabs { flex-shrink: 0; padding: 0 26px; display: flex; gap: 24px; border-bottom: 1px solid var(--line-soft); background: var(--bg-1); }
-.mtab { padding: 13px 0; font-size: 13.5px; color: var(--text-2); }
+.mtab { padding: 13px 0; font-size: 13.5px; color: var(--text-2); white-space: nowrap; }
 .mtab.on { color: var(--text-0); font-weight: 600; box-shadow: inset 0 -2px 0 var(--ember); }
 .mtab .n { color: var(--text-3); font-family: 'IBM Plex Mono', ui-monospace, monospace; }
 .mtab.on .n { color: var(--ember); }
@@ -632,6 +633,8 @@ a:hover { color: var(--ember-soft); }
   .mtabs { padding: 0 14px; gap: 16px; overflow-x: auto; }
   .table-head { display: none; }
   .table-row { flex-wrap: wrap; }
+  .copy-line { height: auto; min-height: 42px; flex-wrap: wrap; padding: 6px 6px 6px 14px; }
+  .copy-line .val { flex-basis: 100%; }
 }
 
 

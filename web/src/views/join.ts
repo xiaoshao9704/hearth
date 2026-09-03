@@ -1,9 +1,8 @@
 // 凭邀请链接注册：#/join/<code>。倒计时真跑，归零切过期态。
 import { inviteInfo, register } from '../api';
-import { cycleTheme, getTheme } from '../theme';
+import { cycleTheme, getTheme, THEME_ICONS } from '../theme';
 import { avatarHtml, esc, flameLogo, icon, pwBarsHtml, pwScore } from '../ui';
 
-const THEME_ICONS: Record<string, string> = { light: 'sun', dark: 'moon', auto: 'autoTheme' };
 const USER_RE = /^[a-zA-Z0-9_-]{2,32}$/;
 
 export async function renderJoin(root: HTMLElement, code: string) {

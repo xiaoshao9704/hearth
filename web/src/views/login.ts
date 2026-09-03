@@ -1,9 +1,7 @@
 // 登录页：邀请制服务器，不开放公开注册（凭邀请链接走 #/join/<code>）。
 import { login } from '../api';
-import { cycleTheme, getTheme } from '../theme';
+import { cycleTheme, getTheme, THEME_ICONS } from '../theme';
 import { esc, flameLogo, icon } from '../ui';
-
-const THEME_ICONS: Record<string, string> = { light: 'sun', dark: 'moon', auto: 'autoTheme' };
 
 export function renderLogin(root: HTMLElement) {
   let reveal = false;

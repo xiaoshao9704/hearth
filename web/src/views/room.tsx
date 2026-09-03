@@ -693,7 +693,10 @@ export async function renderRoom(root: HTMLElement, channel: string) {
 
   async function toggleCamera() {
     const eng = stageEngine();
-    if (!eng || !stageUp) return;
+    if (!eng || !stageUp) {
+      toast(stageHint(), '', 3000);
+      return;
+    }
     setCameraOn((c) => !c);
     try {
       await eng.setCamera(cameraOn());
@@ -708,7 +711,10 @@ export async function renderRoom(root: HTMLElement, channel: string) {
 
   async function toggleScreen() {
     const eng = stageEngine();
-    if (!eng || !stageUp) return;
+    if (!eng || !stageUp) {
+      toast(stageHint(), '', 3000);
+      return;
+    }
     setScreenOn((s) => !s);
     try {
       await eng.setScreen(screenOn());
@@ -1056,16 +1062,17 @@ export async function renderRoom(root: HTMLElement, channel: string) {
     const spotlight = createMemo(() => layoutPref() === 'spotlight');
     // 全部卡片按到达顺序（九宫格排位 = 旧版 DOM 插入顺序）
     const tileEntries = createMemo<TileEntry[]>(() => [...videoEntries(), ...audioEntries()].sort((a, b) => a.seq - b.seq));
-    // 聚焦布局：投屏 > pin > 发言人 > 第一块（fallback 顺序 = 视频优先，对齐旧版 allTiles 的遍历序）
+    // 聚焦布局：pin > 投屏 > 发言人 > 第一块（fallback 顺序 = 视频优先，对齐旧版 allTiles 的遍历序）
+    // pin 是用户的显式动作，压过投屏这条自动规则
     const focusKey = createMemo<string | null>(() => {
       const vids = videoEntries();
       const auds = audioEntries();
       if (vids.length + auds.length === 0) return null;
       const keys = [...vids.map((v) => v.key), ...auds.map((a) => a.key)];
-      const scr = keys.find((k) => k.endsWith(':screen'));
-      if (scr) return scr;
       const pk = pinnedKey();
       if (pk && keys.includes(pk)) return pk;
+      const scr = keys.find((k) => k.endsWith(':screen'));
+      if (scr) return scr;
       const ls = lastSpeaker();
       if (ls) {
         for (const cand of [`${ls}:camera`, `${ls}:audio-tile`]) {

@@ -9,6 +9,7 @@ import (
 	"log"
 	"sync"
 
+	"github.com/livekit/protocol/livekit"
 	lksdk "github.com/livekit/server-sdk-go/v2"
 	"github.com/pion/rtcp"
 	"github.com/pion/rtp"
@@ -69,7 +70,13 @@ func (p *Provider) PublishRemote(ctx context.Context, room, identity, name strin
 		p.releasePubRoom(key, pr)
 		return nil, err
 	}
-	if _, err := pr.room.LocalParticipant.PublishTrack(lt, &lksdk.TrackPublicationOptions{}); err != nil {
+	// OBS/WHIP 推流按投屏对待（非摄像头语义）：视频轨标 SCREEN_SHARE，
+	// 让前端归入投屏而非摄像头分类（LIVE 角标/聚焦优先级/统计角标据此判断）
+	pubOpts := lksdk.TrackPublicationOptions{}
+	if tr.Kind() == webrtc.RTPCodecTypeVideo {
+		pubOpts.Source = livekit.TrackSource_SCREEN_SHARE
+	}
+	if _, err := pr.room.LocalParticipant.PublishTrack(lt, &pubOpts); err != nil {
 		p.releasePubRoom(key, pr)
 		return nil, err
 	}
