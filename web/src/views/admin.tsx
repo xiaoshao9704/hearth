@@ -319,12 +319,17 @@ function StatusTab() {
 
 const CAP_LABELS: Record<string, string> = { voice: '语音', stage: '舞台', ingest: '推流' };
 // 内建类型不在可注册类型列表里，展示名这里补
-const TYPE_LABELS: Record<string, string> = { ember: 'Ember（内置语音）', bellows: 'Bellows（内置推流网关）' };
+const TYPE_LABELS: Record<string, string> = {
+  ember: 'Ember（内置语音）',
+  bellows: 'Bellows（内置推流网关）',
+  'livekit-embedded': 'LiveKit（进程内）',
+};
 // 枚举值的人话标签（值本身仍以英文存库）；选择器可选项是实例 alias，未知名直接显示原值
 const KERNEL_LABELS: Record<string, string> = {
   livekit: 'LiveKit',
   ember: 'Ember（内置语音）',
   bellows: 'Bellows（内置推流网关）',
+  lkembed: 'LiveKit（进程内）',
   none: '关闭',
   auto: '自动',
   off: '关闭',
@@ -333,6 +338,7 @@ const GROUP_META: Record<string, [string, string]> = {
   core: ['内核选择', '语音 / 舞台（投屏）/ 推流入口分别选服务实例'],
   livekit: ['LiveKit', '信令与令牌签发'],
   voice: ['Ember 内置语音', '本进程直出音频，UDP 单端口'],
+  stage: ['进程内 LiveKit（舞台）', '舞台选 lkembed 时才启动，信令只监听回环'],
   ingress: ['推流入口（OBS）', 'WHIP 上游与公开地址'],
   network: ['网络', '向默认网关申请端口映射，仅 host 网络或裸机可用'],
 };

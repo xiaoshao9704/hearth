@@ -285,6 +285,10 @@ func (a *API) adminSetConfig(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// 舞台选择器切到/切走 lkembed：立即启停进程内 LiveKit（另起协程，启动要 1 秒级）
+	if _, ok := req.Values["stage_provider"]; ok {
+		go a.EnsureStageKernel(context.Background())
+	}
 	// 让缓存的在线人数立即按新配置重取
 	a.countsMu.Lock()
 	a.counts = nil

@@ -135,7 +135,8 @@ func TestReloadReusesUnchangedInstances(t *testing.T) {
 		t.Fatal("其余未变化实例仍应复用旧对象")
 	}
 	list := a.listInstances(ctx)
-	if len(list) < 3 || list[0].Alias != "ember" || list[1].Alias != "bellows" || list[2].Alias != "br1" {
+	if len(list) < 4 || list[0].Alias != "ember" || list[1].Alias != "bellows" ||
+		list[2].Alias != AliasLkembed || list[3].Alias != "br1" {
 		t.Fatalf("实例顺序应保持 内建→DB: %+v", list)
 	}
 }
@@ -326,4 +327,39 @@ func TestFallbacksSafeWhenInitialReloadFails(t *testing.T) {
 		t.Fatalf("启动期加载失败时推流应回落 bellows 且非 nil: %q", alias)
 	}
 	_ = ip.Enabled(ctx) // 回落对象的调用路径不得 panic
+}
+
+// 内建 lkembed：可被舞台选择器选中，配置映射到回环，密钥首次生成后落库不变。
+func TestLkembedInstanceWiring(t *testing.T) {
+	maskProviderEnv(t)
+	a := testAPI(t)
+	ctx := context.Background()
+
+	if msg := a.checkSelector(ctx, "stage_provider", AliasLkembed); msg != "" {
+		t.Fatalf("lkembed 应可选为舞台内核: %s", msg)
+	}
+	if err := a.st.SetSetting(ctx, "cfg_stage_provider", AliasLkembed); err != nil {
+		t.Fatal(err)
+	}
+	if alias, sp := a.stageInstance(ctx); alias != AliasLkembed || sp == nil {
+		t.Fatalf("舞台实例应为 lkembed，实际 %q", alias)
+	}
+	if got := a.embedCfg(ctx, "livekit_api_url"); got != "http://127.0.0.1:47730" {
+		t.Fatalf("API 地址应指向回环默认端口，实际 %q", got)
+	}
+
+	key, secret, err := a.ensureEmbedKeys(ctx)
+	if err != nil {
+		t.Fatalf("生成密钥: %v", err)
+	}
+	if key == "" || len(secret) < 32 {
+		t.Fatalf("密钥不合法: key=%q secretLen=%d", key, len(secret))
+	}
+	key2, secret2, err := a.ensureEmbedKeys(ctx)
+	if err != nil || key2 != key || secret2 != secret {
+		t.Fatalf("密钥应落库后不变: %q/%q err=%v", key2, secret2, err)
+	}
+	if got := a.embedCfg(ctx, "livekit_api_secret"); got != secret {
+		t.Fatalf("配置映射应读到落库的 secret，实际 %q", got)
+	}
 }

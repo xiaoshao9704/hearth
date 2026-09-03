@@ -25,13 +25,19 @@ const (
 	TypeBellowsRemote  = "bellows-remote"
 	TypeEmber          = "ember"   // 内建
 	TypeBellows        = "bellows" // 内建（进程内 WHIP 直通）
+	// TypeLivekitEmbedded 内建：补丁式 fork 的 LiveKit 跑在本进程内，只监听回环，
+	// 浏览器经 /providers/lkembed/rtc 同源反代访问（见 lkembed.go）
+	TypeLivekitEmbedded = "livekit-embedded"
 )
+
+// AliasLkembed 内建进程内 LiveKit 实例的 alias（不能叫 livekit，那个留给 env 锁定实例）。
+const AliasLkembed = "lkembed"
 
 // alias 规则：单段小写，出现在 URL 路径里；类型同名的 alias 保留给 env 锁定实例
 var aliasRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,31}$`)
 var reservedAliases = map[string]bool{
 	TypeEmber: true, TypeBellows: true, TypeLivekit: true,
-	TypeLivekitIngress: true, TypeBellowsRemote: true,
+	TypeLivekitIngress: true, TypeBellowsRemote: true, AliasLkembed: true,
 }
 
 // ProviderInstance 一个注册的内核实例：alias 唯一标识，能力按槽位接口非空判定。
@@ -97,6 +103,7 @@ func (a *API) builtinInstances() []*ProviderInstance {
 		{Alias: TypeEmber, Type: TypeEmber, Builtin: true, Cfg: a.dynVal, Voice: a.ember},
 		{Alias: TypeBellows, Type: TypeBellows, Builtin: true, Cfg: a.dynVal,
 			Ingest: bellows.New(a.dynVal, a.ingressResolver, a.stagePublisherSink, a.mapped)},
+		{Alias: AliasLkembed, Type: TypeLivekitEmbedded, Builtin: true, Cfg: a.embedCfg, Stage: a.lkembed},
 	}
 }
 

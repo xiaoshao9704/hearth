@@ -18,6 +18,8 @@ import (
 	"hearth/server/internal/rtc/bellows"
 	"hearth/server/internal/rtc/ember"
 	"hearth/server/internal/rtc/lite"
+	"hearth/server/internal/rtc/livekitembed"
+	"hearth/server/internal/rtc/livekitrtc"
 	"hearth/server/internal/store"
 
 	"crypto/rand"
@@ -58,6 +60,12 @@ type API struct {
 
 	// mapped 端口映射结果查询，透传给进程内 ICE-Lite 内核做宣告（无映射来源时为 nil）
 	mapped lite.MappedFunc
+
+	// 进程内 LiveKit（内建实例 lkembed，见 lkembed.go）：实例对象常在，服务端只在
+	// stage_provider 选中它时才跑
+	lkembed  *livekitrtc.Provider
+	embedMu  sync.Mutex
+	embedSrv *livekitembed.Server
 }
 
 func New(st *store.Store, cfg config.Config, hub *chat.Hub, mapped lite.MappedFunc) *API {
@@ -73,7 +81,9 @@ func New(st *store.Store, cfg config.Config, hub *chat.Hub, mapped lite.MappedFu
 		}
 		return adm.Room, adm.Identity, adm.Meta, nil
 	}
+	a.lkembed = livekitrtc.New(a.embedCfg)
 	a.kernelKeys = append(ember.ConfigKeys(), bellows.ConfigKeys()...)
+	a.kernelKeys = append(a.kernelKeys, livekitembed.ConfigKeys()...)
 	// 注册表先种内建实例：启动期迁移或 ListProviders 失败（保留旧表）时，
 	// voiceInstance/ingestInstance 的回落路径仍有 ember/bellows 对象可用
 	for _, inst := range a.builtinInstances() {

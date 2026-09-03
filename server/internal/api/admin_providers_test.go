@@ -119,7 +119,8 @@ func TestAdminProvidersList(t *testing.T) {
 	r := a.Router()
 
 	resp := getProviders(t, r, token)
-	if len(resp.Instances) != 2 || resp.Instances[0].Alias != "ember" || resp.Instances[1].Alias != "bellows" {
+	if len(resp.Instances) != 3 || resp.Instances[0].Alias != "ember" ||
+		resp.Instances[1].Alias != "bellows" || resp.Instances[2].Alias != AliasLkembed {
 		t.Fatalf("全新部署应只有内建实例: %+v", resp.Instances)
 	}
 	if !resp.Instances[0].Builtin || resp.Instances[0].Caps[0] != "voice" {
