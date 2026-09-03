@@ -39,7 +39,7 @@ export interface EngineCallbacks {
   onReconnected(): void;
   // 连接终结。lost = 引擎放弃恢复，房间层负责拿新凭证重连；其余为终态
   onEnded(reason: 'kicked' | 'room-deleted' | 'duplicate' | 'lost'): void;
-  onLocalTrackEnded(kind: 'mic' | 'camera'): void; // 采集设备中途断开（如连续互通断开）
+  onLocalTrackEnded(kind: 'mic' | 'camera' | 'screen'): void; // 采集中途终止：设备断开（如连续互通断开）、浏览器原生「停止共享」
 }
 
 export interface AVEngine {
@@ -52,6 +52,9 @@ export interface AVEngine {
   setMic(on: boolean): Promise<void>;
   setCamera(on: boolean): Promise<void>;
   setScreen(on: boolean): Promise<void>;
+  // 投屏进行中按 prefs 重设画质：码率/帧率/分辨率就地改在途轨，换编码则重新发布
+  //（采集轨保留，不用重选窗口；观众端短暂重订阅）。返回是否发生了重新发布；未投屏返回 false
+  applyScreenPrefs(): Promise<boolean>;
   restartMic(): Promise<void>; // 开麦状态下设备/处理链变更：重启采集
   localMicTrack(): MediaStreamTrack | null; // 当前发布中的本地麦克风轨（本地电平表用；未开麦为 null）
   // 投屏实际生效的编码器（getStats 运行时真值）；未投屏或引擎无视频返回 null。

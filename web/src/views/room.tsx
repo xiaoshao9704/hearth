@@ -631,6 +631,12 @@ export async function renderRoom(root: HTMLElement, channel: string) {
           void stageEngine()?.setCamera(false).catch(() => {});
           toast('摄像头设备断开了，已自动关闭', 'bad');
         }
+        if (kind === 'screen' && screenOn()) {
+          // 浏览器原生「停止共享」：采集轨已结束，内核会自行撤发布，这里只对齐页面状态
+          setScreenOn(false);
+          void stageEngine()?.setScreen(false).catch(() => {});
+          refreshMeta();
+        }
         refreshRoster();
       },
     };
@@ -840,8 +846,28 @@ export async function renderRoom(root: HTMLElement, channel: string) {
       const p = loadPrefs();
       if (p.camDeviceId) void stageEngine()?.switchCamera(p.camDeviceId).catch(() => {});
     }
+    if (what === 'screen' && screenOn()) applyScreenPrefsSoon();
   };
   prefsBus.addEventListener('prefs', onPrefs);
+
+  // 投屏画质热应用：码率滑块每格都发事件，合并到一次；setParameters 不能并发，串成链
+  let screenApplyTimer = 0;
+  let screenApplyChain = Promise.resolve();
+  function applyScreenPrefsSoon() {
+    window.clearTimeout(screenApplyTimer);
+    screenApplyTimer = window.setTimeout(() => {
+      screenApplyChain = screenApplyChain.then(async () => {
+        const eng = stageEngine();
+        if (!eng || !screenOn()) return;
+        try {
+          if (await eng.applyScreenPrefs()) toast('投屏编码已切换，观众端会短暂重连', '', 3000);
+        } catch (err) {
+          toast(`投屏画质应用失败：${err instanceof Error ? err.message : String(err)}`, 'bad');
+        }
+        refreshMeta();
+      });
+    }, 200);
+  }
 
   // ---- 视图组件 ----
 

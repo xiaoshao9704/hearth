@@ -315,6 +315,10 @@ export class EmberEngine implements AVEngine {
     throw new Error('语音线不支持投屏');
   }
 
+  async applyScreenPrefs() {
+    return false;
+  }
+
   async switchCamera() {
     // 语音线无摄像头
   }

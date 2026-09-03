@@ -9,9 +9,10 @@ import {
   RoomEvent,
   Track,
 } from 'livekit-client';
-import type { AudioCaptureOptions, ScreenShareCaptureOptions, TrackPublishOptions, VideoCodec } from 'livekit-client';
+import type { AudioCaptureOptions, LocalVideoTrack, ScreenShareCaptureOptions, TrackPublishOptions, VideoCodec } from 'livekit-client';
 import { RnnoisePipeline } from '../audio';
 import { RES_DIMS, loadPrefs } from '../prefs';
+import type { RoomPrefs, ScreenCodec } from '../prefs';
 import type { AVEngine, EPart, EngineCallbacks, TrackSource, VideoStats } from './types';
 
 const toSource = (s: Track.Source): TrackSource | null =>
@@ -108,6 +109,9 @@ export class LiveKitEngine implements AVEngine {
         if (pub.track) this.removeTrack(this.room.localParticipant, pub.track);
         this.cbs.onRoster();
       })
+      // 远端开始/停止投屏：名册里的 sharing 标记来自发布列表，订阅事件不覆盖「未订阅就撤了」的情况
+      .on(RoomEvent.TrackPublished, () => this.cbs.onRoster())
+      .on(RoomEvent.TrackUnpublished, () => this.cbs.onRoster())
       .on(RoomEvent.ParticipantConnected, () => this.cbs.onRoster())
       .on(RoomEvent.ParticipantDisconnected, () => this.cbs.onRoster())
       // 禁言/解禁（canPublish 变化）：走名册刷新，视图据此更新徽标与自我提示
@@ -216,7 +220,7 @@ export class LiveKitEngine implements AVEngine {
     return { audioPreset: { maxBitrate: loadPrefs().voiceBitrate } };
   }
 
-  private watchEnded(kind: 'mic' | 'camera', track: MediaStreamTrack | undefined) {
+  private watchEnded(kind: 'mic' | 'camera' | 'screen', track: MediaStreamTrack | undefined) {
     track?.addEventListener('ended', () => this.cbs.onLocalTrackEnded(kind), { once: true });
   }
 
@@ -271,8 +275,51 @@ export class LiveKitEngine implements AVEngine {
 
   // ---- 投屏：h264 单层 / vp9·av1 SVC 分层 ----
 
+  // 当前投屏轨发布时选的编码：与 prefs 对比决定热改能否就地完成。
+  // 不拿 track.codec 比——SDK 对本机不支持的编码会静默回落，用它比会反复触发重发布
+  private screenCodec: ScreenCodec | null = null;
+
   async setScreen(on: boolean) {
     const p = loadPrefs();
+    const { capture, publish } = this.screenOptions(p);
+    await this.room.localParticipant.setScreenShareEnabled(on, on ? capture : undefined, on ? publish : undefined);
+    this.screenCodec = on ? p.screenCodec : null;
+    if (on) this.watchEnded('screen', this.screenTrack()?.mediaStreamTrack);
+  }
+
+  private screenTrack(): LocalVideoTrack | undefined {
+    return this.room.localParticipant.getTrackPublication(Track.Source.ScreenShare)?.videoTrack;
+  }
+
+  async applyScreenPrefs(): Promise<boolean> {
+    const track = this.screenTrack();
+    if (!track) return false;
+    const p = loadPrefs();
+    const { publish } = this.screenOptions(p);
+    if (p.screenCodec !== this.screenCodec) {
+      // 编码在 SDP 协商时定死，只能重新发布；stopOnUnpublish=false 留住采集轨，不用重选窗口
+      await this.room.localParticipant.unpublishTrack(track, false);
+      await this.room.localParticipant.publishTrack(track, publish);
+      this.screenCodec = p.screenCodec;
+      return true;
+    }
+    const d = RES_DIMS[p.res];
+    await track.mediaStreamTrack.applyConstraints({ width: { ideal: d.width }, height: { ideal: d.height }, frameRate: { ideal: p.fps } });
+    // 主编码与 h264 备份编码的发送参数一起改；SDK 的层开关只动 active，不会覆盖这里的码率
+    const senders = [track.sender, ...[...track.simulcastCodecs.values()].map((c) => c.sender)];
+    for (const sender of senders) {
+      if (!sender) continue;
+      const params = sender.getParameters();
+      for (const e of params.encodings) {
+        e.maxBitrate = Math.round(p.bitrate * 1e6);
+        e.maxFramerate = p.fps;
+      }
+      await sender.setParameters(params);
+    }
+    return false;
+  }
+
+  private screenOptions(p: RoomPrefs): { capture: ScreenShareCaptureOptions; publish: TrackPublishOptions } {
     const d = RES_DIMS[p.res];
     const capture: ScreenShareCaptureOptions = {
       resolution: { width: d.width, height: d.height, frameRate: p.fps },
@@ -302,7 +349,7 @@ export class LiveKitEngine implements AVEngine {
         backupCodec: { codec: 'h264' },
       };
     }
-    await this.room.localParticipant.setScreenShareEnabled(on, on ? capture : undefined, on ? publish : undefined);
+    return { capture, publish };
   }
 
   dispose() {
