@@ -1,6 +1,10 @@
 # 计划：自研舞台内核（Ember 补视频能力，LiveKit 退场）
 
-状态：方案落盘，待执行。2026-09-02。前置：Provider 注册制修复合入发版；Bun 迁移可与本计划并行（不同代码区域）。
+状态：**路线 A 已定，待其他会话实施。2026-09-03。** 前置（Provider 注册制、Bun 迁移、自动端口映射 `plan-portmap.md`）均已合入。
+路线 A = 下文「第 2 段实施路线」的第 1 步（模块方式引用 `pkg/sfu`）+ 第 2 步（写胶水）**提到最前作为起手**，
+转发从第一天就建在 `pkg/sfu` 上，不再自写一次性的单层直通转发器；第 3 步（vendor + 去 protocol 化）后置到 LiveKit 退场前。
+决策依据是 2026-09-03 的 spike（见该节）。**起手交付**是一条最小链路：Bellows 的 `TrackRemote` 进程内直递给 `sfu.Receiver`，
+经 `DownTrack` 转发到一个浏览器——跑通即舞台内核骨架立住。
 
 ## 动机与边界
 
@@ -36,23 +40,34 @@ OBS ──WHIP /providers/{alias}/w（hearth 反代 + 通行证）──▶ 同�
 
 - `NewAPI` 增加拦截器注册：`RegisterDefaultInterceptors`（NACK 生成/应答、RTCP 报告、PLI 转发所需的
   `ReceiverReport`）。今天的 Ember/Bellows 没有注册拦截器，纯音频靠 opus 容错，视频不行。
-- **双候选通告**：`SetNAT1To1IPs([]string{公网IP}, ICECandidateTypeSrflx)` 追加公网候选并保留本机 host（LAN）
-  候选（现在的 `ICECandidateTypeHost` 是替换语义，LAN 与外网推流者只能二选一）。Ember、Bellows 同步改。
-- **公网 IP 动态恢复（替代 watchdog）**：`lite.PublicIP` 带 TTL（默认 5 分钟）缓存的探测器；每次新建
-  PeerConnection 时取值（过期则重探）；同一进程内 ICE 连续失败 N 次（默认 3）主动失效缓存并立即重探；
-  `SettingEngine` 按 PC 逐个构造（NAT1To1 是 SettingEngine 级别的，缓存 API 对象会把旧 IP 钉死——
-  现在 `ensureAPI` 只建一次 API，要改成「UDP mux 与 MediaEngine 复用、SettingEngine 按需重建」）。
-  存量连接不救：前端本来就有断线自动重连，回到签发路径就拿到新候选。
-- 探测源：外部 HTTP 回显为准；配置了显式 `*_PUBLIC_IP` 则不探测。UPnP 的 `GetExternalIPAddress` 只作兜底
-  （见 `plan-bellows-upnp.md`）。
+- **双候选通告、公网 IP 动态恢复、探测源：已完成**（2026-09-03，见 `plan-portmap.md` 与 `rtc/lite`）。
+  现状：pion 只宣告本机 host 候选；外部地址在 SDP 出口由 `lite.Announcer.Announce` 追加为 srflx 候选
+  （端口映射结果与 STUN 结果并列、按地址去重），显式 `*_public_ip` 仍走 pion 改写规则；`lite.Transport` 持有
+  UDP mux 与 MediaEngine 只建一次、`webrtc.API` 按 PC 组装；探测由进程内周期任务刷新、端口映射变化再触发一次，
+  公网 IP 变化不重启。自动端口映射（PCP/NAT-PMP/UPnP、向上游级联、v6 pinhole）已上线，watchdog 不再需要。
+  舞台内核直接复用这套，不要再加第二套探测/宣告。
+- **硬性要求：StageProvider 必须接上端口映射与宣告自愈，与 Ember 语音线、Bellows 完全同款**（用户 2026-09-03 明确）：
+  - **建连**：PC 一律经 `lite.Transport.NewAPI(announcer.Rules(ctx))` 组装（mux 与 MediaEngine 只建一次，API 按 PC 组装）。
+  - **宣告**：所有 SDP 出口（offer 与 answer）都经 `announcer.Announce(ctx, sdp)` 追加外部 srflx 候选；
+    host 候选由 pion 按 PC 逐个收集，本机 LAN 地址变了新 PC 自然拿到新地址。
+  - **自愈**：实现 `RefreshAnnounce(ctx)` / `AnnounceSnapshot()`（即 `api.refreshableAnnouncer`），纳入
+    `api.RefreshAnnounce` 的周期刷新（`lite.DefaultAnnounceTTL`）与 `Mapper.OnChange` 的映射变化回调；
+    公网 IP 或映射变化后新会话即拿到新候选，不重启、不动在途会话。
+  - **端口映射**：构造函数接收 `lite.MappedFunc`（进程内为 `Mapper.UDPExternal`），舞台媒体 UDP 端口进
+    `api.PortWants`（`stage_provider` 选中内建 ember 时加入，与 `ember_udp_port`/`bellows_udp_port` 同列）；
+    v6 pinhole 随同一份 wants 自动覆盖，不另配。
+  - **远端形态** `cmd/ember`：`portmap.New()` → `NewRemote(..., mapper.UDPExternal)` → `OnChange` 起协程调
+    `RefreshAnnounce` → `go mapper.Run(ctx, wants)` → 周期 ticker → 退出 `Close(新 ctx)`，**逐行照抄 `cmd/bellows/main.go`**，
+    `PORTMAP_MODE=off` 时 wants 返回空。
 - **ICE-TCP 候选**：`SetICETCPMux` 在同一端口号上提供 TCP 候选，覆盖客户端网络封 UDP 的情况（不是 TURN，
   服务器仍是公网直达）。
 
 ### 1.2 服务端房间模型（`rtc/ember`）
 
 - `participant` 从「一条上行 opus 轨」扩展为「上行轨集合」：`audio`、`camera`、`screen`（+ `screen-audio`
-  伴音），每条是 `TrackRemote → TrackLocalStaticRTP` 的直通；订阅关系仍是 N-1 全量（服务端给每个其他
-  参与者的 PC `AddTrack`，走现有的服务端主动 `renegotiate`）。
+  伴音）。**每条上行轨不自写直通转发，直接交给 `pkg/sfu`**：`TrackRemote` 建 `sfu.Receiver`，每个订阅者一个
+  `DownTrack`（实现 `webrtc.TrackLocal`）挂到其 PC 的 transceiver；订阅关系仍是 N-1 全量，走现有的服务端主动
+  `renegotiate`。单层与分层是同一条路径，第 2 段只是把 `StreamAllocator`/层选择接上，不换转发器。
 - 信令扩展（沿用 `sigMsg`，加字段不改形状）：
   - C→S `offer` 不再只在入会时一次：开/关摄像头、投屏时客户端 `addTransceiver(sendonly)` 后重协商；
     与服务端主动 offer 的 glare 用现有 `negMu` 串行化 + 客户端「服务端 offer 未应答前不发 offer」规则解决。
@@ -60,8 +75,9 @@ OBS ──WHIP /providers/{alias}/w（hearth 反代 + 通行证）──▶ 同�
     前端据此挂到 `onVideoTrack(part, source, el)`。
   - `peerInfo` 加 `camera`、`sharing` 布尔（`EPart.sharing` 已存在），`roster` 广播时机加「轨增删」。
   - 新增 C→S `keyframe`（identity, source）：观众端解码失败/首帧超时时请求，服务端转成对发布者的 PLI。
-- **PLI/FIR 转发**：每条下行 sender 起 RTCP 读循环，收到 PLI/FIR 转成对上行 `TrackRemote` SSRC 的 PLI，
-  并做 1 秒节流（多观众同时请求只发一次）。NACK 由拦截器各段自理，不桥接（与 Bellows 现状一致）。
+- **PLI/FIR 与 NACK 由 `pkg/sfu` 自理**：`DownTrack` 收观众 RTCP 后由 `Receiver` 向上行发 PLI（自带节流），
+  buffer 负责 NACK 重传，不必自写 RTCP 读循环。唯一要接的是 Bellows 那条：上行是 Bellows 的 WHIP PC，
+  关键帧请求经现有的 `rtc.WithKeyframeRelay`/`KeyframeRelay`（挂在 ctx 上）回到推流端，契约见 CLAUDE.md。
 - 编码白名单：opus + H.264（pm=1）+ H.265 + VP9 + AV1，第 1 段只做**单层**转发（VP9/AV1 不带 SVC 时也是单层）。
 - 禁言语义：`MuteUserAudio` 契约是禁全部媒体，扩展后要丢弃该参与者全部上行（含视频）并回收其下行 sender。
 
@@ -69,14 +85,16 @@ OBS ──WHIP /providers/{alias}/w（hearth 反代 + 通行证）──▶ 同�
 
 - `cmd/ember`：环境变量 `EMBER_SHARED_SECRET`、`EMBER_ADDR`（WS 信令）、`EMBER_UDP_PORT`、`EMBER_PUBLIC_IP`，
   外加 Bellows 的 `BELLOWS_*` 端口键；一个进程两个监听（WS 信令、WHIP HTTP）+ 一个 UDP mux（两者复用
-  同一 `lite.NewAPI`，端口只放行一个）。
+  同一 `lite.NewAPI`，端口只放行一个）。端口映射与宣告自愈按 1.1 的硬性要求接线（`PORTMAP_MODE` 同名沿用）。
 - 信令通行证：hearth 的 `/providers/{alias}/voice` 对 `ember-remote` 实例做完票据校验后，把
   `{room, identity, name, muted, exp}` 签成 grant 放请求头再反代 WS（复用 `bellows/grant.go` 的签验，
   抽到 `rtc/lite/grant.go` 供两者用）；远端验签后进入现有 `HandleJoin`。一次性入场票机制不变
   （票在 hearth 侧消费）。
-- Bellows 在同进程内发布：`bellows.Gateway` 的发布目标从 `lksdk.Room` 改为接口
-  `type Publisher interface { PublishRemote(room, identity string, tr *webrtc.TrackRemote) (unpublish func()) }`，
-  Ember 实现它；远端形态与进程内形态代码路径一致。`lksdk` 与 `pion/rtcp` 桥接代码删除。
+- Bellows 在同进程内发布：`rtc.Publisher` 能力接口**已存在**（Bellows 每次发布取当前舞台线实例的 Publisher，
+  回执一律走 ctx：`WithKeyframeRelay`/`WithPublishLost`，见 CLAUDE.md），目前只有 `livekitrtc` 一个实现。
+  本段新增**进程内实现**：把 Bellows 的 `TrackRemote` 与 `RTPReceiver` 直接交给 `sfu.NewWebRTCReceiver`，
+  不再开第二条 PeerConnection——这就是「同进程直递」，省掉一次 DTLS/SRTP 加解密与回环往返。
+  远端 Bellows 形态继续用网络 Publisher，两种并存，Bellows 本身不改。`lksdk` 桥接随 LiveKit 退场删除。
 
 ### 1.4 前端（`web/src/engine/ember.ts`）
 
@@ -94,6 +112,8 @@ OBS ──WHIP /providers/{alias}/w（hearth 反代 + 通行证）──▶ 同�
   （PLI 转发生效）；C 弱网（devtools 限速）丢包时 NACK 重传生效（webrtc-internals `nackCount>0`、无马赛克）。
 - OBS 经 Bellows 推 HEVC → 观众硬解可见；`{user}-obs` 出现在名册；禁言后视频与音频同时消失。
 - 拔掉公网 IP（模拟：改探测器返回值）后新进房观众拿到新候选并连通，无需重启进程。
+- 端口映射：舞台进程启动即在网关上出现舞台媒体端口的映射（v4）与 pinhole（v6，有 GUA 时）；退出后撤销；
+  `PORTMAP_MODE=off` 时无任何映射；映射建立后 SDP 里出现「映射外部地址:端口」的 srflx 候选。
 - LAN 观众与公网观众同时在房，各自走 host / srflx 候选（webrtc-internals 看选中候选对）。
 - 单测：转发器（pion 本机回环发布 → 两个订阅 PC 都收到相同序列的 RTP）；PLI 节流；`Mids` 编解码；
   grant 签验复用测试。
@@ -117,11 +137,20 @@ OBS ──WHIP /providers/{alias}/w（hearth 反代 + 通行证）──▶ 同�
   关键帧边界，无花屏；`codec-test` 页分层矩阵与实际一致。
 - 工作量：2–3 周，其中 SVC 重写占一半以上。
 
-### 第 2 段实施路线：vendor LiveKit `pkg/sfu`，并把 `livekit/protocol` 依赖换成自有中性类型
+### 第 2 段实施路线（路线 A 的主体）：模块引用 LiveKit `pkg/sfu` 起手，vendor + 去 protocol 化后置
 
 **为什么不自写**：第 2 段的难点（分层选择 + 包级重写 + 拥塞控制）在 livekit-server 的 `pkg/sfu` 里是打磨多年的
 成熟实现，Apache-2.0（`pkg/sfu/NOTICE` 注明部分源自 MIT 的 ion-sfu），可以合法搬入 MIT 项目，只需保留文件
 许可证头与 NOTICE。
+
+**Spike 结果（2026-09-03，临时模块以依赖方式引用 `livekit-server v1.13.6`，无任何 `replace`）**：
+- `pkg/sfu` 单独 import 对上游 `pion/webrtc/v4 v4.2.18` **编译通过**，因此 Bellows 手里上游 pion 的 `TrackRemote`
+  与 `sfu.Receiver` 要的是**同一个 Go 类型**，进程内直递成立，不需要切到 LiveKit 的 pion 分叉。
+- `pkg/rtc`（participant/room）对上游 pion只差**一行**：`transport.go` 里的 `se.EnableSped(true)`，分叉私有的发送
+  平滑开关。结论：**不 import `pkg/rtc`**，它只作接法参考（只读）；房间/订阅/participant 薄层自己写。
+  若哪天急需单二进制里的完整 LiveKit，vendor 一份 `transport.go` 删掉这一行即可，作为备选不进主线。
+- `pkg/sfu` 的传递依赖：`livekit/protocol`（22 个包，protobuf 类型与 logger/utils）、`psrpc`、`mediatransportutil`；
+  都是类型与工具，不带 redis/nats 等运行时服务。作为过渡接受，第 3 步一次性清掉。
 
 **Spike 结果（2026-09-02，稀疏 checkout 验证）**：
 - `pkg/sfu` 约 38k 行非测试 Go，子包：buffer / rtpstats / videolayerselector(+temporallayerselector) / codecmunger /
@@ -147,16 +176,18 @@ OBS ──WHIP /providers/{alias}/w（hearth 反代 + 通行证）──▶ 同�
 | `livekit-server/pkg/telemetry/prometheus` | `forwardstats.go` 指标 | 删除或换成 hearth 自己的计数钩子 |
 
 **分三步走，每步可编译可测**：
-1. **先以模块方式引用，不急着复制**：`go get github.com/livekit/livekit-server@<commit>` 后直接 import
-   `.../pkg/sfu`（它在 `pkg/` 下不是 internal，可引用）。依赖方的 `replace` 对主模块无效，Go 自动用 hearth 的上游 pion
+1. **先以模块方式引用，不急着复制（路线 A 起手，2026-09-03 已定）**：`go get github.com/livekit/livekit-server@v1.13.6`
+   （钉死这个版本，spike 即在此版本验证）后直接 import `.../pkg/sfu`（它在 `pkg/` 下不是 internal，可引用）。依赖方的 `replace` 对主模块无效，Go 自动用 hearth 的上游 pion
    编译它——spike 已证明可行。代价是依赖图：`pkg/sfu` 经 `livekit/protocol` 与 `pkg/telemetry/prometheus` 连带
    约 60 个外部模块（redis、nats、psrpc、grpc、otel、prometheus…），但 hearth 今天经 lksdk/protocol **已经背着其中大半**，
    净增有限，且第 3 步会一次性清掉。这一步的价值是在不提交 38k 行代码的情况下把胶水写通、验证功能。
    钉死 commit；不删子包（模块引用改不了源码）。
-2. **写胶水（这才是第 2 段的功能交付）**：从 pion `TrackRemote` 建 `Receiver`（`NewWebRTCReceiver`）；每个订阅者一个
-   `DownTrack` 绑到其 `RTPTransceiver`（实现了 `webrtc.TrackLocal`）；每个订阅 PC 挂一个 `StreamAllocator` 接 TWCC/REMB；
-   `Forwarder` 按订阅端目标层选层。LiveKit 的 `pkg/rtc/mediatrack*.go`、`subscribedtrack.go`、`transport.go` 是接法参考
-   （只读，不搬）。验收同第 2 段。
+2. **写胶水（路线 A 的主体交付，同时覆盖原第 1 段的转发）**：从 pion `TrackRemote` 建 `Receiver`（`NewWebRTCReceiver`）；
+   每个订阅者一个 `DownTrack` 绑到其 `RTPTransceiver`（实现了 `webrtc.TrackLocal`）；每个订阅 PC 挂一个 `StreamAllocator`
+   接 TWCC/REMB；`Forwarder` 按订阅端目标层选层。LiveKit 的 `pkg/rtc/mediatrack*.go`、`subscribedtrack.go`、`transport.go`
+   是接法参考（只读，不搬，也不 import）。**起手 spike 就是这一步的最小子集**：一条 Bellows `TrackRemote` →
+   `Receiver` → 一个 `DownTrack` → 一个浏览器订阅 PC，单层、无分层，跑通即骨架立住；随后再补第 1 段的房间模型、
+   信令与前端。验收同第 2 段。
 3. **vendor + 去 protocol 化**（改源码必须先复制，这一步才把代码拿进仓库）：`pkg/sfu` + `pkg/utils` 复制到
    `server/internal/rtc/ember/sfu`（保留许可证头与 NOTICE，`sfu/VENDOR.md` 记来源 commit），改 import 路径，删掉不需要的
    子包（`datachannel`、`sfufakes`、`testutils`、`interceptor` 若仅为 pkg/rtc 服务）与 `forwardstats.go` 的 prometheus 上报；
@@ -208,14 +239,17 @@ OBS ──WHIP /providers/{alias}/w（hearth 反代 + 通行证）──▶ 同�
 
 ## 与其他计划的关系
 
-- `plan-bellows-upnp.md`：UPnP 与可达性检测并入第 1 段 1.1 的传输基建（hearth 作为外部探测点的
-  「检测可达性」管理动作），作为可选开关；TLS 由 hearth 反代承担，远端不需要证书。
+- `plan-portmap.md`（已实现，取代已删除的 `plan-bellows-upnp.md`）：自动端口映射、向上游级联、v6 pinhole 与
+  宣告收归 `lite` 均已上线；远端舞台进程（`cmd/ember`）沿用同一套 `portmap.Mapper` 与 `lite.Announcer`，
+  接线方式照抄 `cmd/bellows`。TLS 由 hearth 反代承担，远端不需要证书。
 - `plan-store-bun.md`：无交集，可并行。
 - 注册制：新实例类型 `ember-remote`、内建 `ember` 补 stage 能力，走现有 `providerTypeFields`/`instantiateProvider`
   两个扩展点。
 
 ## 风险与取舍
 
+- `pkg/sfu` 不是对外承诺稳定的 API：钉死 `v1.13.6`，升级视为一次有意的迁移；`livekit/protocol` 等类型在第 3 步前
+  留在依赖树里是**有意的过渡**，不要在胶水层提前做类型替换，避免做两遍。
 - SVC 重写是最大的技术风险：若第 2 段推进不顺，保底方案是 simulcast（投屏端多编码流、服务端整流切换，
   无需包级重写）——代价是投屏端 CPU，对硬编场景可接受。第 1 段不依赖此决策。
 - HEVC 在浏览器侧的可用性（Chrome 已默认开、Safari 平台硬编）是既有事实，服务端直通不引入新约束。
