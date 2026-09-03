@@ -80,9 +80,12 @@ type participant struct {
 	closed   chan struct{}
 	closeOne sync.Once
 
-	// 对每个别人 out 轨的 sender（离开时 RemoveTrack 用）；sndMu 保护
+	// 对每个别人 out 轨的 sender（离开时 RemoveTrack 用）；sndMu 保护。
+	// 值带 owner：identity 可能因重连被新 incarnation 复用，增删前必须比对是不是同一个人，
+	// 不能只按 identity 键判断——否则旧连接的收尾会把新连接刚建立的 sender 一起摘掉，
+	// 或者新连接的订阅被旧连接的残留 sender 挡住（见 addPeer/dropPeer 注释）。
 	sndMu   sync.Mutex
-	senders map[string]*webrtc.RTPSender
+	senders map[string]*senderEntry
 
 	negMu    sync.Mutex // 串行化重协商：同一时刻最多一个未应答 offer
 	answerCh chan string
@@ -114,6 +117,13 @@ func (p *participant) close(reason string) {
 			}
 		}()
 	})
+}
+
+// senderEntry 是 participant.senders 的值：owner 记录这个 sender 是订阅了谁的 out 轨，
+// 供 identity 复用场景下精确匹配（见 participant.senders 字段注释）。
+type senderEntry struct {
+	owner  *participant
+	sender *webrtc.RTPSender
 }
 
 type vroom struct {
@@ -339,7 +349,7 @@ func (p *Provider) HandleJoin(ctx context.Context, roomName string, meta rtc.Met
 		identity: identity, uid: meta.UID, username: meta.Username, tag: meta.Tag,
 		name: name, joinedAt: time.Now().Unix(),
 		conn: conn, send: make(chan sigMsg, 32), out: out,
-		closed: make(chan struct{}), senders: make(map[string]*webrtc.RTPSender),
+		closed: make(chan struct{}), senders: make(map[string]*senderEntry),
 		answerCh: make(chan string, 1),
 		// 出口宣告绑在参与者上：renegotiate 是 vroom 的方法，拿不到 Provider 与入会 ctx
 		announce: func(sdp string) string { return p.announcer.Announce(ctx, sdp) },
@@ -363,10 +373,15 @@ func (p *Provider) HandleJoin(ctx context.Context, roomName string, meta rtc.Met
 
 	p.readLoop(ctx, api, r, part) // 阻塞
 
-	// 收尾
+	// 收尾：identity 可能已被同 identity 的新连接顶替（重入会判重复时踢的就是这里的 part）。
+	// 顶替时新 incarnation 正在走自己的入会流程，这里不能再碰它——
+	// 对它 renegotiate 会跟它自己初始握手抢同一个 pc（negMu 保护的是同一把锁，但这里的 offer
+	// 本身就是多余的，不该发）；dropPeer 也只应摘掉属于这一代（旧 part）的 sender。
 	r.mu.Lock()
-	if r.parts[identity] == part {
+	replaced := r.parts[identity] // 顶替时是新 part；正常退出时会等于 part，随之被摘掉
+	if replaced == part {
 		delete(r.parts, identity)
+		replaced = nil
 	}
 	empty := len(r.parts) == 0
 	others := make([]*participant, 0, len(r.parts)) // 锁内手工收集：snapshot() 会重复抢 r.mu
@@ -376,7 +391,10 @@ func (p *Provider) HandleJoin(ctx context.Context, roomName string, meta rtc.Met
 	r.mu.Unlock()
 	part.close("")
 	for _, o := range others {
-		o.dropPeer(part.identity)
+		if o == replaced {
+			continue
+		}
+		o.dropPeer(part)
 		r.renegotiate(o)
 	}
 	r.broadcastRoster()
@@ -421,6 +439,11 @@ func (p *Provider) readLoop(ctx context.Context, api *webrtc.API, r *vroom, part
 			if err != nil {
 				return
 			}
+			// negMu 与 renegotiate 共用：初始握手完成前，任何并发的重协商都必须排在后面，
+			// 不能抢着往同一个 pc 塞 offer——那会把 signaling state 撞坏，客户端要么收到
+			// 意外的 offer、要么等 answer 永远等不到（见 renegotiate 注释）。part.pc 的赋值
+			// 也纳入锁内，避免 renegotiate 那头的 nil 检查与这里的赋值出现数据竞争。
+			part.negMu.Lock()
 			part.pc = pc
 			pc.OnTrack(func(tr *webrtc.TrackRemote, recv *webrtc.RTPReceiver) {
 				go part.forward(tr, recv)
@@ -431,19 +454,24 @@ func (p *Provider) readLoop(ctx context.Context, api *webrtc.API, r *vroom, part
 				}
 			})
 			if err := pc.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeOffer, SDP: m.SDP}); err != nil {
+				part.negMu.Unlock()
 				log.Printf("ember SetRemoteDescription: %v", err)
 				return
 			}
 			answer, err := pc.CreateAnswer(nil)
 			if err != nil {
+				part.negMu.Unlock()
 				return
 			}
 			done := webrtc.GatheringCompletePromise(pc)
 			if err := pc.SetLocalDescription(answer); err != nil {
+				part.negMu.Unlock()
 				return
 			}
 			<-done
-			part.send <- sigMsg{Type: "answer", SDP: part.announce(pc.LocalDescription().SDP)}
+			localSDP := pc.LocalDescription().SDP
+			part.negMu.Unlock()
+			part.send <- sigMsg{Type: "answer", SDP: part.announce(localSDP)}
 			// 把既有参与者的音轨喂给新人，把新人的音轨喂给既有参与者
 			for _, other := range r.snapshot() {
 				if other == part {
@@ -512,20 +540,34 @@ func (pt *participant) forward(tr *webrtc.TrackRemote, recv *webrtc.RTPReceiver)
 	}
 }
 
-// addPeer 订阅对方的 out 轨（sender 存起来供离开时移除）
+// addPeer 订阅对方的 out 轨（sender 存起来供离开时移除）。
+// identity 可能因重连被复用：已有 sender 但 owner 不是这次的 other，说明是旧 incarnation
+// 的残留（它的收尾还没轮到），不能当成"已订阅"直接跳过——否则新 incarnation 的下行轨永远建不起来。
 func (pt *participant) addPeer(other *participant) {
 	pt.sndMu.Lock()
-	dup := pt.pc == nil || pt.senders[other.identity] != nil
-	pt.sndMu.Unlock()
-	if dup {
+	if pt.pc == nil {
+		pt.sndMu.Unlock()
 		return
 	}
+	old := pt.senders[other.identity]
+	if old != nil {
+		if old.owner == other {
+			pt.sndMu.Unlock()
+			return
+		}
+		delete(pt.senders, other.identity)
+	}
+	pt.sndMu.Unlock()
+	if old != nil {
+		pt.pc.RemoveTrack(old.sender)
+	}
+
 	sender, err := pt.pc.AddTrack(other.out)
 	if err != nil {
 		return
 	}
 	pt.sndMu.Lock()
-	pt.senders[other.identity] = sender
+	pt.senders[other.identity] = &senderEntry{owner: other, sender: sender}
 	pt.sndMu.Unlock()
 	go func() { // 排空 RTCP，释放 interceptor
 		buf := make([]byte, 1500)
@@ -537,24 +579,34 @@ func (pt *participant) addPeer(other *participant) {
 	}()
 }
 
-func (pt *participant) dropPeer(identity string) {
+// dropPeer 摘掉 owner 在自己身上的 sender；按参与者对象而不是仅按 identity 精确匹配——
+// identity 可能被重连的新 incarnation 复用，按 identity 摘会连新连接刚建立的 sender 一起删掉。
+func (pt *participant) dropPeer(owner *participant) {
 	pt.sndMu.Lock()
-	s := pt.senders[identity]
-	delete(pt.senders, identity)
+	s := pt.senders[owner.identity]
+	if s == nil || s.owner != owner {
+		pt.sndMu.Unlock()
+		return
+	}
+	delete(pt.senders, owner.identity)
 	pt.sndMu.Unlock()
-	if s != nil && pt.pc != nil {
-		pt.pc.RemoveTrack(s)
+	if pt.pc != nil {
+		pt.pc.RemoveTrack(s.sender)
 	}
 }
 
-// renegotiate 服务端发 offer（入会后只有服务端主动协商，天然无 glare）
+// renegotiate 服务端发 offer（入会后只有服务端主动协商，天然无 glare）。
+// pt.pc 的读取与初始握手（"offer" 分支）里的赋值共用 negMu：新连接的初始握手
+// （SetRemoteDescription→CreateAnswer→SetLocalDescription→发 answer）也在 negMu 保护下进行，
+// 避免这里抢在它把 answer 发出去之前就往同一个 pc 塞 offer——那会把 pc 的 signaling state 撞坏，
+// 客户端要么收到意外的 offer、要么等 answer 永远等不到。
 func (r *vroom) renegotiate(pt *participant) {
-	if pt.pc == nil {
-		return
-	}
 	go func() {
 		pt.negMu.Lock()
 		defer pt.negMu.Unlock()
+		if pt.pc == nil {
+			return
+		}
 		select {
 		case <-pt.closed:
 			return
@@ -574,8 +626,8 @@ func (r *vroom) renegotiate(pt *participant) {
 		pt.sndMu.Lock()
 		for _, tx := range pt.pc.GetTransceivers() {
 			if s := tx.Sender(); s != nil && s.Track() != nil && tx.Mid() != "" {
-				for id, snd := range pt.senders {
-					if snd == s {
+				for id, e := range pt.senders {
+					if e.sender == s {
 						mids[tx.Mid()] = id
 					}
 				}
@@ -591,6 +643,9 @@ func (r *vroom) renegotiate(pt *participant) {
 		case sdp := <-pt.answerCh:
 			pt.pc.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeAnswer, SDP: sdp})
 		case <-time.After(10 * time.Second):
+			// 迟迟不答不代表连接已死（可能只是后台 tab 被节流、一时丢包）：这里只是这次
+			// 追加协商没追完，连接死活交给 pc.OnConnectionStateChange 判断，不在这里主动
+			// close——否则会把可自愈的抖动升级成整条连接被踢、客户端重连。
 		case <-pt.closed:
 		}
 	}()
