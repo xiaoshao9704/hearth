@@ -93,9 +93,11 @@ func (a *API) allConfigKeys() []rtc.ConfigKey {
 
 // PortWants 当前要向网关申请的映射：HTTP 端口 + 当前选中内核里跑在本进程的媒体端口
 // （选的是外部实例时那些端口不在本机，映射了也没意义）。cmd/server 把它交给 portmap.Mapper
-// 每轮读——端口与内核选择都是动态配置，后台改了下一轮就撤旧加新。
-// 一律不置 StrictPort：SDP 出口能宣告与监听端口不同的外部端口，让网关自由改派可用性更高
+// 每轮读——端口与内核选择都是动态配置，后台改了下一轮（renewInterval，见 portmap.go）就
+// 撤旧加新，选择器切换不需要重启；这层"热更新"就是 Mapper.Run 本身的续租循环，未额外接线。
+// 大多数端口不置 StrictPort：SDP 出口能宣告与监听端口不同的外部端口，让网关自由改派可用性更高
 // （同端口优先仍由 Mapper 保证，上游 DMZ 的端口不变透传因此照样能对上）。
+// 例外是 lkembed 的媒体端口，见下方注释。
 func (a *API) PortWants(ctx context.Context) []portmap.Want {
 	if a.dynVal(ctx, "portmap_mode") == "off" {
 		return nil
@@ -111,6 +113,15 @@ func (a *API) PortWants(ctx context.Context) []portmap.Want {
 	}
 	if alias, _, _ := a.ingestInstance(ctx); alias == TypeBellows {
 		ws = append(ws, portmap.Want{Proto: "udp", Port: dynPort(a.dynVal(ctx, "bellows_udp_port")), Desc: "hearth whip"})
+	}
+	// lkembed（进程内 LiveKit）的媒体端口必须 StrictPort：LiveKit 的候选地址改写（补丁二）只换
+	// IP 不换端口，与 pion 的 SDP 宣告同源限制一致；网关若把外部端口改派成别的号，宣告出去的
+	// 候选端口就是错的，宁可让 Mapper 判定失败、走 port_conflict 诊断，也不能假装映射成功。
+	if alias, _ := a.stageInstance(ctx); alias == AliasLkembed {
+		ws = append(ws, portmap.Want{Proto: "udp", Port: dynPort(a.dynVal(ctx, "lkembed_udp_port")), Desc: "hearth stage", StrictPort: true})
+		if tcp := dynPort(a.dynVal(ctx, "lkembed_tcp_port")); tcp > 0 {
+			ws = append(ws, portmap.Want{Proto: "tcp", Port: tcp, Desc: "hearth stage", StrictPort: true})
+		}
 	}
 	return ws
 }
