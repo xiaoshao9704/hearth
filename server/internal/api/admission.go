@@ -85,9 +85,10 @@ func (a *API) cleanTicketsLocked() {
 	}
 }
 
-// ---- 推流入场判定（/w POST，进程内 bellows / 远端 bellows / livekit-ingress 三条路径共用）----
+// ---- 推流入场判定（/w POST，进程内 bellows / 远端 bellows / livekit-ingress /
+// lkembed 反代 LiveKit 自带 WHIP 四条路径共用）----
 
-// ingestCtxKey 进程内 bellows 的判定结果传递：admitIngest 在 serveWHIP 做完后把组好的
+// ingestCtxKey 进程内推流网关（bellows / lkembed）的判定结果传递：admitIngest 在 serveWHIP 做完后把组好的
 // 身份四元组挂到请求 ctx，ingressResolver（ResolveFunc 只有令牌参数，频道在 URL 里
 // 由接入层解析）原样取回。
 type ingestCtxKey struct{}
@@ -102,7 +103,7 @@ type ingestAdmission struct {
 }
 
 // admitIngest 统一推流入场判定（替代旧 canPublishByStreamKey 与 admitWhipRemote）：
-// 令牌反查用户 + URL 取频道 → admitUser（封禁/邀请制/禁言）。三条路径全部 definitive：
+// 令牌反查用户 + URL 取频道 → admitUser（封禁/邀请制/禁言）。四条路径全部 definitive：
 // 令牌不存在 404、频道不存在 404、不许推（封禁/邀请制/禁言/账号停用）403、查询出错 503——
 // 不再有 fail-open：上游收到的已是 hearth 出示的实例凭证，不再承担鉴权。
 // 返回 false 时响应已写好。

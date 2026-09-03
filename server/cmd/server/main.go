@@ -72,6 +72,9 @@ func main() {
 	mapper := portmap.New()
 	a := api.New(st, cfg, hub, lite.MappedFunc(mapper.UDPExternal))
 
+	// 舞台线选中 lkembed 时拉起进程内 LiveKit（选 none 或外部实例时什么都不起）
+	a.EnsureStageKernel(context.Background())
+
 	// chi 路由：API + 聊天 WS + /providers/* 接入分发；具体路由优先于静态通配，无 ServeMux 模式冲突问题
 	r := a.Router()
 	a.RegisterProxies(r)
@@ -123,4 +126,5 @@ func main() {
 	closeCtx, closeCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer closeCancel()
 	mapper.Close(closeCtx)
+	a.StopStageKernel()
 }

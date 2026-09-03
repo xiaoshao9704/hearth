@@ -173,6 +173,14 @@ func (p *Provider) AnnounceSnapshot() (externals []string, probedAt time.Time) {
 	return p.announcer.Snapshot()
 }
 
+// RegisterAnnouncePort 显式登记一个本机媒体端口，让 AnnounceSnapshot 在没有真实语音 SDP
+// 流经这个（唯一的）Announcer 时也能查到它的映射结果——lkembed 复用 ember 这一个
+// Announcer 探测公网地址，但它的 PeerConnection 由内嵌的 LiveKit 自己建，不经过 ember 的
+// Announce()。port<=0 撤销该名字下的登记（选择器切走 lkembed 时调用）。
+func (p *Provider) RegisterAnnouncePort(name string, port int) {
+	p.announcer.RegisterMediaPort(name, port)
+}
+
 func (p *Provider) Name() string { return "ember" }
 
 func (p *Provider) JoinCredentials(context.Context, string, rtc.Meta, bool) (rtc.Credentials, error) {

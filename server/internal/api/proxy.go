@@ -51,11 +51,16 @@ func (a *API) serveProvider(w http.ResponseWriter, r *http.Request) {
 		r.URL.Path = sub // WHIP 逻辑与上游都按 /w 形状工作，剥到 /w 后原样复用
 		a.serveWHIP(w, r, inst)
 	case sub == "/rtc" || strings.HasPrefix(sub, "/rtc/"):
-		if inst.Type != TypeLivekit {
+		// 内建 lkembed 只占舞台槽位（语音仍是 ember），信令代理取它的 Stage 对象
+		p := inst.Voice
+		if p == nil {
+			p = inst.Stage
+		}
+		if p == nil || (inst.Type != TypeLivekit && inst.Type != TypeLivekitEmbedded) {
 			writeErr(w, http.StatusNotFound, "该实例无信令代理")
 			return
 		}
-		a.proxyTo(w, r, inst.Voice.SignalProxyUpstream(r.Context()), "/providers/"+alias)
+		a.proxyTo(w, r, p.SignalProxyUpstream(r.Context()), "/providers/"+alias)
 	default:
 		writeErr(w, http.StatusNotFound, "未知路径")
 	}

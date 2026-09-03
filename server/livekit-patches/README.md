@@ -12,12 +12,16 @@ hearth 进程内嵌入的 LiveKit 用的是 `livekit/livekit-server` 的**补丁
 
 ## 重建 fork
 
+上游仓库现在叫 `livekit/livekit`（旧地址 `livekit/livekit-server` 是重定向）；**Go module 路径仍是
+`github.com/livekit/livekit-server`**（`replace` 要求 fork 的 go.mod module 与原路径一致，所以 fork 里不改它）。
+fork 仓库名建议与上游对齐，也叫 `livekit`。
+
 ```sh
-git clone --branch v1.13.6 https://github.com/livekit/livekit-server.git && cd livekit-server
+git clone --branch v1.13.6 https://github.com/livekit/livekit.git && cd livekit
 git checkout -b hearth-patches
 git am <hearth 仓库>/server/livekit-patches/*.patch
 git tag -a v1.13.6-hearth.1 -m "livekit-server v1.13.6 + hearth patches 1-2"
-git remote add fork git@github.com:<你的账号>/livekit-server.git
+git remote add fork git@github.com:<你的账号>/livekit.git
 git push fork hearth-patches v1.13.6-hearth.1
 ```
 
@@ -25,7 +29,7 @@ hearth 侧 `server/go.mod`：
 
 ```
 require github.com/livekit/livekit-server v1.13.6
-replace github.com/livekit/livekit-server => github.com/<你的账号>/livekit-server v1.13.6-hearth.1
+replace github.com/livekit/livekit-server => github.com/<你的账号>/livekit v1.13.6-hearth.1
 ```
 
 fork 的 go.mod 里指向 `-warp` 分叉的 `replace` 对依赖方无效，hearth 自动用上游 pion，这正是补丁一存在的原因。

@@ -1,7 +1,7 @@
 # 计划：进程内嵌入 LiveKit（补丁式 fork，单二进制自打洞自宣告）
 
-状态：**路线 B，主线，待实施。2026-09-03。** 取代 `plan-stage-kernel.md` 的路线 A 成为舞台线的主路线；路线 A 降为备选，
-其文档保留。本计划自包含，实施会话读完即可开工，不需要本会话的其他上下文。
+状态：**路线 B，主线。第 1–7 步代码全部完成（2026-09-04）；第 4 步打洞/宣告已真机验收；待做：远端机器用 `cmd/stage` 替换两个容器、OBS 实推 HEVC 的真机验收。** 取代 `plan-stage-kernel.md` 的路线 A 成为舞台线的主路线；路线 A 降为备选，其文档保留。
+本计划自包含，实施会话读完即可开工，不需要本会话的其他上下文。
 
 ## 目标与判据
 
@@ -12,11 +12,13 @@
 - **自打洞**：LiveKit 的媒体端口进 `portmap.Mapper` 的 wants，v4 映射、向上游级联、v6 pinhole 全部自动。
 - **自宣告不重启**：LiveKit 的候选宣告改为每建新 PC 时向 hearth 的 `lite.Announcer` 取当前外部地址，公网 IP 或映射变化
   只影响新会话，在途会话不动，watchdog 退役。
-- **进程内推流**：Bellows 经现有 `rtc.Publisher`（`livekitrtc`）向回环的 LiveKit 发布，OBS 推流不出进程。
+- **进程内推流**：OBS 的 WHIP 经 hearth 反代直达进程内 LiveKit 自带的 WHIP 入口（`/whip/v1`），推流不出进程、
+  也不多绕一条回环 PeerConnection。外部 LiveKit 与远端形态同样走各自实例自带的 `/whip/v1`；Bellows 只剩「进程内直通」
+  这一种形态（`cmd/bellows` 远端进程标注废弃、下一版本移除）。
 - **零重写**：不碰协商、订阅、层选择、拥塞控制、重连，也不碰 livekit-client。LiveKit 多年修掉的 bug 原样继承。
 
-**不做**：改 LiveKit 的架构、把它的控制面换成 hearth 的（那是路线 A）、Bellows 与 SFU 的进程内直递（保留回环 PC，
-同机代价可忽略；将来想要再在 fork 里加内部发布入口）。
+**不做**：改 LiveKit 的架构、把它的控制面换成 hearth 的（那是路线 A）、给 fork 加第三个补丁做 Bellows 与 SFU 的
+进程内直递（见下节「为什么不做补丁 3」）。
 
 判据（用户 2026-09-03 拍板）：「不担心做完成本，只担心跑完出现很多 LiveKit 早就解决的 bug」+「一个容器/一个文件自己解决所有问题」。
 路线 A 只剩「一套前端引擎、控制面完全自有、Bellows 直递」三样，不是硬目标，因此让位。
@@ -63,7 +65,7 @@ livekit-server 用 `replace` 把三个 pion 模块换成自家 `-warp.1` 分叉�
 ```
 浏览器 ──舞台信令 /providers/{alias}/rtc/*（hearth 反代）──▶ 回环 127.0.0.1:<lkembed_port> 的进程内 LiveKit
                                     ▲ 媒体直连：LAN host + 映射/STUN 外部地址（LiveKit 按补丁二从 lite.Announcer 取）
-OBS ──WHIP /providers/{alias}/w──▶ 进程内 Bellows ──现有 livekitrtc Publisher（回环 PC）──▶ 同一个进程内 LiveKit
+OBS ──WHIP /providers/lkembed/w（hearth 判定 + 换票反代）──▶ 同一个进程内 LiveKit 的 /whip/v1
 portmap.Mapper：把 lkembed 的 UDP（与可选 TCP）端口映射到网关；v6 pinhole 同步；OnChange 触发宣告刷新
 ```
 
@@ -71,9 +73,10 @@ portmap.Mapper：把 lkembed 的 UDP（与可选 TCP）端口映射到网关；v
   实例对象**复用现有 `livekitrtc.New(cfg)`**：给它一个 cfg getter，`livekit_api_url` 固定为回环地址、`livekit_api_key/secret`
   取自 `lkembed_*` 全局键。这样舞台槽位、令牌签发、`/rtc/*` 反代、Bellows 的 Publisher 全部零改动。
 - **语音线不变**：仍是 Ember。两条线分属两个实例，前端仍是双连接（`combined` 判定不变）。
-- **远端形态**：家里局域网机器跑 `cmd/stage` = 同一个嵌入包 + Bellows + Mapper + 周期刷新，替代今天树莓派上 livekit 与 bellows
-  两个容器。hearth 侧继续用 env 锁定的 `livekit` 实例指向它的 API 地址（tailscale），推流入口用 `bellows-remote`——**hearth 侧接线与今天完全一样**。
-  LiveKit 的信令票据就是 hearth 签的 JWT，不需要 grant。
+- **远端形态**：另一台机器跑 `cmd/stage` = 同一个嵌入包 + Mapper + 周期刷新，替代今天那台机器上 livekit 与 bellows 两个容器。
+  **不含 Bellows**：推流由 hearth 反代到这台远端 LiveKit 自带的 `/whip/v1`，OBS 媒体与浏览器观众走同一条媒体路径、同一个打洞端口。
+  hearth 侧继续用 env 锁定的 `livekit` 实例指向它的 API 地址（私网通道），两个选择器（`stage_provider`/`ingest_provider`）都选它——
+  **hearth 侧接线与外部 LiveKit 完全一样**。LiveKit 的信令票据就是 hearth 签的 JWT，不需要 grant。
 - **回退**：外部 LiveKit 实例（`livekit` env 锁定 / DB 注册）继续可选，选择器一切即回退。
 
 ## Fork：补丁序列，不改形
@@ -92,11 +95,58 @@ portmap.Mapper：把 lkembed 的 UDP（与可选 TCP）端口映射到网关；v
     不需要缓存失效机制，也不影响其他 transport。
   - bool 已确认为 `includeInternal`，用 `true`：保留本机 host 候选（LAN 直连）并追加外部地址（公网观众）。不需要改成 srflx；
     LiveKit 一贯用 host 型追加（`advertise_internal_ip` 语义），与 hearth 在 P1 之前的做法相同。
-  - hearth 侧 YAML：`rtc.use_external_ip: false`、不设 `node_ip`、`rtc.stun_servers: []`（DefaultConfig 本就如此，显式写上防上游改默认）——
-    探测与打洞交给 hearth，避免 LiveKit 自己去 gather STUN（国内 Google STUN 不可达会拖慢每个 PC）。
+  - hearth 侧 YAML：`rtc.use_external_ip: false`、不设 `node_ip`、`rtc.stun_servers: []`，**外加 `rtc.use_ice_lite: true`**——
+    探测与打洞交给 hearth，不让 LiveKit 自己去 gather STUN。
+    **`stun_servers: []` 单独写没有用**（实测）：`rtcconfig.NewWebRTCConfig` 在「非 ICE-Lite + `node_ip` 未显式指定 +
+    `use_external_ip=false`」时一定给服务端 PeerConnection 挂 STUN，列表为空就挂它内置的默认列表。默认列表不可达时，
+    WHIP 的一次性信令要等 gathering 完成才出 answer，一次 POST 从 60ms 变成 13s，推流端会直接超时。
+    开 ICE-Lite 后服务端不再 gather STUN；WHIP 参与者仍由 LiveKit 自己退回完整 ICE（`whipservice` 的 `DisableICELite`），
+    此时 Configuration 里已没有 STUN 服务器，gathering 立即完成。这也让舞台内核与 ember/bellows 同为 ICE-Lite：
+    对外地址一律由 `lite.Announcer` 宣告，可达性由 portmap 负责。
   - **两个补丁的权威副本在 `server/livekit-patches/`**（`git format-patch` 产物 + 重建 fork 的步骤），fork 上的 tag 为 `v1.13.6-hearth.1`。
     已验证：贴上两个补丁的整个服务端对上游 pion 在 darwin / linux / windows 编译通过。
 - 许可证：Apache-2.0，fork 与嵌入合法，保留 LICENSE/NOTICE。
+
+## 为什么不做补丁 3（Bellows 直递 SFU）
+
+原计划里推流走「Bellows 收 WHIP → 回环 PeerConnection → LiveKit」，并留了「将来在 fork 里加内部发布入口」的口子。
+实测 LiveKit 自带的 `/whip/v1` 覆盖了 Bellows 的全部能力，因此这条推流路径改为 hearth 反代到它，补丁 3 不做：
+
+| Bellows 能力 | LiveKit 自带 WHIP |
+| --- | --- |
+| 令牌鉴权 | 请求头 `Authorization: Bearer <LiveKit JWT>`（房间与 identity 取自票，不看 URL），hearth 判定后现签 |
+| 参与者身份与元数据 | 票里的 identity / name / metadata 原样成为参与者属性（`rtc.Meta{kind:"ingest"}` 照常下发） |
+| HEVC/AV1 直通 | offer 里放什么 answer 原样保留（`room.enabled_codecs` 默认含 H264/H265/VP8/VP9/AV1/opus），H.265 端到端可解 |
+| 关键帧回执（PLI） | SFU 内部直接回给发布端，不需要 `rtc.WithKeyframeRelay` 这类桥接 |
+| 会话收尾 | `Location` + PATCH（trickle / ICE restart，需 `If-Match`）+ DELETE，标准 RFC 9725 |
+| 撤销与管制 | `RoomService.RemoveParticipant` 立刻关掉推流端的 PeerConnection |
+
+省下的不只是一个补丁：少一条回环 PeerConnection（一次 DTLS/SRTP）、少一份需要跟着 pion 升级的协商代码，
+而且这条路径是上游自己的测试覆盖范围。
+
+仍与 Bellows 有差异、由 hearth 侧补上或接受的地方：
+
+- **跨房间重推**：LiveKit 只保证房间内 identity 唯一，同一票据推两个房间会两个会话并存；推流令牌的语义是
+  一台设备同时只推一个房间，因此 hearth 在会话表里记住绑定，重推时把旧房间的同一发布身份移出。
+- **推流端掉线**：Bellows 靠 PeerConnection 状态回调立即拆会话，LiveKit 靠 ICE 断连检测，约 16s 后参与者才消失。
+  观众侧表现为画面停住十几秒后参与者才下线。接受。
+- **DELETE 不幂等**：上游第二次 DELETE 返回 404，hearth 侧统一回 204（与 Bellows 一致）。
+- **编码白名单**：Bellows 显式拒绝非白名单编码（pion 会静默降级），LiveKit 按 `room.enabled_codecs` 协商，
+  拒绝原因由 hearth 原样回传给推流端。
+
+## 禁言与推流设备
+
+实测（进程内 LiveKit + pion WHIP 推流 + lksdk 订阅）：对推流参与者 `UpdateParticipant(CanPublish=false)`
+会下架它已发布的全部轨道、订阅端立刻停收，但改回 `true` 后参与者仍在房间且 `tracks=0`，订阅端再也收不到包——
+推流端没有信令通道，不会也无从重新发布，表现为推流软件一路显示正常而观众永久黑屏。
+
+因此 `livekitrtc.MuteUserAudio` 对元数据 `kind=ingest` 的参与者改为直接移出房间（普通参与者仍走 `CanPublish` 翻转）：
+LiveKit 会立刻关掉推流端的 PeerConnection，推流软件按自己的重连策略重推；被禁言期间 `admitIngest` 本就 403，
+解禁后重推即恢复。契约不变——禁言仍是禁全部媒体发布。这条对 Bellows 转发进 LiveKit 的参与者同样生效
+（它带同样的 `kind=ingest` 标记），顺带修掉那条路径上一样的永久黑屏。
+
+另一条路（`room.enable_remote_unmute: true` + `MutePublishedTrack` 逐轨静音/取消）实测可恢复，但要依赖部署侧
+yaml 打开一个全局的远程取消静音开关，外部 LiveKit 实例上 hearth 保证不了，行为会随部署而异，故不采用。
 
 ## hearth 侧接线
 
@@ -133,11 +183,23 @@ func (s *Server) Stop()                                       // service.Livekit
   StrictPort: true}`（TCP 端口开着时同样追加）。**`StrictPort` 必须为 true**：LiveKit 的地址改写只改 IP 不改端口（与 pion 同源限制），
   网关若改派了外部端口，宣告出去的端口就是错的，宁可判定失败给 `port_conflict` 诊断也不要假成功。v6 pinhole 随 wants 自动覆盖。
   `Mapper.OnChange` 已接 `a.RefreshAnnounce`，回调读的是刷新后的快照，无需额外接线。
-- **Bellows**：`stagePublisherSink` 取到 `lkembed` 实例的 Publisher（`livekitrtc` 已实现）即向回环 LiveKit 发布，零改动。
-- **`cmd/stage`**（远端形态，替代树莓派上的两个容器）：`livekitembed.Start` + `bellows.NewRemote` + `portmap.New` + 周期刷新，
-  接线逐行照抄 `cmd/bellows/main.go`（Mapper、OnChange、ticker、优雅退出 `Close(新 ctx)`），环境变量 `STAGE_*` 对应上面五个键，
-  `PORTMAP_MODE` 同名沿用。LiveKit 在这里**监听非回环地址**（hearth 经 tailscale 访问其 API），`bind_addresses` 由 env 给。
-  `cmd/bellows` 保留一段时间后并入 `cmd/stage`。
+- **推流面**：`lkembed` 实例同时具备 `ingest` 能力（`livekitrtc.WHIP`，与 Stage 面共用 `embedCfg`）：
+  `/providers/lkembed/w/{channel}[/{token}]` POST 照常先过 `admitIngest`，通过后按房间/identity/meta 现签一张短时效
+  LiveKit JWT 换掉用户令牌，反代到 `{livekit_api_url}/whip/v1`；应答的 `Location` 换成不透明会话 id
+  （`/w/sessions/{rid}`，接入层再加 `/providers/lkembed` 前缀），PATCH/DELETE 按会话反查上游参与者路径并现签新票转发。
+  上游的 `Link: rel="ice-server"` 不透传（与 Bellows 一致：那是 LiveKit 内置的默认 STUN 列表，不一定可达）。
+  没有「令牌 → 上游 stream key」的持久端点（房间与身份都写在票里），`EnsureEndpoint`/`BindRoom`/`DeleteEndpoint`
+  是空实现；需要的状态只有一张会话表，用于换票、令牌重置时撤销会话，以及同令牌换房间重推时把旧房间里的同一发布身份
+  移出（LiveKit 只保证房间内 identity 唯一，跨房间会两个会话并存，而推流令牌的语义是一台设备同时只推一个房间）。
+- **推流入口的默认值不联动**：`ingest_provider` 的回落仍是内建 `bellows`（选中 `lkembed` 舞台时 Bellows 本来就能跑，
+  只是多一跳回环 PC），要用原生 WHIP 就在管理后台把 `ingest_provider` 也选成 `lkembed`。回落值保持固定可预期，
+  与「未知 alias 回落内建默认」一致。`lkembed` 推流面的 `Enabled` 会看进程内 LiveKit 是否真的在跑
+  （舞台线没选中它时服务端根本没起）。
+- **禁言**：推流参与者（元数据 `kind=ingest`）的禁言实现为把它移出房间，见下节「禁言与推流设备」。
+- **`cmd/stage`**（远端形态，替代远端机器上的两个容器）：`livekitembed.Start` + `portmap.New` + 自己的 `lite.Announcer` + 周期刷新，
+  接线逐行照 `cmd/bellows/main.go`（Mapper、OnChange、ticker、优雅退出 `Close(新 ctx)`），环境变量 `STAGE_*`，`PORTMAP_MODE` 同名沿用。
+  LiveKit 在这里**监听非回环地址**（hearth 经私网通道访问其 API），`bind_addresses` 由 `STAGE_BIND` 给。没有 Ember，所以自建一个
+  `Announcer` 并显式 `RegisterMediaPort`。`cmd/bellows` 标注废弃、下一版本移除。
 
 ## 实施顺序（每步单独可验）
 
@@ -150,10 +212,19 @@ func (s *Server) Stop()                                       // service.Livekit
 4. **宣告与打洞**：补丁二回调接 `Announcer`；`PortWants` 加 StrictPort 的 UDP want。真机验收（**环境信息不入库**）：
    网关租约表出现舞台 UDP 端口的同端口映射（v4）与 pinhole（v6）；LiveKit 给浏览器的候选里出现映射外部 IP 的 srflx，
    **且 LAN host 候选仍在**（这条验补丁二的 bool 语义）；公网 IP 变化模拟（改探测返回值）后**新**会话拿到新地址、进程不重启、在途会话不断。
-5. **推流**：OBS/ffmpeg（见既有 WHIP 验收配方）经进程内 Bellows 推 HEVC，观众可见，`{user}-obs` 入名册，禁言后消失。
-6. **`cmd/stage`** 远端形态；树莓派 compose 从 livekit + bellows 两个服务换成一个 `stage`（备份旧 compose）；bj 侧不动。
+5. **推流**：`ingest_provider=lkembed`，OBS/ffmpeg（见既有 WHIP 验收配方）经 `/providers/lkembed/w` 推 HEVC，
+   观众可见，`u{uid}-obs` 入名册，禁言后消失、解禁重推恢复。
+6. **`cmd/stage`** 远端形态。**已完成（代码与本机验收）2026-09-04**：`livekitrtc.WHIP` 泛化到 `livekit` 类型实例
+   （上游由 `livekit_api_url` 推导，`ws(s)://` 归一成 `http(s)://`），env 锁定与 DB 注册的 livekit 实例因此三面齐全；
+   `cmd/stage` 落地（`STAGE_*` 环境变量、`healthcheck` 子命令、`Dockerfile.stage` 与 `hearth-stage` 镜像）；
+   `cmd/bellows` 标注「下一版本移除」。**待真机**：远端机器的 compose 从 livekit + bellows 两个服务换成一个 `stage`
+   （备份旧 compose），服务端侧只改 `LIVEKIT_API_URL` 与两个选择器。
 7. **收尾**：aio 的 `EMBED_LIVEKIT` 路径退役（`aioinit` 不再拉 livekit/redis）；README 架构图与部署段；CLAUDE.md 更新
    （内建实例多一个 `lkembed`、aio 不再拉子进程、`livekit_*` 命名空间说明）；`plan-stage-kernel.md` 状态行指向本计划。
+   ✅ **与代码无冲突的部分已完成**：`Dockerfile.aio`/`server/cmd/aioinit` 已删除，`-livekit`/`-full` 两档在 release.yml
+   里改成主镜像的过渡别名 tag（一个版本后移除）；`warnLegacyConfig` 加了 `EMBED_LIVEKIT`/`EMBED_INGRESS`/回环
+   `LIVEKIT_API_URL` 的残留提示；README/CLAUDE.md/`.env.example` 同步改写。`plan-stage-kernel.md` 状态行已在更早的提交里
+   指向本计划，不需要再动。
 
 第 1 到 3 步可以在一个 worktree 里连续做，第 4 步起需要真机。
 
@@ -162,6 +233,9 @@ func (s *Server) Stop()                                       // service.Livekit
 - `cd server && go build ./... && go vet ./... && go test ./...`；`GOOS=linux`/`GOOS=windows` 交叉编译。
 - 纯语音部署（`stage_provider=none`）：启动无任何 LiveKit 相关日志与端口，行为与今天完全一致。
 - `stage_provider=lkembed`：单进程内投屏/摄像头/OBS 三路都通；无 redis、无 ingress、无 watchdog。
+- `ingest_provider=lkembed`：推流经 `/providers/lkembed/w` 直达进程内 LiveKit 的 `/whip/v1`——201 与不透明会话地址、
+  观众可见、`kind=ingest` 入名册、换频道重推顶掉旧房间、DELETE 即下线、禁言即移出、解禁重推恢复
+  （这几条已有端到端测试，`server/internal/api/lkembed_whip_test.go`）。真机还要验 OBS 与 HEVC 实推。
 - 打洞与宣告：见第 4 步；`PORTMAP_MODE=off` 时无映射且 LiveKit 只宣告 host + STUN 公网 IP。
 - 回退：选择器切回外部 `livekit` 实例，前端零改动即恢复。
 
@@ -178,7 +252,7 @@ func (s *Server) Stop()                                       // service.Livekit
   升级 LiveKit 版本时重跑一次同样的 diff，确认分叉没有长出新的非 warp 改动。
 - **Windows**：只验证了编译，运行时（UDP mux、防火墙弹窗）第一次跑 `cmd/stage` 时验；`portmap` 的 `host_firewall` 诊断仍是预留。
 - **端口改动需重启**：与 ember 一致；热切选择器可后置。
-- **性能**：Bellows 到 LiveKit 多一条回环 PC（一次 DTLS/SRTP），同机可忽略；真要省，将来在 fork 里加内部发布入口，不在本计划内。
+- **推流路径**：`ingest_provider=lkembed` 时没有回环 PC；仍选 Bellows 时多一条回环 PC（一次 DTLS/SRTP），同机可忽略。
 
 ## 与路线 A 的关系
 

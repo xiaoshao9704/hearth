@@ -234,3 +234,48 @@ func TestAnnouncerSnapshot(t *testing.T) {
 		t.Fatalf("映射结果应排在 STUN 之前，实际 %v", ext)
 	}
 }
+
+// TestAnnouncerRegisterMediaPortWithoutSDP 对应 lkembed 的场景：语音线（Announce）一次
+// 都没跑过，舞台端口靠 RegisterMediaPort 显式登记，Snapshot 也应该能查到它的映射结果。
+func TestAnnouncerRegisterMediaPortWithoutSDP(t *testing.T) {
+	a := announcerWith("", map[string]string{"192.168.50.4": "198.51.100.7"},
+		func(port int) (netip.AddrPort, bool) {
+			if port != 47720 {
+				t.Fatalf("应按登记的端口查映射，实际 %d", port)
+			}
+			return netip.MustParseAddrPort("203.0.113.5:47720"), true
+		})
+	// 未登记时（也没见过 SDP）只回显 STUN 结果。
+	if ext, _ := a.Snapshot(); !slices.Equal(ext, []string{"198.51.100.7"}) {
+		t.Fatalf("未登记、未见过 SDP 时只回显 STUN 结果，实际 %v", ext)
+	}
+	a.RegisterMediaPort("stage", 47720)
+	ext, _ := a.Snapshot()
+	if !slices.Equal(ext, []string{"203.0.113.5:47720", "198.51.100.7"}) {
+		t.Fatalf("显式登记后应查到映射结果并排在 STUN 之前，实际 %v", ext)
+	}
+	// 撤销登记（port<=0）：映射结果从快照里消失。
+	a.RegisterMediaPort("stage", 0)
+	if ext, _ := a.Snapshot(); !slices.Equal(ext, []string{"198.51.100.7"}) {
+		t.Fatalf("撤销登记后不应再回显映射结果，实际 %v", ext)
+	}
+}
+
+// TestAnnouncerRegisterMediaPortMergesWithVoice 语音（Announce 隐式登记）与舞台（显式
+// RegisterMediaPort）两个端口同时存在时，Snapshot 应该把两者的映射结果都列出来
+// （同一台机器复用一个 Announcer，两条线的端口天然不同）。
+func TestAnnouncerRegisterMediaPortMergesWithVoice(t *testing.T) {
+	mapped := map[int]netip.AddrPort{
+		51973: netip.MustParseAddrPort("203.0.113.5:33445"), // 语音线：sampleSDP 里的端口
+		47720: netip.MustParseAddrPort("203.0.113.5:47720"), // 舞台线：显式登记
+	}
+	a := announcerWith("", map[string]string{"192.168.50.4": "198.51.100.7"},
+		func(port int) (netip.AddrPort, bool) { ap, ok := mapped[port]; return ap, ok })
+	a.RegisterMediaPort("stage", 47720)
+	a.Announce(context.Background(), sampleSDP) // 记下语音端口 51973
+	ext, _ := a.Snapshot()
+	want := []string{"203.0.113.5:33445", "203.0.113.5:47720", "198.51.100.7"}
+	if !slices.Equal(ext, want) {
+		t.Fatalf("语音与舞台的映射结果应并列排在 STUN 之前，实际 %v，期望 %v", ext, want)
+	}
+}

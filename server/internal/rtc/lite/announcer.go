@@ -45,8 +45,15 @@ type Announcer struct {
 	public string            // 显式配置的 public IP，非空即覆盖语义
 	stun   map[string]string // STUN 探测结果 local→external
 	// mediaPort 最近一次 Announce 见到的本机媒体端口，只用于 Snapshot 回显映射结果
-	// （映射查询按端口，而端口要到第一条 SDP 出来才知道）。
-	mediaPort   int
+	// （映射查询按端口，而端口要到第一条 SDP 出来才知道）。这是隐式登记：只有真的经这个
+	// Announcer 的 Announce() 出过 SDP 才会有值。
+	mediaPort int
+	// registered 显式登记的媒体端口（见 RegisterMediaPort）：调用方自己知道端口号、不需要
+	// 等第一条 SDP 才能登记——用于 lkembed，它的 PeerConnection 由内嵌的 LiveKit 自己建，
+	// 走 ExternalIPs 回调而不经过这个 Announcer 的 Announce()，语音线（ember）一次都没
+	// 用过时 mediaPort 仍是 0，Snapshot 就查不到舞台端口的映射。key 是登记名，同名后写覆盖
+	// 前写，端口配置变化或选择器切走时调用方用同一个名字覆盖/清除。
+	registered  map[string]int
 	probedAt    time.Time
 	probing     bool
 	probeDone   chan struct{}
@@ -55,6 +62,21 @@ type Announcer struct {
 
 func NewAnnouncer(publicIP, stunServers func(context.Context) string, mapped MappedFunc) *Announcer {
 	return &Announcer{publicIP: publicIP, stunServers: stunServers, mapped: mapped, probe: probeAllSTUN}
+}
+
+// RegisterMediaPort 显式登记一个本机媒体端口，让 Snapshot 不必等它经这个 Announcer 出过
+// SDP 就能查询映射结果（见 registered 字段注释）。port<=0 撤销该名字下的登记。
+func (a *Announcer) RegisterMediaPort(name string, port int) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if port <= 0 {
+		delete(a.registered, name)
+		return
+	}
+	if a.registered == nil {
+		a.registered = make(map[string]int)
+	}
+	a.registered[name] = port
 }
 
 // Rules 返回建 PeerConnection 用的地址改写规则；缓存过期（TTL）先同步重探。
@@ -146,17 +168,53 @@ func (a *Announcer) Refresh(ctx context.Context) (changed bool) {
 	return a.runProbe(ctx)
 }
 
-// Snapshot 当前会宣告的外部地址与探测时间，给日志与管理后台回显。
+// Snapshot 当前会宣告的外部地址与探测时间，给日志与管理后台回显。映射结果（隐式经
+// Announce() 见过的媒体端口 + 显式 RegisterMediaPort 登记的端口，按端口号去重）排最前，
+// 其次是 STUN/显式公网 IP。
 func (a *Announcer) Snapshot() (externals []string, probedAt time.Time) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	out := externalIPs(a.public, a.stun)
-	if a.mapped != nil && a.mediaPort > 0 {
-		if ext, ok := a.mapped(a.mediaPort); ok {
-			out = append([]string{ext.String()}, out...) // 映射结果最准，排最前
+	if a.mapped != nil {
+		ports := make(map[int]struct{}, 1+len(a.registered))
+		if a.mediaPort > 0 {
+			ports[a.mediaPort] = struct{}{}
 		}
+		for _, p := range a.registered {
+			if p > 0 {
+				ports[p] = struct{}{}
+			}
+		}
+		var mapped []string
+		for p := range ports {
+			if ext, ok := a.mapped(p); ok {
+				mapped = append(mapped, ext.String())
+			}
+		}
+		slices.Sort(mapped) // map 遍历顺序不定，排序保证输出稳定
+		out = append(mapped, out...)
 	}
 	return out, a.probedAt
+}
+
+// ExternalIPv4s 把 Snapshot 的外部地址列表（可能带端口）压成去重的 IPv4 列表，
+// 顺序不变。给 LiveKit 的地址改写回调用：它只换 IP 不换端口，也只认 IPv4。
+func ExternalIPv4s(externals []string) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, e := range externals {
+		ip := e
+		if ap, err := netip.ParseAddrPort(e); err == nil {
+			ip = ap.Addr().String()
+		}
+		addr, err := netip.ParseAddr(ip)
+		if err != nil || !addr.Is4() || seen[ip] {
+			continue
+		}
+		seen[ip] = true
+		out = append(out, ip)
+	}
+	return out
 }
 
 func (a *Announcer) runProbe(ctx context.Context) bool {

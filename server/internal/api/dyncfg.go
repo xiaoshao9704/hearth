@@ -11,6 +11,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -28,7 +29,8 @@ var selectorKeys = []rtc.ConfigKey{
 	{Name: "stage_provider", Group: "core",
 		Label: "舞台内核", Hint: "实例 alias；none = 纯语音部署，禁用投屏与摄像头"},
 	{Name: "ingest_provider", Group: "core",
-		Label: "推流入口", Hint: "OBS/WHIP 推流的接入实例 alias；内建 bellows = 进程内直通网关（支持 HEVC/AV1，发进 LiveKit 房间）"},
+		Label: "推流入口", Hint: "OBS/WHIP 推流的接入实例 alias；内建 bellows = 进程内直通网关（支持 HEVC/AV1，发进舞台内核）；" +
+			"舞台线选 lkembed 时也可把这里一并选 lkembed，推流直接进进程内 LiveKit 自带的 WHIP 入口，少一跳回环 PeerConnection"},
 }
 
 // portmapKeys 自动端口映射：进程内网络基建，与 bellows_udp_port 同类的全局键（不进实例 params）。
@@ -49,11 +51,14 @@ var selectorEnv = map[string]string{
 
 // warnLegacyConfig 启动时检查已废弃/不再读取的旧配置，打一次日志提示管理员，不做静默迁移：
 //   - 选择器 env（VOICE/STAGE/INGEST_PROVIDER）：不再读取（迁移 v2 已把旧值一次性落库），
-//     提醒从部署侧删除；值是改名前残留（pion / ingest 的 livekit）时说明回落口径；
+//     提醒从部署侧删除；值是改名前残留（pion）时说明回落口径；
 //   - 选择器 DB 值是 "pion"：按未知值回落默认实例（voice→ember、ingest→bellows）；
-//   - pion_* 键：被忽略回落 ember_* 默认值。
+//   - pion_* 键：被忽略回落 ember_* 默认值；
+//   - EMBED_LIVEKIT/EMBED_INGRESS/回环 LIVEKIT_API_URL：aio 自包含镜像的内嵌子进程（aioinit 拉起
+//     livekit-server/redis/ingress）已退役，内嵌 LiveKit 并入本进程（内建实例 lkembed）；这三个
+//     env 是旧编排的残留，hearth 本体从未读取，只提醒改走管理后台。
 func (a *API) warnLegacyConfig(ctx context.Context) {
-	for name, env := range selectorEnv {
+	for _, env := range selectorEnv {
 		v := strings.TrimSpace(os.Getenv(env))
 		if v == "" {
 			continue
@@ -61,8 +66,6 @@ func (a *API) warnLegacyConfig(ctx context.Context) {
 		switch {
 		case v == "pion":
 			log.Printf("配置告警: %s=pion 是改名前的残留（语音/推流内核现名 ember/bellows）；选择器已不再读环境变量，当前按管理后台所选实例运行", env)
-		case name == "ingest_provider" && v == "livekit":
-			log.Printf("配置告警: %s=livekit 无推流能力（推流入口已拆为独立类型 livekit-ingress/bellows-remote）；选择器已不再读环境变量，当前按管理后台所选实例运行", env)
 		default:
 			log.Printf("配置告警: %s 已不再读取（选择器以管理后台为准；旧值已在首次启动时落库导入），请从部署侧删除该环境变量", env)
 		}
@@ -84,6 +87,18 @@ func (a *API) warnLegacyConfig(ctx context.Context) {
 			log.Printf("配置告警: %s/%s 已不再读取，请改用 %s（当前按默认值运行）", old.Env, old.Name, old.New)
 		}
 	}
+	for _, env := range []string{"EMBED_LIVEKIT", "EMBED_INGRESS"} {
+		if os.Getenv(env) != "" {
+			log.Printf("配置告警: %s 已不再生效（自包含镜像的内嵌子进程已退役），舞台线请在管理后台把「舞台内核」改选 lkembed", env)
+		}
+	}
+	if raw := strings.TrimSpace(os.Getenv("LIVEKIT_API_URL")); raw != "" {
+		if u, err := url.Parse(raw); err == nil {
+			if host := u.Hostname(); host == "127.0.0.1" || host == "localhost" || host == "::1" {
+				log.Printf("配置告警: LIVEKIT_API_URL=%s 指向本机回环，疑似旧自包含镜像内嵌 LiveKit 的残留配置（该子进程已退役）；需要舞台内核请在管理后台改选 lkembed（进程内自带，无需此环境变量），指向真正的外部 LiveKit 才需要保留它", raw)
+			}
+		}
+	}
 }
 
 func (a *API) allConfigKeys() []rtc.ConfigKey {
@@ -93,9 +108,11 @@ func (a *API) allConfigKeys() []rtc.ConfigKey {
 
 // PortWants 当前要向网关申请的映射：HTTP 端口 + 当前选中内核里跑在本进程的媒体端口
 // （选的是外部实例时那些端口不在本机，映射了也没意义）。cmd/server 把它交给 portmap.Mapper
-// 每轮读——端口与内核选择都是动态配置，后台改了下一轮就撤旧加新。
-// 一律不置 StrictPort：SDP 出口能宣告与监听端口不同的外部端口，让网关自由改派可用性更高
+// 每轮读——端口与内核选择都是动态配置，后台改了下一轮（renewInterval，见 portmap.go）就
+// 撤旧加新，选择器切换不需要重启；这层"热更新"就是 Mapper.Run 本身的续租循环，未额外接线。
+// 大多数端口不置 StrictPort：SDP 出口能宣告与监听端口不同的外部端口，让网关自由改派可用性更高
 // （同端口优先仍由 Mapper 保证，上游 DMZ 的端口不变透传因此照样能对上）。
+// 例外是 lkembed 的媒体端口，见下方注释。
 func (a *API) PortWants(ctx context.Context) []portmap.Want {
 	if a.dynVal(ctx, "portmap_mode") == "off" {
 		return nil
@@ -111,6 +128,15 @@ func (a *API) PortWants(ctx context.Context) []portmap.Want {
 	}
 	if alias, _, _ := a.ingestInstance(ctx); alias == TypeBellows {
 		ws = append(ws, portmap.Want{Proto: "udp", Port: dynPort(a.dynVal(ctx, "bellows_udp_port")), Desc: "hearth whip"})
+	}
+	// lkembed（进程内 LiveKit）的媒体端口必须 StrictPort：LiveKit 的候选地址改写（补丁二）只换
+	// IP 不换端口，与 pion 的 SDP 宣告同源限制一致；网关若把外部端口改派成别的号，宣告出去的
+	// 候选端口就是错的，宁可让 Mapper 判定失败、走 port_conflict 诊断，也不能假装映射成功。
+	if alias, _ := a.stageInstance(ctx); alias == AliasLkembed {
+		ws = append(ws, portmap.Want{Proto: "udp", Port: dynPort(a.dynVal(ctx, "lkembed_udp_port")), Desc: "hearth stage", StrictPort: true})
+		if tcp := dynPort(a.dynVal(ctx, "lkembed_tcp_port")); tcp > 0 {
+			ws = append(ws, portmap.Want{Proto: "tcp", Port: tcp, Desc: "hearth stage", StrictPort: true})
+		}
 	}
 	return ws
 }
@@ -284,6 +310,10 @@ func (a *API) adminSetConfig(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusInternalServerError, "内部错误")
 			return
 		}
+	}
+	// 舞台选择器切到/切走 lkembed：立即启停进程内 LiveKit（另起协程，启动要 1 秒级）
+	if _, ok := req.Values["stage_provider"]; ok {
+		go a.EnsureStageKernel(context.Background())
 	}
 	// 让缓存的在线人数立即按新配置重取
 	a.countsMu.Lock()

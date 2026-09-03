@@ -20,18 +20,27 @@ import (
 
 // 实例类型（内建两类 + 可注册三类）
 const (
+	// TypeLivekit 一个 LiveKit 服务端：语音/舞台/推流三面齐全——推流面就是它自带的
+	// WHIP 入口（/whip/v1，见 livekitrtc/whip.go），远端 cmd/stage 与外部 LiveKit
+	// 都按这条接线，不再需要 Bellows 转发一道。
 	TypeLivekit        = "livekit"
 	TypeLivekitIngress = "livekit-ingress"
 	TypeBellowsRemote  = "bellows-remote"
 	TypeEmber          = "ember"   // 内建
 	TypeBellows        = "bellows" // 内建（进程内 WHIP 直通）
+	// TypeLivekitEmbedded 内建：补丁式 fork 的 LiveKit 跑在本进程内，只监听回环，
+	// 浏览器经 /providers/lkembed/rtc 同源反代访问（见 lkembed.go）
+	TypeLivekitEmbedded = "livekit-embedded"
 )
+
+// AliasLkembed 内建进程内 LiveKit 实例的 alias（不能叫 livekit，那个留给 env 锁定实例）。
+const AliasLkembed = "lkembed"
 
 // alias 规则：单段小写，出现在 URL 路径里；类型同名的 alias 保留给 env 锁定实例
 var aliasRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,31}$`)
 var reservedAliases = map[string]bool{
 	TypeEmber: true, TypeBellows: true, TypeLivekit: true,
-	TypeLivekitIngress: true, TypeBellowsRemote: true,
+	TypeLivekitIngress: true, TypeBellowsRemote: true, AliasLkembed: true,
 }
 
 // ProviderInstance 一个注册的内核实例：alias 唯一标识，能力按槽位接口非空判定。
@@ -97,6 +106,8 @@ func (a *API) builtinInstances() []*ProviderInstance {
 		{Alias: TypeEmber, Type: TypeEmber, Builtin: true, Cfg: a.dynVal, Voice: a.ember},
 		{Alias: TypeBellows, Type: TypeBellows, Builtin: true, Cfg: a.dynVal,
 			Ingest: bellows.New(a.dynVal, a.ingressResolver, a.stagePublisherSink, a.mapped)},
+		{Alias: AliasLkembed, Type: TypeLivekitEmbedded, Builtin: true, Cfg: a.embedCfg,
+			Stage: a.lkembed, Ingest: a.lkembedWHIP},
 	}
 }
 
@@ -139,7 +150,8 @@ func (a *API) reloadProvidersLocked(ctx context.Context) {
 	if params := envLockedParams(a.providerTypeFields(TypeLivekit), "livekit_api_url", "livekit_api_key", "livekit_api_secret"); params != nil {
 		cfg := paramsCfg(params, a.providerTypeFields(TypeLivekit))
 		lk := livekitrtc.New(cfg)
-		add(&ProviderInstance{Alias: TypeLivekit, Type: TypeLivekit, Params: params, Cfg: cfg, Locked: true, Voice: lk, Stage: lk})
+		add(&ProviderInstance{Alias: TypeLivekit, Type: TypeLivekit, Params: params, Cfg: cfg, Locked: true,
+			Voice: lk, Stage: lk, Ingest: livekitrtc.NewWHIP(cfg, a.ingressResolver, nil)})
 	}
 	if params := envLockedParams(a.providerTypeFields(TypeLivekitIngress), "ingress_upstream_url"); params != nil {
 		cfg := paramsCfg(params, a.providerTypeFields(TypeLivekitIngress))
@@ -227,6 +239,7 @@ func (a *API) instantiateProvider(rec *store.ProviderRecord) *ProviderInstance {
 	case TypeLivekit:
 		lk := livekitrtc.New(cfg)
 		inst.Voice, inst.Stage = lk, lk
+		inst.Ingest = livekitrtc.NewWHIP(cfg, a.ingressResolver, nil)
 	case TypeLivekitIngress:
 		inst.Ingest = livekitrtc.NewIngress(cfg)
 	case TypeBellowsRemote:
@@ -426,12 +439,12 @@ func (a *API) migrateProviders(ctx context.Context) error {
 
 // importSelectorEnv 迁移 v2：选择器不再读环境变量（env 只负责把 provider 实例带进
 // 可选列表）。为保证旧部署升级后行为不变，部署侧还设着的选择器 env 在后台从未选过时
-// 把 env 值一次性落库；改名前残留（pion）与无对应能力的值（ingest 的 livekit）跳过，
-// 由 warnLegacyConfig 打告警。只随 v2 跑一次：之后管理员清空恢复默认不被撤销。
+// 把 env 值一次性落库；改名前残留（pion）跳过，由 warnLegacyConfig 打告警。
+// 只随 v2 跑一次：之后管理员清空恢复默认不被撤销。
 func (a *API) importSelectorEnv(ctx context.Context) error {
 	for name, env := range selectorEnv {
 		v := strings.TrimSpace(os.Getenv(env))
-		if v == "" || v == "pion" || (name == "ingest_provider" && v == "livekit") {
+		if v == "" || v == "pion" {
 			continue
 		}
 		if cur, _ := a.st.GetSetting(ctx, "cfg_"+name); strings.TrimSpace(cur) != "" {

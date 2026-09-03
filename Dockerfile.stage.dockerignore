@@ -1,0 +1,4 @@
+# Dockerfile.stage 专用（BuildKit 按 <Dockerfile 名>.dockerignore 优先匹配）：
+# 装配上下文只需要预编译的 stage 二进制
+*
+!out/stage-linux-*

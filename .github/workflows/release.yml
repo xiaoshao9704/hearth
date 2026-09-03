@@ -2,7 +2,9 @@
 # - build 作业：前端构建一次 + Go 原生交叉编译双架构静态二进制；
 #   tag 触发时 tar.gz 作为 GitHub Release 资产发布，同时把产物传给 image 作业
 # - image 作业：用 Dockerfile.release 纯 COPY 装配多架构 OCI 镜像推 ghcr.io——
-#   没有任何 RUN 指令，不需要 QEMU，秒级完成（此前 arm64 在 QEMU 下编译要 1 小时+）
+#   没有任何 RUN 指令，不需要 QEMU，秒级完成（此前 arm64 在 QEMU 下编译要 1 小时+）。
+#   自包含 -livekit/-full 镜像档（Dockerfile.aio + aioinit）已退役：内嵌 LiveKit 并入了主镜像
+#   （进程内 lkembed，见 docs/plan-livekit-embed.md），只留这两个 tag 作为一个版本的过渡别名。
 name: release
 
 on:
@@ -52,8 +54,9 @@ jobs:
           mkdir -p "$GITHUB_WORKSPACE/out"
           for arch in amd64 arm64; do
             GOARCH=$arch go build -ldflags "-s -w" -o "$GITHUB_WORKSPACE/out/hearth-linux-$arch" ./cmd/server
-            GOARCH=$arch go build -ldflags "-s -w" -o "$GITHUB_WORKSPACE/out/aioinit-linux-$arch" ./cmd/aioinit
-            # 远端 Bellows 推流网关：单文件，跑在 LiveKit 同一局域网的机器上
+            # 远端舞台内核：单文件，跑在另一台机器上替代 livekit + bellows 两个容器
+            GOARCH=$arch go build -ldflags "-s -w" -o "$GITHUB_WORKSPACE/out/stage-linux-$arch" ./cmd/stage
+            # 远端 Bellows 推流网关：已被 cmd/stage 取代，下一版本移除
             GOARCH=$arch go build -ldflags "-s -w" -o "$GITHUB_WORKSPACE/out/bellows-linux-$arch" ./cmd/bellows
           done
 
@@ -73,7 +76,7 @@ jobs:
           name: dist
           path: |
             out/hearth-linux-*
-            out/aioinit-linux-*
+            out/stage-linux-*
             out/bellows-linux-*
             web/dist
             hearth_*.tar.gz
@@ -85,6 +88,7 @@ jobs:
         with:
           files: |
             hearth_*.tar.gz
+            out/stage-linux-*
             out/bellows-linux-*
 
   image:
@@ -118,18 +122,12 @@ jobs:
             type=raw,value=latest,enable=${{ github.ref_type == 'tag' }}
             type=raw,value=edge,enable=${{ github.ref_type != 'tag' }}
 
-      - uses: docker/build-push-action@v7
-        with:
-          context: .
-          file: Dockerfile.release
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-
-      # aio 自包含两档（Dockerfile.aio）：tag 加 -livekit / -full 后缀
+      # 过渡别名：旧自包含镜像档 -livekit/-full（Dockerfile.aio + aioinit）已退役，内嵌 LiveKit
+      # 并入了主镜像（进程内 lkembed）。这两个 tag 只在这一个版本里指向与主镜像相同的内容，
+      # 方便旧部署把 tag 名切过来；下一个版本发布时删掉这两段 metadata 步骤与下面的 tags 拼接
+      # （比照 CLAUDE.md 里 pion_* 只保留一个版本的先例，不要长期维护）。
       - uses: docker/metadata-action@v6
-        id: meta-livekit
+        id: meta-livekit-alias
         with:
           images: ghcr.io/${{ github.repository }}
           flavor: suffix=-livekit,onlatest=true
@@ -137,20 +135,9 @@ jobs:
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=raw,value=latest,enable=${{ github.ref_type == 'tag' }}
-            type=raw,value=edge,enable=${{ github.ref_type != 'tag' }}
-
-      - uses: docker/build-push-action@v7
-        with:
-          context: .
-          file: Dockerfile.aio
-          target: livekit
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ steps.meta-livekit.outputs.tags }}
-          labels: ${{ steps.meta-livekit.outputs.labels }}
 
       - uses: docker/metadata-action@v6
-        id: meta-full
+        id: meta-full-alias
         with:
           images: ghcr.io/${{ github.repository }}
           flavor: suffix=-full,onlatest=true
@@ -158,17 +145,35 @@ jobs:
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=raw,value=latest,enable=${{ github.ref_type == 'tag' }}
-            type=raw,value=edge,enable=${{ github.ref_type != 'tag' }}
-
-      # full 档 arm64 的 apt 层走 QEMU（分钟级，可接受）；两个官方 base 均有 arm64
-      - uses: docker/setup-qemu-action@v3
 
       - uses: docker/build-push-action@v7
         with:
           context: .
-          file: Dockerfile.aio
-          target: full
+          file: Dockerfile.release
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: ${{ steps.meta-full.outputs.tags }}
-          labels: ${{ steps.meta-full.outputs.labels }}
+          tags: |
+            ${{ steps.meta.outputs.tags }}
+            ${{ steps.meta-livekit-alias.outputs.tags }}
+            ${{ steps.meta-full-alias.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+      # 远端舞台镜像（Dockerfile.stage）：单独的镜像名 <repo>-stage，纯装配
+      - uses: docker/metadata-action@v6
+        id: meta-stage
+        with:
+          images: ghcr.io/${{ github.repository }}-stage
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable=${{ github.ref_type == 'tag' }}
+            type=raw,value=edge,enable=${{ github.ref_type != 'tag' }}
+
+      - uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: Dockerfile.stage
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta-stage.outputs.tags }}
+          labels: ${{ steps.meta-stage.outputs.labels }}

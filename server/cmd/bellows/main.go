@@ -1,3 +1,7 @@
+// 已被 cmd/stage 取代，下一版本移除：远端舞台机器现在只跑一个 stage 进程（进程内
+// LiveKit 自带 WHIP 入口，OBS 的媒体与浏览器观众走同一条打洞路径），不再需要
+// Bellows 在前面转发一道。迁移见 README「远端舞台机器」。
+//
 // Bellows 独立进程：跑在舞台内核同一局域网的机器上收 OBS 的 WHIP 推流并直通发进
 // 舞台房间，视频不经过 hearth 所在服务器。无状态、无出站依赖（只连舞台内核）：
 // 推流令牌的归属与入场判定由 hearth 在反代前做完并签成短时效通行证（grant）随请求头带来，
@@ -51,6 +55,8 @@ func main() {
 		return
 	}
 
+	log.Printf("提示: cmd/bellows 已被 cmd/stage 取代（远端舞台机器改跑一个 stage 进程，" +
+		"推流直达它自带的 WHIP 入口），本进程将在下一版本移除")
 	cfg := map[string]string{
 		"bellows_shared_secret": need("BELLOWS_SHARED_SECRET"),
 		"bellows_udp_port":      envOr("BELLOWS_UDP_PORT", "47710"),
