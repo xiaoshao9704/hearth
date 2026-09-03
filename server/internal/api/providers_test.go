@@ -18,7 +18,7 @@ func testAPI(t *testing.T) *API {
 		t.Fatalf("打开测试库失败: %v", err)
 	}
 	t.Cleanup(func() { s.Close() })
-	return New(s, config.Load(), chat.NewHub(s, ""))
+	return New(s, config.Load(), chat.NewHub(s, ""), nil)
 }
 
 func TestBuiltinInstancesFirst(t *testing.T) {
@@ -316,7 +316,7 @@ func TestFallbacksSafeWhenInitialReloadFails(t *testing.T) {
 	}
 	t.Cleanup(func() { s.Close() })
 	s.Close() // 模拟启动期 DB 不可用（迁移与首次 ListProviders 都会失败）
-	a := New(s, config.Load(), chat.NewHub(s, ""))
+	a := New(s, config.Load(), chat.NewHub(s, ""), nil)
 	ctx := context.Background()
 	if alias, vp := a.voiceInstance(ctx); alias != "ember" || vp == nil {
 		t.Fatalf("启动期加载失败时语音应回落 ember 且非 nil: %q", alias)

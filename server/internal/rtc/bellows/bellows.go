@@ -85,27 +85,36 @@ type Gateway struct {
 	sessions map[string]*session // 键 = 会话资源 id（POST 应答 Location /w/sessions/{rid}），非推流令牌
 }
 
-func New(cfg rtc.ConfigFunc, resolve ResolveFunc, sink func(ctx context.Context) rtc.Publisher) *Gateway {
+// New mapped 传端口映射结果的查询函数（无映射来源、或远端形态实例传 nil），
+// 媒体端口的外部地址据此宣告。
+func New(cfg rtc.ConfigFunc, resolve ResolveFunc, sink func(ctx context.Context) rtc.Publisher,
+	mapped lite.MappedFunc) *Gateway {
+
 	g := &Gateway{cfg: cfg, resolve: resolve, sink: sink, sessions: map[string]*session{}}
 	g.announcer = lite.NewAnnouncer(
 		func(ctx context.Context) string { return g.cfg(ctx, "bellows_public_ip") },
 		func(ctx context.Context) string { return g.cfg(ctx, "bellows_stun_servers") },
+		mapped,
 	)
 	return g
 }
 
 // NewRemote 远端形态（cmd/bellows）：不做归属反查，handlePost 只验 hearth 签发的通行证；
 // sink 编译时选定（BELLOWS_SINK），取不到 Publisher 时推流拒绝。
-func NewRemote(cfg rtc.ConfigFunc, sink func(ctx context.Context) rtc.Publisher) *Gateway {
+func NewRemote(cfg rtc.ConfigFunc, sink func(ctx context.Context) rtc.Publisher,
+	mapped lite.MappedFunc) *Gateway {
+
 	g := &Gateway{cfg: cfg, sink: sink, sessions: map[string]*session{}}
 	g.announcer = lite.NewAnnouncer(
 		func(ctx context.Context) string { return g.cfg(ctx, "bellows_public_ip") },
 		func(ctx context.Context) string { return g.cfg(ctx, "bellows_stun_servers") },
+		mapped,
 	)
 	return g
 }
 
-// RefreshAnnounce 健康检查触发的宣告探测刷新。远端形态（hearth 侧的 bellows-remote
+// RefreshAnnounce 周期刷新（或端口映射变化）触发的宣告探测刷新。
+// 远端形态（hearth 侧的 bellows-remote
 // 实例）不收流，宣告是远端进程自己的事，这里直接 no-op。
 func (g *Gateway) RefreshAnnounce(ctx context.Context) (changed bool, externals []string, probedAt time.Time) {
 	if g.remoteURL(ctx) != "" {
@@ -116,14 +125,13 @@ func (g *Gateway) RefreshAnnounce(ctx context.Context) (changed bool, externals 
 	return changed, externals, probedAt
 }
 
-// AnnounceSnapshot 只读当前公网映射，给健康检查回显。
+// AnnounceSnapshot 只读当前会宣告的外部地址，给日志/管理后台回显。
 func (g *Gateway) AnnounceSnapshot() (externals []string, probedAt time.Time) {
 	return g.announceSnapshot()
 }
 
 func (g *Gateway) announceSnapshot() ([]string, time.Time) {
-	rules, at := g.announcer.Snapshot()
-	return lite.RuleExternals(rules), at
+	return g.announcer.Snapshot()
 }
 
 func randHex(nbytes int) (string, error) {
@@ -356,7 +364,7 @@ func (g *Gateway) handlePost(w http.ResponseWriter, r *http.Request, token strin
 	}
 	g.mu.Unlock()
 
-	body := []byte(pc.LocalDescription().SDP)
+	body := []byte(g.announcer.Announce(r.Context(), pc.LocalDescription().SDP))
 	w.Header().Set("Content-Type", "application/sdp")
 	// 资源地址用一次性会话 id：bearer 模式的令牌不能经 Location 回流进 URL/访问日志
 	w.Header().Set("Location", "/w/sessions/"+rid)

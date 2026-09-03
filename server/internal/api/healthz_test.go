@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"net/http/httptest"
 	"testing"
@@ -8,36 +9,24 @@ import (
 
 func TestHealthz(t *testing.T) {
 	a := testAPI(t)
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest("GET", "/healthz", nil)
-	a.Router().ServeHTTP(rec, req)
-	if rec.Code != 200 {
-		t.Fatalf("healthz 应返回 200，实际 %d", rec.Code)
-	}
-	var body struct {
-		OK       bool                       `json:"ok"`
-		Announce map[string]json.RawMessage `json:"announce"`
-	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
-		t.Fatalf("响应应为 JSON: %v", err)
-	}
-	if !body.OK {
-		t.Fatal("ok 应为 true")
-	}
-	if _, ok := body.Announce["ember"]; !ok {
-		t.Fatalf("announce 应含内建 ember: %s", rec.Body.String())
+	for _, target := range []string{"/healthz", "/healthz?refresh=1"} {
+		rec := httptest.NewRecorder()
+		a.Router().ServeHTTP(rec, httptest.NewRequest("GET", target, nil))
+		if rec.Code != 200 {
+			t.Fatalf("%s 应返回 200，实际 %d", target, rec.Code)
+		}
+		var body map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+			t.Fatalf("响应应为 JSON: %v", err)
+		}
+		// 纯探活：不回显宣告地址（内网拓扑），refresh 参数也已不再受理
+		if body["ok"] != true || len(body) != 1 {
+			t.Fatalf("%s 应只回 {\"ok\":true}，实际 %s", target, rec.Body.String())
+		}
 	}
 }
 
-// 外部来源（非回环）带 refresh 参数也只回显不探测——门控逻辑本身在
-// lite.LoopbackRemote 的单测里覆盖，这里只确认端点行为不炸且不回 5xx。
-func TestHealthzRefreshFromExternal(t *testing.T) {
-	a := testAPI(t)
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest("GET", "/healthz?refresh=1", nil)
-	req.RemoteAddr = "203.0.113.9:5555"
-	a.Router().ServeHTTP(rec, req)
-	if rec.Code != 200 {
-		t.Fatalf("外部 refresh 请求也应 200（只回显），实际 %d", rec.Code)
-	}
+// RefreshAnnounce 是进程内周期刷新的入口：遍历内建 ember 与实现了接口的 ingest 实例，不炸即可。
+func TestRefreshAnnounce(t *testing.T) {
+	testAPI(t).RefreshAnnounce(context.Background())
 }

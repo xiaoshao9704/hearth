@@ -1,6 +1,10 @@
 # 计划：宣告地址可刷新（健康检查触发探测，替代 watchdog 重启）
 
-状态：已执行（announce-refresh 分支）。2026-09-02。基线：main 已含注入式 `announceRules`（PR #1 + #2，per-NIC 纯 STUN 探测、External 去重；HTTP 兜底已去除——STUN 全挂返回 nil，candidate 按网卡地址原样宣告）。
+状态：已执行（announce-refresh 分支）。2026-09-02。
+2026-09-03：healthz 触发刷新已改为进程内周期刷新（`/healthz` 精简为纯探活，不再接受 `refresh=1`、不再回显宣告），
+见 `docs/plan-portmap.md`；下文正文保留原样，涉及健康检查触发的部分以此条为准。
+
+基线：main 已含注入式 `announceRules`（PR #1 + #2，per-NIC 纯 STUN 探测、External 去重；HTTP 兜底已去除——STUN 全挂返回 nil，candidate 按网卡地址原样宣告）。
 
 ## 动机
 

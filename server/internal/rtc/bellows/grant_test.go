@@ -60,7 +60,7 @@ func mustSign(t *testing.T, g *Gateway, token, offer string) string {
 
 func TestGrantRoundTrip(t *testing.T) {
 	p := grantPayload{V: 1, Op: "publish", Token: "tok", Room: "r", Identity: "u7-obs",
-		Meta: rtc.Meta{UID: 7, Username: "alice", Kind: "ingest", Tag: "obs"},
+		Meta:  rtc.Meta{UID: 7, Username: "alice", Kind: "ingest", Tag: "obs"},
 		Offer: "abc", Exp: time.Now().Add(grantTTL).Unix()}
 	v, err := signGrant(testSecret, p)
 	if err != nil {
@@ -125,7 +125,7 @@ func TestGrantReject(t *testing.T) {
 
 // 远端形态 POST：有效 grant → 201；无 grant / offer 哈希不符 / token 不符 → 401。
 func TestRemotePostGrant(t *testing.T) {
-	g := NewRemote(remoteCfg("47722"), remoteSink)
+	g := NewRemote(remoteCfg("47722"), remoteSink, nil)
 	offer := testOffer("a=rtpmap:96 H264/90000\na=fmtp:96 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f")
 
 	post := func(token, body, grant string) int {
@@ -158,7 +158,7 @@ func TestRemotePostGrant(t *testing.T) {
 
 // 撤销端点 /w/revoke/{token}：验签（无/错 grant → 401）→ 掐会话 → 幂等 204。
 func TestRevokeSessions(t *testing.T) {
-	g := NewRemote(remoteCfg("47723"), remoteSink)
+	g := NewRemote(remoteCfg("47723"), remoteSink, nil)
 	offer := testOffer("a=rtpmap:96 H264/90000")
 	req := httptest.NewRequest("POST", "/w/chan1/good", strings.NewReader(offer))
 	req.Header.Set(GrantHeader, mustSign(t, g, "good", offer))
@@ -208,7 +208,7 @@ func TestRevokeSessions(t *testing.T) {
 
 // RevokeRemoteSessions 端到端：hearth 侧 Gateway（配 remote_url）→ 远端 Handler()。
 func TestRevokeRemoteSessions(t *testing.T) {
-	remote := NewRemote(remoteCfg("47724"), remoteSink)
+	remote := NewRemote(remoteCfg("47724"), remoteSink, nil)
 	srv := httptest.NewServer(remote.Handler())
 	defer srv.Close()
 
@@ -231,7 +231,7 @@ func TestRevokeRemoteSessions(t *testing.T) {
 			return testSecret
 		}
 		return ""
-	}, nil, nil)
+	}, nil, nil, nil)
 	if err := hearthSide.RevokeRemoteSessions(context.Background(), "good"); err != nil {
 		t.Fatalf("远端撤销失败: %v", err)
 	}

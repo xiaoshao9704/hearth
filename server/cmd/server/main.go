@@ -3,15 +3,21 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"regexp"
+	"syscall"
+	"time"
 
 	"hearth/server/internal/api"
 	"hearth/server/internal/chat"
 	"hearth/server/internal/config"
+	"hearth/server/internal/portmap"
+	"hearth/server/internal/rtc/lite"
 	"hearth/server/internal/selfcheck"
 	"hearth/server/internal/store"
 
@@ -23,8 +29,7 @@ var usernameRe = regexp.MustCompile(`^[a-zA-Z0-9_-]{2,32}$`)
 func main() {
 	cfg := config.Load()
 
-	// CLI 子命令: healthcheck —— 容器健康检查（镜像无 shell/curl）：探活本机 /healthz
-	// 并顺带触发宣告探测刷新。不开数据库。
+	// CLI 子命令: healthcheck —— 容器健康检查（镜像无 shell/curl）：探活本机 /healthz。不开数据库。
 	if len(os.Args) > 1 && os.Args[1] == "healthcheck" {
 		if err := selfcheck.Run(selfcheck.URL(cfg.Addr)); err != nil {
 			log.Printf("健康检查失败: %v", err)
@@ -62,7 +67,10 @@ func main() {
 	}
 
 	hub := chat.NewHub(st, cfg.CORSOrigin)
-	a := api.New(st, cfg, hub)
+	// 端口映射先建好：它是内核宣告外部地址的来源之一（lite.MappedFunc），要在内核构造前交出去。
+	// Run 之前查不到任何映射，返回 false 即可，内核那边只是暂时少一条 srflx 候选。
+	mapper := portmap.New()
+	a := api.New(st, cfg, hub, lite.MappedFunc(mapper.UDPExternal))
 
 	// chi 路由：API + 聊天 WS + /providers/* 接入分发；具体路由优先于静态通配，无 ServeMux 模式冲突问题
 	r := a.Router()
@@ -76,6 +84,43 @@ func main() {
 		r.Head("/*", fs.ServeHTTP)
 	}
 
-	log.Printf("hearth server 监听于 %s", cfg.Addr)
-	log.Fatal(http.ListenAndServe(cfg.Addr, r))
+	// 优雅退出：Windows 没有 SIGTERM（常量仍在），os.Interrupt 是那边的兜底
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	// 映射建立/变化后立刻刷新宣告，让新会话拿到映射出的外部地址。
+	// 回调不得阻塞 Mapper 的申请轮次（RefreshAnnounce 里是最长 2s 的 STUN 探测），另起协程。
+	mapper.OnChange = func(portmap.Status) { go a.RefreshAnnounce(context.Background()) }
+	go mapper.Run(ctx, a.PortWants)
+
+	// 宣告探测周期刷新：公网 IP 变化后新会话拿到新候选，不重启、不动在途会话
+	go func() {
+		t := time.NewTicker(lite.DefaultAnnounceTTL)
+		defer t.Stop()
+		for {
+			select {
+			case <-t.C:
+				a.RefreshAnnounce(ctx)
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+
+	srv := &http.Server{Addr: cfg.Addr, Handler: r}
+	go func() {
+		log.Printf("hearth server 监听于 %s", cfg.Addr)
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Fatalf("监听失败: %v", err)
+		}
+	}()
+
+	<-ctx.Done()
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	srv.Shutdown(shutdownCtx)
+	// Run 的 ctx 已经结束，撤销映射必须用新的 ctx，否则请求发不出去、映射留在网关上
+	closeCtx, closeCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer closeCancel()
+	mapper.Close(closeCtx)
 }

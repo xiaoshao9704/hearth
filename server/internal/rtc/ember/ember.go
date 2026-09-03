@@ -87,6 +87,10 @@ type participant struct {
 	negMu    sync.Mutex // 串行化重协商：同一时刻最多一个未应答 offer
 	answerCh chan string
 
+	// announce SDP 出口的宣告追加（Announcer.Announce 绑住入会 ctx）：
+	// renegotiate 是 vroom 的方法，拿不到 Provider
+	announce func(sdp string) string
+
 	// 说话检测
 	levelMu    sync.Mutex
 	lastLoudAt time.Time
@@ -136,26 +140,27 @@ type Provider struct {
 	announcer *lite.Announcer
 }
 
-func New(cfg rtc.ConfigFunc) *Provider {
+// New mapped 传端口映射结果的查询函数（无映射来源传 nil），媒体端口的外部地址据此宣告。
+func New(cfg rtc.ConfigFunc, mapped lite.MappedFunc) *Provider {
 	p := &Provider{cfg: cfg, rooms: make(map[string]*vroom)}
 	p.announcer = lite.NewAnnouncer(
 		func(ctx context.Context) string { return p.cfg(ctx, "ember_public_ip") },
 		func(ctx context.Context) string { return p.cfg(ctx, "ember_stun_servers") },
+		mapped,
 	)
 	return p
 }
 
-// RefreshAnnounce 健康检查触发的宣告探测刷新。
+// RefreshAnnounce 周期刷新（或端口映射变化）触发的宣告探测刷新。
 func (p *Provider) RefreshAnnounce(ctx context.Context) (changed bool, externals []string, probedAt time.Time) {
 	changed = p.announcer.Refresh(ctx)
 	externals, probedAt = p.AnnounceSnapshot()
 	return changed, externals, probedAt
 }
 
-// AnnounceSnapshot 只读当前公网映射，给健康检查回显。
+// AnnounceSnapshot 只读当前会宣告的外部地址，给日志/管理后台回显。
 func (p *Provider) AnnounceSnapshot() (externals []string, probedAt time.Time) {
-	rules, at := p.announcer.Snapshot()
-	return lite.RuleExternals(rules), at
+	return p.announcer.Snapshot()
 }
 
 func (p *Provider) Name() string { return "ember" }
@@ -336,6 +341,8 @@ func (p *Provider) HandleJoin(ctx context.Context, roomName string, meta rtc.Met
 		conn: conn, send: make(chan sigMsg, 32), out: out,
 		closed: make(chan struct{}), senders: make(map[string]*webrtc.RTPSender),
 		answerCh: make(chan string, 1),
+		// 出口宣告绑在参与者上：renegotiate 是 vroom 的方法，拿不到 Provider 与入会 ctx
+		announce: func(sdp string) string { return p.announcer.Announce(ctx, sdp) },
 	}
 	part.muted.Store(muted) // 禁言状态随入会生效（api 层据 channel_gags 判定）
 
@@ -436,7 +443,7 @@ func (p *Provider) readLoop(ctx context.Context, api *webrtc.API, r *vroom, part
 				return
 			}
 			<-done
-			part.send <- sigMsg{Type: "answer", SDP: pc.LocalDescription().SDP}
+			part.send <- sigMsg{Type: "answer", SDP: part.announce(pc.LocalDescription().SDP)}
 			// 把既有参与者的音轨喂给新人，把新人的音轨喂给既有参与者
 			for _, other := range r.snapshot() {
 				if other == part {
@@ -576,7 +583,7 @@ func (r *vroom) renegotiate(pt *participant) {
 		}
 		pt.sndMu.Unlock()
 		select {
-		case pt.send <- sigMsg{Type: "offer", SDP: pt.pc.LocalDescription().SDP, Mids: mids}:
+		case pt.send <- sigMsg{Type: "offer", SDP: pt.announce(pt.pc.LocalDescription().SDP), Mids: mids}:
 		case <-pt.closed:
 			return
 		}

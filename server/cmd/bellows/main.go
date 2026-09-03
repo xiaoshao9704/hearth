@@ -13,9 +13,11 @@
 //	BELLOWS_UDP_PORT        媒体 UDP 端口，默认 47710
 //	BELLOWS_PUBLIC_IP       向推流端通告的 IP；留空 = 自动宣告全部网卡地址 + STUN 探测的公网映射，显式设置则只通告该地址
 //	BELLOWS_STUN_SERVERS    逗号分隔的 STUN 服务器；探测各网卡公网映射用，留空用内置默认
+//	PORTMAP_MODE            auto（默认）向默认网关申请 UPnP/PCP/NAT-PMP 映射（媒体 UDP 口与 HTTP 口），
+//	                        仅 host 网络或裸机可用；off 关闭
 //
-// 子命令：`bellows healthcheck` 探活本机 /healthz 并顺带触发宣告探测刷新（容器健康检查用，
-// 镜像无 shell/curl，健康检查命令只能是二进制自己）。
+// 子命令：`bellows healthcheck` 探活本机 /healthz（容器健康检查用，镜像无 shell/curl，
+// 健康检查命令只能是二进制自己）。
 package main
 
 import (
@@ -23,12 +25,16 @@ import (
 	"encoding/json"
 	"errors"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
+	"hearth/server/internal/portmap"
 	"hearth/server/internal/rtc"
 	"hearth/server/internal/rtc/bellows"
 	"hearth/server/internal/rtc/lite"
@@ -66,27 +72,21 @@ func main() {
 	default:
 		log.Fatalf("未知 BELLOWS_SINK %q（可选: livekit）", name)
 	}
-	gw := bellows.NewRemote(func(_ context.Context, name string) string { return cfg[name] }, sink)
+	// 端口映射：远端形态跑在别人的局域网里，最需要自动打洞。与 hearth 同形：PORTMAP_MODE=off
+	// 时 wants 为空、Mapper 空转，宣告只剩 host 候选 + STUN 探测的公网 IP。
+	addr := envOr("BELLOWS_ADDR", ":8090")
+	mapper := portmap.New()
+	gw := bellows.NewRemote(func(_ context.Context, name string) string { return cfg[name] }, sink, mapper.UDPExternal)
 
 	mux := http.NewServeMux()
 	mux.Handle("/w", gw.Handler())
 	mux.Handle("/w/", gw.Handler())
-	// 健康状态只表示进程活着：探测失败/映射为空不影响 200。refresh=1 触发宣告探测，
-	// 只接受回环来源（容器内健康检查），外部请求带参数也只回显。
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Query().Get("refresh") == "1" && lite.LoopbackRemote(r.RemoteAddr) {
-			gw.RefreshAnnounce(r.Context())
-		}
-		externals, probedAt := gw.AnnounceSnapshot()
+	// 纯探活：健康只表示进程活着。宣告探测的刷新走下面的周期任务，不挂在这个匿名端点上。
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{
-			"ok": true,
-			"announce": map[string]any{
-				"externals": externals, "probed_at": probedAt,
-			},
-		})
+		json.NewEncoder(w).Encode(map[string]any{"ok": true})
 	})
-	srv := &http.Server{Addr: envOr("BELLOWS_ADDR", ":8090"), Handler: mux}
+	srv := &http.Server{Addr: addr, Handler: mux}
 
 	go func() {
 		announce := cfg["bellows_public_ip"]
@@ -98,12 +98,49 @@ func main() {
 			log.Fatalf("监听失败: %v", err)
 		}
 	}()
-	stop := make(chan os.Signal, 1)
-	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
-	<-stop
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	// 映射变化后立刻刷新宣告；回调不得阻塞 Mapper 的申请轮次（探测最长 2s），另起协程
+	mapper.OnChange = func(portmap.Status) { go gw.RefreshAnnounce(context.Background()) }
+	go mapper.Run(ctx, func(context.Context) []portmap.Want {
+		if envOr("PORTMAP_MODE", "auto") == "off" {
+			return nil
+		}
+		ws := []portmap.Want{{Proto: "udp", Port: udpPort(cfg["bellows_udp_port"]), Desc: "bellows whip"}}
+		if _, port, err := net.SplitHostPort(addr); err == nil {
+			if p, err := strconv.Atoi(port); err == nil {
+				ws = append(ws, portmap.Want{Proto: "tcp", Port: p, Desc: "bellows http"})
+			}
+		}
+		return ws
+	})
+	// 宣告探测周期刷新：公网 IP 变化后新会话拿到新候选，不重启、不动在途会话
+	go func() {
+		t := time.NewTicker(lite.DefaultAnnounceTTL)
+		defer t.Stop()
+		for {
+			select {
+			case <-t.C:
+				gw.RefreshAnnounce(ctx)
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+	<-ctx.Done()
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	srv.Shutdown(ctx)
+	srv.Shutdown(shutdownCtx)
+	// Run 的 ctx 已经结束，撤销映射必须用新的 ctx
+	closeCtx, closeCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer closeCancel()
+	mapper.Close(closeCtx)
+}
+
+// udpPort 端口环境变量转数字；填错了返回 0，由 Mapper 丢掉这条 want。
+func udpPort(v string) int {
+	p, _ := strconv.Atoi(strings.TrimSpace(v))
+	return p
 }
 
 func need(k string) string {

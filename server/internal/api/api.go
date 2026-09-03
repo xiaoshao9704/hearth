@@ -17,6 +17,7 @@ import (
 	"hearth/server/internal/rtc"
 	"hearth/server/internal/rtc/bellows"
 	"hearth/server/internal/rtc/ember"
+	"hearth/server/internal/rtc/lite"
 	"hearth/server/internal/store"
 
 	"crypto/rand"
@@ -54,13 +55,17 @@ type API struct {
 
 	// endpointMu 串行化上游推流端点的惰性创建（见 bindIngressEndpoint）
 	endpointMu sync.Mutex
+
+	// mapped 端口映射结果查询，透传给进程内 ICE-Lite 内核做宣告（无映射来源时为 nil）
+	mapped lite.MappedFunc
 }
 
-func New(st *store.Store, cfg config.Config, hub *chat.Hub) *API {
-	a := &API{st: st, cfg: cfg, hub: hub, tickets: map[string]voiceTicket{}, providers: map[string]*ProviderInstance{}}
+func New(st *store.Store, cfg config.Config, hub *chat.Hub, mapped lite.MappedFunc) *API {
+	a := &API{st: st, cfg: cfg, hub: hub, mapped: mapped,
+		tickets: map[string]voiceTicket{}, providers: map[string]*ProviderInstance{}}
 	// 内建实例：ember 是进程内纯音频语音内核；bellows 是进程内 WHIP 直通推流网关
 	//（OBS HEVC/AV1 的接入路径），其余形态由 env/DB 注册成实例（见 providers.go）
-	a.ember = ember.New(a.dynVal)
+	a.ember = ember.New(a.dynVal, a.mapped)
 	a.ingressResolver = func(ctx context.Context, _ string) (string, string, rtc.Meta, error) {
 		adm, ok := ctx.Value(ingestCtxKey{}).(ingestAdmission)
 		if !ok {
@@ -90,8 +95,7 @@ func (a *API) Router() *chi.Mux {
 	r.Post("/api/login", a.login)
 	r.Get("/api/invites/{code}", a.inviteInfo)
 
-	// 健康检查（容器探活 + 宣告探测刷新触发）：健康只表示进程活着，
-	// 探测失败/映射为空不影响 200，防 autoheal 类工具误杀
+	// 健康检查：只表示进程活着（宣告探测的刷新由进程内周期任务触发，不挂在这里）
 	r.Get("/healthz", a.healthz)
 
 	// 需登录

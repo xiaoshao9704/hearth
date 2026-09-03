@@ -75,7 +75,7 @@ func testGateway(udpPort string, pub *fakePublisher, roomFor func(token string) 
 		}
 		return "", "", rtc.Meta{}, ErrUnknownKey
 	}
-	return New(cfg, resolve, func(context.Context) rtc.Publisher { return pub })
+	return New(cfg, resolve, func(context.Context) rtc.Publisher { return pub }, nil)
 }
 
 // post 向 /w/{channel}/{token} 发 WHIP POST。
@@ -285,13 +285,13 @@ func TestEnabledBySink(t *testing.T) {
 		return ""
 	}
 	ctx := context.Background()
-	if New(cfg, nil, nil).Enabled(ctx) {
+	if New(cfg, nil, nil, nil).Enabled(ctx) {
 		t.Fatal("无 sink 应 Enabled=false")
 	}
-	if New(cfg, nil, func(context.Context) rtc.Publisher { return nil }).Enabled(ctx) {
+	if New(cfg, nil, func(context.Context) rtc.Publisher { return nil }, nil).Enabled(ctx) {
 		t.Fatal("sink 取不到 Publisher 应 Enabled=false")
 	}
-	if !New(cfg, nil, func(context.Context) rtc.Publisher { return &fakePublisher{} }).Enabled(ctx) {
+	if !New(cfg, nil, func(context.Context) rtc.Publisher { return &fakePublisher{} }, nil).Enabled(ctx) {
 		t.Fatal("sink 可用应 Enabled=true")
 	}
 }

@@ -9,10 +9,13 @@ package api
 import (
 	"context"
 	"log"
+	"net"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 
+	"hearth/server/internal/portmap"
 	"hearth/server/internal/rtc"
 )
 
@@ -26,6 +29,15 @@ var selectorKeys = []rtc.ConfigKey{
 		Label: "舞台内核", Hint: "实例 alias；none = 纯语音部署，禁用投屏与摄像头"},
 	{Name: "ingest_provider", Group: "core",
 		Label: "推流入口", Hint: "OBS/WHIP 推流的接入实例 alias；内建 bellows = 进程内直通网关（支持 HEVC/AV1，发进 LiveKit 房间）"},
+}
+
+// portmapKeys 自动端口映射：进程内网络基建，与 bellows_udp_port 同类的全局键（不进实例 params）。
+var portmapKeys = []rtc.ConfigKey{
+	{Name: "portmap_mode", Env: "PORTMAP_MODE", Group: "network", Default: "auto",
+		Options: []string{"auto", "off"},
+		Label:   "自动端口映射",
+		Hint: "auto = 向默认网关申请 UPnP/PCP/NAT-PMP 映射（HTTP 端口与当前选中内核的媒体端口），" +
+			"仅 host 网络或裸机可用（容器 bridge 网络发现不到网关）；off = 关闭并撤销已建映射"},
 }
 
 // selectorEnv 选择器对应的旧环境变量名：只供迁移 v2 一次性导入与启动告警，不参与取值。
@@ -75,7 +87,38 @@ func (a *API) warnLegacyConfig(ctx context.Context) {
 }
 
 func (a *API) allConfigKeys() []rtc.ConfigKey {
-	return append(append([]rtc.ConfigKey{}, selectorKeys...), a.kernelKeys...)
+	keys := append(append([]rtc.ConfigKey{}, selectorKeys...), a.kernelKeys...)
+	return append(keys, portmapKeys...)
+}
+
+// PortWants 当前要向网关申请的映射：HTTP 端口 + 当前选中内核里跑在本进程的媒体端口
+// （选的是外部实例时那些端口不在本机，映射了也没意义）。cmd/server 把它交给 portmap.Mapper
+// 每轮读——端口与内核选择都是动态配置，后台改了下一轮就撤旧加新。
+// 一律不置 StrictPort：SDP 出口能宣告与监听端口不同的外部端口，让网关自由改派可用性更高
+// （同端口优先仍由 Mapper 保证，上游 DMZ 的端口不变透传因此照样能对上）。
+func (a *API) PortWants(ctx context.Context) []portmap.Want {
+	if a.dynVal(ctx, "portmap_mode") == "off" {
+		return nil
+	}
+	var ws []portmap.Want
+	if _, port, err := net.SplitHostPort(a.cfg.Addr); err == nil {
+		if p, err := strconv.Atoi(port); err == nil {
+			ws = append(ws, portmap.Want{Proto: "tcp", Port: p, Desc: "hearth http"})
+		}
+	}
+	if alias, _ := a.voiceInstance(ctx); alias == TypeEmber {
+		ws = append(ws, portmap.Want{Proto: "udp", Port: dynPort(a.dynVal(ctx, "ember_udp_port")), Desc: "hearth voice"})
+	}
+	if alias, _, _ := a.ingestInstance(ctx); alias == TypeBellows {
+		ws = append(ws, portmap.Want{Proto: "udp", Port: dynPort(a.dynVal(ctx, "bellows_udp_port")), Desc: "hearth whip"})
+	}
+	return ws
+}
+
+// dynPort 端口配置项转数字；填错了返回 0，由 Mapper 的 normalizeWants 丢掉。
+func dynPort(v string) int {
+	p, _ := strconv.Atoi(strings.TrimSpace(v))
+	return p
 }
 
 func (a *API) findDynKey(name string) *rtc.ConfigKey {

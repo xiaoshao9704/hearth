@@ -96,7 +96,7 @@ func (a *API) builtinInstances() []*ProviderInstance {
 	return []*ProviderInstance{
 		{Alias: TypeEmber, Type: TypeEmber, Builtin: true, Cfg: a.dynVal, Voice: a.ember},
 		{Alias: TypeBellows, Type: TypeBellows, Builtin: true, Cfg: a.dynVal,
-			Ingest: bellows.New(a.dynVal, a.ingressResolver, a.stagePublisherSink)},
+			Ingest: bellows.New(a.dynVal, a.ingressResolver, a.stagePublisherSink, a.mapped)},
 	}
 }
 
@@ -149,7 +149,7 @@ func (a *API) reloadProvidersLocked(ctx context.Context) {
 	if params := envLockedParams(a.providerTypeFields(TypeBellowsRemote), "bellows_remote_url"); params != nil {
 		cfg := paramsCfg(params, a.providerTypeFields(TypeBellowsRemote))
 		add(&ProviderInstance{Alias: TypeBellowsRemote, Type: TypeBellowsRemote, Params: params, Cfg: cfg, Locked: true,
-			Ingest: bellows.New(cfg, nil, nil)})
+			Ingest: bellows.New(cfg, nil, nil, nil)})
 	}
 
 	// DB 注册
@@ -230,7 +230,7 @@ func (a *API) instantiateProvider(rec *store.ProviderRecord) *ProviderInstance {
 	case TypeLivekitIngress:
 		inst.Ingest = livekitrtc.NewIngress(cfg)
 	case TypeBellowsRemote:
-		inst.Ingest = bellows.New(cfg, nil, nil)
+		inst.Ingest = bellows.New(cfg, nil, nil, nil)
 	default:
 		log.Printf("providers 表实例 %s 类型未知（%s），跳过", rec.Alias, rec.Type)
 		return nil

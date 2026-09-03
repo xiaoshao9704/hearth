@@ -1,5 +1,5 @@
 // Package lite 是进程内 ICE-Lite 内核（ember / bellows）共用的传输基建：
-// UDP 单端口 Transport + ICE-Lite + 宣告地址探测缓存（Announcer）。
+// UDP 单端口 Transport + ICE-Lite + 宣告（Announcer：探测缓存 + SDP 出口追加候选）。
 // 各内核只带自己的 MediaEngine 与配置键。
 package lite
 
@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/pion/stun/v3"
-	"github.com/pion/webrtc/v4"
 )
 
 // DefaultSTUNServers 默认 STUN 列表（国内可达的 miwifi + Google）；不可达时靠各内核的
@@ -118,59 +117,30 @@ func probeAllSTUN(locals, servers []string, timeout time.Duration) map[string]st
 	return out
 }
 
-// appendRule 内网 candidate 保留、公网映射追加（对应 LiveKit 的 advertise_internal_ip 语义）。
-func appendRule(external, local string) webrtc.ICEAddressRewriteRule {
-	return webrtc.ICEAddressRewriteRule{
-		External:        []string{external},
-		Local:           local,
-		AsCandidateType: webrtc.ICECandidateTypeHost,
-		Mode:            webrtc.ICEAddressRewriteAppend,
-	}
-}
-
-// announceRules 纯组合逻辑，探测函数注入以便离线单测（复刻 LiveKit ingress 的
-// SetNAT1To1AddressRewriteRules 思路：网卡地址照常自动收集宣告，探到的公网映射
-// 按 append 追加，对端各取可达者）：
-//   - 显式配置 publicIP：catch-all 替换规则，所有 host candidate 改写成它（覆盖语义）；
-//   - 留空：每张网卡按探测结果生成 append 规则。
+// stunExternals 探测各网卡的公网映射，返回 local→external。探测函数注入以便离线单测。
+// 两类结果不入表：探不到的网卡；以及 ext == local 的网卡（它直连公网，host 候选本身就是对的，
+// 再追加一条只是重复）。返回 nil 表示无公网映射可宣告。
 //
-// 探测用的是临时端口的映射，媒体端口的公网映射假定同 IP——1:1 NAT/端口转发生效，
-// 对称 NAT 不成立（与 LiveKit 同一假设）。
-// 返回 nil 表示无需改写（网卡直连公网或探测全失败），candidate 按网卡地址原样宣告。
-// 单网卡最坏耗时 = 单服务器超时（服务器并发）。
-func announceRules(publicIP string, locals, servers []string,
-	probe func(locals, servers []string, timeout time.Duration) map[string]string) []webrtc.ICEAddressRewriteRule {
+// 探测走的是临时端口的 socket，探到的映射属于那个临时端口，与媒体端口无关，
+// 所以 STUN 只给得出**公网 IP**，给不出可用的外部端口——宣告时把它与媒体端口拼在一起
+// 是「NAT 端口保持」的假设，只在 1:1 NAT（服务器直接绑公网 IP）成立。
+// 准确的外部端口只有显式的端口映射能给（见 Announcer.Announce 的优先级）。
+// 单网卡最坏耗时 = 单服务器超时（服务器之间并发）。
+func stunExternals(locals, servers []string,
+	probe func(locals, servers []string, timeout time.Duration) map[string]string) map[string]string {
 
-	if publicIP != "" {
-		return []webrtc.ICEAddressRewriteRule{{
-			External:        []string{publicIP},
-			AsCandidateType: webrtc.ICECandidateTypeHost,
-			// Mode 零值 = 替换：所有 host candidate 都改写成该地址
-		}}
-	}
 	if len(locals) == 0 {
 		return nil
 	}
-	mapping := probe(locals, servers, 2*time.Second)
-	var rules []webrtc.ICEAddressRewriteRule
-	seen := make(map[string]bool, len(mapping))
-	for _, local := range locals {
-		ext, ok := mapping[local]
-		// 未探到 / 网卡直连公网（candidate 本身已正确）/ 多网卡同出口映射重复
-		if !ok || ext == local || seen[ext] {
+	out := map[string]string{}
+	for local, ext := range probe(locals, servers, 2*time.Second) {
+		if ext == "" || ext == local {
 			continue
 		}
-		seen[ext] = true
-		rules = append(rules, appendRule(ext, local))
+		out[local] = ext
 	}
-	return rules
-}
-
-// RuleExternals 提取规则里的外部地址，仅用于日志。
-func RuleExternals(rules []webrtc.ICEAddressRewriteRule) []string {
-	var out []string
-	for _, r := range rules {
-		out = append(out, r.External...)
+	if len(out) == 0 {
+		return nil
 	}
 	return out
 }
@@ -183,15 +153,4 @@ func splitTrim(s string) []string {
 		}
 	}
 	return out
-}
-
-// LoopbackRemote 判断请求来源是否回环地址：健康检查的刷新触发只接受容器内本机调用，
-// 经反代进来的外部请求即使带刷新参数也只回显不探测。
-func LoopbackRemote(remoteAddr string) bool {
-	host, _, err := net.SplitHostPort(remoteAddr)
-	if err != nil {
-		host = remoteAddr
-	}
-	ip := net.ParseIP(host)
-	return ip != nil && ip.IsLoopback()
 }

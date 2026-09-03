@@ -4,8 +4,6 @@ import (
 	"context"
 	"net/http"
 	"time"
-
-	"hearth/server/internal/rtc/lite"
 )
 
 // refreshableAnnouncer 进程内 ICE-Lite 内核（ember / 进程内 bellows）的宣告探测出口。
@@ -14,31 +12,26 @@ type refreshableAnnouncer interface {
 	AnnounceSnapshot() (externals []string, probedAt time.Time)
 }
 
-// healthz 探活 + 宣告探测刷新触发。refresh=1 只接受回环来源（容器内健康检查天然回环），
-// 经反代进来的外部请求即使带参数也只回显不探测；叠加 Announcer 的最小间隔，端点无需鉴权。
-func (a *API) healthz(w http.ResponseWriter, r *http.Request) {
-	refresh := r.URL.Query().Get("refresh") == "1" && lite.LoopbackRemote(r.RemoteAddr)
-	announce := map[string]any{}
+// healthz 纯探活：健康只表示进程活着。宣告探测的刷新由 RefreshAnnounce 的周期调用负责，
+// 不挂在这个端点上——它匿名可达，触发副作用和回显内网拓扑都不合适。
+func (a *API) healthz(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// RefreshAnnounce 刷新全部进程内内核的宣告探测，给进程内周期任务与端口映射变化回调用。
+func (a *API) RefreshAnnounce(ctx context.Context) {
 	if a.ember != nil {
-		announce["ember"] = a.kernelAnnounce(r.Context(), a.ember, refresh)
+		a.ember.RefreshAnnounce(ctx)
 	}
 	a.providersMu.RLock()
-	for alias, inst := range a.providers {
+	var ras []refreshableAnnouncer
+	for _, inst := range a.providers {
 		if ra, ok := inst.Ingest.(refreshableAnnouncer); ok {
-			announce[alias] = a.kernelAnnounce(r.Context(), ra, refresh)
+			ras = append(ras, ra)
 		}
 	}
 	a.providersMu.RUnlock()
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "announce": announce})
-}
-
-func (a *API) kernelAnnounce(ctx context.Context, ra refreshableAnnouncer, refresh bool) map[string]any {
-	var externals []string
-	var probedAt time.Time
-	if refresh {
-		_, externals, probedAt = ra.RefreshAnnounce(ctx)
-	} else {
-		externals, probedAt = ra.AnnounceSnapshot()
+	for _, ra := range ras {
+		ra.RefreshAnnounce(ctx)
 	}
-	return map[string]any{"externals": externals, "probed_at": probedAt}
 }
