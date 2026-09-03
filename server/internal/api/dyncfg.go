@@ -51,14 +51,14 @@ var selectorEnv = map[string]string{
 
 // warnLegacyConfig 启动时检查已废弃/不再读取的旧配置，打一次日志提示管理员，不做静默迁移：
 //   - 选择器 env（VOICE/STAGE/INGEST_PROVIDER）：不再读取（迁移 v2 已把旧值一次性落库），
-//     提醒从部署侧删除；值是改名前残留（pion / ingest 的 livekit）时说明回落口径；
+//     提醒从部署侧删除；值是改名前残留（pion）时说明回落口径；
 //   - 选择器 DB 值是 "pion"：按未知值回落默认实例（voice→ember、ingest→bellows）；
 //   - pion_* 键：被忽略回落 ember_* 默认值；
 //   - EMBED_LIVEKIT/EMBED_INGRESS/回环 LIVEKIT_API_URL：aio 自包含镜像的内嵌子进程（aioinit 拉起
 //     livekit-server/redis/ingress）已退役，内嵌 LiveKit 并入本进程（内建实例 lkembed）；这三个
 //     env 是旧编排的残留，hearth 本体从未读取，只提醒改走管理后台。
 func (a *API) warnLegacyConfig(ctx context.Context) {
-	for name, env := range selectorEnv {
+	for _, env := range selectorEnv {
 		v := strings.TrimSpace(os.Getenv(env))
 		if v == "" {
 			continue
@@ -66,8 +66,6 @@ func (a *API) warnLegacyConfig(ctx context.Context) {
 		switch {
 		case v == "pion":
 			log.Printf("配置告警: %s=pion 是改名前的残留（语音/推流内核现名 ember/bellows）；选择器已不再读环境变量，当前按管理后台所选实例运行", env)
-		case name == "ingest_provider" && v == "livekit":
-			log.Printf("配置告警: %s=livekit 无推流能力（推流入口已拆为独立类型 livekit-ingress/bellows-remote）；选择器已不再读环境变量，当前按管理后台所选实例运行", env)
 		default:
 			log.Printf("配置告警: %s 已不再读取（选择器以管理后台为准；旧值已在首次启动时落库导入），请从部署侧删除该环境变量", env)
 		}

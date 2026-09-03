@@ -2,6 +2,10 @@
 // 没有「令牌 → 上游 stream key」的持久端点：房间与身份都写在每次 POST 现签的短时效
 // LiveKit JWT 里，hearth 终结用户令牌、向上游出示自己签的凭证，端点三方法因此是空实现。
 //
+// 上游是哪一个 LiveKit 由实例的 livekit_api_url 决定，三种形态同一份代码：进程内
+// lkembed（回环）、远端 cmd/stage（私网地址）、外部 LiveKit 实例。远端形态因此不再需要
+// Bellows 转发——OBS 的媒体与浏览器观众走同一条打洞路径。
+//
 // 反代由本类型自己做（ProxyUpstream 返回空，接入层把 /w 请求整个交过来）：会话资源地址
 // 要换成不透明会话 id、PATCH/DELETE 要按会话现签新票，这两件事都在 rtc 的通用反代里
 // 表达不出来。
@@ -91,6 +95,30 @@ func (h *WHIP) client(ctx context.Context) *lkroom.Client {
 
 func (h *WHIP) apiURL(ctx context.Context) string {
 	return strings.TrimSuffix(strings.TrimSpace(h.cfg(ctx, "livekit_api_url")), "/")
+}
+
+// whipBase 上游 WHIP 入口的基地址。LiveKit 把 /whip/v1 与 Twirp API 挂在同一个 HTTP
+// 端口上，所以直接由 livekit_api_url 推导，不另开配置键；ws(s):// 写法（照抄浏览器信令
+// 地址的常见填法）归一成 http(s)://，否则 http.Client 认不得这个 scheme。
+func (h *WHIP) whipBase(ctx context.Context) string {
+	return httpScheme(h.apiURL(ctx))
+}
+
+// httpScheme ws→http、wss→https；其余原样返回（含解析不了与没有 host 的填法）。
+func httpScheme(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return raw
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "ws":
+		u.Scheme = "http"
+	case "wss":
+		u.Scheme = "https"
+	default:
+		return raw
+	}
+	return strings.TrimSuffix(u.String(), "/")
 }
 
 // ---- rtc.IngestProvider ----
@@ -309,7 +337,7 @@ func (h *WHIP) upstream(ctx context.Context, method, path, room string, meta rtc
 
 // resolveUpstream 把上游给的会话资源地址（相对路径或绝对 URL）解析成本次请求的目标地址。
 func (h *WHIP) resolveUpstream(ctx context.Context, path string) (string, error) {
-	base := h.apiURL(ctx)
+	base := h.whipBase(ctx)
 	if base == "" {
 		return "", errors.New("livekit_api_url 未配置")
 	}

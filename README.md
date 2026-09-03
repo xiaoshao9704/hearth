@@ -18,7 +18,7 @@
 |------|------|----------|
 | `voice_provider` 语音线 | 麦克风音频、名册、说话检测 | 内建 `ember`（Ember，进程内纯音频 SFU，零外部依赖，默认）；或任一已注册的外部 `livekit` 实例 |
 | `stage_provider` 舞台线 | 投屏、摄像头、OBS 推流及其伴音 | `none`（纯语音部署，默认）；内建 `lkembed`（补丁式 fork 的 LiveKit，跑在本进程内，无 redis/ingress，推荐）；或任一已注册的外部 `livekit` 实例 |
-| `ingest_provider` 推流入口 | OBS WHIP 接入 | 内建 `bellows`（Bellows，进程内直通网关，支持 HEVC/AV1，默认）；或已注册 `livekit-ingress` / `bellows-remote` 实例 |
+| `ingest_provider` 推流入口 | OBS WHIP 接入 | 内建 `bellows`（Bellows，进程内直通网关，支持 HEVC/AV1，默认）；内建 `lkembed`（走进程内 LiveKit 自带的 WHIP 入口，推流不必多绕一跳）；或任一已注册 `livekit` 实例（同样走它自带的 WHIP 入口）；或已注册 `livekit-ingress` / `bellows-remote` 实例 |
 
 外部服务（独立部署的 LiveKit / LiveKit Ingress / 远端 Bellows）在管理后台「服务实例」按类型注册：alias 命名、同类型可注册多个；环境变量（`LIVEKIT_API_URL`、`INGRESS_UPSTREAM_URL`、`BELLOWS_REMOTE_URL`）配置了则自动合成同名锁定实例（后台只读）。切换发生在保存配置的瞬间（内建实例热启动/热停止，不需要重启进程）。单进程默认拓扑：
 
@@ -148,7 +148,50 @@ NAT 后的宽带线路上，hearth **默认自动向本机默认网关申请端�
 
 **上游还有一层 NAT 时**（消费级路由器接在上游设备之后的二级路由形态）：hearth 会先**自动向上游那台设备也申请一次**（最多往上三层，上游开了 UPnP/PCP 就免配置），失败了才需要手工配置——在上游设备上把日志里列出的那几个端口转发到本机网关的 WAN 地址（更安全），或对它开启 DMZ（未匹配的入站全兜给它，端口不变透传）。**网关返回私网外部地址不代表映射失败**：上游配好之后这条链就是通的，只是网关自己不知道公网地址是什么，公网地址以进程内 STUN 探测的结果为准。
 
-### OBS 推流网关放到局域网（Bellows 远端形态）
+### 舞台内核放到局域网（远端舞台机器）
+
+hearth 所在服务器上行有限时，投屏与 OBS 推流的视频不该绕它一圈。舞台内核（进程内 LiveKit）可以整台搬到另一台机器上：那里跑**一个** `stage` 容器就够了——它自己申请端口映射、自己探测并宣告外部地址，浏览器观众与 OBS 走同一个打洞出来的 UDP 端口，不需要 redis、ingress，也不需要单独的推流网关。镜像 `ghcr.io/xiaoshao9704/hearth-stage`，Release 里也有单文件 `stage-linux-{amd64,arm64}`（arm64 小主机可用）：
+
+```yaml
+# 舞台机器上单独一个 compose，host 网络：端口即宿主端口
+stage:
+  image: ghcr.io/xiaoshao9704/hearth-stage:latest
+  network_mode: host
+  restart: unless-stopped
+  environment:
+    STAGE_API_KEY: change-me                    # 与 hearth 侧 LIVEKIT_API_KEY 同值
+    STAGE_API_SECRET: change-me                 # 与 hearth 侧 LIVEKIT_API_SECRET 同值（>= 32 字符）
+    STAGE_HTTP_PORT: "7880"                     # API/信令；hearth 经私网访问，不必暴露公网
+    STAGE_BIND: "0.0.0.0"                       # 只填 127.0.0.1 的话 hearth 连不上
+    STAGE_UDP_PORT: "47720"                     # 媒体，需在防火墙放行
+    # STAGE_TCP_PORT: "0"                       # ICE-TCP，UDP 全被封的网络里才开
+    # STAGE_PUBLIC_IP: <公网 IP>                # 显式指定 = 只通告该地址（覆盖）；留空 = 自动
+    # STAGE_STUN_SERVERS: stun.example.com:3478 # 公网映射探测用，逗号分隔；留空用内置默认
+    # PORTMAP_MODE: auto                        # off 关闭自动端口映射
+  healthcheck:
+    test: ["CMD", "/app/stage", "healthcheck"]  # 镜像无 shell/curl，用 exec 形式
+    interval: 60s
+    timeout: 12s
+    start_period: 20s
+    retries: 3
+```
+
+hearth 侧把它当一个普通的外部 LiveKit 实例接进来——环境变量合成同名锁定实例（或在「管理后台 → 服务实例」注册一个 `livekit` 类型实例，同样的三个参数）：
+
+```env
+LIVEKIT_API_URL=http://<stage 机器的私网地址>:7880   # hearth 能访问到的地址
+LIVEKIT_API_KEY=change-me
+LIVEKIT_API_SECRET=change-me
+LIVEKIT_URL=                                        # 留空 = 浏览器信令经 hearth 同源反代（推荐）
+```
+
+然后在管理后台把 **`stage_provider`** 与 **`ingest_provider`** 都选成这个实例（env 合成的锁定实例 alias 就是 `livekit`）。推流地址保持 hearth 同源：bearer 模式（OBS）服务器填 `/providers/livekit/w/{频道}`、Bearer 填推流令牌；路径模式（ffmpeg 等）用 `/providers/livekit/w/{频道}/{令牌}`。入场判定仍在 hearth 做完，通过后由 hearth 现签一张短时效 LiveKit 票换掉用户令牌反代过去，舞台机器只认票、不需要访问 hearth。语音仍走 hearth 进程内的 Ember，与视频物理隔离。
+
+要让局域网与外网观众都能连，**不要填 `STAGE_PUBLIC_IP`**（STUN 不可达时配 `STAGE_STUN_SERVERS`）：显式配置是覆盖语义，填成公网 IP 会让局域网客户端绕 NAT 回环。
+
+### OBS 推流网关放到局域网（Bellows 远端形态，已被上一节取代）
+
+> 下一版本移除：远端机器改跑一个 `stage` 容器即可，推流直达它自带的 WHIP 入口，不必再多一跳。
 
 hearth 所在服务器上行有限、LiveKit 部署在别处时，OBS 的视频不该绕 hearth 一圈。Bellows 远端进程随 hearth 镜像分发（`/app/bellows`，Release 里也有单文件 `bellows-linux-{amd64,arm64}`），放到 LiveKit 同一局域网的任意机器（低功耗 arm64 小主机即可）：
 

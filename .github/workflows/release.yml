@@ -54,7 +54,9 @@ jobs:
           mkdir -p "$GITHUB_WORKSPACE/out"
           for arch in amd64 arm64; do
             GOARCH=$arch go build -ldflags "-s -w" -o "$GITHUB_WORKSPACE/out/hearth-linux-$arch" ./cmd/server
-            # 远端 Bellows 推流网关：单文件，跑在 LiveKit 同一局域网的机器上
+            # 远端舞台内核：单文件，跑在另一台机器上替代 livekit + bellows 两个容器
+            GOARCH=$arch go build -ldflags "-s -w" -o "$GITHUB_WORKSPACE/out/stage-linux-$arch" ./cmd/stage
+            # 远端 Bellows 推流网关：已被 cmd/stage 取代，下一版本移除
             GOARCH=$arch go build -ldflags "-s -w" -o "$GITHUB_WORKSPACE/out/bellows-linux-$arch" ./cmd/bellows
           done
 
@@ -74,6 +76,7 @@ jobs:
           name: dist
           path: |
             out/hearth-linux-*
+            out/stage-linux-*
             out/bellows-linux-*
             web/dist
             hearth_*.tar.gz
@@ -85,6 +88,7 @@ jobs:
         with:
           files: |
             hearth_*.tar.gz
+            out/stage-linux-*
             out/bellows-linux-*
 
   image:
@@ -153,3 +157,23 @@ jobs:
             ${{ steps.meta-livekit-alias.outputs.tags }}
             ${{ steps.meta-full-alias.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+
+      # 远端舞台镜像（Dockerfile.stage）：单独的镜像名 <repo>-stage，纯装配
+      - uses: docker/metadata-action@v6
+        id: meta-stage
+        with:
+          images: ghcr.io/${{ github.repository }}-stage
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable=${{ github.ref_type == 'tag' }}
+            type=raw,value=edge,enable=${{ github.ref_type != 'tag' }}
+
+      - uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: Dockerfile.stage
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta-stage.outputs.tags }}
+          labels: ${{ steps.meta-stage.outputs.labels }}

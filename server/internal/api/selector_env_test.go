@@ -14,7 +14,7 @@ import (
 func TestSelectorEnvImportedOnce(t *testing.T) {
 	maskProviderEnv(t)                     // 不带 livekit 凭证：隔离 v1 的默认落库，只验 v2 的 env 导入
 	t.Setenv("VOICE_PROVIDER", "livekit")  // 应被 v2 落库
-	t.Setenv("INGEST_PROVIDER", "livekit") // 无推流能力的旧残留：跳过
+	t.Setenv("INGEST_PROVIDER", "pion")    // 改名前的残留：跳过
 	a := testAPI(t)                        // New 内跑迁移
 	ctx := context.Background()
 
@@ -22,7 +22,7 @@ func TestSelectorEnvImportedOnce(t *testing.T) {
 		t.Fatalf("旧 env 值应由迁移 v2 落库保持生效，实际 %q", v)
 	}
 	if v := a.dynVal(ctx, "ingest_provider"); v != TypeBellows {
-		t.Fatalf("INGEST_PROVIDER=livekit 应跳过导入并回落内建 bellows，实际 %q", v)
+		t.Fatalf("INGEST_PROVIDER=pion 应跳过导入并回落内建 bellows，实际 %q", v)
 	}
 	// 落库值由管理员清空后，env 不再参与取值（重启重跑迁移也不应再落库）
 	if err := a.st.SetSetting(ctx, "cfg_voice_provider", ""); err != nil {

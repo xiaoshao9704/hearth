@@ -1,6 +1,9 @@
-// Package livekitembed 在 hearth 进程内拉起/停止一个 LiveKit 服务端（补丁式 fork，见
+// Package livekitembed 在当前进程内拉起/停止一个 LiveKit 服务端（补丁式 fork，见
 // docs/plan-livekit-embed.md）。本包只管生命周期与配置拼装，不实现任何 rtc 接口——
-// 舞台槽位、令牌签发、信令反代、推流出口一律由 livekitrtc 指向这里的回环地址。
+// 舞台槽位、令牌签发、信令反代、推流出口一律由 livekitrtc 指向它的监听地址。
+//
+// 两种宿主：hearth 自己（内建实例 lkembed，只听回环，见 api/lkembed.go），
+// 以及远端舞台机器上的 cmd/stage（听私网地址，hearth 经 LIVEKIT_API_URL 访问）。
 package livekitembed
 
 import (
@@ -39,6 +42,21 @@ func ConfigKeys() []rtc.ConfigKey {
 	}
 }
 
+// bindOr / logLevelOr 空值回落默认（见 Options 字段注释）。
+func bindOr(v string) string {
+	if v == "" {
+		return "127.0.0.1"
+	}
+	return v
+}
+
+func logLevelOr(v string) string {
+	if v == "" {
+		return "warn"
+	}
+	return v
+}
+
 // setLoggerOnce 见 Start 里的用法：LiveKit 的全局 logger 只装一次。
 var setLoggerOnce sync.Once
 
@@ -49,11 +67,17 @@ const startTimeout = 20 * time.Second
 const stopTimeout = 10 * time.Second
 
 type Options struct {
-	HTTPPort  int // 回环 HTTP/信令端口
+	HTTPPort int // HTTP/信令端口
+	// Bind HTTP/信令的监听地址，空 = 127.0.0.1。进程内形态（lkembed）只听回环、
+	// 浏览器经 hearth 同源反代；远端形态（cmd/stage）要让 hearth 经私网访问 API，
+	// 由部署侧给 0.0.0.0 或具体网卡地址。
+	Bind      string
 	UDPPort   int // 媒体 UDP 单端口
 	TCPPort   int // ICE-TCP 端口，0 = 关
 	APIKey    string
 	APISecret string
+	// LogLevel LiveKit 自己的日志级别，空 = warn（错误看得见，正常运行不刷屏）。
+	LogLevel string
 	// ExternalIPs 是补丁二的回调：每建一个 PeerConnection 取一次当前外部 IPv4，
 	// 追加为候选（本机 host 候选保留）。nil = 只宣告本机地址。
 	ExternalIPs func() []string
@@ -128,7 +152,8 @@ func Start(ctx context.Context, o Options) (*Server, error) {
 		s.Stop()
 		return nil, err
 	}
-	s.logf("进程内 LiveKit 就绪: http=127.0.0.1:%d udp=%d tcp=%d", o.HTTPPort, o.UDPPort, o.TCPPort)
+	s.logf("进程内 LiveKit 就绪: http=%s udp=%d tcp=%d",
+		net.JoinHostPort(bindOr(o.Bind), strconv.Itoa(o.HTTPPort)), o.UDPPort, o.TCPPort)
 	return s, nil
 }
 
@@ -157,7 +182,7 @@ func (s *Server) Stop() {
 func (s *Server) waitReady(ctx context.Context) error {
 	ctx, cancel := context.WithTimeout(ctx, startTimeout)
 	defer cancel()
-	url := fmt.Sprintf("http://127.0.0.1:%d/", s.opts.HTTPPort)
+	url := fmt.Sprintf("http://%s/", net.JoinHostPort(s.probeHost(), strconv.Itoa(s.opts.HTTPPort)))
 	client := &http.Client{Timeout: time.Second}
 	for {
 		select {
@@ -201,7 +226,7 @@ func (s *Server) waitPortsReleased() {
 }
 
 func (s *Server) portsFree() bool {
-	if !tcpFree("127.0.0.1", s.opts.HTTPPort) {
+	if !tcpFree(s.probeHost(), s.opts.HTTPPort) {
 		return false
 	}
 	if s.opts.TCPPort > 0 && !tcpFree("", s.opts.TCPPort) {
@@ -213,6 +238,16 @@ func (s *Server) portsFree() bool {
 	}
 	pc.Close()
 	return true
+}
+
+// probeHost 探活/端口回收检查连的地址：通配监听（0.0.0.0 / ::）从回环连自己。
+func (s *Server) probeHost() string {
+	switch h := s.opts.Bind; h {
+	case "", "0.0.0.0", "::", "[::]":
+		return "127.0.0.1"
+	default:
+		return h
+	}
 }
 
 func tcpFree(host string, port int) bool {
@@ -249,7 +284,7 @@ func (s *Server) logf(format string, args ...any) {
 // 可达性由 portmap 负责。
 func buildYAML(o Options) string {
 	return fmt.Sprintf(`port: %d
-bind_addresses: ["127.0.0.1"]
+bind_addresses: [%q]
 keys:
   %q: %q
 rtc:
@@ -261,6 +296,6 @@ rtc:
 room:
   auto_create: true
 logging:
-  level: warn
-`, o.HTTPPort, o.APIKey, o.APISecret, o.UDPPort, o.TCPPort)
+  level: %s
+`, o.HTTPPort, bindOr(o.Bind), o.APIKey, o.APISecret, o.UDPPort, o.TCPPort, logLevelOr(o.LogLevel))
 }

@@ -1,0 +1,15 @@
+# 远端舞台机器专用镜像（CI 装配，二进制已在 runner 上原生交叉编译，见 release 工作流）：
+# 一个进程 = 舞台内核 + 自打洞 + 自宣告，无 redis、无 ingress、无推流网关。
+# 单独出镜像而不并进主镜像：它带着整个 LiveKit 依赖树，主镜像不该为此变胖。
+FROM gcr.io/distroless/static-debian12:nonroot
+ARG TARGETARCH
+# artifact 传递会丢执行位，--chmod 补回
+COPY --chmod=755 out/stage-linux-${TARGETARCH} /app/stage
+ENV STAGE_HTTP_PORT=7880 \
+    STAGE_UDP_PORT=47720
+USER 65532
+# 信令/API（hearth 经私网访问，不必暴露公网）与媒体端口；host 网络下端口即宿主端口
+EXPOSE 7880 47720/udp
+# 只表示进程活着（镜像无 shell/curl，用 exec 形式）
+HEALTHCHECK --interval=60s --timeout=12s --start-period=20s CMD ["/app/stage", "healthcheck"]
+ENTRYPOINT ["/app/stage"]

@@ -1,7 +1,6 @@
 # 计划：进程内嵌入 LiveKit（补丁式 fork，单二进制自打洞自宣告）
 
-状态：**路线 B，主线。第 1–3 步与第 7 步（收尾里与代码无冲突的部分）已完成；第 4–6 步（打洞真机验收、推流真机验收、`cmd/stage`
-远端形态）待做，需要真机。** 取代 `plan-stage-kernel.md` 的路线 A 成为舞台线的主路线；路线 A 降为备选，其文档保留。
+状态：**路线 B，主线。第 1–7 步代码全部完成（2026-09-04）；第 4 步打洞/宣告已真机验收；待做：远端机器用 `cmd/stage` 替换两个容器、OBS 实推 HEVC 的真机验收。** 取代 `plan-stage-kernel.md` 的路线 A 成为舞台线的主路线；路线 A 降为备选，其文档保留。
 本计划自包含，实施会话读完即可开工，不需要本会话的其他上下文。
 
 ## 目标与判据
@@ -14,7 +13,8 @@
 - **自宣告不重启**：LiveKit 的候选宣告改为每建新 PC 时向 hearth 的 `lite.Announcer` 取当前外部地址，公网 IP 或映射变化
   只影响新会话，在途会话不动，watchdog 退役。
 - **进程内推流**：OBS 的 WHIP 经 hearth 反代直达进程内 LiveKit 自带的 WHIP 入口（`/whip/v1`），推流不出进程、
-  也不多绕一条回环 PeerConnection。Bellows 保留，仍是其他舞台实例（外部 LiveKit、远端形态）的推流网关。
+  也不多绕一条回环 PeerConnection。外部 LiveKit 与远端形态同样走各自实例自带的 `/whip/v1`；Bellows 只剩「进程内直通」
+  这一种形态（`cmd/bellows` 远端进程标注废弃、下一版本移除）。
 - **零重写**：不碰协商、订阅、层选择、拥塞控制、重连，也不碰 livekit-client。LiveKit 多年修掉的 bug 原样继承。
 
 **不做**：改 LiveKit 的架构、把它的控制面换成 hearth 的（那是路线 A）、给 fork 加第三个补丁做 Bellows 与 SFU 的
@@ -73,9 +73,10 @@ portmap.Mapper：把 lkembed 的 UDP（与可选 TCP）端口映射到网关；v
   实例对象**复用现有 `livekitrtc.New(cfg)`**：给它一个 cfg getter，`livekit_api_url` 固定为回环地址、`livekit_api_key/secret`
   取自 `lkembed_*` 全局键。这样舞台槽位、令牌签发、`/rtc/*` 反代、Bellows 的 Publisher 全部零改动。
 - **语音线不变**：仍是 Ember。两条线分属两个实例，前端仍是双连接（`combined` 判定不变）。
-- **远端形态**：另一台机器跑 `cmd/stage` = 同一个嵌入包 + Bellows + Mapper + 周期刷新，替代今天 arm64 小主机上 livekit 与 bellows
-  两个容器。hearth 侧继续用 env 锁定的 `livekit` 实例指向它的 API 地址（私网通道），推流入口用 `bellows-remote`——**hearth 侧接线与今天完全一样**。
-  LiveKit 的信令票据就是 hearth 签的 JWT，不需要 grant。
+- **远端形态**：另一台机器跑 `cmd/stage` = 同一个嵌入包 + Mapper + 周期刷新，替代今天那台机器上 livekit 与 bellows 两个容器。
+  **不含 Bellows**：推流由 hearth 反代到这台远端 LiveKit 自带的 `/whip/v1`，OBS 媒体与浏览器观众走同一条媒体路径、同一个打洞端口。
+  hearth 侧继续用 env 锁定的 `livekit` 实例指向它的 API 地址（私网通道），两个选择器（`stage_provider`/`ingest_provider`）都选它——
+  **hearth 侧接线与外部 LiveKit 完全一样**。LiveKit 的信令票据就是 hearth 签的 JWT，不需要 grant。
 - **回退**：外部 LiveKit 实例（`livekit` env 锁定 / DB 注册）继续可选，选择器一切即回退。
 
 ## Fork：补丁序列，不改形
@@ -195,10 +196,10 @@ func (s *Server) Stop()                                       // service.Livekit
   与「未知 alias 回落内建默认」一致。`lkembed` 推流面的 `Enabled` 会看进程内 LiveKit 是否真的在跑
   （舞台线没选中它时服务端根本没起）。
 - **禁言**：推流参与者（元数据 `kind=ingest`）的禁言实现为把它移出房间，见下节「禁言与推流设备」。
-- **`cmd/stage`**（远端形态，替代 arm64 小主机上的两个容器）：`livekitembed.Start` + `bellows.NewRemote` + `portmap.New` + 周期刷新，
-  接线逐行照抄 `cmd/bellows/main.go`（Mapper、OnChange、ticker、优雅退出 `Close(新 ctx)`），环境变量 `STAGE_*` 对应上面五个键，
-  `PORTMAP_MODE` 同名沿用。LiveKit 在这里**监听非回环地址**（hearth 经私网通道访问其 API），`bind_addresses` 由 env 给。
-  `cmd/bellows` 保留一段时间后并入 `cmd/stage`。
+- **`cmd/stage`**（远端形态，替代远端机器上的两个容器）：`livekitembed.Start` + `portmap.New` + 自己的 `lite.Announcer` + 周期刷新，
+  接线逐行照 `cmd/bellows/main.go`（Mapper、OnChange、ticker、优雅退出 `Close(新 ctx)`），环境变量 `STAGE_*`，`PORTMAP_MODE` 同名沿用。
+  LiveKit 在这里**监听非回环地址**（hearth 经私网通道访问其 API），`bind_addresses` 由 `STAGE_BIND` 给。没有 Ember，所以自建一个
+  `Announcer` 并显式 `RegisterMediaPort`。`cmd/bellows` 标注废弃、下一版本移除。
 
 ## 实施顺序（每步单独可验）
 
@@ -213,7 +214,11 @@ func (s *Server) Stop()                                       // service.Livekit
    **且 LAN host 候选仍在**（这条验补丁二的 bool 语义）；公网 IP 变化模拟（改探测返回值）后**新**会话拿到新地址、进程不重启、在途会话不断。
 5. **推流**：`ingest_provider=lkembed`，OBS/ffmpeg（见既有 WHIP 验收配方）经 `/providers/lkembed/w` 推 HEVC，
    观众可见，`u{uid}-obs` 入名册，禁言后消失、解禁重推恢复。
-6. **`cmd/stage`** 远端形态；arm64 小主机的 compose 从 livekit + bellows 两个服务换成一个 `stage`（备份旧 compose）；服务端侧不动。
+6. **`cmd/stage`** 远端形态。**已完成（代码与本机验收）2026-09-04**：`livekitrtc.WHIP` 泛化到 `livekit` 类型实例
+   （上游由 `livekit_api_url` 推导，`ws(s)://` 归一成 `http(s)://`），env 锁定与 DB 注册的 livekit 实例因此三面齐全；
+   `cmd/stage` 落地（`STAGE_*` 环境变量、`healthcheck` 子命令、`Dockerfile.stage` 与 `hearth-stage` 镜像）；
+   `cmd/bellows` 标注「下一版本移除」。**待真机**：远端机器的 compose 从 livekit + bellows 两个服务换成一个 `stage`
+   （备份旧 compose），服务端侧只改 `LIVEKIT_API_URL` 与两个选择器。
 7. **收尾**：aio 的 `EMBED_LIVEKIT` 路径退役（`aioinit` 不再拉 livekit/redis）；README 架构图与部署段；CLAUDE.md 更新
    （内建实例多一个 `lkembed`、aio 不再拉子进程、`livekit_*` 命名空间说明）；`plan-stage-kernel.md` 状态行指向本计划。
    ✅ **与代码无冲突的部分已完成**：`Dockerfile.aio`/`server/cmd/aioinit` 已删除，`-livekit`/`-full` 两档在 release.yml
