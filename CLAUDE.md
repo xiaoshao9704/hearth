@@ -75,5 +75,5 @@
 
 - 服务端：`cd server && go build ./... && go vet ./...` 必须通过。
 - 前端：`cd web && npx tsc --noEmit && npm run build` 必须通过。
-- 行为改动尽量本地起服务验证：`go run ./cmd/server` 零外部依赖（选择器默认 ember 语音 + 关闭舞台线）。
+- 行为改动尽量本地起服务验证：`go run ./cmd/server` 零外部依赖（选择器默认 ember 语音 + 关闭舞台线）。注意 `.env` 里有 `LIVEKIT_*` 时迁移会把选择器落库成 livekit，本地验证要用干净 DB 或先改 settings 里的 `cfg_voice_provider`；ember 的 UDP 端口（默认 47700）被别的 hearth 进程占着时会入会即 bye、客户端死循环重连，换 `EMBER_UDP_PORT` 即可。
 - 发布：打 `v*` tag 触发 CI（`.github/workflows/release.yml`，原生交叉编译 + 纯装配镜像，无 QEMU）。

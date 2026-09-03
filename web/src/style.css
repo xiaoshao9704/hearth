@@ -357,6 +357,23 @@ a:hover { color: var(--ember-soft); }
 .tile .tact-pin.pinned:hover { color: var(--on-ember); }
 .tile .tact-pin.pinned svg { fill: currentColor; }
 
+/* 卡片全屏：真全屏（容器）与 iOS 模拟全屏共用一套呈现 */
+.tile:fullscreen { border-radius: 0; border: 0; }
+.tile.faux-fs { position: fixed; inset: 0; z-index: 300; border-radius: 0; border: 0; }
+.tile:fullscreen .tact, .tile.faux-fs .tact { opacity: 1; }
+.fs-bar {
+  position: absolute; left: 50%; bottom: 22px; transform: translateX(-50%); z-index: 3;
+  display: flex; align-items: center; gap: 10px; width: min(320px, 70vw); padding: 9px 13px;
+  background: var(--scrim); border: 1px solid var(--stage-line); border-radius: 11px;
+  backdrop-filter: blur(6px); color: var(--on-stage);
+}
+.fs-vol-mute {
+  width: 26px; height: 26px; flex-shrink: 0; border-radius: 7px;
+  display: flex; align-items: center; justify-content: center; color: var(--on-stage);
+}
+.fs-vol-mute.muted-on { color: var(--red); }
+.fs-bar .vol-num { color: inherit; font-size: 11.5px; }
+
 /* 无视频参与者的音频块 */
 .tile.tile-audio {
   background: var(--bg-3); border: 1px solid var(--line);
@@ -433,6 +450,15 @@ a:hover { color: var(--ember-soft); }
 .member-row .m-btn:hover { background: var(--bg-4); color: var(--text-0); }
 .member-row .m-btn.muted-on { background: var(--red-tint); color: var(--red); }
 .member-row .m-btn.muted-on:hover { background: var(--red-tint); color: var(--red); }
+/* 成员行音量：按钮点击=屏蔽/恢复，hover 向左弹出滑条浮层（触屏走长按菜单） */
+.volwrap { position: relative; display: flex; flex-shrink: 0; }
+.volpop {
+  /* 右缘与按钮重叠 2px：留缝会让鼠标经过时 hover 断掉，滑条够不着 */
+  position: absolute; right: calc(100% - 2px); top: 50%; transform: translateY(-50%); z-index: 5;
+  display: none; align-items: center; gap: 7px; width: 158px; padding: 7px 10px;
+  background: var(--bg-1); border: 1px solid var(--line); border-radius: 9px; box-shadow: var(--shadow-lg);
+}
+.volwrap:hover .volpop { display: flex; }
 /* 设备子行：缩进 + 连接线；竖线贯穿兄弟行，末行带弧度收口成 └ */
 .member-row.mdev { position: relative; margin-left: 17px; padding: 5px 8px 5px 22px; gap: 8px; }
 .member-row.mdev::before { content: ''; position: absolute; left: 0; top: -3px; bottom: 0; border-left: 1.5px solid var(--line); }
@@ -662,6 +688,18 @@ a:hover { color: var(--ember-soft); }
 }
 .user-menu .um-item:hover { background: var(--bg-2); }
 .user-menu .um-item.danger { color: var(--red-text); }
+/* 音量行：图标快捷开关 + 滑条 + 数值，不参与 hover 底色的整行按钮语义 */
+.user-menu .um-vol { cursor: default; }
+.user-menu .um-vol:hover { background: transparent; }
+.user-menu .um-vol-mute {
+  width: 22px; height: 22px; flex-shrink: 0; border-radius: 6px;
+  display: flex; align-items: center; justify-content: center; color: var(--text-1);
+}
+.user-menu .um-vol-mute:hover { background: var(--bg-4); }
+.user-menu .um-vol-name { max-width: 90px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-1); }
+.user-menu .um-vol .range { min-width: 90px; }
+/* 音量数值：菜单行 / 成员行浮层 / 全屏控制条共用 */
+.vol-num { font-size: 11px; color: var(--text-2); width: 26px; text-align: right; flex-shrink: 0; }
 
 /* 编码档的软/硬编标注（设置页 MediaCapabilities 预测值） */
 .seg .enc-tag {
@@ -673,3 +711,9 @@ a:hover { color: var(--ember-soft); }
 
 /* 触屏长按弹操作菜单：禁用 iOS 长按系统气泡与文本选中 */
 .tile, .member-row { -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; }
+
+/* 全屏/模拟全屏压过 spotlight 边栏的定宽定高（含窄屏媒体查询那条），否则边栏卡片全屏只有 116px 高 */
+.video-grid.spotlight .rail .tile.faux-fs,
+.video-grid.spotlight .rail .tile:fullscreen {
+  width: auto; height: auto; border-radius: 0; border: 0;
+}

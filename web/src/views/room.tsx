@@ -18,9 +18,7 @@ import { menuButtonHtml, renderShell, wireMenuButton } from '../shell';
 import { avatarHtml, el, esc, fmtClock, icon, licon, micIcon, slashIcon, toast } from '../ui';
 import { openSettings } from './settings';
 
-// iOS Safari 的私有全屏 API（iPhone 仅 video 元素可用）
-type IOSVideo = HTMLVideoElement & { webkitEnterFullscreen?: () => void };
-type SinkMedia = HTMLMediaElement & { setSinkId?: (id: string) => Promise<void> };
+type SinkMedia = HTMLMediaElement & { setSinkId?: (id: string) => Promise<void>; sinkId?: string };
 
 type Role = 'voice' | 'stage';
 
@@ -61,6 +59,27 @@ interface AudioEntry {
 
 type TileEntry = VideoEntry | AudioEntry;
 
+// ---- 每设备本地音量持久化（0~100，按 identity）----
+const VOLS_KEY = 'hearth_room_volumes';
+
+function loadVolumes(): Map<string, number> {
+  try {
+    const raw = localStorage.getItem(VOLS_KEY);
+    if (!raw) return new Map();
+    const m = new Map<string, number>();
+    for (const [k, v] of Object.entries(JSON.parse(raw) as Record<string, unknown>)) {
+      if (typeof v === 'number' && v >= 0 && v <= 100) m.set(k, Math.round(v));
+    }
+    return m;
+  } catch {
+    return new Map();
+  }
+}
+
+function saveVolumes(m: Map<string, number>) {
+  localStorage.setItem(VOLS_KEY, JSON.stringify(Object.fromEntries(m)));
+}
+
 export async function renderRoom(root: HTMLElement, channel: string) {
   const prefs = loadPrefs();
   const canScreenShare = typeof navigator.mediaDevices?.getDisplayMedia === 'function';
@@ -79,6 +98,52 @@ export async function renderRoom(root: HTMLElement, channel: string) {
   let bounced = false;
   let seq = 0; // 卡片到达顺序计数
   const audioEls = new Map<string, Set<SinkMedia>>();
+
+  // iOS Safari 的 volume 只读（设置被静默忽略）：探测后切到 Web Audio 增益链，
+  // 每 identity 一个 GainNode，元素本体 muted；可写平台维持 elm.volume 直控
+  const volProbe = document.createElement('audio');
+  volProbe.volume = 0.5;
+  const useGain = volProbe.volume !== 0.5;
+  let audioCtx: AudioContext | null = null;
+  let gainResume: (() => void) | null = null;
+  const gainNodes = new Map<string, GainNode>();
+  const srcNodes = new Map<SinkMedia, MediaStreamAudioSourceNode>();
+
+  function wireGain(identity: string, elm: SinkMedia) {
+    const stream = elm.srcObject as MediaStream | null;
+    if (!stream) return;
+    if (!audioCtx) {
+      audioCtx = new AudioContext();
+      // 自动播放策略：上下文要在用户手势里 resume
+      gainResume = () => void audioCtx?.resume();
+      document.addEventListener('pointerdown', gainResume);
+      document.addEventListener('keydown', gainResume);
+    }
+    let g = gainNodes.get(identity);
+    if (!g) {
+      g = audioCtx.createGain();
+      g.connect(audioCtx.destination);
+      gainNodes.set(identity, g);
+    }
+    const src = audioCtx.createMediaStreamSource(stream);
+    src.connect(g);
+    srcNodes.set(elm, src);
+    elm.muted = true;
+    // livekit 的 attach/startAudio（webAudioMix 关闭时）会把 muted 翻回 false，
+    // 元素一旦直放就和增益链双路出声：盯 volumechange 压回去
+    elm.addEventListener('volumechange', reassertMute);
+  }
+
+  const reassertMute = (ev: Event) => {
+    const elm = ev.currentTarget as SinkMedia;
+    if (srcNodes.has(elm) && !elm.muted) elm.muted = true;
+  };
+
+  function unwireGain(elm: SinkMedia) {
+    elm.removeEventListener('volumechange', reassertMute);
+    srcNodes.get(elm)?.disconnect();
+    srcNodes.delete(elm);
+  }
   const speakingByRole: Record<Role, Set<string>> = { voice: new Set(), stage: new Set() };
   const tileTimers = new Set<number>(); // 投屏徽章的实测轮询定时器，离房时兜底清掉
 
@@ -99,8 +164,11 @@ export async function renderRoom(root: HTMLElement, channel: string) {
   const [metaText, setMetaText] = createSignal('连接中'); // 顶栏 "N 人在房 · x 路投屏"
   const [layoutPref, setLayoutPref] = createSignal<'grid' | 'spotlight'>(prefs.layout);
   const [pinnedKey, setPinnedKey] = createSignal<string | null>(null);
+  const [fsKey, setFsKey] = createSignal<string | null>(null); // 全屏中的卡片 key（含 iOS 模拟全屏）
   const [lastSpeaker, setLastSpeaker] = createSignal<string | null>(null);
-  const [volumes, setVolumes] = createSignal<Map<string, number>>(new Map()); // 本地音量（0=屏蔽）
+  // 每设备本地音量（0~100，0=屏蔽），按 identity 持久化，跨频道/会话记住
+  const [volumes, setVolumes] = createSignal<Map<string, number>>(loadVolumes());
+  const restoreVol = new Map<string, number>(); // 屏蔽前的音量（仅本会话），恢复时回填
   const [panel, setPanel] = createSignal<'members' | 'chat' | ''>(
     window.matchMedia('(min-width: 1200px)').matches ? 'members' : '',
   );
@@ -148,18 +216,64 @@ export async function renderRoom(root: HTMLElement, channel: string) {
     const p = parts().find((pp) => pp.identity === identity);
     return !!p?.ingest && p.uid === myUid;
   };
-  const volumeFor = (identity: string) => volumes().get(identity) ?? (isOwnIngest(identity) ? 0 : 1);
+  const volumePctFor = (identity: string) => volumes().get(identity) ?? (isOwnIngest(identity) ? 0 : 100);
+  const volumeFor = (identity: string) => volumePctFor(identity) / 100;
+
+  // 拖动滑条每个 tick 都会来：持久化做去抖，别把 localStorage 当流式写
+  let volSaveTimer = 0;
+  function scheduleSaveVolumes() {
+    clearTimeout(volSaveTimer);
+    volSaveTimer = window.setTimeout(() => saveVolumes(volumes()), 300);
+  }
+
+  function setVolumePct(identity: string, pct: number) {
+    pct = Math.max(0, Math.min(100, Math.round(pct)));
+    setVolumes((prev) => {
+      const m = new Map(prev);
+      m.set(identity, pct);
+      return m;
+    });
+    scheduleSaveVolumes();
+    applyAudioPrefs();
+    if (useGain) void audioCtx?.resume(); // 拖滑条本身是手势，顺手唤醒挂起的上下文
+  }
+
+  // 拖动起点记为恢复点：拖到 0 再点恢复，回到开拖前的值而不是最后一个 tick
+  const captureRestore = (identity: string) => {
+    const v = volumePctFor(identity);
+    if (v > 0) restoreVol.set(identity, v);
+  };
+
+  // 屏蔽 ↔ 恢复（恢复屏蔽前的音量，无记录回 100）
+  const toggleVol = (identity: string) => {
+    if (volumePctFor(identity) > 0) {
+      captureRestore(identity);
+      setVolumePct(identity, 0);
+    } else {
+      setVolumePct(identity, restoreVol.get(identity) ?? 100);
+    }
+  };
 
   function applyAudioPrefs() {
     const p = loadPrefs();
     const master = deafened() ? 0 : p.volume / 100;
     audioEls.forEach((set, identity) => {
       const v = master * volumeFor(identity);
+      if (useGain) {
+        // 增益链路径：音量全在 GainNode 上，元素保持 muted（iOS 也没有 setSinkId 可用）
+        const g = gainNodes.get(identity);
+        if (g) g.gain.value = v;
+        set.forEach((elm) => {
+          elm.muted = true;
+        });
+        return;
+      }
       set.forEach((elm) => {
-        // iOS Safari 的 volume 只读（设置被静默忽略），静音必须走 muted 属性
+        // iOS Safari 走不到这里（useGain）；静音保留 muted 属性兜底
         elm.muted = v === 0;
         elm.volume = v;
-        if (p.speakerId && typeof elm.setSinkId === 'function') {
+        // 拖滑条会反复进这里：sinkId 没变就别重复调用（返回 promise，有成本）
+        if (p.speakerId && typeof elm.setSinkId === 'function' && elm.sinkId !== p.speakerId) {
           elm.setSinkId(p.speakerId).catch(() => {});
         }
       });
@@ -255,6 +369,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
     if (!videoEntries().some((e) => e.key === key)) return;
     setVideoEntries((v) => v.filter((e) => e.key !== key));
     if (pinnedKey() === key) setPinnedKey(null);
+    if (fsKey() === key) setFsKey(null);
     maybeClearStatus();
     refreshMeta();
   }
@@ -262,6 +377,29 @@ export async function renderRoom(root: HTMLElement, channel: string) {
   function togglePin(key: string) {
     setPinnedKey((k) => (k === key ? null : key));
   }
+
+  // 全屏对 tile 容器请求（不是 video 元素），才能叠自定义控制条（音量滑条）；
+  // iOS 私有全屏只接受 video 元素，或被浏览器拒绝时，退回 fixed 定位的模拟全屏
+  function toggleFs(key: string, tileEl: HTMLElement) {
+    if (fsKey() === key) return exitFs();
+    if (typeof tileEl.requestFullscreen === 'function') {
+      tileEl.requestFullscreen().catch(() => setFsKey(key));
+    } else {
+      setFsKey(key);
+    }
+  }
+  function exitFs() {
+    if (document.fullscreenElement) void document.exitFullscreen();
+    setFsKey(null);
+  }
+  const onFsChange = () => {
+    const t = document.fullscreenElement as HTMLElement | null;
+    setFsKey(t?.dataset.tileKey ?? null);
+  };
+  // 模拟全屏没有浏览器的 Esc 退出，自己补
+  const onFsKey = (ev: KeyboardEvent) => {
+    if (ev.key === 'Escape' && fsKey() && !document.fullscreenElement) exitFs();
+  };
 
   // ---- 用户操作菜单（聊天卡片、成员行与视频卡片右键共用；挂 body，保持命令式）----
   // 管理操作（禁言/踢出）= 房主或管理员，与后端 requireModerator 一致
@@ -288,21 +426,26 @@ export async function renderRoom(root: HTMLElement, channel: string) {
     const gagged = voiceTargets.length > 0 && voiceTargets.every((p) => !p.canPublish);
     const gagBtn = (on: boolean, label: string) =>
       `<button class="hit um-item${on ? ' danger' : ''}" data-gag="${on}">${micIcon(14, on, on ? 'var(--red)' : 'currentColor')}<span>${label}</span></button>`;
+    // 音量行：图标 = 屏蔽/恢复快捷开关，滑条 0~100；多设备用户每台一行
+    const volRow = (p: EPart) => {
+      const v = volumePctFor(p.identity);
+      return `<div class="um-item um-vol" data-vol-id="${esc(p.identity)}">
+        <button class="hit um-vol-mute" title="屏蔽/恢复">${slashIcon('volume', 14, v === 0, v === 0 ? 'var(--red)' : 'currentColor')}</button>
+        ${targets.length > 1 ? `<span class="um-vol-name">${esc(devName(p))}</span>` : ''}
+        <input class="range" type="range" min="0" max="100" step="1" value="${v}">
+        <span class="mono vol-num">${v}</span>
+      </div>`;
+    };
     const menu = document.createElement('div');
     menu.className = 'user-menu';
     menu.innerHTML = `
       <div class="um-title">${esc(username)}${isSelf ? '（我）' : ''}${deviceMode && targets[0] ? ` · ${esc(devName(targets[0]))}` : ''}</div>
       ${
         targets.length > 1
-          ? targets
-              .map((p) => {
-                const m = volumeFor(p.identity) === 0;
-                return `<button class="hit um-item" data-mute-id="${esc(p.identity)}">${slashIcon('volume', 14, !m, m ? 'var(--red)' : 'currentColor')}<span>${m ? '恢复' : '屏蔽'} ${esc(devName(p))}</span></button>`;
-              })
-              .join('') +
+          ? targets.map(volRow).join('') +
             `<button class="hit um-item" data-act="mute">${slashIcon('volume', 14, !muted, 'currentColor')}<span>${muted ? '恢复全部声音' : '屏蔽全部声音'}</span></button>`
           : targets.length
-            ? `<button class="hit um-item" data-act="mute">${slashIcon('volume', 14, !muted, 'currentColor')}<span>${muted ? '恢复声音' : '屏蔽声音'}</span></button>`
+            ? volRow(targets[0])
             : ''
       }
       ${
@@ -339,13 +482,23 @@ export async function renderRoom(root: HTMLElement, channel: string) {
       if (!menu.contains(ev.target as Node)) close();
     };
     setTimeout(() => document.addEventListener('pointerdown', onDoc, true));
-    menu.querySelector('[data-act="mute"]')?.addEventListener('click', () => {
-      setVolumes((prev) => {
-        const m = new Map(prev);
-        targets.forEach((p) => m.set(p.identity, muted ? 1 : 0));
-        return m;
+    // 屏蔽全部/恢复全部：状态按点击当时重算（菜单开着时滑条可能改过）；
+    // 恢复只动被屏蔽的设备，不覆盖其他设备手调的音量
+    const muteAllBtn = menu.querySelector('[data-act="mute"]');
+    const paintMuteAll = () => {
+      if (!muteAllBtn) return;
+      const anyMuted = targets.some((p) => volumePctFor(p.identity) === 0);
+      muteAllBtn.innerHTML = `${slashIcon('volume', 14, !anyMuted, 'currentColor')}<span>${anyMuted ? '恢复全部声音' : '屏蔽全部声音'}</span>`;
+    };
+    muteAllBtn?.addEventListener('click', () => {
+      const anyMuted = targets.some((p) => volumePctFor(p.identity) === 0);
+      targets.forEach((p) => {
+        const cur = volumePctFor(p.identity);
+        if (anyMuted ? cur === 0 : cur > 0) {
+          if (!anyMuted) restoreVol.set(p.identity, cur);
+          setVolumePct(p.identity, anyMuted ? (restoreVol.get(p.identity) ?? 100) : 0);
+        }
       });
-      applyAudioPrefs();
       close();
     });
     menu.querySelectorAll<HTMLButtonElement>('[data-gag]').forEach((btn) => {
@@ -360,16 +513,27 @@ export async function renderRoom(root: HTMLElement, channel: string) {
         }
       });
     });
-    menu.querySelectorAll<HTMLButtonElement>('[data-mute-id]').forEach((btn) => {
-      btn.addEventListener('click', () => {
-        const id = btn.dataset.muteId!;
-        setVolumes((prev) => {
-          const m = new Map(prev);
-          m.set(id, volumeFor(id) === 0 ? 1 : 0);
-          return m;
-        });
-        applyAudioPrefs();
-        close();
+    // 音量行：拖滑条/点图标不关菜单，就地刷新行内数值、图标与「屏蔽全部」的文案
+    menu.querySelectorAll<HTMLElement>('.um-vol').forEach((row) => {
+      const id = row.dataset.volId!;
+      const input = row.querySelector<HTMLInputElement>('input.range')!;
+      const num = row.querySelector<HTMLElement>('.vol-num')!;
+      const muteBtnEl = row.querySelector<HTMLButtonElement>('.um-vol-mute')!;
+      const paint = () => {
+        const v = volumePctFor(id);
+        input.value = String(v);
+        num.textContent = String(v);
+        muteBtnEl.innerHTML = slashIcon('volume', 14, v === 0, v === 0 ? 'var(--red)' : 'currentColor');
+        paintMuteAll();
+      };
+      input.addEventListener('pointerdown', () => captureRestore(id));
+      input.addEventListener('input', () => {
+        setVolumePct(id, Number(input.value));
+        paint();
+      });
+      muteBtnEl.addEventListener('click', () => {
+        toggleVol(id);
+        paint();
       });
     });
     menu.querySelectorAll<HTMLButtonElement>('[data-kick-id]').forEach((btn) => {
@@ -550,6 +714,8 @@ export async function renderRoom(root: HTMLElement, channel: string) {
     if (document.visibilityState === 'visible') retryNow();
   };
   document.addEventListener('visibilitychange', onVisible);
+  document.addEventListener('fullscreenchange', onFsChange);
+  document.addEventListener('keydown', onFsKey);
   window.addEventListener('online', retryNow);
 
   // ---- 引擎回调（按线）：只写信号 / 增删条目，不碰 DOM ----
@@ -565,13 +731,20 @@ export async function renderRoom(root: HTMLElement, channel: string) {
         }
         set.add(elm as SinkMedia);
         audioBinEl.appendChild(elm);
+        if (useGain) wireGain(identity, elm as SinkMedia);
         applyAudioPrefs();
       },
       onAudioTrackRemoved: (identity, els) => {
         els.forEach((elm) => {
           elm.remove();
+          unwireGain(elm as SinkMedia);
           audioEls.get(identity)?.delete(elm as SinkMedia);
         });
+        // 该 identity 没有音轨了：拆掉增益节点，重进时重建
+        if (!audioEls.get(identity)?.size) {
+          gainNodes.get(identity)?.disconnect();
+          gainNodes.delete(identity);
+        }
       },
       onRoster: () => {
         refreshRoster();
@@ -873,6 +1046,23 @@ export async function renderRoom(root: HTMLElement, channel: string) {
   // ---- 视图组件 ----
 
   // 静态头像（聊天卡片等，不随信号变化）
+  // 音量滑条 + 数值：成员行浮层与全屏控制条共用（右键菜单那份是命令式字符串，形态不同）
+  const VolSlider = (p: { identity: string }) => (
+    <>
+      <input
+        class="range"
+        type="range"
+        min="0"
+        max="100"
+        step="1"
+        value={volumePctFor(p.identity)}
+        onPointerDown={() => captureRestore(p.identity)}
+        onInput={(ev) => setVolumePct(p.identity, Number(ev.currentTarget.value))}
+      />
+      <span class="mono vol-num">{volumePctFor(p.identity)}</span>
+    </>
+  );
+
   const Avatar = (p: { name: string; cls?: string; onClick?: (ev: MouseEvent) => void }) => {
     const a = el(avatarHtml(p.name, p.cls ?? 'avatar')) as HTMLElement;
     if (p.onClick) a.addEventListener('click', p.onClick);
@@ -881,19 +1071,23 @@ export async function renderRoom(root: HTMLElement, channel: string) {
 
   const VideoTileView = (p: { e: VideoEntry; spotlight: () => boolean; focusKey: () => string | null }) => {
     const e = p.e;
-    const iv = e.video as IOSVideo;
-    const fsOk = typeof iv.requestFullscreen === 'function' || typeof iv.webkitEnterFullscreen === 'function';
+    let tileEl!: HTMLDivElement;
     const name = e.isLocal && e.source === 'camera' ? '你' : e.display;
+    const isFs = () => fsKey() === e.key;
     return (
       <div
+        ref={tileEl}
         class={'tile' + (e.source === 'screen' ? ' tile-screen' : '')}
         classList={{
           speaking: speaking().has(e.identity),
           pinned: pinnedKey() === e.key,
           featured: p.spotlight() && p.focusKey() === e.key,
+          'faux-fs': isFs() && !document.fullscreenElement,
         }}
         data-identity={e.identity}
+        data-tile-key={e.key}
         onClick={(ev) => {
+          if (isFs()) return; // 全屏里点击不切置顶
           if ((ev.target as HTMLElement).closest('.tile-actions')) return;
           togglePin(e.key);
         }}
@@ -948,20 +1142,31 @@ export async function renderRoom(root: HTMLElement, channel: string) {
           >
             {el(licon('pin', 15))}
           </button>
-          <Show when={fsOk}>
-            <button
-              class="hit tact"
-              title="全屏"
-              onClick={(ev) => {
-                ev.stopPropagation();
-                if (typeof iv.requestFullscreen === 'function') void iv.requestFullscreen();
-                else iv.webkitEnterFullscreen?.();
-              }}
-            >
-              {el(icon('fullscreen', 15))}
-            </button>
-          </Show>
+          <button
+            class="hit tact"
+            title={isFs() ? '退出全屏' : '全屏'}
+            onClick={(ev) => {
+              ev.stopPropagation();
+              toggleFs(e.key, tileEl);
+            }}
+          >
+            {el(icon('fullscreen', 15))}
+          </button>
         </div>
+        {/* 全屏控制条：远端卡片给音量滑条（本机卡片没有可调的声音）；退出全屏在右上角 */}
+        <Show when={isFs() && !e.isLocal}>
+          <div class="fs-bar" onClick={(ev) => ev.stopPropagation()}>
+            <button
+              class="hit fs-vol-mute"
+              classList={{ 'muted-on': volumePctFor(e.identity) === 0 }}
+              title={volumePctFor(e.identity) === 0 ? '恢复声音' : '屏蔽声音'}
+              onClick={() => toggleVol(e.identity)}
+            >
+              {el(slashIcon('volume', 15, volumePctFor(e.identity) === 0, 'currentColor'))}
+            </button>
+            <VolSlider identity={e.identity} />
+          </div>
+        </Show>
       </div>
     );
   };
@@ -1313,33 +1518,36 @@ export async function renderRoom(root: HTMLElement, channel: string) {
                     const devName = (p: EPart) =>
                       p.ingest ? `OBS 推流${p.tag ? ` · ${p.tag}` : ''}` : p.tag || p.identity;
                     const devSpeaking = (p: EPart) => speaking().has(p.identity);
-                    const devMuted = (p: EPart) => volumeFor(p.identity) === 0;
+                    const devMuted = (p: EPart) => volumePctFor(p.identity) === 0;
                     const devBits = (p: EPart) =>
                       [
                         p.sharing ? '投屏中' : '',
                         devSpeaking(p) ? '说话中' : !p.micOn && !p.ingest ? '已静音' : '',
                         !p.canPublish && !p.ingest ? '已禁言' : '',
-                        devMuted(p) && !p.isLocal ? '已本地屏蔽' : '',
+                        !p.isLocal && devMuted(p)
+                          ? '已本地屏蔽'
+                          : !p.isLocal && volumePctFor(p.identity) !== 100
+                            ? `音量 ${volumePctFor(p.identity)}%`
+                            : '',
                       ]
                         .filter(Boolean)
                         .join(' · ');
+                    // 音量按钮：点击 = 屏蔽/恢复；桌面 hover 弹出滑条（触屏走长按菜单）
                     const muteBtn = (p: EPart) => (
                       <Show when={!p.isLocal}>
-                        <button
-                          class="hit m-btn"
-                          classList={{ 'muted-on': devMuted(p) }}
-                          title={devMuted(p) ? '恢复该设备声音' : '屏蔽该设备声音'}
-                          onClick={() => {
-                            setVolumes((prev) => {
-                              const m = new Map(prev);
-                              m.set(p.identity, devMuted(p) ? 1 : 0);
-                              return m;
-                            });
-                            applyAudioPrefs();
-                          }}
-                        >
-                          {el(slashIcon('volume', 14, devMuted(p), devMuted(p) ? 'var(--red)' : 'var(--text-2)'))}
-                        </button>
+                        <div class="volwrap">
+                          <button
+                            class="hit m-btn"
+                            classList={{ 'muted-on': devMuted(p) }}
+                            title={devMuted(p) ? '恢复该设备声音' : '屏蔽该设备声音'}
+                            onClick={() => toggleVol(p.identity)}
+                          >
+                            {el(slashIcon('volume', 14, devMuted(p), devMuted(p) ? 'var(--red)' : 'var(--text-2)'))}
+                          </button>
+                          <div class="volpop">
+                            <VolSlider identity={p.identity} />
+                          </div>
+                        </div>
                       </Show>
                     );
                     const kickBtn = (p: EPart) => (
@@ -1519,8 +1727,21 @@ export async function renderRoom(root: HTMLElement, channel: string) {
       prefsBus.removeEventListener('prefs', onPrefs);
       navigator.mediaDevices?.removeEventListener?.('devicechange', onDeviceChange);
       document.removeEventListener('visibilitychange', onVisible);
+      document.removeEventListener('fullscreenchange', onFsChange);
+      document.removeEventListener('keydown', onFsKey);
       window.removeEventListener('online', retryNow);
       leaving = true;
+      exitFs();
+      clearTimeout(volSaveTimer);
+      saveVolumes(volumes()); // 去抖的尾触可能还没落盘
+      if (gainResume) {
+        document.removeEventListener('pointerdown', gainResume);
+        document.removeEventListener('keydown', gainResume);
+      }
+      srcNodes.forEach((s) => s.disconnect());
+      srcNodes.clear();
+      gainNodes.clear();
+      void audioCtx?.close();
       clearInterval(vuTimer);
       tileTimers.forEach((t) => clearInterval(t));
       tileTimers.clear();
