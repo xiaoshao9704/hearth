@@ -84,7 +84,7 @@ func (a *Announcer) Snapshot() (rules, probedAt)   // 只读，给健康检查�
 
 - 容器 `docker inspect` 显示 healthy；`docker logs` 每次映射变化各一条日志，不变时无输出。
 - 模拟公网 IP 变化（假探测 / 改路由器映射）后 60s 内新推流/新进房拿到新候选，进程未重启。
-- 树莓派上的 `ip-watchdog` 可以下线（LiveKit 仍在则保留其重启，只对 Bellows 不再需要）。
+- arm64 小主机上的 `ip-watchdog` 可以下线（LiveKit 仍在则保留其重启，只对 Bellows 不再需要）。
 
 ## 工作量
 

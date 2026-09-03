@@ -71,8 +71,8 @@ portmap.Mapper：把 lkembed 的 UDP（与可选 TCP）端口映射到网关；v
   实例对象**复用现有 `livekitrtc.New(cfg)`**：给它一个 cfg getter，`livekit_api_url` 固定为回环地址、`livekit_api_key/secret`
   取自 `lkembed_*` 全局键。这样舞台槽位、令牌签发、`/rtc/*` 反代、Bellows 的 Publisher 全部零改动。
 - **语音线不变**：仍是 Ember。两条线分属两个实例，前端仍是双连接（`combined` 判定不变）。
-- **远端形态**：家里局域网机器跑 `cmd/stage` = 同一个嵌入包 + Bellows + Mapper + 周期刷新，替代今天树莓派上 livekit 与 bellows
-  两个容器。hearth 侧继续用 env 锁定的 `livekit` 实例指向它的 API 地址（tailscale），推流入口用 `bellows-remote`——**hearth 侧接线与今天完全一样**。
+- **远端形态**：另一台机器跑 `cmd/stage` = 同一个嵌入包 + Bellows + Mapper + 周期刷新，替代今天 arm64 小主机上 livekit 与 bellows
+  两个容器。hearth 侧继续用 env 锁定的 `livekit` 实例指向它的 API 地址（私网通道），推流入口用 `bellows-remote`——**hearth 侧接线与今天完全一样**。
   LiveKit 的信令票据就是 hearth 签的 JWT，不需要 grant。
 - **回退**：外部 LiveKit 实例（`livekit` env 锁定 / DB 注册）继续可选，选择器一切即回退。
 
@@ -134,9 +134,9 @@ func (s *Server) Stop()                                       // service.Livekit
   网关若改派了外部端口，宣告出去的端口就是错的，宁可判定失败给 `port_conflict` 诊断也不要假成功。v6 pinhole 随 wants 自动覆盖。
   `Mapper.OnChange` 已接 `a.RefreshAnnounce`，回调读的是刷新后的快照，无需额外接线。
 - **Bellows**：`stagePublisherSink` 取到 `lkembed` 实例的 Publisher（`livekitrtc` 已实现）即向回环 LiveKit 发布，零改动。
-- **`cmd/stage`**（远端形态，替代树莓派上的两个容器）：`livekitembed.Start` + `bellows.NewRemote` + `portmap.New` + 周期刷新，
+- **`cmd/stage`**（远端形态，替代 arm64 小主机上的两个容器）：`livekitembed.Start` + `bellows.NewRemote` + `portmap.New` + 周期刷新，
   接线逐行照抄 `cmd/bellows/main.go`（Mapper、OnChange、ticker、优雅退出 `Close(新 ctx)`），环境变量 `STAGE_*` 对应上面五个键，
-  `PORTMAP_MODE` 同名沿用。LiveKit 在这里**监听非回环地址**（hearth 经 tailscale 访问其 API），`bind_addresses` 由 env 给。
+  `PORTMAP_MODE` 同名沿用。LiveKit 在这里**监听非回环地址**（hearth 经私网通道访问其 API），`bind_addresses` 由 env 给。
   `cmd/bellows` 保留一段时间后并入 `cmd/stage`。
 
 ## 实施顺序（每步单独可验）
@@ -151,7 +151,7 @@ func (s *Server) Stop()                                       // service.Livekit
    网关租约表出现舞台 UDP 端口的同端口映射（v4）与 pinhole（v6）；LiveKit 给浏览器的候选里出现映射外部 IP 的 srflx，
    **且 LAN host 候选仍在**（这条验补丁二的 bool 语义）；公网 IP 变化模拟（改探测返回值）后**新**会话拿到新地址、进程不重启、在途会话不断。
 5. **推流**：OBS/ffmpeg（见既有 WHIP 验收配方）经进程内 Bellows 推 HEVC，观众可见，`{user}-obs` 入名册，禁言后消失。
-6. **`cmd/stage`** 远端形态；树莓派 compose 从 livekit + bellows 两个服务换成一个 `stage`（备份旧 compose）；bj 侧不动。
+6. **`cmd/stage`** 远端形态；arm64 小主机的 compose 从 livekit + bellows 两个服务换成一个 `stage`（备份旧 compose）；服务端侧不动。
 7. **收尾**：aio 的 `EMBED_LIVEKIT` 路径退役（`aioinit` 不再拉 livekit/redis）；README 架构图与部署段；CLAUDE.md 更新
    （内建实例多一个 `lkembed`、aio 不再拉子进程、`livekit_*` 命名空间说明）；`plan-stage-kernel.md` 状态行指向本计划。
 
