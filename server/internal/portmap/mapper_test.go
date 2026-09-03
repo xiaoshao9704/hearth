@@ -6,6 +6,7 @@ import (
 	"net/netip"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -83,6 +84,10 @@ func testMapper(c client) *Mapper {
 	m.gateway = func() (netip.Addr, error) { return netip.MustParseAddr("192.168.0.1"), nil }
 	m.newPCP = func(netip.AddrPort) client { return c }
 	m.upnp = func(context.Context) (client, error) { return nil, ErrUnsupported }
+	// 默认不去找上游：级联要发真报文，单测按需再注入（见 chain_test.go）。
+	m.hopFound = func(context.Context, netip.Addr, Want, int, time.Duration) (client, netip.Addr, Mapping, error) {
+		return nil, netip.Addr{}, Mapping{}, ErrUnsupported
+	}
 	m.logf = func(string, ...any) {}
 	return m
 }
@@ -444,6 +449,34 @@ func TestMapperOnChangeOnlyOnRealChange(t *testing.T) {
 	}
 	if got[1].Mappings[0].ExternalIP.String() != "198.51.100.10" {
 		t.Fatalf("回调带的状态不对: %+v", got[1].Mappings)
+	}
+}
+
+// TestMapperReportsChainHops 级联走通两跳时，Status 要回显每一跳，诊断按最外层的
+// 外部地址判定（拿到公网地址就是 ok，不再提示配上游）。
+func TestMapperReportsChainHops(t *testing.T) {
+	inner := &fakeClient{mapFn: func(w Want, external int, _ time.Duration) (Mapping, error) {
+		return okMap(w, external, "10.0.0.2"), nil
+	}}
+	m := testMapper(inner)
+	m.hopFound = func(_ context.Context, x netip.Addr, w Want, external int, _ time.Duration) (client, netip.Addr, Mapping, error) {
+		return &fakeClient{}, netip.MustParseAddr("10.0.0.1"), okMap(w, external, "198.51.100.9"), nil
+	}
+
+	runRounds(m, staticWants(httpWant), 1)
+
+	st := m.Snapshot()
+	if st.Diagnosis != DiagOK {
+		t.Fatalf("诊断 = %s（%s）", st.Diagnosis, st.Detail)
+	}
+	if len(st.Hops) != 2 || st.Hops[0].Gateway.String() != "192.168.0.1" || st.Hops[1].Gateway.String() != "10.0.0.1" {
+		t.Fatalf("跳列表 = %+v", st.Hops)
+	}
+	if len(st.Mappings) != 1 || st.Mappings[0].ExternalIP.String() != "198.51.100.9" {
+		t.Fatalf("映射应取最外层的外部地址: %+v", st.Mappings)
+	}
+	if !strings.Contains(st.Detail, "经 2 层网关") {
+		t.Fatalf("诊断文案应带跳数: %s", st.Detail)
 	}
 }
 

@@ -46,6 +46,10 @@ var errUnsuppVersion = errors.New("网关不支持 PCP 版本")
 
 type pcpClient struct {
 	gw netip.AddrPort
+	// clientIP 覆盖请求头里的 client IP，级联申请时用（见 chain.go）：报文经内层 NAT
+	// 到达上游时源地址已变成内层路由的 WAN 地址，头里填同一个地址才过得了
+	// ADDRESS_MISMATCH 校验。零值 = 用 dial() 取到的本机源地址。
+	clientIP netip.Addr
 
 	mu     sync.Mutex
 	natpmp bool                // 收到 UNSUPP_VERSION 后永久回落，不再试 PCP
@@ -53,7 +57,12 @@ type pcpClient struct {
 }
 
 func newPCPClient(gw netip.AddrPort) client {
-	return &pcpClient{gw: gw, nonces: make(map[string][12]byte)}
+	return newPCPClientAs(gw, netip.Addr{})
+}
+
+// newPCPClientAs 同上，但把请求头里的 client IP 固定成 clientIP（级联申请，见 chain.go）。
+func newPCPClientAs(gw netip.AddrPort, clientIP netip.Addr) client {
+	return &pcpClient{gw: gw, clientIP: clientIP, nonces: make(map[string][12]byte)}
 }
 
 func (c *pcpClient) Method() string {
@@ -87,6 +96,10 @@ func (c *pcpClient) do(ctx context.Context, w Want, external int, lifetime time.
 		return Mapping{}, err
 	}
 	defer conn.Close()
+
+	if c.clientIP.IsValid() {
+		local = c.clientIP
+	}
 
 	c.mu.Lock()
 	fallen := c.natpmp

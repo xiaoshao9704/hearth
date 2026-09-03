@@ -105,11 +105,12 @@ type fakeIGDv1 struct {
 }
 
 type addCall struct {
-	externalPort int
-	internalPort int
-	protocol     string
-	description  string
-	lease        int
+	externalPort   int
+	internalPort   int
+	protocol       string
+	description    string
+	internalClient string
+	lease          int
 }
 
 type deleteCall struct {
@@ -182,8 +183,9 @@ func (f *fakeIGDv1) serveSOAP(w http.ResponseWriter, r *http.Request) {
 		lease := extractIntTag(body, "NewLeaseDuration")
 		proto := extractStringTag(body, "NewProtocol")
 		desc := extractStringTag(body, "NewPortMappingDescription")
+		ic := extractStringTag(body, "NewInternalClient")
 		f.mu.Lock()
-		f.added = append(f.added, addCall{externalPort: ext, internalPort: in, protocol: proto, description: desc, lease: lease})
+		f.added = append(f.added, addCall{externalPort: ext, internalPort: in, protocol: proto, description: desc, internalClient: ic, lease: lease})
 		f.mu.Unlock()
 		writeSOAPResult(w, wanIPConnV1NS, "AddPortMapping", "")
 	case strings.Contains(action, "DeletePortMapping"):

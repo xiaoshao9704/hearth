@@ -24,12 +24,13 @@ type Mapper struct {
 	OnChange func(Status)
 
 	// 发现途径与时间源做成字段，单测注入假 client 与假时钟。
-	gateway func() (netip.Addr, error)
-	newPCP  func(netip.AddrPort) client
-	upnp    func(context.Context) (client, error)
-	sleep   func(context.Context, time.Duration) bool
-	now     func() time.Time
-	logf    func(string, ...any)
+	gateway  func() (netip.Addr, error)
+	newPCP   func(netip.AddrPort) client
+	upnp     func(context.Context) (client, error)
+	hopFound hopDiscoverFunc // 级联时发现上游那一跳，见 chain.go
+	sleep    func(context.Context, time.Duration) bool
+	now      func() time.Time
+	logf     func(string, ...any)
 
 	mu      sync.Mutex
 	cl      client // 锁定的协议客户端，nil = 尚未发现
@@ -46,14 +47,15 @@ type mapKey struct {
 
 func New() *Mapper {
 	return &Mapper{
-		gateway: defaultGateway,
-		newPCP:  newPCPClient,
-		upnp:    discoverUPnP,
-		sleep:   sleepCtx,
-		now:     time.Now,
-		logf:    log.Printf,
-		active:  make(map[mapKey]Mapping),
-		st:      Status{Diagnosis: DiagOff},
+		gateway:  defaultGateway,
+		newPCP:   newPCPClient,
+		upnp:     discoverUPnP,
+		hopFound: discoverHop,
+		sleep:    sleepCtx,
+		now:      time.Now,
+		logf:     log.Printf,
+		active:   make(map[mapKey]Mapping),
+		st:       Status{Diagnosis: DiagOff},
 	}
 }
 
@@ -185,11 +187,12 @@ func (m *Mapper) round(ctx context.Context, wants func(context.Context) []Want) 
 		return m.bump()
 	}
 
+	hops, stall := m.chainInfo()
 	if ip, ok := firstPrivateExternal(mappings); ok {
 		// 私网外部地址不算失败：上游做了 DMZ/转发时映射照样有效，只是要提示补那一层配置。
-		m.commit(mappings, DiagUpstreamNAT, detailUpstreamNAT(ip, mappings))
+		m.commit(mappings, DiagUpstreamNAT, detailUpstreamNAT(ip, mappings, stall))
 	} else {
-		m.commit(mappings, DiagOK, detailOK(mappings))
+		m.commit(mappings, DiagOK, detailOK(mappings, hops))
 	}
 	m.reset()
 	return renewInterval
@@ -199,6 +202,8 @@ func (m *Mapper) round(ctx context.Context, wants func(context.Context) []Want) 
 // 只有 ErrUnsupported（5351 上没反应）才退到 UPnP。PCP 侧不额外套超时——
 // roundTrip 自己就限死了重试次数与每次的等待。
 // 返回的 Mapping/error 是这条 want 的申请结果，调用方不必重复申请。
+// 锁定的客户端一律包一层 chainClient：外部地址是私网时它自己会向上游续接（chain.go），
+// Mapper 只看最外层的结果。
 func (m *Mapper) pick(ctx context.Context, w Want) (client, Mapping, error) {
 	gw, err := m.gateway()
 	if err != nil {
@@ -208,7 +213,7 @@ func (m *Mapper) pick(ctx context.Context, w Want) (client, Mapping, error) {
 	m.st.Gateway = gw
 	m.mu.Unlock()
 
-	c := m.newPCP(netip.AddrPortFrom(gw, pcpPort))
+	c := m.newChain(m.newPCP(netip.AddrPortFrom(gw, pcpPort)), gw)
 	mp, err := m.apply(ctx, c, w)
 	if !errors.Is(err, ErrUnsupported) {
 		return c, mp, err
@@ -223,11 +228,29 @@ func (m *Mapper) pick(ctx context.Context, w Want) (client, Mapping, error) {
 	if err != nil {
 		return nil, Mapping{}, err
 	}
-	mp, err = m.apply(uctx, uc, w)
+	cc := m.newChain(uc, gw)
+	mp, err = m.apply(uctx, cc, w)
 	if errors.Is(err, ErrUnsupported) {
 		return nil, Mapping{}, err
 	}
-	return uc, mp, err
+	return cc, mp, err
+}
+
+func (m *Mapper) newChain(first client, gw netip.Addr) *chainClient {
+	c := newChain(first, gw, m.now, m.logf)
+	c.discover = m.hopFound
+	return c
+}
+
+// chainInfo 取链的回显与停链原因；非链式客户端（不会出现，留作兜底）返回空。
+func (m *Mapper) chainInfo() ([]Hop, string) {
+	m.mu.Lock()
+	c := m.cl
+	m.mu.Unlock()
+	if hl, ok := c.(hopLister); ok {
+		return hl.hopList(), hl.stallReason()
+	}
+	return nil, ""
 }
 
 func (m *Mapper) unmapAll(ctx context.Context) {
@@ -328,8 +351,12 @@ func (m *Mapper) commit(mappings []Mapping, diag Diagnosis, detail string) {
 	changed := !sameMappings(m.st.Mappings, mappings)
 	diagChanged := m.st.Diagnosis != diag || m.st.Detail != detail
 	method := ""
+	m.st.Hops = nil
 	if m.cl != nil {
 		method = m.cl.Method()
+		if hl, ok := m.cl.(hopLister); ok {
+			m.st.Hops = hl.hopList()
+		}
 	}
 	methodChanged := m.st.Method != method
 
@@ -395,6 +422,7 @@ func (m *Mapper) reset() {
 
 func (s Status) clone() Status {
 	s.Mappings = slices.Clone(s.Mappings)
+	s.Hops = slices.Clone(s.Hops)
 	return s
 }
 
@@ -499,14 +527,28 @@ func detailPortConflict(errs []error) string {
 		"请换一个端口。详情：%v", errors.Join(errs...))
 }
 
-func detailUpstreamNAT(ip netip.Addr, mappings []Mapping) string {
-	return fmt.Sprintf("映射已建立，但网关给出的外部地址 %s 是私网地址：上游还有一层 NAT。"+
+// detailUpstreamNAT 的「转发到」用最外层已到达那一跳的外部地址：级联走通了几跳，
+// 要人工配置的就是再上面那一层。
+func detailUpstreamNAT(ip netip.Addr, mappings []Mapping, stall string) string {
+	tried := ""
+	if stall != "" {
+		tried = fmt.Sprintf("已尝试向上游网关申请但未成功（%s）。", stall)
+	}
+	return fmt.Sprintf("映射已建立，但网关给出的外部地址 %s 是私网地址：上游还有一层 NAT。%s"+
 		"请在上游设备把 %s 转发到 %s（本机网关的 WAN 地址），或对它开启 DMZ。",
-		ip, externalPorts(mappings), ip)
+		ip, tried, externalPorts(mappings), ip)
 }
 
-func detailOK(mappings []Mapping) string {
-	return "端口映射已建立：" + describe(mappings)
+func detailOK(mappings []Mapping, hops []Hop) string {
+	detail := "端口映射已建立：" + describe(mappings)
+	if len(hops) > 1 {
+		gws := make([]string, 0, len(hops))
+		for _, h := range hops {
+			gws = append(gws, h.Gateway.String())
+		}
+		detail += fmt.Sprintf("（经 %d 层网关：%s）", len(hops), strings.Join(gws, " → "))
+	}
+	return detail
 }
 
 func sleepCtx(ctx context.Context, d time.Duration) bool {

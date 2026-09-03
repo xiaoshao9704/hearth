@@ -2,7 +2,8 @@
 // 进程内网络基建：HTTP 端口与各媒体端口一并映射，不进 rtc/。
 //
 // 设计约束（详见 docs/plan-portmap.md）：
-//   - P1 只向本机默认网关申请一层；上游还有一层时给诊断指引，由部署者一次性配置（级联见方案第六节）。
+//   - 内层网关给出私网外部地址时会自动向上游那一层继续申请（级联，最多 3 跳，见 chain.go）；
+//     级联不成再给诊断指引，由部署者在上游设备上一次性配置转发或 DMZ。
 //   - 优先申请 external == internal：双层 NAT 下上游 DMZ 是端口不变透传，端口一变整条链就断。
 //   - 判定映射是否有效不看 IP 段：网关返回私网外部地址（上游 DMZ）映射照样有效，
 //     只标 DiagUpstreamNAT 提示上游要配转发。
@@ -36,6 +37,13 @@ type Mapping struct {
 	ExpiresAt  time.Time
 }
 
+// Hop 级联申请时链上的一跳，第一跳是本机默认网关（见 chain.go）。
+type Hop struct {
+	Gateway    netip.Addr
+	Method     string
+	ExternalIP netip.Addr // 该跳给出的外部地址，也是下一跳眼里的请求者地址
+}
+
 // Diagnosis 可操作的失败分类，日志与管理后台共用同一套文案（见 Status.Detail）。
 type Diagnosis string
 
@@ -57,6 +65,7 @@ type Status struct {
 	Diagnosis Diagnosis
 	Detail    string // 人读文案：诊断含义 + 下一步该做什么
 	Mappings  []Mapping
+	Hops      []Hop // 级联申请实际走通的每一跳，第一跳是默认网关
 	UpdatedAt time.Time
 }
 

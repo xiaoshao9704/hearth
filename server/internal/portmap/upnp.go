@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/http"
 	"net/netip"
 	"net/url"
 	"strings"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/huin/goupnp"
 	"github.com/huin/goupnp/dcps/internetgateway2"
+	"github.com/huin/goupnp/httpu"
 	"github.com/huin/goupnp/soap"
 )
 
@@ -31,6 +33,10 @@ type upnpConn interface {
 type upnpClient struct {
 	conn upnpConn
 	v2   *internetgateway2.WANIPConnection2
+	// internalClient 覆盖 AddPortMapping 的 NewInternalClient，级联申请时用（见 chain.go）：
+	// 报文经内层 NAT 到达上游时源地址已变成内层路由的 WAN 地址，而 miniupnpd 的
+	// secure_mode 只允许给请求源地址开洞。零值 = 用 localAddrFor 取到的出口地址。
+	internalClient netip.Addr
 }
 
 // discoverUPnP 依次尝试 IGDv2 → IGDv1 → WANPPPConnection1，取第一个发现到的。
@@ -49,12 +55,92 @@ func discoverUPnP(ctx context.Context) (client, error) {
 	return nil, ErrUnsupported
 }
 
+// ssdpPort SSDP 的固定端口；做成变量只为单测把单播搜索指向回环上的假应答器。
+var ssdpPort = 1900
+
+// ssdpUnicastTimeout 单播 M-SEARCH 每个 ST 的等待时长：对端就在链路上，
+// 应答是即时的，等久了只是白拖（两个 ST 串行，总耗时还受调用方的 ctx 限制）。
+const ssdpUnicastTimeout = 1500 * time.Millisecond
+
+// upstreamSearchTargets 单播搜索的 ST：IGD 设备类型 v1 优先（不少设备默认以 v1 身份宣告）。
+var upstreamSearchTargets = []string{
+	"urn:schemas-upnp-org:device:InternetGatewayDevice:1",
+	"urn:schemas-upnp-org:device:InternetGatewayDevice:2",
+}
+
+// discoverUPnPAt 单播发现指定地址上的 IGD：M-SEARCH 直接发给它（UPnP 1.1 允许单播搜索），
+// 绕开「多播出不了本级路由」——级联申请时上游网关不在本机的多播域里（见 chain.go）。
+// 返回具体类型而不是 client 接口，调用方要覆盖 internalClient。
+func discoverUPnPAt(ctx context.Context, host netip.Addr) (*upnpClient, error) {
+	loc, err := ssdpUnicastLocation(ctx, host)
+	if err != nil {
+		return nil, err
+	}
+	root, err := goupnp.DeviceByURLCtx(ctx, loc)
+	if err != nil {
+		return nil, err
+	}
+	if clients, err := internetgateway2.NewWANIPConnection2ClientsFromRootDevice(root, loc); err == nil && len(clients) > 0 {
+		return &upnpClient{conn: clients[0], v2: clients[0]}, nil
+	}
+	if clients, err := internetgateway2.NewWANIPConnection1ClientsFromRootDevice(root, loc); err == nil && len(clients) > 0 {
+		return &upnpClient{conn: clients[0]}, nil
+	}
+	if clients, err := internetgateway2.NewWANPPPConnection1ClientsFromRootDevice(root, loc); err == nil && len(clients) > 0 {
+		return &upnpClient{conn: clients[0]}, nil
+	}
+	return nil, ErrUnsupported
+}
+
+// ssdpUnicastLocation 向 host:1900 单播 M-SEARCH，取第一个应答里的设备描述 URL。
+// 按 UPnP 1.1，单播搜索不带 MX（那是给多播应答错峰用的）。
+func ssdpUnicastLocation(ctx context.Context, host netip.Addr) (*url.URL, error) {
+	hu, err := httpu.NewHTTPUClient()
+	if err != nil {
+		return nil, err
+	}
+	defer hu.Close()
+
+	dst := netip.AddrPortFrom(host, uint16(ssdpPort)).String()
+	for _, st := range upstreamSearchTargets {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		req := (&http.Request{
+			Method: "M-SEARCH",
+			Host:   dst,
+			URL:    &url.URL{Opaque: "*"},
+			// 直接给 Header 赋值避免被标题化：SSDP 的头名是大小写敏感的。
+			Header: http.Header{
+				"HOST": []string{dst},
+				"MAN":  []string{`"ssdp:discover"`},
+				"ST":   []string{st},
+			},
+		}).WithContext(ctx)
+
+		resps, err := hu.Do(req, ssdpUnicastTimeout, 2)
+		if err != nil {
+			continue
+		}
+		for _, resp := range resps {
+			loc, err := url.Parse(resp.Header.Get("LOCATION"))
+			if err == nil && loc.Host != "" {
+				return loc, nil
+			}
+		}
+	}
+	return nil, ErrUnsupported
+}
+
 func (u *upnpClient) Method() string { return "upnp" }
 
 func (u *upnpClient) Map(ctx context.Context, w Want, external int, lifetime time.Duration) (Mapping, error) {
-	localAddr, err := localAddrFor(u.conn.GetServiceClient().Location)
-	if err != nil {
-		return Mapping{}, fmt.Errorf("确定本机出口地址失败: %w", err)
+	localAddr := u.internalClient
+	if !localAddr.IsValid() {
+		var err error
+		if localAddr, err = localAddrFor(u.conn.GetServiceClient().Location); err != nil {
+			return Mapping{}, fmt.Errorf("确定本机出口地址失败: %w", err)
+		}
 	}
 
 	proto := strings.ToUpper(w.Proto)
