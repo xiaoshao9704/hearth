@@ -37,7 +37,7 @@
 
 ### 入场判定（server/internal/api/admission.go）
 
-一条规则，三个执行点：`admitUser` 是唯一的"谁能进房、能否发布"决策函数（返回 `UID`/`Username`，identity 由调用方经 `rtc.Identity` 组），`joinToken`（凭证签发）、`/providers/ember/voice`（ember 验票入会）、`/providers/{alias}/w` POST（WHIP 推流拦截，统一走 `admitIngest`：令牌反查用户 + URL 取频道，进程内 bellows / 远端 bellows / livekit-ingress 三条路径共用，definitive 404/403/503 无 fail-open）都调它。远端 `cmd/bellows` 进程没有数据库也不回调：hearth 在反代前做完判定，把结果签成短时效通行证（grant）塞进请求头，远端只本地验签（与 LiveKit join token 同一模型）。新增入口或新增入场约束时**只改这里**，不得在别处散落 `CanJoin`/`IsGagged` 组合。ember 线走一次性入场票（60s、取出即删、防挪用），不做二次判定。
+一条规则，三个执行点：`admitUser` 是唯一的"谁能进房、能否发布"决策函数（返回 `UID`/`Username`，identity 由调用方经 `rtc.Identity` 组），`joinToken`（凭证签发）、`/providers/ember/voice`（ember 验票入会）、`/providers/{alias}/w` POST（WHIP 推流拦截，统一走 `admitIngest`：令牌反查用户 + URL 取频道，进程内 bellows / 远端 bellows / livekit-ingress / lkembed 反代 LiveKit 自带 WHIP 四条路径共用，definitive 404/403/503 无 fail-open）都调它。远端 `cmd/bellows` 进程没有数据库也不回调：hearth 在反代前做完判定，把结果签成短时效通行证（grant）塞进请求头，远端只本地验签（与 LiveKit join token 同一模型）。新增入口或新增入场约束时**只改这里**，不得在别处散落 `CanJoin`/`IsGagged` 组合。ember 线走一次性入场票（60s、取出即删、防挪用），不做二次判定。
 
 ### 动态配置（server/internal/api/dyncfg.go）
 
