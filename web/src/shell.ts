@@ -86,7 +86,7 @@ export function renderShell(root: HTMLElement, opts: ShellOptions = {}): Shell {
   prefsBus.addEventListener('prefs', onPrefs);
 
   root.querySelector('#side-gear')!.addEventListener('click', () => {
-    openSettings('account');
+    openSettings('av', { channel: opts.activeChannel });
   });
 
   function paintChannels(channels: Channel[]) {

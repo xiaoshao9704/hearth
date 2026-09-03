@@ -481,6 +481,10 @@ a:hover { color: var(--ember-soft); }
 .nav-row.on { background: var(--ember-tint); color: var(--ember); font-weight: 600; }
 .nav-row .badge-n { font-size: 11px; color: var(--text-3); }
 .nav-row.on .badge-n { color: var(--ember); }
+.nav-row > svg { color: var(--text-2); }
+.nav-row.on > svg { color: var(--ember); }
+.settings-nav .nav-group { padding: 12px 10px 4px; font-size: 10.5px; font-weight: 600; letter-spacing: 0.08em; color: var(--text-3); }
+.settings-nav .nav-group:first-child { padding-top: 2px; }
 .settings-nav .nav-foot { padding: 10px; border-top: 1px solid var(--line-soft); }
 .back-row {
   display: flex; align-items: center; gap: 9px; padding: 10px; border-radius: 8px;
@@ -619,6 +623,7 @@ a:hover { color: var(--ember-soft); }
   .nav-row { white-space: nowrap; padding: 8px 10px; }
   .nav-row span.label { font-size: 12px; }
   .settings-nav .nav-foot { border-top: 0; margin-left: auto; }
+  .settings-nav .nav-group { display: none; }
   .back-row .back-label { display: none; }
   .settings-body { padding: 16px 14px; }
   .video-grid.spotlight { flex-direction: column; }

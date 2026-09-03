@@ -185,3 +185,10 @@ export function pwBarsHtml(score: number): string {
   const cls = score <= 1 ? 'bad' : score === 2 ? 'mid' : 'good';
   return Array.from({ length: 4 }, (_, i) => `<div class="${i < score ? cls : ''}"></div>`).join('');
 }
+
+// 把一段 HTML 变成节点：Solid 视图里挂 icon()/avatarHtml() 这类字符串产物用
+export function el(html: string): Element {
+  const t = document.createElement('template');
+  t.innerHTML = html;
+  return t.content.firstElementChild!;
+}

@@ -1,5 +1,6 @@
-// 设置（全屏接管浮层）：账户 / 外观 / 语音与视频 / 投屏画质 / 推流 / 我的设备。
-// 以浮层形式挂在 body 上，房间内打开不会断开通话；偏好改动经 prefsBus 通知房间热应用。
+// 设置浮层的六个「个人」pane：账户 / 外观 / 语音与视频 / 投屏画质 / 推流 / 我的设备。
+// 仍是命令式渲染（innerHTML + 事件绑定），由 settings.tsx 的骨架按需挂进容器；
+// 有后台资源的 pane（语音与视频的电平表/预览）返回清理函数，切页时由骨架调用。
 import {
   clearSession,
   deleteMyDevice,
@@ -28,116 +29,48 @@ import { getTheme, setTheme } from '../theme';
 import type { Theme } from '../theme';
 import { avatarHtml, copyText, esc, icon, pwBarsHtml, pwScore, slashIcon, timeAgo, toast } from '../ui';
 
-type Pane = 'account' | 'appearance' | 'av' | 'screen' | 'stream' | 'devices';
+export type PersonalPane = 'av' | 'screen' | 'stream' | 'devices' | 'account' | 'appearance';
 
-const PANES: { id: Pane; label: string; icon: string; sub: string }[] = [
-  { id: 'account', label: '账户', icon: 'user', sub: '用户名、密码与登录状态' },
-  { id: 'appearance', label: '外观', icon: 'moon', sub: '浅色 / 深色 / 跟随系统' },
+export const PERSONAL_PANES: { id: PersonalPane; label: string; icon: string; sub: string }[] = [
   { id: 'av', label: '语音与视频', icon: 'mic', sub: '输入输出设备与处理链' },
   { id: 'screen', label: '投屏画质', icon: 'screen', sub: '分辨率、帧率与码率联动' },
   { id: 'stream', label: '推流', icon: 'stream', sub: 'OBS 的 WHIP 地址与令牌' },
   { id: 'devices', label: '我的设备', icon: 'device', sub: '同账号在线的设备' },
+  { id: 'account', label: '账户', icon: 'user', sub: '用户名、密码与登录状态' },
+  { id: 'appearance', label: '外观', icon: 'moon', sub: '浅色 / 深色 / 跟随系统' },
 ];
 
-let overlay: HTMLDivElement | null = null;
-let cleanupPane: (() => void) | null = null;
-
-export function openSettings(pane: Pane = 'account', context?: { backLabel?: string }) {
-  if (overlay) closeSettings();
-  overlay = document.createElement('div');
-  overlay.className = 'settings-overlay';
-  document.body.appendChild(overlay);
-  const backLabel = context?.backLabel ?? '返回';
-  renderFrame(overlay, pane, backLabel);
+export interface PaneHost {
+  close(): void; // 退出登录等需要关掉整个浮层
+  go(pane: PersonalPane): void; // pane 间跳转（投屏画质 → 推流）
 }
 
-export function closeSettings() {
-  cleanupPane?.();
-  cleanupPane = null;
-  overlay?.remove();
-  overlay = null;
-}
-
-function renderFrame(root: HTMLDivElement, pane: Pane, backLabel: string) {
-  const meta = PANES.find((p) => p.id === pane)!;
-  root.innerHTML = `
-    <div class="settings-nav">
-      <div class="nav-head">设置</div>
-      <div class="nav-body">
-        ${PANES.map(
-          (p) => `
-          <button class="hit nav-row ${p.id === pane ? 'on' : ''}" data-pane="${p.id}">
-            ${icon(p.icon, 16, p.id === pane ? 'var(--ember)' : 'var(--text-2)', 1.6)}
-            <span class="label" style="flex-grow:1;text-align:left">${p.label}</span>
-          </button>`,
-        ).join('')}
-      </div>
-      <div class="nav-foot" style="display:flex;flex-direction:column;gap:8px">
-        ${
-          getUser()?.is_admin
-            ? `<button class="hit back-row" id="settings-admin" style="width:100%;border-color:var(--ember-line);background:var(--ember-weak)">
-                 ${icon('shield', 15, 'var(--ember)', 1.6)}
-                 <span class="back-label" style="flex-grow:1;text-align:left;color:var(--ember)">管理后台</span>
-               </button>`
-            : ''
-        }
-        <button class="hit back-row" id="settings-back" style="width:100%">
-          ${icon('back', 15, 'var(--text-1)')}
-          <span class="back-label" style="flex-grow:1;text-align:left">${esc(backLabel)}</span>
-        </button>
-      </div>
-    </div>
-    <div class="settings-main">
-      <header class="topbar">
-        <h1>${meta.label}</h1>
-        <span class="sub">${meta.sub}</span>
-        <div class="spacer"></div>
-        <button class="hit btn btn-icon" id="settings-close">${icon('close', 16, 'var(--text-1)', 1.8)}</button>
-      </header>
-      <div class="settings-body" id="pane-body"></div>
-    </div>
-  `;
-
-  root.querySelectorAll<HTMLButtonElement>('[data-pane]').forEach((btn) => {
-    btn.addEventListener('click', () => {
-      cleanupPane?.();
-      cleanupPane = null;
-      renderFrame(root, btn.dataset.pane as Pane, backLabel);
-    });
-  });
-  root.querySelector('#settings-back')!.addEventListener('click', closeSettings);
-  root.querySelector('#settings-close')!.addEventListener('click', closeSettings);
-  root.querySelector('#settings-admin')?.addEventListener('click', () => {
-    closeSettings();
-    location.hash = '#/admin';
-  });
-
-  const body = root.querySelector<HTMLDivElement>('#pane-body')!;
+// 把 pane 渲染进 body，返回清理函数（没有后台资源的 pane 返回 undefined）
+export function renderPane(body: HTMLElement, pane: PersonalPane, host: PaneHost): (() => void) | undefined {
   switch (pane) {
     case 'account':
-      renderAccount(body);
-      break;
+      renderAccount(body, host.close);
+      return;
     case 'appearance':
       renderAppearance(body);
-      break;
+      return;
     case 'av':
-      renderAV(body);
-      break;
+      return renderAV(body);
     case 'screen':
-      renderScreen(body, () => renderFrame(root, 'stream', backLabel));
-      break;
+      renderScreen(body, () => host.go('stream'));
+      return;
     case 'stream':
       renderStream(body);
-      break;
+      return;
     case 'devices':
       renderDevices(body);
-      break;
+      return;
   }
 }
 
 // ---- 账户 ----
 
-function renderAccount(body: HTMLElement) {
+function renderAccount(body: HTMLElement, close: () => void) {
   const user = getUser();
   body.innerHTML = `
     <div class="pane-col pane-narrow">
@@ -273,7 +206,7 @@ function renderAccount(body: HTMLElement) {
     } catch {
       clearSession();
     }
-    closeSettings();
+    close();
     location.hash = '#/login';
   });
 }
@@ -329,7 +262,7 @@ async function enumerate(kind: MediaDeviceKind): Promise<MediaDeviceOpt[]> {
   }
 }
 
-function renderAV(body: HTMLElement) {
+function renderAV(body: HTMLElement): () => void {
   const prefs = loadPrefs();
   let openPicker = '';
   let micStream: MediaStream | null = null;
@@ -653,7 +586,7 @@ function renderAV(body: HTMLElement) {
   void startMeter();
   void startCamPreview();
 
-  cleanupPane = () => {
+  return () => {
     stopMeter();
     stopCam();
   };

@@ -46,7 +46,8 @@
 ### 前端（web/）
 
 - 房间页是 Solid（`views/room.tsx`）：状态一律走信号/派生 memo，**禁止**引入第二真相源（手工同步的布尔副本）；引擎产的媒体元素是命令式节点，用 ref 挂载不重建。
-- 其余视图保持 vanilla TS；vite-plugin-solid 只处理 `.tsx`。
+- 设置浮层骨架（`views/settings.tsx`）与频道管理（`views/manage.tsx`）也是 Solid；设置的六个个人 pane 暂留命令式渲染（`settings-panes.ts`，由骨架挂进容器、切页调清理函数），逐个迁移即可。一次性渲染的轻页面（shell/lobby/login/join）保持 vanilla TS；vite-plugin-solid 只处理 `.tsx`。
+- 设置的三个维度：个人（跟账号/本机走，即改即存）、频道（房主视角，落库即生效、每次操作 toast）、服务器（管理后台 `#/admin`，浮层里只放跳转）。所有齿轮入口都开同一个浮层，只是落点不同；浮层按 `channel` 上下文自查房主决定是否出「频道」分区，入口不必区分谁是房主。
 - CSS 统一在 `src/style.css`，类名复用既有设计系统（ember 主题、三态明暗），选择器注意特异性（button 重置用零特异性 `:where`）。
 - 引擎抽象 `engine/types.ts`：新内核实现 `AVEngine` 并在 `engine/index.ts` 注册动态导入（保持代码分割）。
 

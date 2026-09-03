@@ -15,7 +15,7 @@ import { createEngine } from '../engine';
 import type { AVEngine, EPart, EngineCallbacks, TrackSource, VideoStats } from '../engine/types';
 import { encoderIsHw, loadPrefs, prefsBus, savePrefs } from '../prefs';
 import { menuButtonHtml, renderShell, wireMenuButton } from '../shell';
-import { avatarHtml, esc, fmtClock, icon, licon, micIcon, slashIcon, toast } from '../ui';
+import { avatarHtml, el, esc, fmtClock, icon, licon, micIcon, slashIcon, toast } from '../ui';
 import { openSettings } from './settings';
 
 // iOS Safari 的私有全屏 API（iPhone 仅 video 元素可用）
@@ -60,13 +60,6 @@ interface AudioEntry {
 }
 
 type TileEntry = VideoEntry | AudioEntry;
-
-// ui.ts 的图标/头像返回 HTML 字符串（内容可信：路径常量 + 已转义的名字首字母），转成真实节点给 JSX 插入
-function el(html: string): Element {
-  const t = document.createElement('template');
-  t.innerHTML = html;
-  return t.content.firstElementChild!;
-}
 
 export async function renderRoom(root: HTMLElement, channel: string) {
   const prefs = loadPrefs();
@@ -117,6 +110,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
   const [chatReady, setChatReady] = createSignal(false); // 输入框非空 → 发送按钮点亮
   const [chatPlaceholder, setChatPlaceholder] = createSignal(`发消息到 #${channel}`);
   const [isOwnerSig, setIsOwnerSig] = createSignal(false);
+  const settingsCtx = { backLabel: `返回 ${channel}`, channel }; // 浮层按频道自查房主，决定是否出「频道」分区
   const [ownerName, setOwnerName] = createSignal('');
 
   // DOM ref（引擎产的命令式元素挂载点等）
@@ -1126,8 +1120,8 @@ export async function renderRoom(root: HTMLElement, channel: string) {
           <button
             class="hit btn btn-icon"
             classList={{ hidden: !isOwnerSig() }}
-            title="频道管理（新标签打开，不离开房间）"
-            onClick={() => window.open(`#/manage/${encodeURIComponent(channel)}`, '_blank')}
+            title="频道管理"
+            onClick={() => openSettings('channel', settingsCtx)}
           >
             {el(icon('shield', 15, 'var(--text-1)', 1.6))}
           </button>
@@ -1233,7 +1227,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
                   {el(icon('screen', 17, 'currentColor'))}
                   <span class="pill-label">{screenOn() ? '投屏中' : '投屏'}</span>
                 </button>
-                <button class="hit ctl-square" title="投屏画质" onClick={() => openSettings('screen', { backLabel: `返回 ${channel}` })}>
+                <button class="hit ctl-square" title="投屏画质" onClick={() => openSettings('screen', settingsCtx)}>
                   {el(icon('sliders', 16, 'var(--text-1)', 1.6))}
                 </button>
               </div>
@@ -1258,7 +1252,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
                     {unread() > 99 ? '99+' : unread()}
                   </span>
                 </button>
-                <button class="hit ctl-square" title="设置" onClick={() => openSettings('devices', { backLabel: `返回 ${channel}` })}>
+                <button class="hit ctl-square" title="设置" onClick={() => openSettings('av', settingsCtx)}>
                   {el(icon('gear', 17, 'var(--text-1)'))}
                 </button>
                 <button
