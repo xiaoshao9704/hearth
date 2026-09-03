@@ -1,6 +1,10 @@
 # 计划：三档自包含镜像（方案 A）与后续演进
 
-状态：已落地（2026-09-01）。执行中与原文的偏差：
+状态：**已退役（2026-09-04）**。内嵌 LiveKit 改为进程内嵌入补丁式 fork（`plan-livekit-embed.md`，内建实例 `lkembed`，
+`stage_provider` 选中即热启动，无需外部子进程），本文档描述的「拉外部 livekit/redis/ingress 子进程」形态（`Dockerfile.aio`、
+`server/cmd/aioinit`）已删除，`-livekit`/`-full` 镜像 tag 只在退役后的第一个版本里保留为主镜像的别名。本文档保留作历史记录。
+
+以下为原文，已落地（2026-09-01）时的执行记录。执行中与原文的偏差：
 
 - `Dockerfile.aio.dockerignore` 的 `!out/aioinit-linux-*` 行在落盘时已补齐，第 1 步无需执行。
 - writeIfAbsent 语义改为 **env 权威**：`livekit.yaml`/`ingress.yaml` 每次重启按环境变量重生成（手改不保留），密钥仍只持久化 `keys.env`。
