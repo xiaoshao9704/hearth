@@ -83,6 +83,7 @@ func (a *API) EnsureStageKernel(ctx context.Context) {
 		srv := a.embedSrv
 		a.embedSrv = nil
 		srv.Stop()
+		a.registerStageAnnouncePort(0) // 撤销登记：快照不再回显舞台端口的映射结果
 		return
 	}
 	key, secret, err := a.ensureEmbedKeys(ctx)
@@ -90,9 +91,10 @@ func (a *API) EnsureStageKernel(ctx context.Context) {
 		log.Printf("进程内 LiveKit 密钥落库失败，舞台线未启动: %v", err)
 		return
 	}
+	udpPort := dynPort(a.dynVal(ctx, "lkembed_udp_port"))
 	srv, err := livekitembed.Start(ctx, livekitembed.Options{
 		HTTPPort:    dynPort(a.dynVal(ctx, "lkembed_port")),
-		UDPPort:     dynPort(a.dynVal(ctx, "lkembed_udp_port")),
+		UDPPort:     udpPort,
 		TCPPort:     dynPort(a.dynVal(ctx, "lkembed_tcp_port")),
 		APIKey:      key,
 		APISecret:   secret,
@@ -104,6 +106,19 @@ func (a *API) EnsureStageKernel(ctx context.Context) {
 		return
 	}
 	a.embedSrv = srv
+	// 显式登记舞台 UDP 端口：LiveKit 自己建 PeerConnection、不经过 ember 的 Announce()，
+	// 不登记的话 Announcer 要等语音线出过一条 SDP 才知道有个端口需要查映射（见
+	// lite.Announcer 的 registered 字段注释），语音线一次没用过时舞台端口的映射结果
+	// 就进不了 stageExternalIPs 的快照。
+	a.registerStageAnnouncePort(udpPort)
+}
+
+// registerStageAnnouncePort 见 EnsureStageKernel 调用处的注释；a.ember 恒非空（New 里已建），
+// 这里仍判空防御式编程，避免测试或未来重构漏初始化时 panic。
+func (a *API) registerStageAnnouncePort(port int) {
+	if a.ember != nil {
+		a.ember.RegisterAnnouncePort(AliasLkembed, port)
+	}
 }
 
 // StopStageKernel 进程退出时收尾。
@@ -112,6 +127,7 @@ func (a *API) StopStageKernel() {
 	srv := a.embedSrv
 	a.embedSrv = nil
 	a.embedMu.Unlock()
+	a.registerStageAnnouncePort(0)
 	if srv != nil {
 		srv.Stop()
 	}
