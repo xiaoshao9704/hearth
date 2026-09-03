@@ -1,6 +1,8 @@
 package portmap
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -222,6 +224,131 @@ func localAddrFor(loc *url.URL) (netip.Addr, error) {
 	return netip.ParseAddr(host)
 }
 
+// ssdpV6Group SSDP 的 IPv6 组播组（链路本地范围）。
+var ssdpV6Group = netip.MustParseAddr("ff02::c")
+
+// ssdpV6Timeout 每个 ST 等应答的时长，与 MX 配套；做成变量只为单测缩短等待。
+var ssdpV6Timeout = 1500 * time.Millisecond
+
+// v6SearchTargets v6 pinhole 是 IGDv2 的能力，先问 v2；有的设备只应答 v1 的 ST，
+// 描述文档里却照样带 WANIPv6FirewallControl，所以再问一次 v1。
+var v6SearchTargets = []string{
+	"urn:schemas-upnp-org:device:InternetGatewayDevice:2",
+	"urn:schemas-upnp-org:device:InternetGatewayDevice:1",
+}
+
+// ssdpSearchV6 走 IPv6 组播做 SSDP 发现，返回设备描述 URL 与其中的网关地址。
+// v6 pinhole 不能复用 v4 的发现结果：miniupnpd 的 secure_mode 只允许给「SOAP 请求的源地址」
+// 开洞，走 v4 通道时网关看到的 v6 客户端地址是 ::，AddPinhole 一律 606。而 v6 应答里的
+// LOCATION 用的是网关自己的 GUA——这也是取网关 GUA 唯一可靠的来源：默认路由的下一跳
+// 通常是链路本地地址，按前缀拼 ::1 只是猜。
+func ssdpSearchV6(ctx context.Context) (*url.URL, netip.Addr, error) {
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return nil, netip.Addr{}, err
+	}
+	for _, ifi := range ifaces {
+		if ifi.Flags&net.FlagUp == 0 || ifi.Flags&net.FlagMulticast == 0 {
+			continue
+		}
+		src, ok := ifaceGUA(ifi)
+		if !ok {
+			continue // 没有 GUA 的网卡既没有要放行的候选，也当不了源地址
+		}
+		// 目的地址带 zone：链路本地范围的组播靠 scope id 选出口网卡，省掉 IPV6_MULTICAST_IF。
+		dst := netip.AddrPortFrom(ssdpV6Group.WithZone(ifi.Name), uint16(ssdpPort))
+		loc, gw, err := ssdpSearchV6From(ctx, src, dst)
+		if err == nil {
+			return loc, gw, nil
+		}
+		if ctx.Err() != nil {
+			break
+		}
+	}
+	return nil, netip.Addr{}, ErrUnsupported
+}
+
+// ssdpSearchV6From 从 src 发一轮 M-SEARCH 到 dst，取第一条 host 可路由的 LOCATION。
+// 用无连接 socket 而不是 DialUDP：应答由网关从它的链路本地地址发回，连接态 socket
+// 会把它当成「不是对端」丢掉。
+func ssdpSearchV6From(ctx context.Context, src netip.Addr, dst netip.AddrPort) (*url.URL, netip.Addr, error) {
+	conn, err := net.ListenUDP("udp6", &net.UDPAddr{IP: src.AsSlice(), Zone: src.Zone()})
+	if err != nil {
+		return nil, netip.Addr{}, err
+	}
+	defer conn.Close()
+
+	host := netip.AddrPortFrom(dst.Addr().WithZone(""), dst.Port()).String() // HOST 头不带 zone
+	buf := make([]byte, 2048)
+	for _, st := range v6SearchTargets {
+		if ctx.Err() != nil {
+			return nil, netip.Addr{}, ctx.Err()
+		}
+		req := "M-SEARCH * HTTP/1.1\r\nHOST: " + host + "\r\nMAN: \"ssdp:discover\"\r\nMX: 1\r\nST: " + st + "\r\n\r\n"
+		if _, err := conn.WriteToUDP([]byte(req), net.UDPAddrFromAddrPort(dst)); err != nil {
+			continue
+		}
+		deadline := time.Now().Add(ssdpV6Timeout)
+		if d, ok := ctx.Deadline(); ok && d.Before(deadline) {
+			deadline = d
+		}
+		if err := conn.SetReadDeadline(deadline); err != nil {
+			return nil, netip.Addr{}, err
+		}
+		for {
+			n, _, err := conn.ReadFromUDP(buf)
+			if err != nil {
+				break // 读超时：换下一个 ST
+			}
+			if loc, gw, ok := ssdpV6Location(buf[:n]); ok {
+				return loc, gw, nil
+			}
+		}
+	}
+	return nil, netip.Addr{}, ErrUnsupported
+}
+
+// ssdpV6Location 解析一条 SSDP 应答，取 LOCATION 与其中的网关地址。只认可路由的 v6 host：
+// 链路本地/ULA 的描述 URL 与「源地址是 GUA」的 SOAP 请求配不成对，拿到了也开不成洞。
+func ssdpV6Location(b []byte) (*url.URL, netip.Addr, bool) {
+	resp, err := http.ReadResponse(bufio.NewReader(bytes.NewReader(b)), nil)
+	if err != nil {
+		return nil, netip.Addr{}, false
+	}
+	resp.Body.Close()
+	loc, err := url.Parse(resp.Header.Get("LOCATION"))
+	if err != nil || loc.Host == "" {
+		return nil, netip.Addr{}, false
+	}
+	gw, err := netip.ParseAddr(loc.Hostname())
+	if err != nil || !gw.Is6() || gw.Is4In6() || gw.IsLinkLocalUnicast() || gw.IsPrivate() {
+		return nil, netip.Addr{}, false
+	}
+	return loc, gw, true
+}
+
+// ifaceGUA 取网卡上第一个 GUA。
+func ifaceGUA(ifi net.Interface) (netip.Addr, bool) {
+	addrs, err := ifi.Addrs()
+	if err != nil {
+		return netip.Addr{}, false
+	}
+	for _, a := range addrs {
+		n, ok := a.(*net.IPNet)
+		if !ok {
+			continue
+		}
+		ip, ok := netip.AddrFromSlice(n.IP)
+		if !ok {
+			continue
+		}
+		if ip = ip.Unmap(); isGlobalUnicastV6(ip) {
+			return ip, true
+		}
+	}
+	return netip.Addr{}, false
+}
+
 // upnp6NoSuchEntry WANIPv6FirewallControl 的 704 NoSuchEntry：UniqueID 已不存在。
 const upnp6NoSuchEntry = 704
 
@@ -235,25 +362,74 @@ func upnpFaultCode(err error) int {
 }
 
 // upnp6Client 用 IGDv2 的 WANIPv6FirewallControl:1 开 v6 防火墙 pinhole。
-// 不依赖网关 v6 地址（走 SOAP，是最稳的一条）；续租优先 UpdatePinhole，报 704
-// unknown id 就重新 AddPinhole。ids 按 (协议, 端口, GUA) 存 UniqueID，供续租/删除认领。
+// 续租优先 UpdatePinhole，报 704 unknown id 就重新 AddPinhole；ids 按 (协议, 端口, GUA)
+// 存 UniqueID，供续租/删除认领。bound 是按被放行的 GUA 绑好出站源地址的客户端副本。
 type upnp6Client struct {
 	fw *internetgateway2.WANIPv6FirewallControl1
 
-	mu  sync.Mutex
-	ids map[string]uint16
+	mu    sync.Mutex
+	bound map[netip.Addr]*internetgateway2.WANIPv6FirewallControl1
+	ids   map[string]uint16
 }
 
 func newUPnP6Client(fw *internetgateway2.WANIPv6FirewallControl1) *upnp6Client {
-	return &upnp6Client{fw: fw, ids: make(map[string]uint16)}
+	return &upnp6Client{
+		fw:    fw,
+		bound: make(map[netip.Addr]*internetgateway2.WANIPv6FirewallControl1),
+		ids:   make(map[string]uint16),
+	}
 }
 
-// discoverUPnP6 发现暴露 WANIPv6FirewallControl:1 的 IGD（IGDv2 才有）。
-func discoverUPnP6(ctx context.Context) (pinholeClient, error) {
-	if clients, _, err := internetgateway2.NewWANIPv6FirewallControl1ClientsCtx(ctx); err == nil && len(clients) > 0 {
-		return newUPnP6Client(clients[0]), nil
+// clientFor 取一份把 SOAP 出站源地址绑到 gua 的客户端副本：secure_mode 的网关要求
+// AddPinhole 的 InternalClient 就是请求的源地址，多 GUA（临时/隐私地址）时不绑定
+// 会由内核任选源地址，于是给哪个地址开洞就不由我们说了算。副本按 gua 缓存，同一条
+// 放行的 Add/Update/Delete 都从同一个源发出。
+func (u *upnp6Client) clientFor(gua netip.Addr) *internetgateway2.WANIPv6FirewallControl1 {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if c, ok := u.bound[gua]; ok {
+		return c
 	}
-	return nil, ErrUnsupported
+	cp := *u.fw
+	sc := *cp.SOAPClient
+	sc.HTTPClient.Transport = &http.Transport{DialContext: dialFrom(gua)}
+	cp.SOAPClient = &sc
+	u.bound[gua] = &cp
+	return &cp
+}
+
+// dialFrom 把源地址绑到 addr 的拨号器；绑不上就退回不绑定（地址可能刚被系统撤销，
+// 或描述 URL 与它不同族）——尽力而为，能不能开洞交给网关裁决。
+func dialFrom(addr netip.Addr) func(context.Context, string, string) (net.Conn, error) {
+	return func(ctx context.Context, network, address string) (net.Conn, error) {
+		bound := &net.Dialer{LocalAddr: &net.TCPAddr{IP: addr.AsSlice()}}
+		if conn, err := bound.DialContext(ctx, network, address); err == nil {
+			return conn, nil
+		}
+		var plain net.Dialer
+		return plain.DialContext(ctx, network, address)
+	}
+}
+
+// discoverUPnP6 建 v6 pinhole 客户端。loc 是已发现的设备描述 URL（v6 SSDP 的成果，
+// 见 ssdpSearchV6），为空则自己搜一次。必须走 v6 URL：SOAP 从 v4 通道发过去时
+// secure_mode 的网关看到的客户端 v6 地址是 ::，AddPinhole 一律 606。
+func discoverUPnP6(ctx context.Context, loc *url.URL) (pinholeClient, error) {
+	if loc == nil {
+		var err error
+		if loc, _, err = ssdpSearchV6(ctx); err != nil {
+			return nil, err
+		}
+	}
+	root, err := goupnp.DeviceByURLCtx(ctx, loc)
+	if err != nil {
+		return nil, err
+	}
+	clients, err := internetgateway2.NewWANIPv6FirewallControl1ClientsFromRootDevice(root, loc)
+	if err != nil || len(clients) == 0 {
+		return nil, ErrUnsupported // 设备以 IGDv1 身份宣告或 v6 功能被禁时就没有这个服务
+	}
+	return newUPnP6Client(clients[0]), nil
 }
 
 func (u *upnp6Client) Method() string { return "upnp6" }
@@ -271,7 +447,7 @@ func (u *upnp6Client) Open(ctx context.Context, proto string, port int, gua neti
 	u.mu.Unlock()
 	if have {
 		// 续租：更新已有 pinhole 的租期，网关才不会每轮换 UniqueID、堆满 pinhole 空间。
-		err := u.fw.UpdatePinholeCtx(ctx, id, seconds)
+		err := u.clientFor(gua).UpdatePinholeCtx(ctx, id, seconds)
 		if err == nil {
 			return pinhole{proto: proto, port: port, gua: gua, method: "upnp6", id: id, hasID: true}, nil
 		}
@@ -285,7 +461,7 @@ func (u *upnp6Client) Open(ctx context.Context, proto string, port int, gua neti
 	}
 
 	// RemoteHost 空 + RemotePort 0 = 任意源；InternalClient 是本机 GUA、外部端口 == 内部端口。
-	id, err = u.fw.AddPinholeCtx(ctx, "", 0, gua.String(), uint16(port), uint16(protoNum), seconds)
+	id, err = u.clientFor(gua).AddPinholeCtx(ctx, "", 0, gua.String(), uint16(port), uint16(protoNum), seconds)
 	if err != nil {
 		return pinhole{}, classifyUPnPError(err)
 	}
@@ -299,7 +475,7 @@ func (u *upnp6Client) Close(ctx context.Context, h pinhole) error {
 	u.mu.Lock()
 	delete(u.ids, pinNonceKey(h.proto, h.port, h.gua))
 	u.mu.Unlock()
-	err := u.fw.DeletePinholeCtx(ctx, h.id)
+	err := u.clientFor(h.gua).DeletePinholeCtx(ctx, h.id)
 	if err == nil || upnpFaultCode(err) == upnp6NoSuchEntry {
 		return nil // 已不存在视为已删除
 	}

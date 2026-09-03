@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/netip"
+	"net/url"
 	"os"
 	"strconv"
 	"testing"
@@ -30,11 +31,24 @@ func TestLivePinhole(t *testing.T) {
 	want := Want{Proto: "udp", Port: 47999, Desc: "hearth pinhole live test"}
 
 	var (
-		cl pinholeClient
-		h  pinhole
+		cl  pinholeClient
+		h   pinhole
+		loc *url.URL
 	)
-	if gw, ok := defaultGateway6(); ok {
-		t.Logf("默认路由 v6 下一跳是 GUA（is6=%v），先试 PCP-v6", gw.Is6())
+	gw, ok := defaultGateway6()
+	if !ok {
+		// 默认路由的下一跳多半是链路本地地址，取网关 GUA 只能靠 v6 SSDP。
+		var err error
+		if loc, gw, err = ssdpSearchV6(ctx); err != nil {
+			t.Logf("v6 SSDP 没找到 IGD（%v），两条路都缺网关 GUA", err)
+		} else {
+			t.Logf("v6 SSDP 发现 IGD：描述 URL 的 host 是可路由 v6 地址（is6=%v）", gw.Is6())
+		}
+	} else {
+		t.Log("默认路由 v6 下一跳就是 GUA，直接用它")
+	}
+
+	if gw.IsValid() {
 		pc := newPCPPinhole(netip.AddrPortFrom(gw, pcpPort))
 		if ph, err := pc.Open(ctx, want.Proto, want.Port, gua, time.Minute); err == nil {
 			cl, h = pc, ph
@@ -42,12 +56,10 @@ func TestLivePinhole(t *testing.T) {
 		} else {
 			t.Logf("PCP-v6 未成功（%v），退到 UPnP", err)
 		}
-	} else {
-		t.Log("默认路由 v6 下一跳不是 GUA（可能是链路本地），直接试 UPnP")
 	}
 
 	if cl == nil {
-		uc, err := discoverUPnP6(ctx)
+		uc, err := discoverUPnP6(ctx, loc)
 		if err != nil {
 			t.Fatalf("v6 pinhole 两条路都不可用: %v", err)
 		}
@@ -71,7 +83,10 @@ func TestLivePinhole(t *testing.T) {
 			time.Sleep(time.Duration(d) * time.Second)
 		}
 	}
-	if err := cl.Close(ctx, h); err != nil {
+	// 撤销另起 ctx：上面的 HOLD 可能已经把 ctx 等超时了。
+	cctx, ccancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer ccancel()
+	if err := cl.Close(cctx, h); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
 	t.Log("v6 pinhole 已撤销")

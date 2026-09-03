@@ -29,6 +29,7 @@ func startFakeGW6(t *testing.T, respond func(req []byte) []byte) *fakeGW {
 			req := bytes.Clone(buf[:n])
 			g.mu.Lock()
 			g.reqs = append(g.reqs, req)
+			g.srcs = append(g.srcs, from.AddrPort().Addr().Unmap())
 			g.mu.Unlock()
 			if resp := respond(req); resp != nil {
 				conn.WriteToUDP(resp, from)
@@ -167,5 +168,26 @@ func TestPCP6PinholeTimeoutIsUnsupported(t *testing.T) {
 	_, err := newPCPPinhole(gw.addr()).Open(context.Background(), "udp", 47700, testGUA, time.Hour)
 	if !errors.Is(err, ErrUnsupported) {
 		t.Fatalf("网关不响应应返回 ErrUnsupported，得到 %v", err)
+	}
+}
+
+// TestPCP6PinholeBindsSourceToGUA 报文必须从被放行的 GUA 发出：secure_mode 的网关按
+// 报文源地址判定「只能给自己开洞」。回环里能绑的本机地址只有 ::1，就拿它当这条放行的 GUA。
+func TestPCP6PinholeBindsSourceToGUA(t *testing.T) {
+	loop := netip.MustParseAddr("::1")
+	gw := startFakeGW6(t, func(req []byte) []byte {
+		return pcpMapResp(req, 0, 3600, binary.BigEndian.Uint16(req[42:44]), loop.String())
+	})
+	if _, err := newPCPPinhole(gw.addr()).Open(context.Background(), "udp", 47700, loop, time.Hour); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	gw.mu.Lock()
+	srcs := append([]netip.Addr(nil), gw.srcs...)
+	gw.mu.Unlock()
+	if len(srcs) != 1 {
+		t.Fatalf("请求数 = %d", len(srcs))
+	}
+	if srcs[0] != loop {
+		t.Fatalf("报文源地址 = %v，应绑定到被放行的 GUA %v", srcs[0], loop)
 	}
 }

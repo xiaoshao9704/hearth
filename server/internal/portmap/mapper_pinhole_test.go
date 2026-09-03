@@ -3,6 +3,7 @@ package portmap
 import (
 	"context"
 	"net/netip"
+	"net/url"
 	"sync"
 	"testing"
 	"time"
@@ -71,7 +72,9 @@ func mapperWithPinhole(v4 client, ph *fakePinholeClient, gua6 func() []netip.Add
 	m.gua6 = gua6
 	m.gateway6 = func() (netip.Addr, bool) { return netip.MustParseAddr("2001:db8::ffff"), true }
 	m.newPCP6 = func(netip.AddrPort) pinholeClient { return ph }
-	m.upnp6 = func(context.Context) (pinholeClient, error) { return nil, ErrUnsupported }
+	m.upnp6 = func(context.Context, *url.URL) (pinholeClient, error) { return nil, ErrUnsupported }
+	// v6 SSDP 默认不可用：单测不发真实组播。
+	m.ssdp6 = func(context.Context) (*url.URL, netip.Addr, error) { return nil, netip.Addr{}, ErrUnsupported }
 	return m
 }
 
@@ -161,7 +164,7 @@ func TestMapperPinholeDiscoveryFailureIsSilent(t *testing.T) {
 	m := mapperWithPinhole(okV4(), ph, func() []netip.Addr { return []netip.Addr{gua1} })
 	// 两条 v6 途径都不可用：没有网关 GUA + UPnP 不支持。
 	m.gateway6 = func() (netip.Addr, bool) { return netip.Addr{}, false }
-	m.upnp6 = func(context.Context) (pinholeClient, error) { return nil, ErrUnsupported }
+	m.upnp6 = func(context.Context, *url.URL) (pinholeClient, error) { return nil, ErrUnsupported }
 
 	runRounds(m, staticWants(httpWant), 1)
 

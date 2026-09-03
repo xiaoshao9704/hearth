@@ -313,7 +313,7 @@ func protoNumber(proto string) (byte, error) {
 
 // pcp6Client 用同一份 PCP MAP 报文做 IPv6 防火墙 pinhole：IPv6 下 MAP 就是「放行入站」
 // 而非端口翻译。与 v4 的两处区别——地址族走 udp6，且请求头 client IP 与 MAP 的建议外部
-// 地址都填本机 GUA（不是 dial 取到的源地址）：真机核实过 PCP 反欺骗要求报文源、头里的
+// 地址都填本机 GUA，且报文源地址也绑到它：真机核实过 PCP 反欺骗要求报文源、头里的
 // client IP、建议外部地址三者都是本机 GUA，网关才授予租约（发链路本地地址无回应）。
 // 没有 NAT-PMP 回落（那是 v4 专属）。
 type pcp6Client struct {
@@ -362,9 +362,14 @@ func (c *pcp6Client) exchange(ctx context.Context, proto string, port int, gua n
 	if err != nil {
 		return err
 	}
-	conn, err := net.DialUDP("udp6", nil, net.UDPAddrFromAddrPort(c.gw))
+	// 源地址绑到 gua：secure_mode 的网关按报文源地址判定「只能给自己开洞」，多 GUA
+	// （临时/隐私地址）时不绑定会由内核任选源地址，开出来的洞就不是这一条。绑不上
+	// （地址刚被系统撤销）退回不绑定，报文头里仍填 gua，授权与否交给网关裁决。
+	conn, err := net.DialUDP("udp6", &net.UDPAddr{IP: gua.AsSlice()}, net.UDPAddrFromAddrPort(c.gw))
 	if err != nil {
-		return err
+		if conn, err = net.DialUDP("udp6", nil, net.UDPAddrFromAddrPort(c.gw)); err != nil {
+			return err
+		}
 	}
 	defer conn.Close()
 

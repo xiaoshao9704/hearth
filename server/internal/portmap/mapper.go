@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net/netip"
+	"net/url"
 	"slices"
 	"strings"
 	"sync"
@@ -30,8 +31,9 @@ type Mapper struct {
 	hopFound hopDiscoverFunc // 级联时发现上游那一跳，见 chain.go
 	// v6 pinhole 侧的发现途径（与 v4 并列、互不影响，见 pinhole.go）。
 	gateway6 func() (netip.Addr, bool)
+	ssdp6    func(context.Context) (*url.URL, netip.Addr, error)
 	newPCP6  func(netip.AddrPort) pinholeClient
-	upnp6    func(context.Context) (pinholeClient, error)
+	upnp6    func(context.Context, *url.URL) (pinholeClient, error)
 	gua6     func() []netip.Addr
 	sleep    func(context.Context, time.Duration) bool
 	now      func() time.Time
@@ -62,6 +64,7 @@ func New() *Mapper {
 		upnp:     discoverUPnP,
 		hopFound: discoverHop,
 		gateway6: defaultGateway6,
+		ssdp6:    ssdpSearchV6,
 		newPCP6:  newPCPPinhole,
 		upnp6:    discoverUPnP6,
 		gua6:     globalUnicastV6,
@@ -308,10 +311,25 @@ func (m *Mapper) roundPinhole(ctx context.Context, ws []Want) time.Duration {
 }
 
 // discoverPinhole 发现并锁定 v6 pinhole 客户端，用一条真实 Open 当探测（与 pick 同思路）。
-// PCP-v6 优先（不依赖设备宣告版本）：拿到网关 GUA 就先试它，ErrUnsupported 或没有网关 GUA
-// 才退到 UPnP 的 WANIPv6FirewallControl。w/gua 是这条探测放行的目标。
+// 两条路都要能把请求发到网关的 GUA，来源顺序：默认路由的下一跳（是 GUA 才算数，常见的
+// 链路本地下一跳不可用）→ v6 SSDP 应答里 LOCATION 的 host。一轮至多搜一次，搜到的
+// LOCATION 顺手给 UPnP-v6 用，省掉第二次发现。
+// PCP-v6 优先（不依赖设备宣告哪个版本），ErrUnsupported 才退到 UPnP 的
+// WANIPv6FirewallControl。w/gua 是这条探测放行的目标。
 func (m *Mapper) discoverPinhole(ctx context.Context, w Want, gua netip.Addr) (pinholeClient, pinhole, error) {
-	if gw, ok := m.gateway6(); ok {
+	dctx, cancel := context.WithTimeout(ctx, upnpDiscoveryTimeout)
+	defer cancel()
+
+	var loc *url.URL
+	gw, ok := m.gateway6()
+	if !ok {
+		var err error
+		if loc, gw, err = m.ssdp6(dctx); err != nil {
+			return nil, pinhole{}, err
+		}
+		ok = gw.IsValid()
+	}
+	if ok {
 		pc := m.newPCP6(netip.AddrPortFrom(gw, pcpPort))
 		h, err := pc.Open(ctx, w.Proto, w.Port, gua, leaseDuration)
 		if !errors.Is(err, ErrUnsupported) {
@@ -321,13 +339,17 @@ func (m *Mapper) discoverPinhole(ctx context.Context, w Want, gua netip.Addr) (p
 			return nil, pinhole{}, ctx.Err()
 		}
 	}
-	uctx, cancel := context.WithTimeout(ctx, upnpDiscoveryTimeout)
-	defer cancel()
-	uc, err := m.upnp6(uctx)
+	if loc == nil {
+		var err error
+		if loc, _, err = m.ssdp6(dctx); err != nil {
+			return nil, pinhole{}, err
+		}
+	}
+	uc, err := m.upnp6(dctx, loc)
 	if err != nil {
 		return nil, pinhole{}, err
 	}
-	h, err := uc.Open(uctx, w.Proto, w.Port, gua, leaseDuration)
+	h, err := uc.Open(dctx, w.Proto, w.Port, gua, leaseDuration)
 	return uc, h, err
 }
 
@@ -442,8 +464,9 @@ func (m *Mapper) resetPinhole() {
 
 const detailNoV6 = "本机没有全局 IPv6 地址，无需放行 v6 入站"
 
-const detailNoGateway6 = "未发现支持 v6 pinhole 的网关：PCP 需要网关的 GUA（默认路由若指向链路本地地址则不可用），" +
-	"UPnP 需要 IGDv2 暴露 WANIPv6FirewallControl（常被以 IGDv1 身份宣告或单独禁用挡住）。"
+const detailNoGateway6 = "未发现支持 v6 pinhole 的网关：两条路都要把请求发到网关的 GUA，" +
+	"默认路由的下一跳若是链路本地地址就只能靠 v6 SSDP 取，而它没有应答（或应答里的描述 URL 不是可路由地址）；" +
+	"UPnP 侧还要 IGDv2 暴露 WANIPv6FirewallControl（常被以 IGDv1 身份宣告或单独禁用挡住）。"
 
 func detailPinholeOK(ps []Pinhole) string {
 	if len(ps) == 0 {

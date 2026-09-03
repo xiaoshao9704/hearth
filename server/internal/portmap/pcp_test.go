@@ -17,6 +17,7 @@ type fakeGW struct {
 	conn *net.UDPConn
 	mu   sync.Mutex
 	reqs [][]byte
+	srcs []netip.Addr // 每个请求的源地址，v6 侧验证源绑定用
 }
 
 func startFakeGW(t *testing.T, respond func(req []byte) []byte) *fakeGW {
@@ -36,6 +37,7 @@ func startFakeGW(t *testing.T, respond func(req []byte) []byte) *fakeGW {
 			req := bytes.Clone(buf[:n])
 			g.mu.Lock()
 			g.reqs = append(g.reqs, req)
+			g.srcs = append(g.srcs, from.AddrPort().Addr().Unmap())
 			g.mu.Unlock()
 			if resp := respond(req); resp != nil {
 				conn.WriteToUDP(resp, from)
