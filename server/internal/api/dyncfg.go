@@ -11,6 +11,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -52,7 +53,10 @@ var selectorEnv = map[string]string{
 //   - 选择器 env（VOICE/STAGE/INGEST_PROVIDER）：不再读取（迁移 v2 已把旧值一次性落库），
 //     提醒从部署侧删除；值是改名前残留（pion / ingest 的 livekit）时说明回落口径；
 //   - 选择器 DB 值是 "pion"：按未知值回落默认实例（voice→ember、ingest→bellows）；
-//   - pion_* 键：被忽略回落 ember_* 默认值。
+//   - pion_* 键：被忽略回落 ember_* 默认值；
+//   - EMBED_LIVEKIT/EMBED_INGRESS/回环 LIVEKIT_API_URL：aio 自包含镜像的内嵌子进程（aioinit 拉起
+//     livekit-server/redis/ingress）已退役，内嵌 LiveKit 并入本进程（内建实例 lkembed）；这三个
+//     env 是旧编排的残留，hearth 本体从未读取，只提醒改走管理后台。
 func (a *API) warnLegacyConfig(ctx context.Context) {
 	for name, env := range selectorEnv {
 		v := strings.TrimSpace(os.Getenv(env))
@@ -83,6 +87,18 @@ func (a *API) warnLegacyConfig(ctx context.Context) {
 		}
 		if strings.TrimSpace(v) != "" {
 			log.Printf("配置告警: %s/%s 已不再读取，请改用 %s（当前按默认值运行）", old.Env, old.Name, old.New)
+		}
+	}
+	for _, env := range []string{"EMBED_LIVEKIT", "EMBED_INGRESS"} {
+		if os.Getenv(env) != "" {
+			log.Printf("配置告警: %s 已不再生效（自包含镜像的内嵌子进程已退役），舞台线请在管理后台把「舞台内核」改选 lkembed", env)
+		}
+	}
+	if raw := strings.TrimSpace(os.Getenv("LIVEKIT_API_URL")); raw != "" {
+		if u, err := url.Parse(raw); err == nil {
+			if host := u.Hostname(); host == "127.0.0.1" || host == "localhost" || host == "::1" {
+				log.Printf("配置告警: LIVEKIT_API_URL=%s 指向本机回环，疑似旧自包含镜像内嵌 LiveKit 的残留配置（该子进程已退役）；需要舞台内核请在管理后台改选 lkembed（进程内自带，无需此环境变量），指向真正的外部 LiveKit 才需要保留它", raw)
+			}
 		}
 	}
 }

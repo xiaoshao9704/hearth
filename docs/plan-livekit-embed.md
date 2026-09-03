@@ -1,7 +1,8 @@
 # 计划：进程内嵌入 LiveKit（补丁式 fork，单二进制自打洞自宣告）
 
-状态：**路线 B，主线，待实施。2026-09-03。** 取代 `plan-stage-kernel.md` 的路线 A 成为舞台线的主路线；路线 A 降为备选，
-其文档保留。本计划自包含，实施会话读完即可开工，不需要本会话的其他上下文。
+状态：**路线 B，主线。第 1–3 步与第 7 步（收尾里与代码无冲突的部分）已完成；第 4–6 步（打洞真机验收、推流真机验收、`cmd/stage`
+远端形态）待做，需要真机。** 取代 `plan-stage-kernel.md` 的路线 A 成为舞台线的主路线；路线 A 降为备选，其文档保留。
+本计划自包含，实施会话读完即可开工，不需要本会话的其他上下文。
 
 ## 目标与判据
 
@@ -215,6 +216,10 @@ func (s *Server) Stop()                                       // service.Livekit
 6. **`cmd/stage`** 远端形态；arm64 小主机的 compose 从 livekit + bellows 两个服务换成一个 `stage`（备份旧 compose）；服务端侧不动。
 7. **收尾**：aio 的 `EMBED_LIVEKIT` 路径退役（`aioinit` 不再拉 livekit/redis）；README 架构图与部署段；CLAUDE.md 更新
    （内建实例多一个 `lkembed`、aio 不再拉子进程、`livekit_*` 命名空间说明）；`plan-stage-kernel.md` 状态行指向本计划。
+   ✅ **与代码无冲突的部分已完成**：`Dockerfile.aio`/`server/cmd/aioinit` 已删除，`-livekit`/`-full` 两档在 release.yml
+   里改成主镜像的过渡别名 tag（一个版本后移除）；`warnLegacyConfig` 加了 `EMBED_LIVEKIT`/`EMBED_INGRESS`/回环
+   `LIVEKIT_API_URL` 的残留提示；README/CLAUDE.md/`.env.example` 同步改写。`plan-stage-kernel.md` 状态行已在更早的提交里
+   指向本计划，不需要再动。
 
 第 1 到 3 步可以在一个 worktree 里连续做，第 4 步起需要真机。
 
