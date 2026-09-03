@@ -39,6 +39,9 @@ func ConfigKeys() []rtc.ConfigKey {
 	}
 }
 
+// setLoggerOnce 见 Start 里的用法：LiveKit 的全局 logger 只装一次。
+var setLoggerOnce sync.Once
+
 // startTimeout 是「监听起来并能应答 HTTP」的等待上限；超时按启动失败返回。
 const startTimeout = 20 * time.Second
 
@@ -89,9 +92,13 @@ func Start(ctx context.Context, o Options) (*Server, error) {
 	// 不用 config.InitLoggerFromConfig：它内部还会 slog.SetDefault，而那会连带把标准库
 	// log 的默认输出接到 LiveKit 的 zap 上——级别一压到 warn，hearth 自己的 log.Printf
 	// 就全被吞掉。这里只装 LiveKit 自己的 logger，不碰进程级默认。
-	if l, lerr := logger.NewZapLogger(&conf.Logging.Config); lerr == nil {
-		logger.SetLogger(l, "livekit")
-	}
+	// 只装一次：logger.SetLogger 写的是包级变量且无锁，重启舞台线时上一实例尚未散尽的
+	// goroutine 还在读它。日志配置在几次启动之间不变，装一次就够。
+	setLoggerOnce.Do(func() {
+		if l, lerr := logger.NewZapLogger(&conf.Logging.Config); lerr == nil {
+			logger.SetLogger(l, "livekit")
+		}
+	})
 	if err := conf.ValidateKeys(); err != nil {
 		return nil, fmt.Errorf("livekitembed: 密钥: %w", err)
 	}
