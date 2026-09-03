@@ -270,7 +270,12 @@ export function ChannelManage(p: { channel: string }) {
 
 // #/manage/<频道名> 直达页：套个头，内容与浮层分区同一个组件
 export function renderManage(root: HTMLElement, channel: string) {
+  // 挂在自己的宿主节点上：hashchange 时 route() 已把下一个视图画进 root，
+  // dispose 会清空所挂容器——直接挂 root 会把新视图一起擦掉
+  const host = document.createElement('div');
+  host.style.height = '100%';
   root.innerHTML = '';
+  root.appendChild(host);
   const dispose = render(
     () => (
       <div style="height:100%;display:flex;flex-direction:column;background:var(--bg-1)">
@@ -286,7 +291,7 @@ export function renderManage(root: HTMLElement, channel: string) {
         <ChannelManage channel={channel} />
       </div>
     ),
-    root,
+    host,
   );
   window.addEventListener('hashchange', dispose, { once: true });
 }
