@@ -23,7 +23,7 @@ import {
   listChannels,
 } from '../api';
 import type { AdminOverview, AdminUser, Channel, ConfigItem, Invite, ProviderField, ProviderInstance, ProviderType } from '../api';
-import { avatarHtml, copyText, icon, timeAgo, toast } from '../ui';
+import { avatarHtml, copyText, el, icon, timeAgo, toast } from '../ui';
 import { menuButtonHtml, wireMenuButton } from '../shell';
 
 type Tab = 'status' | 'config' | 'users' | 'rooms' | 'invites';
@@ -35,13 +35,6 @@ const NAV: { id: Tab; label: string; icon: string; sub: string }[] = [
   { id: 'rooms', label: '房间', icon: 'volume', sub: '频道、房主与可见性' },
   { id: 'invites', label: '邀请', icon: 'mail', sub: '生成有时效的注册链接' },
 ];
-
-// ui.ts 的图标/头像返回 HTML 字符串（内容可信：路径常量 + 已转义的名字首字母），转成真实节点给 JSX 插入
-function el(html: string): Element {
-  const t = document.createElement('template');
-  t.innerHTML = html;
-  return t.content.firstElementChild!;
-}
 
 // 各 tab 共用的「加载中 / 出错」占位
 function Placeholder(props: { err: string }) {
