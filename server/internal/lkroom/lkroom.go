@@ -4,6 +4,7 @@ package lkroom
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"time"
@@ -117,6 +118,12 @@ func (c *Client) RemoveParticipantsOf(ctx context.Context, room string, userID i
 // 其全部已发布轨道，且客户端无法自行重新发布（区别于仅静音轨道，后者客户端可自行取消）。
 // 权限是整体替换语义（见 auth.VideoGrant.UpdateFromPermission），故从参与者当前权限
 // （ParticipantInfo.Permission）出发只翻转 CanPublish，避免误清 CanSubscribe/CanPublishData 等。
+//
+// 推流设备（元数据 kind=ingest，WHIP 直推与 Bellows 转发都带这个标记）走另一条路：禁言
+// 直接把它移出房间。推流端没有信令通道，收走 CanPublish 会让 LiveKit 下架它已发布的全部
+// 轨道，而解禁时它不会、也无从重新发布——推流端一路显示正常，观众永久黑屏。移出则会立刻
+// 关掉推流端的 PeerConnection，推流软件按自己的重连策略重推；被禁言期间入场判定
+// （admitIngest）本就 403，解禁后重推即恢复。解禁对推流设备无事可做，跳过。
 // 该用户没有任何参与者在房间时返回 rtc.ErrNoParticipant。
 func (c *Client) MuteUserAudio(ctx context.Context, room string, userID int64, muted bool) error {
 	ctx = withRoom(ctx, room)
@@ -130,6 +137,18 @@ func (c *Client) MuteUserAudio(ctx context.Context, room string, userID int64, m
 			continue
 		}
 		found = true
+		if isIngest(p.Metadata) {
+			if !muted {
+				continue
+			}
+			if _, err := c.api.RemoveParticipant(ctx, &livekit.RoomParticipantIdentity{
+				Room:     room,
+				Identity: p.Identity,
+			}); err != nil {
+				return fmt.Errorf("移除推流参与者 %s 失败: %w", p.Identity, err)
+			}
+			continue
+		}
 		// p.Permission 是本响应新解码的对象，原地翻转安全；
 		// nil 兜底与进房令牌（lktoken.Sign）的默认授权一致。
 		perm := p.Permission
@@ -149,4 +168,14 @@ func (c *Client) MuteUserAudio(ctx context.Context, room string, userID int64, m
 		return rtc.ErrNoParticipant
 	}
 	return nil
+}
+
+// isIngest 参与者元数据是否标记为推流设备（rtc.Meta.Kind）。元数据由 hearth 组好下发，
+// 非 JSON 或无该字段一律按普通参与者处理。
+func isIngest(metadata string) bool {
+	var meta rtc.Meta
+	if json.Unmarshal([]byte(metadata), &meta) != nil {
+		return false
+	}
+	return meta.Kind == "ingest"
 }
