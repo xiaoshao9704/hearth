@@ -21,7 +21,7 @@ export async function renderLobby(root: HTMLElement) {
   shell.content.innerHTML = `
     <header class="topbar">
       ${menuButtonHtml()}
-      <h1>${greeting()}，${esc(user?.username ?? '')}</h1>
+      <h1 id="greet">${greeting()}，${esc(user?.username ?? '')}</h1>
       <div class="spacer"></div>
       ${user?.is_admin ? `<a class="hit btn btn-sm" href="#/admin">${icon('shield', 14, 'var(--text-1)', 1.6)} 管理后台</a>` : ''}
       <div class="status-chip mono"><span style="display:flex;align-items:center;gap:5px"><span class="ok-dot"></span>服务器在线</span></div>
@@ -47,6 +47,12 @@ export async function renderLobby(root: HTMLElement) {
     </div>
   `;
   wireMenuButton(root);
+
+  const greetEl = root.querySelector<HTMLHeadingElement>('#greet')!;
+  const onUser = () => {
+    greetEl.textContent = `${greeting()}，${getUser()?.username ?? ''}`;
+  };
+  window.addEventListener('hearth:user', onUser);
 
   root.querySelector('#tune-av')!.addEventListener('click', () => openSettings('av'));
 
@@ -120,6 +126,7 @@ export async function renderLobby(root: HTMLElement) {
     if (!root.isConnected || !isLobbyHash()) {
       clearInterval(timer);
       shell.destroy();
+      window.removeEventListener('hearth:user', onUser);
       return;
     }
     void paint();

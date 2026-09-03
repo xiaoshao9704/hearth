@@ -624,7 +624,7 @@ a:hover { color: var(--ember-soft); }
   .nav-row span.label { font-size: 12px; }
   .settings-nav .nav-foot { border-top: 0; margin-left: auto; }
   .settings-nav .nav-group { display: none; }
-  .back-row .back-label { display: none; }
+  .back-row .back-label { font-size: 12px; white-space: nowrap; }
   .settings-body { padding: 16px 14px; }
   .video-grid.spotlight { flex-direction: column; }
   .video-grid.spotlight .rail { width: 100%; flex-direction: row; overflow-x: auto; overflow-y: hidden; }

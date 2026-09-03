@@ -265,6 +265,7 @@ export async function listParticipants(channel: string): Promise<RoomParticipant
 export async function updateUsername(username: string): Promise<User> {
   const u = await req<User>('/api/account/username', { method: 'POST', body: { username } });
   localStorage.setItem(USER_KEY, JSON.stringify(u));
+  window.dispatchEvent(new CustomEvent('hearth:user'));
   return u;
 }
 

@@ -43,15 +43,15 @@ export function renderShell(root: HTMLElement, opts: ShellOptions = {}): Shell {
           <div class="conn-meta mono" id="conn-meta">进入频道后自动协商</div>
         </div>
         <div class="user-bar">
-          <div style="position:relative">
+          <div style="position:relative" id="side-avatar-wrap">
             ${avatarHtml(user?.username ?? '?', 'avatar')}
             <div class="presence-dot"></div>
           </div>
           <div class="who">
-            <div class="name">${esc(user?.username ?? '')}</div>
+            <div class="name" id="side-name">${esc(user?.username ?? '')}</div>
             <div class="meta mono">本机</div>
           </div>
-          <button class="hit mini-btn" id="side-mic" title="麦克风偏好"></button>
+          <button class="hit mini-btn" id="side-mic" title="麦克风偏好" style="${opts.activeChannel ? 'display:none' : ''}"></button>
           <button class="hit mini-btn boxed" id="side-gear" title="设置">${icon('gear', 16, 'var(--text-1)', 1.6)}</button>
         </div>
       </aside>
@@ -66,8 +66,18 @@ export function renderShell(root: HTMLElement, opts: ShellOptions = {}): Shell {
   const connTitle = root.querySelector<HTMLSpanElement>('#conn-title')!;
   const connMeta = root.querySelector<HTMLDivElement>('#conn-meta')!;
   const micBtn = root.querySelector<HTMLButtonElement>('#side-mic')!;
+  const avatarWrap = root.querySelector<HTMLDivElement>('#side-avatar-wrap')!;
+  const nameEl = root.querySelector<HTMLDivElement>('#side-name')!;
 
   root.querySelector('.nav-scrim')!.addEventListener('click', () => frame.classList.remove('nav-open'));
+
+  // 改用户名后立刻重画侧栏名字/头像
+  const onUser = () => {
+    const u = getUser();
+    nameEl.textContent = u?.username ?? '';
+    avatarWrap.innerHTML = `${avatarHtml(u?.username ?? '?', 'avatar')}<div class="presence-dot"></div>`;
+  };
+  window.addEventListener('hearth:user', onUser);
 
   // 麦克风偏好快捷开关（进房时按它决定是否自动开麦；房间页会同步）
   function paintMic() {
@@ -130,6 +140,7 @@ export function renderShell(root: HTMLElement, opts: ShellOptions = {}): Shell {
     refreshChannels,
     destroy() {
       prefsBus.removeEventListener('prefs', onPrefs);
+      window.removeEventListener('hearth:user', onUser);
     },
   };
 }

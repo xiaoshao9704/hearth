@@ -679,9 +679,6 @@ export async function renderRoom(root: HTMLElement, channel: string) {
     setMicOn((m) => !m);
     try {
       await voiceLine.engine.setMic(micOn());
-      const p = loadPrefs();
-      p.mic = micOn();
-      savePrefs(p);
     } catch (err) {
       if (micOn()) toast(captureErrorMsg('麦克风', err), 'bad');
       setMicOn((m) => !m);
@@ -715,8 +712,12 @@ export async function renderRoom(root: HTMLElement, channel: string) {
     setScreenOn((s) => !s);
     try {
       await eng.setScreen(screenOn());
-    } catch {
+    } catch (err) {
       setScreenOn((s) => !s); // 用户取消选择等情况回退
+      const name = (err as DOMException)?.name ?? '';
+      if (name !== 'NotAllowedError' && name !== 'AbortError') {
+        toast(`投屏失败：${(err as Error)?.message ?? name}`, 'bad');
+      }
     }
     refreshMeta();
   }
@@ -825,20 +826,20 @@ export async function renderRoom(root: HTMLElement, channel: string) {
       const entry = videoEntries().find((e) => e.key === `${id}:camera`);
       if (entry) entry.video.style.transform = loadPrefs().mirror ? 'scaleX(-1)' : '';
     }
-    if (what === 'mic' && loadPrefs().mic !== micOn()) {
-      void toggleMic();
-      return;
-    }
     if ((what === 'mic-device' || what === 'audio-chain') && micOn() && voiceLine.engine) {
       try {
         await voiceLine.engine.restartMic();
-      } catch {
+      } catch (err) {
         setMicOn(false);
+        toast(`麦克风重启失败，已闭麦：${(err as Error)?.message ?? ''}`, 'bad');
       }
     }
     if (what === 'cam-device' && cameraOn()) {
       const p = loadPrefs();
-      if (p.camDeviceId) void stageEngine()?.switchCamera(p.camDeviceId).catch(() => {});
+      if (p.camDeviceId)
+        void stageEngine()
+          ?.switchCamera(p.camDeviceId)
+          .catch((err) => toast(`切换摄像头失败：${(err as Error)?.message ?? ''}`, 'bad'));
     }
     if (what === 'screen' && screenOn()) applyScreenPrefsSoon();
   };
@@ -1195,7 +1196,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
               <div class="group">
                 <button class="hit ctl-pill" classList={{ on: micOn() }} onClick={() => void toggleMic()}>
                   {el(micIcon(17, !micOn(), 'currentColor'))}
-                  <span class="pill-label">{micOn() ? '麦克风' : '已静音'}</span>
+                  <span class="pill-label">{micOn() ? '麦克风' : '麦克风已关'}</span>
                   <Show when={micOn()}>
                     <span class="mic-vu">
                       <i ref={(elm) => (vuBarEl = elm)}></i>
@@ -1205,7 +1206,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
                 <button
                   class="hit ctl-square"
                   classList={{ danger: deafened() }}
-                  title="全体静音（只影响自己）"
+                  title="静音全部（只影响自己听到的）"
                   onClick={toggleDeaf}
                 >
                   {el(slashIcon('speaker', 17, deafened(), deafened() ? 'var(--red)' : 'currentColor'))}

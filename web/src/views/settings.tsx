@@ -36,6 +36,11 @@ export function closeSettings() {
 }
 
 function SettingsOverlay(p: { pane: Pane; ctx: SettingsContext }) {
+  const onKeydown = (ev: KeyboardEvent) => {
+    if (ev.key === 'Escape') closeSettings();
+  };
+  document.addEventListener('keydown', onKeydown);
+  onCleanup(() => document.removeEventListener('keydown', onKeydown));
   const [pane, setPane] = createSignal<Pane>(p.pane === 'channel' && !p.ctx.channel ? 'av' : p.pane);
   // 房主判定取服务端 channels.is_owner，浮层自己查：各入口只需报当前频道，不必区分谁是房主
   const [ownedChannel] = createResource(async () => {
@@ -97,6 +102,9 @@ function SettingsOverlay(p: { pane: Pane; ctx: SettingsContext }) {
         <header class="topbar">
           <h1>{meta().label}</h1>
           <span class="sub">{meta().sub}</span>
+          <Show when={pane() === 'av' || pane() === 'screen' || pane() === 'appearance'}>
+            <span class="tag tag-sage">改动立即保存并生效</span>
+          </Show>
           <div class="spacer"></div>
           <button class="hit btn btn-icon" onClick={closeSettings}>
             {el(icon('close', 16, 'var(--text-1)', 1.8))}

@@ -277,6 +277,13 @@ function renderAV(body: HTMLElement): () => void {
       <div style="display:flex;flex-direction:column;gap:16px">
         <div style="display:flex;flex-direction:column;gap:9px">
           <div class="section-label">麦克风</div>
+          <button class="hit card" id="auto-mic-row" style="display:flex;align-items:center;gap:12px;padding:13px 15px;width:100%;text-align:left">
+            <div style="flex-grow:1">
+              <div style="font-size:13px;font-weight:500">进房自动开麦</div>
+              <div style="font-size:11px;color:var(--text-2);margin-top:3px">下次进入频道时自动打开麦克风</div>
+            </div>
+            <div class="switch ${prefs.mic ? 'on' : ''}" id="auto-mic-switch"><div class="knob"></div></div>
+          </button>
           <div class="picker" id="picker-mic"></div>
           <div style="display:flex;align-items:center;gap:12px">
             <span style="font-size:11.5px;color:var(--text-2);width:46px">电平</span>
@@ -571,6 +578,13 @@ function renderAV(body: HTMLElement): () => void {
     save('volume');
   });
 
+  const autoMicSwitch = body.querySelector<HTMLDivElement>('#auto-mic-switch')!;
+  body.querySelector('#auto-mic-row')!.addEventListener('click', () => {
+    prefs.mic = !prefs.mic;
+    autoMicSwitch.classList.toggle('on', prefs.mic);
+    save('mic-auto');
+  });
+
   const mirrorSwitch = body.querySelector<HTMLDivElement>('#mirror-switch')!;
   body.querySelector('#mirror-row')!.addEventListener('click', () => {
     prefs.mirror = !prefs.mirror;
@@ -652,7 +666,10 @@ function renderScreen(body: HTMLElement, goStream: () => void) {
     body.querySelectorAll<HTMLButtonElement>('[data-res]').forEach((btn) => {
       btn.addEventListener('click', () => {
         const r = btn.dataset.res!;
-        if (r !== '720p' && r !== '1080p') return;
+        if (r !== '720p' && r !== '1080p') {
+          toast('浏览器投屏最高 1080p60，更高走 OBS 推流', '', 2600);
+          return;
+        }
         prefs.res = r;
         prefs.bitrate = autoBitrate(r, prefs.fps);
         prefs.bitrateAuto = true;
@@ -681,7 +698,10 @@ function renderScreen(body: HTMLElement, goStream: () => void) {
     body.querySelectorAll<HTMLButtonElement>('[data-fps]').forEach((btn) => {
       btn.addEventListener('click', () => {
         const f = Number(btn.dataset.fps);
-        if (!(FPS_BY_RES[prefs.res] ?? []).includes(f)) return;
+        if (!(FPS_BY_RES[prefs.res] ?? []).includes(f)) {
+          toast('浏览器投屏最高 1080p60，更高走 OBS 推流', '', 2600);
+          return;
+        }
         prefs.fps = f;
         prefs.bitrate = autoBitrate(prefs.res, f);
         prefs.bitrateAuto = true;
