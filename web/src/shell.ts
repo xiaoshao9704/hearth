@@ -79,7 +79,7 @@ export function renderShell(root: HTMLElement, opts: ShellOptions = {}): Shell {
   };
   window.addEventListener('hearth:user', onUser);
 
-  // 麦克风偏好快捷开关（进房时按它决定是否自动开麦；房间页会同步）
+  // 麦克风偏好快捷开关：只决定进房时是否自动开麦（房内开关麦不回写，房内隐藏本按钮）
   function paintMic() {
     const p = loadPrefs();
     micBtn.innerHTML = micIcon(16, !p.mic, p.mic ? 'var(--text-1)' : 'var(--red)');
