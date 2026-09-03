@@ -6,9 +6,9 @@ package api
 import (
 	"context"
 	"log"
-	"net/netip"
 	"strings"
 
+	"hearth/server/internal/rtc/lite"
 	"hearth/server/internal/rtc/livekitembed"
 )
 
@@ -49,24 +49,9 @@ func (a *API) ensureEmbedKeys(ctx context.Context) (key, secret string, err erro
 // stageExternalIPs 补丁二的回调：进程内 LiveKit 每建一个 PeerConnection 取一次当前外部
 // IPv4，追加为候选。数据源是 Ember 那一个 Announcer 的快照（映射结果排最前，其次 STUN
 // 探测结果）——同一台机器只有一个公网地址，不另起第二个探测器。
-// 快照给的是地址（可能带端口），这里只取 IP：LiveKit 的改写只换 IP 不换端口。
 func (a *API) stageExternalIPs() []string {
 	externals, _ := a.ember.AnnounceSnapshot()
-	var out []string
-	seen := map[string]bool{}
-	for _, e := range externals {
-		ip := e
-		if ap, err := netip.ParseAddrPort(e); err == nil {
-			ip = ap.Addr().String()
-		}
-		addr, err := netip.ParseAddr(ip)
-		if err != nil || !addr.Is4() || seen[ip] {
-			continue
-		}
-		seen[ip] = true
-		out = append(out, ip)
-	}
-	return out
+	return lite.ExternalIPv4s(externals)
 }
 
 // EnsureStageKernel 按当前 stage_provider 启停进程内 LiveKit：选中 lkembed 才起，

@@ -197,6 +197,26 @@ func (a *Announcer) Snapshot() (externals []string, probedAt time.Time) {
 	return out, a.probedAt
 }
 
+// ExternalIPv4s 把 Snapshot 的外部地址列表（可能带端口）压成去重的 IPv4 列表，
+// 顺序不变。给 LiveKit 的地址改写回调用：它只换 IP 不换端口，也只认 IPv4。
+func ExternalIPv4s(externals []string) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, e := range externals {
+		ip := e
+		if ap, err := netip.ParseAddrPort(e); err == nil {
+			ip = ap.Addr().String()
+		}
+		addr, err := netip.ParseAddr(ip)
+		if err != nil || !addr.Is4() || seen[ip] {
+			continue
+		}
+		seen[ip] = true
+		out = append(out, ip)
+	}
+	return out
+}
+
 func (a *Announcer) runProbe(ctx context.Context) bool {
 	a.mu.Lock()
 	if a.probing { // 有探测在跑：等它结束共享结果，不重复探测
