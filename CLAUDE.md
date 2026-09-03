@@ -46,7 +46,7 @@
 ### 前端（web/）
 
 - 房间页是 Solid（`views/room.tsx`）：状态一律走信号/派生 memo，**禁止**引入第二真相源（手工同步的布尔副本）；引擎产的媒体元素是命令式节点，用 ref 挂载不重建。
-- 设置浮层骨架（`views/settings.tsx`）与频道管理（`views/manage.tsx`）也是 Solid；设置的六个个人 pane 暂留命令式渲染（`settings-panes.ts`，由骨架挂进容器、切页调清理函数），逐个迁移即可。一次性渲染的轻页面（shell/lobby/login/join）保持 vanilla TS；vite-plugin-solid 只处理 `.tsx`。
+- 设置浮层骨架（`views/settings.tsx`）、频道管理（`views/manage.tsx`）、管理后台（`views/admin.tsx`）也是 Solid；设置的六个个人 pane 暂留命令式渲染（`settings-panes.ts`，由骨架挂进容器、切页调清理函数），逐个迁移即可。一次性渲染的轻页面（shell/lobby/login/join）保持 vanilla TS；vite-plugin-solid 只处理 `.tsx`。
 - 设置的三个维度：个人（跟账号/本机走，即改即存）、频道（房主视角，落库即生效、每次操作 toast）、服务器（管理后台 `#/admin`，浮层里只放跳转）。所有齿轮入口都开同一个浮层，只是落点不同；浮层按 `channel` 上下文自查房主决定是否出「频道」分区，入口不必区分谁是房主。
 - CSS 统一在 `src/style.css`，类名复用既有设计系统（ember 主题、三态明暗），选择器注意特异性（button 重置用零特异性 `:where`）。
 - 引擎抽象 `engine/types.ts`：新内核实现 `AVEngine` 并在 `engine/index.ts` 注册动态导入（保持代码分割）。
@@ -64,6 +64,7 @@
 - ember（语音内核，`rtc/ember`）的 `vroom.mu` 不可重入：持锁时禁止调用 `snapshot()`/`roster()` 等会再抢锁的方法。
 - `nhooyr.io/websocket` 不允许并发写：所有出站消息必须走参与者的 send channel + writeLoop。
 - 前端引擎重连前必须解绑旧 ws 的 handler（`teardown()`），否则旧连接被判 duplicate 时会误伤新连接。
+- Solid 视图作为路由页时 `render()` 不能直接挂 `#app`：main.ts 的 hashchange 监听 `route()` 先注册先执行、先把下一个视图画进 `#app`，随后视图自己注册的 dispose 才跑，而 dispose 会清空所挂容器——直接挂 `#app` 会把新视图一起擦成白屏。一律挂到自建的宿主 div（见 manage.tsx / admin.tsx）。
 - 客户端向 ICE-Lite 服务端发 offer 不必等 gathering complete（最多等 1s），部分环境 gathering 永不完成。
 - 改挂载进容器的配置文件后 compose 不会自动重启服务，需手动 `docker restart`。
 - livekit `use_external_ip: true` 时默认 STUN 不可达会启动即死（国内必配 `LIVEKIT_STUN_SERVERS`）；`docker cp` 进容器的文件是 root 属主，distroless nonroot（65532）进程会写不动。
