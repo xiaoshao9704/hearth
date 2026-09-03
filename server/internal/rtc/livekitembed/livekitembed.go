@@ -230,16 +230,23 @@ func (s *Server) logf(format string, args ...any) {
 	}
 }
 
-// buildYAML 只写我们关心的键，其余全部落在 config.DefaultConfig 上。不配 redis 即本地 router。
+// buildYAML 只写我们关心的键，其余全部落在 config.DefaultConfig 上。不配 redis 即本地
+// router；显式写死 use_external_ip / stun_servers 是防上游改默认值——探测与打洞由 hearth
+// 的 portmap/lite 负责，LiveKit 自己去 gather STUN 只会拖慢每个 PeerConnection。
 //
-// use_ice_lite 必须开：LiveKit 只在「非 ICE-Lite 且 node_ip 未显式指定且 use_external_ip=false」
-// 时给服务端 PeerConnection 挂 STUN 服务器，而 stun_servers 为空时挂的是它内置的默认列表
-//（写 `stun_servers: []` 挡不住，见 mediatransportutil/rtcconfig.NewWebRTCConfig）。默认列表不可达的
-// 网络里，WHIP 的一次性信令要等 gathering 完成才出 answer，实测一次 POST 拖到 13s（推流端会超时）。
-// 开 ICE-Lite 后服务端不再 gather STUN；WHIP 参与者由 LiveKit 自己按需退回完整 ICE
-//（whipservice 的 DisableICELite），此时 Configuration 里已没有 STUN 服务器，gathering 立即完成。
-// 外部地址由补丁二从 hearth 的 Announcer 取（探测与打洞本就归 portmap/lite 负责），
-// 与 ember/bellows 两个进程内 ICE-Lite 内核同一模型。
+// stun_servers: [] 并不能让上游禁用 STUN——mediatransportutil 的 NewWebRTCConfig 只要判定
+// STUNServers 为空（不管是没配还是显式空数组）就回落到内置的 google/twilio 默认值
+//（本地没显式配 node_ip 时必进这条分支）。WHIP 走一次性信令（pkg/service/whipservice.go 里
+// DisableICELite:true），生成 answer 前会 `<-webrtc.GatheringCompletePromise`
+//（pkg/rtc/transport.go 的 PCTransport.GetAnswer）等全部候选凑齐——这些默认 STUN 服务器实际
+// 部署环境下常不可达，等它们的 STUN 请求超时/重试跑完 gathering 才算完成，一次 POST 就要 10+ 秒
+//（实测 13s，修后 60ms 量级；真机 349ms）。use_ice_lite: true 让 NewWebRTCConfig 直接跳过那条
+//「回落默认 STUN」分支（c.ICEServers 全程不写入），只影响 pion 自己的 srflx 探测；WHIP 每次仍按
+// DisableICELite 把 SettingEngine 现改回非 lite，本机 host 候选、补丁二注入的映射外部地址
+//（直接操作 SettingEngine.ICEAddressRewriteRules，不经过 ICEServers）都不受影响。
+// 浏览器的常规信令走 trickle ICE，不等 gathering complete，本来就不受这条影响。
+// 开了之后舞台内核与 ember/bellows 同为 ICE-Lite：对外地址一律由 lite.Announcer 宣告，
+// 可达性由 portmap 负责。
 func buildYAML(o Options) string {
 	return fmt.Sprintf(`port: %d
 bind_addresses: ["127.0.0.1"]
