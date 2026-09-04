@@ -859,3 +859,9 @@ body {
 .video-grid.spotlight .rail .tile:fullscreen {
   width: auto; height: auto; border-radius: 0; border: 0;
 }
+
+/* 触屏可达性（backlog #5）：hover:none 设备没有悬停，靠 hover 出现的控件改为常显 */
+@media (hover: none) {
+  .tile .tact { opacity: 1; }
+  .volpop { display: flex; }
+}

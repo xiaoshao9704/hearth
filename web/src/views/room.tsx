@@ -468,6 +468,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
   const canModerate = () => isOwnerSig() || getUser()?.is_admin === true;
 
   let longPressTimer = 0; // 触屏长按弹菜单的定时器（tile 触摸事件共用）
+  let longPressFired = false; // 本次触摸已触发长按：touchend 要吞掉随之而来的合成 click
 
   // 命令式按钮的进行中态：await 期间置灰并禁止重复触发
   function markBusy(btn: HTMLButtonElement): () => void {
@@ -1644,10 +1645,18 @@ export async function renderRoom(root: HTMLElement, channel: string) {
                   const p = parts().find((pp) => pp.identity === identity);
                   if (!p) return;
                   const t = ev.touches[0];
-                  longPressTimer = window.setTimeout(() => showUserMenu(t.clientX, t.clientY, p.uid, p.username, p.identity), 500);
+                  longPressFired = false;
+                  longPressTimer = window.setTimeout(() => {
+                    longPressFired = true;
+                    showUserMenu(t.clientX, t.clientY, p.uid, p.username, p.identity);
+                  }, 500);
                 }}
                 onTouchMove={() => clearTimeout(longPressTimer)}
-                onTouchEnd={() => clearTimeout(longPressTimer)}
+                onTouchEnd={(ev) => {
+                  clearTimeout(longPressTimer);
+                  // 长按已弹菜单：吞掉抬手的合成 click，否则会误点卡片底下的按钮（置顶/全屏等）
+                  if (longPressFired) ev.preventDefault();
+                }}
                 onTouchCancel={() => clearTimeout(longPressTimer)}
               >
                 <For each={gridTiles()}>{(e) => <Tile e={e} />}</For>
