@@ -1,10 +1,15 @@
 /* Hearth 设计系统：来自 artifacts 原型「Hearth 前端界面」。
    炉火暖色（ember）+ 三态主题（浅色 / 深色 / 跟随系统，html[data-theme] 控制）。 */
 
+/* text-2 / text-3 按 WCAG 相对亮度取值，基准背景 --bg-1：
+   浅色 text-2 #7f7167 对 #fffdfa = 4.64:1，text-3 #9f8e80 = 3.11:1；
+   深色 text-2 #867b75 对 #131010 = 4.60:1，text-3 #6b6058 = 3.10:1。
+   （text-2 承担正文级说明文字，按 4.5:1；text-3 只做占位符/弱提示，按 3:1。） */
 :root {
+  color-scheme: light;
   --bg-0: #f7f3ee; --bg-1: #fffdfa; --bg-2: #f3ede6; --bg-3: #ffffff; --bg-4: #eae2d9;
   --line: #e4dbd1; --line-soft: #efe8e0;
-  --text-0: #2b2420; --text-1: #6d6158; --text-2: #9c8f85; --text-3: #bcb0a6;
+  --text-0: #2b2420; --text-1: #6d6158; --text-2: #7f7167; --text-3: #9f8e80;
   --ember: #c2521c; --ember-soft: #e8703a; --on-ember: #fffaf6;
   --ember-tint: rgba(194, 82, 28, 0.1); --ember-line: rgba(194, 82, 28, 0.34); --ember-weak: rgba(194, 82, 28, 0.06);
   --sage: #5d7a45; --sage-tint: rgba(93, 122, 69, 0.1); --sage-line: rgba(93, 122, 69, 0.26);
@@ -15,9 +20,10 @@
   --hearth-glow: rgba(194, 82, 28, 0.1);
 }
 :root[data-theme='dark'] {
+  color-scheme: dark;
   --bg-0: #0d0b0a; --bg-1: #131010; --bg-2: #191514; --bg-3: #211c19; --bg-4: #2a2320;
   --line: #2e2724; --line-soft: #241f1c;
-  --text-0: #f4eee7; --text-1: #a89d94; --text-2: #7a706a; --text-3: #4f4741;
+  --text-0: #f4eee7; --text-1: #a89d94; --text-2: #867b75; --text-3: #6b6058;
   --ember: #e8703a; --ember-soft: #f0b98f; --on-ember: #1a0f08;
   --ember-tint: rgba(232, 112, 58, 0.14); --ember-line: rgba(232, 112, 58, 0.42); --ember-weak: rgba(232, 112, 58, 0.07);
   --sage: #86a06b; --sage-tint: rgba(134, 160, 107, 0.1); --sage-line: rgba(134, 160, 107, 0.25);
@@ -29,9 +35,10 @@
 }
 @media (prefers-color-scheme: dark) {
   :root[data-theme='auto'] {
+    color-scheme: dark;
     --bg-0: #0d0b0a; --bg-1: #131010; --bg-2: #191514; --bg-3: #211c19; --bg-4: #2a2320;
     --line: #2e2724; --line-soft: #241f1c;
-    --text-0: #f4eee7; --text-1: #a89d94; --text-2: #7a706a; --text-3: #4f4741;
+    --text-0: #f4eee7; --text-1: #a89d94; --text-2: #867b75; --text-3: #6b6058;
     --ember: #e8703a; --ember-soft: #f0b98f; --on-ember: #1a0f08;
     --ember-tint: rgba(232, 112, 58, 0.14); --ember-line: rgba(232, 112, 58, 0.42); --ember-weak: rgba(232, 112, 58, 0.07);
     --sage: #86a06b; --sage-tint: rgba(134, 160, 107, 0.1); --sage-line: rgba(134, 160, 107, 0.25);
@@ -53,9 +60,31 @@ body {
   color: var(--text-0);
   font-size: 13.5px;
 }
-a { color: var(--ember); text-decoration: none; }
-a:hover { color: var(--ember-soft); }
+/* 链接重置同样用零特异性 :where：admin 里有 <a class="btn btn-primary">，
+   带特异性的 a:hover 会压过按钮的文字色，悬停时变成浅橙字 */
+:where(a) { color: var(--ember); text-decoration: none; }
+:where(a:hover) { color: var(--ember-soft); }
 .mono { font-family: 'IBM Plex Mono', ui-monospace, SFMono-Regular, monospace; }
+
+/* ---- 键盘可达性 ---- */
+:focus-visible { outline: 2px solid var(--ember); outline-offset: 2px; }
+/* .field input / .chat-input-box input / .range 都显式清了 outline，
+   焦点反馈补在外层容器上（.field:focus-within 的边框+光晕见下面输入区） */
+.chat-input-box:focus-within { border: 1.5px solid var(--ember); box-shadow: var(--glow); }
+.range:focus-visible { outline: 2px solid var(--ember); outline-offset: 3px; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+/* 触屏没有真正的 hover，:hover 会在点完后粘住不放 */
+@media (hover: none) {
+  .hit:hover { opacity: 1; }
+}
 
 /* ---- 通用交互 ---- */
 .hit {
@@ -104,10 +133,23 @@ a:hover { color: var(--ember-soft); }
 .btn-primary { background: var(--ember); border-color: transparent; color: var(--on-ember); font-weight: 600; }
 .btn-danger { background: var(--red-tint); border-color: var(--red-line); color: var(--red-text); }
 .btn-danger-solid { background: var(--red); border-color: transparent; color: #fff; font-weight: 600; }
-.btn-ok { background: var(--sage-tint); border-color: var(--sage-line); color: var(--sage); }
 .btn-sm { height: 30px; padding: 0 12px; border-radius: 7px; font-size: 12px; }
 .btn-lg { height: 48px; border-radius: 10px; font-size: 14.5px; font-weight: 600; }
 .btn-icon { width: 32px; height: 32px; padding: 0; border-radius: 9px; }
+.btn:active { transform: translateY(1px); }
+/* 禁用与 .disabled 同款；pointer-events:none 顺带挡掉 hover 态与误触 */
+.btn:disabled, .btn[aria-disabled='true'] { cursor: not-allowed; opacity: 0.55; pointer-events: none; }
+/* 提交中：文字留位隐藏，中心转圈 */
+.btn.loading { position: relative; color: transparent; pointer-events: none; }
+.btn.loading > * { visibility: hidden; }
+.btn.loading::after {
+  content: ''; position: absolute; top: 50%; left: 50%; width: 15px; height: 15px; margin: -7.5px 0 0 -7.5px;
+  border-radius: 50%; border: 2px solid currentColor; border-top-color: transparent;
+  color: var(--text-1); animation: spin 0.7s linear infinite;
+}
+.btn-primary.loading::after { color: var(--on-ember); }
+.btn-danger-solid.loading::after { color: #fff; }
+@keyframes spin { to { transform: rotate(360deg); } }
 
 /* ---- 分段控件 ---- */
 .seg-group {
@@ -162,11 +204,11 @@ a:hover { color: var(--ember-soft); }
 }
 
 /* ---- 标签 ---- */
+.chip { padding: 2px 8px; border-radius: 5px; font-size: 11px; font-weight: 600; background: var(--bg-4); color: var(--text-1); white-space: nowrap; }
 .tag { padding: 1.5px 7px; border-radius: 4px; font-size: 9.5px; font-weight: 600; background: var(--bg-4); color: var(--text-2); white-space: nowrap; flex-shrink: 0; }
 .tag-ember { background: var(--ember-tint); color: var(--ember); }
 .tag-sage { background: var(--sage-tint); color: var(--sage); }
 .tag-red { background: var(--red-tint); color: var(--red-text); }
-.chip { padding: 2px 8px; border-radius: 5px; font-size: 11px; font-weight: 600; }
 
 /* ---- 头像 ---- */
 .avatar {
@@ -611,15 +653,64 @@ a:hover { color: var(--ember-soft); }
 .muted { color: var(--text-2); }
 
 /* ---- toast ---- */
-.toast-wrap { position: fixed; left: 50%; bottom: 26px; transform: translateX(-50%); z-index: 200; display: flex; flex-direction: column; gap: 8px; align-items: center; pointer-events: none; }
+.toast-wrap { position: fixed; left: 50%; bottom: 26px; transform: translateX(-50%); z-index: 200; display: flex; flex-direction: column; gap: 8px; align-items: center; pointer-events: none; max-width: 100vw; }
 .toast {
   display: flex; align-items: center; gap: 9px; padding: 10px 16px; border-radius: 9px;
   background: var(--bg-1); border: 1px solid var(--line); box-shadow: var(--shadow-lg);
   font-size: 12.5px; color: var(--text-0); animation: toast-in 0.18s ease;
+  max-width: min(560px, 90vw); overflow-wrap: anywhere;
+  /* 容器不吃事件（别挡住下面的界面），单条可点即关 */
+  pointer-events: auto; cursor: pointer;
 }
 .toast.ok { border-color: var(--sage-line); background: var(--sage-tint); color: var(--sage); }
 .toast.bad { border-color: var(--red-line); background: var(--red-tint); color: var(--red-text); }
+.toast.out { animation: toast-out 0.16s ease forwards; pointer-events: none; }
 @keyframes toast-in { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+@keyframes toast-out { to { opacity: 0; transform: translateY(6px); } }
+
+/* ---- 确认对话框（原生 dialog，自带焦点陷阱与 Esc）---- */
+/* max-width 覆盖 UA 默认的 calc(100% - 6px - 2em)，宽度交给 .dialog-box 定 */
+.dialog { border: 0; padding: 0; background: transparent; color: inherit; max-width: none; }
+.dialog::backdrop { background: var(--scrim); }
+.dialog-box {
+  width: min(420px, 92vw); padding: 20px 22px; border-radius: 12px;
+  background: var(--bg-1); border: 1px solid var(--line); box-shadow: var(--shadow-lg);
+}
+.dialog-title { font-size: 14.5px; font-weight: 600; color: var(--text-0); }
+.dialog-body { margin-top: 9px; font-size: 12.5px; line-height: 1.6; color: var(--text-2); text-wrap: pretty; }
+.dialog-actions { display: flex; justify-content: flex-end; gap: 9px; margin-top: 16px; }
+
+/* ---- 通用状态块（空 / 加载 / 出错）---- */
+.state-block {
+  display: flex; flex-direction: column; align-items: center; gap: 10px;
+  padding: 28px 16px; color: var(--text-2); font-size: 13px; text-align: center;
+}
+.state-block.error { color: var(--red-text); }
+.state-block .btn { margin-top: 4px; }
+
+/* ---- 连接状态 chip（房间页顶栏）---- */
+.conn-chip { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; color: var(--text-2); }
+.conn-chip .dot { width: 8px; height: 8px; flex-shrink: 0; border-radius: 50%; background: var(--text-3); }
+.conn-chip.live .dot { background: var(--sage); }
+.conn-chip.retry .dot { background: var(--ember); }
+
+/* ---- 管理后台骨架（窄屏回落在下面的媒体查询里）---- */
+.topbar-lg { height: 62px; padding: 0 24px; }
+.page-body {
+  flex-grow: 1; padding: 22px 24px; overflow-y: auto;
+  display: flex; flex-direction: column; gap: 18px;
+}
+.sidebar-admin { width: 210px; background-image: none; }
+.view-host { height: 100%; }
+.table-actions { display: flex; gap: 7px; justify-content: flex-end; margin-left: auto; }
+.cell-ellipsis { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+/* 表格列宽：由行/表头容器上的 --col-1..--col-6 定，未定义则自适应 */
+.table-head > :nth-child(1), .table-row > :nth-child(1) { width: var(--col-1, auto); }
+.table-head > :nth-child(2), .table-row > :nth-child(2) { width: var(--col-2, auto); }
+.table-head > :nth-child(3), .table-row > :nth-child(3) { width: var(--col-3, auto); }
+.table-head > :nth-child(4), .table-row > :nth-child(4) { width: var(--col-4, auto); }
+.table-head > :nth-child(5), .table-row > :nth-child(5) { width: var(--col-5, auto); }
+.table-head > :nth-child(6), .table-row > :nth-child(6) { width: var(--col-6, auto); }
 
 /* ---- 移动端 ---- */
 .menu-btn { display: none; }
@@ -632,8 +723,12 @@ a:hover { color: var(--ember-soft); }
   .app-frame.nav-open .sidebar { transform: none; }
   .nav-scrim { display: none; position: fixed; inset: 0; z-index: 39; background: var(--scrim); }
   .app-frame.nav-open .nav-scrim { display: block; }
+  /* 管理后台侧栏跟 .sidebar 一样变抽屉，宽度也跟着抽屉走 */
+  .sidebar-admin { width: 272px; }
   .menu-btn { display: flex; }
   .topbar { padding: 0 14px; gap: 10px; }
+  .topbar-lg { padding: 0 14px; }
+  .page-body { padding: 16px 14px; }
   .status-chip { display: none; }
   .lobby-body { padding: 18px 14px; }
   .stage-area { padding: 12px; }
@@ -659,6 +754,9 @@ a:hover { color: var(--ember-soft); }
   .mtabs { padding: 0 14px; gap: 16px; overflow-x: auto; }
   .table-head { display: none; }
   .table-row { flex-wrap: wrap; }
+  /* 表头没了，定宽也跟着让位；带 data-label 的单元格自带小标签 */
+  .table-row > * { width: auto; }
+  .table-row > [data-label]::before { content: attr(data-label); font-size: 10.5px; color: var(--text-2); margin-right: 6px; }
   .copy-line { height: auto; min-height: 42px; flex-wrap: wrap; padding: 6px 6px 6px 14px; }
   .copy-line .val { flex-basis: 100%; }
 }

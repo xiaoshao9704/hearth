@@ -1,4 +1,6 @@
 // 与 server 交互的 REST 客户端，会话 token 存 localStorage（MVP 简化处理）。
+import { toast } from './ui';
+
 const SERVER_URL: string = import.meta.env.VITE_SERVER_URL ?? 'http://localhost:8080';
 export const LIVEKIT_URL_FALLBACK: string =
   import.meta.env.VITE_LIVEKIT_URL ?? 'ws://localhost:7880';
@@ -28,7 +30,14 @@ export function getToken(): string | null {
 
 export function getUser(): User | null {
   const raw = localStorage.getItem(USER_KEY);
-  return raw ? (JSON.parse(raw) as User) : null;
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw) as User;
+  } catch {
+    // 存档损坏：当作未登录，别让每次读用户都抛
+    clearSession();
+    return null;
+  }
 }
 
 function saveSession(token: string, user: User) {
@@ -45,24 +54,60 @@ export function wsBase(): string {
   return SERVER_URL.replace(/^http/, 'ws');
 }
 
+// 请求失败的统一错误类型：status 是 HTTP 状态码，0 表示网络层失败（连不上 / 超时）。
+// 调用方据此区分「服务器拒绝」与「压根没到服务器」，message 一律是可直接展示的中文。
+export class ApiError extends Error {
+  status: number;
+  constructor(status: number, message: string) {
+    super(message);
+    this.name = 'ApiError';
+    this.status = status;
+  }
+}
+
+// 服务端没给 error 字段时的兜底文案
+function statusMessage(status: number): string {
+  if (status === 403) return '没有权限执行此操作';
+  if (status === 404) return '资源不存在';
+  if (status === 429) return '操作太频繁，稍后再试';
+  if (status >= 500) return '服务器出错了，稍后再试';
+  return `请求失败 (${status})`;
+}
+
+// 登录后回跳用：401 时记下当前 hash，登录页取用后自行清除
+const NEXT_KEY = 'hearth_next';
+const REQ_TIMEOUT_MS = 15000;
+
 async function req<T>(path: string, options: { method?: string; body?: unknown } = {}): Promise<T> {
-  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  const headers: Record<string, string> = {};
   const token = getToken();
   if (token) headers['Authorization'] = `Bearer ${token}`;
-  const res = await fetch(`${SERVER_URL}${path}`, {
-    method: options.method ?? 'GET',
-    headers,
-    body: options.body === undefined ? undefined : JSON.stringify(options.body),
-  });
+  if (options.body !== undefined) headers['Content-Type'] = 'application/json';
+  let res: Response;
+  try {
+    res = await fetch(`${SERVER_URL}${path}`, {
+      method: options.method ?? 'GET',
+      headers,
+      body: options.body === undefined ? undefined : JSON.stringify(options.body),
+      signal: AbortSignal.timeout(REQ_TIMEOUT_MS),
+    });
+  } catch (e) {
+    // fetch 只在网络层失败时 reject（HTTP 错误码走下面的 res.ok 分支）
+    const timeout = (e as { name?: string } | null)?.name === 'TimeoutError';
+    throw new ApiError(0, timeout ? '服务器响应超时，请稍后重试' : '连不上服务器，请检查网络或服务器地址');
+  }
   if (!res.ok) {
     const data = (await res.json().catch(() => null)) as { error?: string } | null;
     // 带着 token 却 401 说明会话已失效（区别于登录页密码错误——那时本地无 token）：
     // 清掉本地会话并跳回登录页，仍然 throw 让调用方停止后续逻辑
     if (res.status === 401 && token) {
+      if (!location.hash.startsWith('#/login')) sessionStorage.setItem(NEXT_KEY, location.hash);
       clearSession();
-      if (location.hash !== '#/login') location.hash = '#/login';
+      toast('登录已失效，请重新登录', 'bad');
+      // replace 而非 push：否则用户按返回键会回到失效页再被踢回来，死循环
+      location.replace('#/login');
     }
-    throw new Error(data?.error ?? `请求失败 (${res.status})`);
+    throw new ApiError(res.status, data?.error ?? statusMessage(res.status));
   }
   if (res.status === 204) return undefined as T;
   return (await res.json()) as T;
