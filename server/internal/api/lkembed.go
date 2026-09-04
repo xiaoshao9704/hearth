@@ -82,6 +82,7 @@ func (a *API) EnsureStageKernel(ctx context.Context) {
 		HTTPPort:    dynPort(a.dynVal(ctx, "lkembed_port")),
 		UDPPort:     udpPort,
 		TCPPort:     dynPort(a.dynVal(ctx, "lkembed_tcp_port")),
+		LogLevel:    a.dynVal(ctx, "lkembed_log_level"),
 		APIKey:      key,
 		APISecret:   secret,
 		ExternalIPs: a.stageExternalIPs,
@@ -96,6 +97,13 @@ func (a *API) EnsureStageKernel(ctx context.Context) {
 	// Announce()，不登记的话 Snapshot 查不到舞台端口的映射结果（见 lite.Announcer
 	// 的 registered 字段注释），stageExternalIPs 就少一条候选。
 	a.registerStageAnnouncePort(udpPort)
+	// 启动即探测一次：Announcer 的周期刷新最长要等一个 TTL（5 分钟）才轮到，而
+	// use_external_ip: false 的进程内 LiveKit 对外地址全靠 stageExternalIPs 读快照——
+	// 快照空着的那几分钟里建起来的 PeerConnection 只有本机/容器内网的 host 候选，
+	// 跨网络进房必然 ICE 失败。异步是因为 STUN 探测会等不可达服务器超时，
+	// 不能卡在 embedMu 里拖住启动与切选择器的请求；ctx 去掉取消是因为 handler
+	// 路径上的 ctx 会在响应写完后取消，探测还没跑完就被掐。
+	go a.announcer.Refresh(context.WithoutCancel(ctx))
 }
 
 // registerStageAnnouncePort 见 EnsureStageKernel 调用处的注释。

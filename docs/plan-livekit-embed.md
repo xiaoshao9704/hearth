@@ -36,7 +36,7 @@
 | 嵌入的规范写法 | 就是 `cmd/server/main.go` 与 `test/integration_helpers.go` 的三步：`config.NewConfig(yaml, true, nil, nil)`（`c` 可为 nil，从 `DefaultConfig` 起叠加 YAML 字符串）→ `routing.NewLocalNode(conf)` → `service.InitializeServer(conf, node)` → `Start()` / `Stop(force)` |
 | 无 redis | `pkg/service/wire.go:183`：`!conf.Redis.IsConfigured()` 即走本地 router |
 | HTTP/信令 | `Start()` 自建 `http.NewServeMux()`，注册 Room/Egress/Ingress/SIP/AgentDispatch 的 twirp 与 `rtcService.SetupRoutes(mux)`，监听 `conf.Port`；`RTCService.SetupRoutes` 是导出的。**本计划让它监听回环、hearth 反代**，不挂外部 mux（`Start()` 是整体的，挂外部 mux 省不掉它自己的监听） |
-| 候选宣告的「钉死」在哪 | `mediatransportutil/pkg/rtcconfig.NewWebRTCConfig`：启动时只在 `node_ip` 非空且（`use_external_ip` 或非自动生成）时把 NAT1To1 规则烧进 `SettingEngine`；两者都不设（DefaultConfig：`UseExternalIP=false`、`STUNServers=[]`）则**没有任何启动规则**。每建一个 transport 时 `transport.go:357` 做 `se := params.Config.SettingEngine`（**值拷贝，本来就是每 PC 一份**）。`transport.go:427-446` 那段只是给不支持 prflx-over-relay 的老客户端的特例，读的是启动时的 `NAT1To1IPs`（我们为空，跳过） |
+| 候选宣告的「钉死」在哪 | `mediatransportutil/pkg/rtcconfig.NewWebRTCConfig`：启动时会按 `node_ip` 生成 rewrite rule；`advertise_internal_ip: true` 同时保留真实 host 候选。每建一个 transport 时 `transport.go:357` 做 `se := params.Config.SettingEngine`（**值拷贝，本来就是每 PC 一份**），随后补丁用 `includeInternal=true` 整体替换这份拷贝上的启动规则。`transport.go:427-446` 那段只是给不支持 prflx-over-relay 的老客户端的特例 |
 | `SetNAT1To1AddressRewriteRules(se, ips, includeInternal)` 的 bool | `includeInternal=true` → pion `ICEAddressRewriteAppend`（保留 host 候选、追加外部地址为 host 型候选）；false → 替换。**我们用 true**。`ips` 可以是裸 IP（catch-all）或 `外部/本机` 对 |
 
 ## 分叉 diff 清单（2026-09-03，逐文件对比，直接采信）
@@ -95,14 +95,15 @@ portmap.Mapper：把 lkembed 的 UDP（与可选 TCP）端口映射到网关；v
     不需要缓存失效机制，也不影响其他 transport。
   - bool 已确认为 `includeInternal`，用 `true`：保留本机 host 候选（LAN 直连）并追加外部地址（公网观众）。不需要改成 srflx；
     LiveKit 一贯用 host 型追加（`advertise_internal_ip` 语义），与 hearth 在 P1 之前的做法相同。
-  - hearth 侧 YAML：`rtc.use_external_ip: false`、不设 `node_ip`、`rtc.stun_servers: []`，**外加 `rtc.use_ice_lite: true`**——
-    探测与打洞交给 hearth，不让 LiveKit 自己去 gather STUN。
-    **`stun_servers: []` 单独写没有用**（实测）：`rtcconfig.NewWebRTCConfig` 在「非 ICE-Lite + `node_ip` 未显式指定 +
-    `use_external_ip=false`」时一定给服务端 PeerConnection 挂 STUN，列表为空就挂它内置的默认列表。默认列表不可达时，
-    WHIP 的一次性信令要等 gathering 完成才出 answer，一次 POST 从 60ms 变成 13s，推流端会直接超时。
-    开 ICE-Lite 后服务端不再 gather STUN；WHIP 参与者仍由 LiveKit 自己退回完整 ICE（`whipservice` 的 `DisableICELite`），
-    此时 Configuration 里已没有 STUN 服务器，gathering 立即完成。这也让舞台内核与 ember/bellows 同为 ICE-Lite：
-    对外地址一律由 `lite.Announcer` 宣告，可达性由 portmap 负责。
+  - hearth 侧 YAML：`rtc.use_external_ip: false`、`rtc.node_ip: 127.0.0.1`、
+    `rtc.advertise_internal_ip: true`、`rtc.stun_servers: []`、`rtc.use_ice_lite: false`。full ICE 是策略路由、
+    多出口等网络的兼容性要求：ICE-Lite 只被动应答，无法由服务端主动
+    检查客户端的其他候选；A/B 实测中前者始终停在 checking，full ICE 能立即选出可达 candidate pair。
+  - `node_ip` 的回环值不是候选来源，只为阻止 `mediatransportutil` 在「full ICE + node_ip 未显式指定 +
+    use_external_ip=false」时把空 STUN 列表回落成内置 google/twilio 服务器；`advertise_internal_ip` 保证首次探测完成前
+    仍有真实 host 候选。补丁二会在每个 transport 上整体替换启动 rewrite rules，稳态候选仍由本机地址与
+    `lite.Announcer` 动态外部地址组成。这样保留 full ICE 的双向检查，
+    同时避免 WHIP 等默认 STUN 超时：一次 POST 从约 13 秒恢复到百毫秒内。
   - **两个补丁的权威副本在 `server/livekit-patches/`**（`git format-patch` 产物 + 重建 fork 的步骤），fork 上的 tag 为 `v1.13.6-hearth.1`。
     已验证：贴上两个补丁的整个服务端对上游 pion 在 darwin / linux / windows 编译通过。
 - 许可证：Apache-2.0，fork 与嵌入合法，保留 LICENSE/NOTICE。

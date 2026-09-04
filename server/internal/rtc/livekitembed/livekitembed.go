@@ -35,6 +35,9 @@ func ConfigKeys() []rtc.ConfigKey {
 			Label: "媒体 UDP 端口", Hint: "单端口 mux，需在防火墙/安全组放行；改动重启生效"},
 		{Name: "lkembed_tcp_port", Group: "stage", Default: "0",
 			Label: "ICE-TCP 端口", Hint: "0 = 关闭；UDP 全被封的网络里才需要"},
+		{Name: "lkembed_log_level", Group: "stage", Default: "warn",
+			Options: []string{"debug", "info", "warn", "error"},
+			Label:   "LiveKit 日志级别", Hint: "正常运行保持 warn；排障时临时改为 debug；改动重启生效"},
 		{Name: "lkembed_api_key", Group: "stage",
 			Label: "API Key", Hint: "留空 = 首次启动自动生成并落库（随数据库一起备份）"},
 		{Name: "lkembed_api_secret", Group: "stage", Secret: true,
@@ -273,29 +276,29 @@ func (s *Server) logf(format string, args ...any) {
 // router；显式写死 use_external_ip / stun_servers 是防上游改默认值——探测与打洞由 hearth
 // 的 portmap/lite 负责，LiveKit 自己去 gather STUN 只会拖慢每个 PeerConnection。
 //
-// stun_servers: [] 并不能让上游禁用 STUN——mediatransportutil 的 NewWebRTCConfig 只要判定
-// STUNServers 为空（不管是没配还是显式空数组）就回落到内置的 google/twilio 默认值
-//（本地没显式配 node_ip 时必进这条分支）。WHIP 走一次性信令（pkg/service/whipservice.go 里
-// DisableICELite:true），生成 answer 前会 `<-webrtc.GatheringCompletePromise`
-//（pkg/rtc/transport.go 的 PCTransport.GetAnswer）等全部候选凑齐——这些默认 STUN 服务器实际
-// 部署环境下常不可达，等它们的 STUN 请求超时/重试跑完 gathering 才算完成，一次 POST 就要 10+ 秒
-//（实测 13s，修后 60ms 量级；真机 349ms）。use_ice_lite: true 让 NewWebRTCConfig 直接跳过那条
-//「回落默认 STUN」分支（c.ICEServers 全程不写入），只影响 pion 自己的 srflx 探测；WHIP 每次仍按
-// DisableICELite 把 SettingEngine 现改回非 lite，本机 host 候选、补丁二注入的映射外部地址
-//（直接操作 SettingEngine.ICEAddressRewriteRules，不经过 ICEServers）都不受影响。
-// 浏览器的常规信令走 trickle ICE，不等 gathering complete，本来就不受这条影响。
-// 开了之后舞台内核就是 ICE-Lite：对外地址一律由 lite.Announcer 宣告，
-// 可达性由 portmap 负责。
+// 浏览器信令必须用 full ICE。ICE-Lite 只被动响应客户端的 connectivity check，在策略路由、
+// 多出口或存在可达内网候选的网络里，客户端发来的探测可能走了不可回程的路径，而服务端不会主动
+// 尝试其他候选。full ICE 会双向检查并选出真正可达的 candidate pair。
+//
+// 但 stun_servers: [] 单独写不能禁用服务端 STUN：mediatransportutil 在 full ICE、node_ip
+// 未显式指定且 use_external_ip=false 时，会把空列表回落成内置的 google/twilio 服务器。
+// WHIP 的一次性信令要等待 gathering 完成，不可达的默认 STUN 会让一次 POST 稳定拖到 10 秒以上。
+// 显式 node_ip: 127.0.0.1 只用于绕过该回落分支；advertise_internal_ip 保证 Announcer
+// 的初次刷新尚未完成时仍保留真实 host 候选。补丁注入的 ExternalIPs 回调拿到结果后，会在每个
+// transport 建立前用 includeInternal=true 整体替换启动时的 rewrite rules，因此稳态候选仍是
+// 本机地址加 Announcer 的动态外部地址。
 func buildYAML(o Options) string {
 	return fmt.Sprintf(`port: %d
 bind_addresses: [%q]
 keys:
   %q: %q
 rtc:
+  node_ip: 127.0.0.1
+  advertise_internal_ip: true
   udp_port: %d
   tcp_port: %d
   use_external_ip: false
-  use_ice_lite: true
+  use_ice_lite: false
   stun_servers: []
 room:
   auto_create: true

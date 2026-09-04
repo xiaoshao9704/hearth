@@ -127,10 +127,10 @@ func sdpCandidateLines(sdp string) []string {
 	return out
 }
 
-// TestWhipLatency 是 buildYAML 里 use_ice_lite: true 修复的验收：进程内 LiveKit 的
-// WHIP 一次性信令曾经因为「stun_servers: [] 被上游回落成内置 google/twilio STUN，
-// GetAnswer 等 gathering 完成时卡在不可达的 STUN 超时上」稳定卡 13s（见
-// buildYAML 上方注释），本地环境应在 whipLatencyBudget 内拿到 201。
+// TestWhipLatency 是 buildYAML 里显式 node_ip 修复的验收：进程内 LiveKit 的 WHIP
+// 一次性信令曾经因为「stun_servers: [] 被上游回落成内置 google/twilio STUN，
+// GetAnswer 等 gathering 完成时卡在不可达的 STUN 超时上」稳定卡 13s（见 buildYAML
+// 上方注释），本地环境应在 whipLatencyBudget 内拿到 201。
 func TestWhipLatency(t *testing.T) {
 	httpPort := freePort(t, "tcp")
 	udpPort := freePort(t, "udp")

@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"slices"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -127,6 +129,51 @@ func TestEmbeddedRoundTrip(t *testing.T) {
 func TestStartRejectsMissingKeys(t *testing.T) {
 	if _, err := Start(context.Background(), Options{HTTPPort: 1, UDPPort: 1}); err == nil {
 		t.Fatal("缺少密钥时应当报错")
+	}
+}
+
+func TestLogLevelConfig(t *testing.T) {
+	var key *rtc.ConfigKey
+	for _, k := range ConfigKeys() {
+		if k.Name == "lkembed_log_level" {
+			key = &k
+			break
+		}
+	}
+	if key == nil {
+		t.Fatal("缺少 lkembed_log_level 配置键")
+	}
+	if key.Default != "warn" || !slices.Equal(key.Options, []string{"debug", "info", "warn", "error"}) {
+		t.Fatalf("日志级别默认值或枚举不正确: default=%q options=%v", key.Default, key.Options)
+	}
+
+	base := Options{HTTPPort: 47730, UDPPort: 47720, APIKey: testAPIKey, APISecret: testAPISecret}
+	if yaml := buildYAML(base); !strings.Contains(yaml, "logging:\n  level: warn\n") {
+		t.Fatalf("空日志级别应回落 warn:\n%s", yaml)
+	}
+	base.LogLevel = "debug"
+	if yaml := buildYAML(base); !strings.Contains(yaml, "logging:\n  level: debug\n") {
+		t.Fatalf("显式日志级别未写入配置:\n%s", yaml)
+	}
+}
+
+func TestYAMLUsesFullICEWithoutDefaultServerSTUN(t *testing.T) {
+	yaml := buildYAML(Options{
+		HTTPPort:  47730,
+		UDPPort:   47720,
+		APIKey:    testAPIKey,
+		APISecret: testAPISecret,
+	})
+	for _, want := range []string{
+		"  node_ip: 127.0.0.1\n",
+		"  advertise_internal_ip: true\n",
+		"  use_external_ip: false\n",
+		"  use_ice_lite: false\n",
+		"  stun_servers: []\n",
+	} {
+		if !strings.Contains(yaml, want) {
+			t.Fatalf("内嵌 LiveKit ICE 配置缺少 %q:\n%s", want, yaml)
+		}
 	}
 }
 
