@@ -198,8 +198,8 @@ export async function renderRoom(root: HTMLElement, channel: string) {
   const [roomEvents, setRoomEvents] = createSignal<RoomEvent[]>([]);
   const [voiceState, setVoiceState] = createSignal<VoiceState>({ phase: 'connecting', attempt: 0 });
   const [audioBlocked, setAudioBlocked] = createSignal(false);
-  const [isOwnerSig, setIsOwnerSig] = createSignal(false);
-  const settingsCtx = { backLabel: `返回 ${channel}`, channel }; // 浮层按频道自查房主，决定是否出「频道」分区
+  const [myRoleSig, setMyRoleSig] = createSignal(''); // 服务端下发的我在本频道的角色（owner/moderator/member/""）
+  const settingsCtx = { backLabel: `返回 ${channel}`, channel }; // 浮层按频道自查管理角色（owner/moderator），决定是否出「频道」分区
   const [ownerName, setOwnerName] = createSignal('');
 
   // DOM ref（引擎产的命令式元素挂载点等）
@@ -470,8 +470,8 @@ export async function renderRoom(root: HTMLElement, channel: string) {
   };
 
   // ---- 用户操作菜单（聊天卡片、成员行与视频卡片右键共用；挂 body，保持命令式）----
-  // 管理操作（禁言/踢出）= 房主或管理员，与后端 requireModerator 一致
-  const canModerate = () => isOwnerSig() || getUser()?.is_admin === true;
+  // 管理操作（禁言/踢出）= 频道 owner 或 moderator（与后端 requireModerator 一致；系统 admin 的隐含 owner 已由 my_role 下发）
+  const canModerate = () => myRoleSig() === 'owner' || myRoleSig() === 'moderator';
 
   let longPressTimer = 0; // 触屏长按弹菜单的定时器（tile 触摸事件共用）
   let longPressFired = false; // 本次触摸已触发长按：touchend 要吞掉随之而来的合成 click
@@ -1612,7 +1612,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
           <div class="spacer"></div>
           <button
             class="hit btn btn-icon"
-            classList={{ hidden: !isOwnerSig() }}
+            classList={{ hidden: !canModerate() }}
             title="频道管理"
             onClick={() => openSettings('channel', settingsCtx)}
           >
@@ -2036,11 +2036,11 @@ export async function renderRoom(root: HTMLElement, channel: string) {
   const dispose = render(App, shell.content);
   const unwireMenu = wireMenuButton(root);
 
-  // ---- 房主探测 ----
+  // ---- 频道角色探测 ----
   void listChannels()
     .then((chs) => {
       const ch = chs.find((c) => c.name === channel);
-      setIsOwnerSig(ch?.is_owner === true);
+      setMyRoleSig(ch?.my_role ?? '');
       setOwnerName(ch?.created_by ?? '');
     })
     .catch(() => {});

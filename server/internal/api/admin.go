@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"hearth/server/internal/perm"
 	"hearth/server/internal/rtc"
 	"hearth/server/internal/store"
 
@@ -30,6 +31,14 @@ func (a *API) regPolicy(r *http.Request) string {
 		}
 	}
 	return a.cfg.DefaultRegPolicy()
+}
+
+// regDefaultRole 注册产出的默认系统角色（cfg_reg_default_role，user/power，默认 user）。
+func (a *API) regDefaultRole(r *http.Request) store.Role {
+	if v, err := a.st.GetSetting(r.Context(), "reg_default_role"); err == nil && store.Role(v) == store.RolePower {
+		return store.RolePower
+	}
+	return store.RoleUser
 }
 
 // ---- 账户 ----
@@ -140,7 +149,7 @@ func (a *API) inviteInfo(w http.ResponseWriter, r *http.Request) {
 }
 
 // registerWithPolicy 按注册策略处理注册：open 直接注册；invite 校验并消耗邀请；closed 拒绝。
-// 例外：users 表为空（首启向导）时直接放行——首个账号由 CreateUser 自动成为管理员，
+// 例外：users 表为空（首启向导）时直接放行——首个账号由 CreateUser 自动成为超级管理员，
 // 这也是单机形态下唯一能自助建起管理员账号的入口。
 func (a *API) registerWithPolicy(w http.ResponseWriter, r *http.Request) {
 	var req struct {
@@ -188,7 +197,15 @@ func (a *API) registerWithPolicy(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	u, err := a.st.CreateUser(r.Context(), req.Username, string(hash))
+	// 产出档：邀请上指定的优先（admin 发邀请时可指定 user/power），否则跟随注册默认档
+	role := a.regDefaultRole(r)
+	if inv != nil {
+		switch store.Role(inv.Role) {
+		case store.RoleUser, store.RolePower:
+			role = store.Role(inv.Role)
+		}
+	}
+	u, err := a.st.CreateUserWithRole(r.Context(), req.Username, string(hash), role)
 	if store.IsUniqueViolation(err) {
 		writeErr(w, http.StatusConflict, "用户名已被占用")
 		return
@@ -204,13 +221,7 @@ func (a *API) registerWithPolicy(w http.ResponseWriter, r *http.Request) {
 
 // requireAdmin 管理员校验中间件（挂在 auth 之后）。
 func (a *API) requireAdmin(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !userFrom(r).IsAdmin {
-			writeErr(w, http.StatusForbidden, "需要管理员权限")
-			return
-		}
-		next.ServeHTTP(w, r)
-	})
+	return a.requireRole(store.RoleAdmin)(next)
 }
 
 // adminOverview 概览：计数、运行信息、组件可达性、资源占用（尽力而为）。
@@ -317,6 +328,11 @@ func (a *API) adminListUsers(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "内部错误")
 		return
 	}
+	// 每行的可授角色候选由服务端按阶梯算好（前端不推导权限，只做显隐）
+	actor := userFrom(r)
+	for i := range users {
+		users[i].CanSetRoles = perm.SettableRoles(actor, &store.User{Role: users[i].Role})
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"users": users})
 }
 
@@ -343,10 +359,19 @@ func (a *API) adminTargetUser(w http.ResponseWriter, r *http.Request) *store.Use
 	return t
 }
 
+// requireCanActOn 阶梯约束：只能操作比自己低档的用户（super 不可被动）。
+func (a *API) requireCanActOn(w http.ResponseWriter, r *http.Request, t *store.User) bool {
+	if !perm.CanActOn(userFrom(r), t) {
+		writeErr(w, http.StatusForbidden, "不能操作同级或更高权限的用户")
+		return false
+	}
+	return true
+}
+
 func (a *API) adminSetUserDisabled(disabled bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		t := a.adminTargetUser(w, r)
-		if t == nil {
+		if t == nil || !a.requireCanActOn(w, r, t) {
 			return
 		}
 		if err := a.st.SetUserDisabled(r.Context(), t.ID, disabled); err != nil {
@@ -357,21 +382,54 @@ func (a *API) adminSetUserDisabled(disabled bool) http.HandlerFunc {
 	}
 }
 
+// adminSetUserRole 授予/收回系统角色：受 CanActOn 与「只能授到自己以下」双重约束；
+// 响应带目标名下频道数（降级 admin 时前端提示「其名下仍有 N 个频道」）。
+func (a *API) adminSetUserRole(w http.ResponseWriter, r *http.Request) {
+	t := a.adminTargetUser(w, r)
+	if t == nil || !a.requireCanActOn(w, r, t) {
+		return
+	}
+	var req struct {
+		Role store.Role `json:"role"`
+	}
+	if !decode(w, r, &req) {
+		return
+	}
+	switch req.Role {
+	case store.RoleUser, store.RolePower, store.RoleAdmin:
+	default:
+		writeErr(w, http.StatusBadRequest, "角色只能是 user / power / admin")
+		return
+	}
+	actor := userFrom(r)
+	if req.Role.Rank() >= actor.Role.Rank() {
+		writeErr(w, http.StatusForbidden, "只能授予比自己低的角色")
+		return
+	}
+	if t.Role == store.RoleGuest {
+		writeErr(w, http.StatusBadRequest, "访客不能授予系统角色（走注册邀请升级）")
+		return
+	}
+	if err := a.st.SetUserRole(r.Context(), t.ID, req.Role); err != nil {
+		writeErr(w, http.StatusInternalServerError, "内部错误")
+		return
+	}
+	owned, _ := a.st.CountOwnedChannels(r.Context(), t.ID)
+	writeJSON(w, http.StatusOK, map[string]any{"role": req.Role, "owned_channels": owned})
+}
+
 func (a *API) adminDeleteUser(w http.ResponseWriter, r *http.Request) {
 	t := a.adminTargetUser(w, r)
-	if t == nil {
+	if t == nil || !a.requireCanActOn(w, r, t) {
 		return
 	}
-	err := a.st.DeleteUser(r.Context(), t.ID)
-	if errors.Is(err, store.ErrOwnsChannels) {
-		writeErr(w, http.StatusConflict, "该用户名下还有频道，先删除或转移其频道")
-		return
-	}
+	// 名下频道过户给执行删除的管理员（不再是拒绝删除，避免误伤活跃频道）
+	adopted, err := a.st.DeleteUser(r.Context(), t.ID, userFrom(r).ID)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "内部错误")
 		return
 	}
-	w.WriteHeader(http.StatusNoContent)
+	writeJSON(w, http.StatusOK, map[string]any{"adopted_channels": adopted})
 }
 
 func (a *API) adminDeleteChannel(w http.ResponseWriter, r *http.Request) {
@@ -398,11 +456,14 @@ func (a *API) adminDeleteChannel(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func (a *API) adminCreateInvite(w http.ResponseWriter, r *http.Request) {
+// createInvite 发注册邀请（power+）：产出 user；admin+ 可在邀请上指定产出档（user/power）。
+func (a *API) createInvite(w http.ResponseWriter, r *http.Request) {
+	u := userFrom(r)
 	var req struct {
 		Note    string `json:"note"`
 		MaxUses int    `json:"max_uses"` // 0 = 不限
 		TTL     string `json:"ttl"`      // 1h / 24h / 7d
+		Role    string `json:"role"`     // 产出档：user/power，仅 admin+ 可指定（空 = 跟随注册默认档）
 	}
 	if !decode(w, r, &req) {
 		return
@@ -414,7 +475,21 @@ func (a *API) adminCreateInvite(w http.ResponseWriter, r *http.Request) {
 	if req.MaxUses < 0 || req.MaxUses > 100 {
 		req.MaxUses = 1
 	}
-	inv, err := a.st.CreateInvite(r.Context(), userFrom(r).ID, strings.TrimSpace(req.Note), req.MaxUses, ttl)
+	role := store.Role("")
+	if req.Role != "" {
+		if !perm.SysAtLeast(u, store.RoleAdmin) {
+			writeErr(w, http.StatusForbidden, "只有管理员能指定邀请产出档")
+			return
+		}
+		switch store.Role(req.Role) {
+		case store.RoleUser, store.RolePower:
+			role = store.Role(req.Role)
+		default:
+			writeErr(w, http.StatusBadRequest, "产出档只能是 user / power")
+			return
+		}
+	}
+	inv, err := a.st.CreateInvite(r.Context(), u.ID, strings.TrimSpace(req.Note), req.MaxUses, ttl, role)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "内部错误")
 		return
@@ -437,8 +512,16 @@ func (a *API) publicBase(r *http.Request) string {
 	return requestScheme(r) + "://" + r.Host
 }
 
-func (a *API) adminListInvites(w http.ResponseWriter, r *http.Request) {
-	invites, err := a.st.ListInvites(r.Context())
+// listInvites 列邀请：admin+ 看全部，power 只看自己发的。
+func (a *API) listInvites(w http.ResponseWriter, r *http.Request) {
+	u := userFrom(r)
+	var invites []store.Invite
+	var err error
+	if perm.SysAtLeast(u, store.RoleAdmin) {
+		invites, err = a.st.ListInvites(r.Context())
+	} else {
+		invites, err = a.st.ListInvitesByCreator(r.Context(), u.ID)
+	}
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "内部错误")
 		return
@@ -446,12 +529,28 @@ func (a *API) adminListInvites(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"invites": invites, "base": a.publicBase(r)})
 }
 
-// adminRevokeInvite 有效邀请撤销、失效邀请删除（前端同一个按钮）。
-func (a *API) adminRevokeInvite(w http.ResponseWriter, r *http.Request) {
+// revokeInvite 有效邀请撤销、失效邀请删除（前端同一个按钮）：只能动自己发的，admin+ 任意。
+func (a *API) revokeInvite(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, "邀请 ID 无效")
 		return
+	}
+	u := userFrom(r)
+	if !perm.SysAtLeast(u, store.RoleAdmin) {
+		inv, err := a.st.InviteByID(r.Context(), id)
+		if errors.Is(err, store.ErrNotFound) {
+			writeErr(w, http.StatusNotFound, "邀请不存在")
+			return
+		}
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, "内部错误")
+			return
+		}
+		if inv.CreatedByID != u.ID {
+			writeErr(w, http.StatusForbidden, "只能撤销自己发的邀请")
+			return
+		}
 	}
 	if err := a.st.DeleteInvite(r.Context(), id); err != nil {
 		writeErr(w, http.StatusInternalServerError, "内部错误")
@@ -461,12 +560,16 @@ func (a *API) adminRevokeInvite(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) adminGetPolicy(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]string{"policy": a.regPolicy(r)})
+	writeJSON(w, http.StatusOK, map[string]string{
+		"policy":       a.regPolicy(r),
+		"default_role": string(a.regDefaultRole(r)),
+	})
 }
 
 func (a *API) adminSetPolicy(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Policy string `json:"policy"`
+		Policy      string `json:"policy"`
+		DefaultRole string `json:"default_role"` // 注册产出默认档：user/power
 	}
 	if !decode(w, r, &req) {
 		return
@@ -477,11 +580,21 @@ func (a *API) adminSetPolicy(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "策略只能是 closed / invite / open")
 		return
 	}
+	switch store.Role(req.DefaultRole) {
+	case store.RoleUser, store.RolePower:
+	default:
+		writeErr(w, http.StatusBadRequest, "默认档只能是 user / power")
+		return
+	}
 	if err := a.st.SetSetting(r.Context(), "reg_policy", req.Policy); err != nil {
 		writeErr(w, http.StatusInternalServerError, "内部错误")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"policy": req.Policy})
+	if err := a.st.SetSetting(r.Context(), "reg_default_role", req.DefaultRole); err != nil {
+		writeErr(w, http.StatusInternalServerError, "内部错误")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"policy": req.Policy, "default_role": req.DefaultRole})
 }
 
 // ---- 频道参与者（房主视角频道管理用）----

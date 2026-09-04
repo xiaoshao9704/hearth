@@ -1,17 +1,15 @@
-// 管理后台（服务器级，仅管理员）：服务状态 / 服务参数 / 用户 / 房间 / 邀请。
+// 管理后台（服务器级，仅管理员）：服务状态 / 服务参数 / 用户 / 房间。
 // Solid 渲染：每个配置组与实例表单各持一份局部输入状态，保存一处或展开表单不再重建整页，
 // 别处未提交的输入不会被清掉；配置组按「当前输入 vs 已保存值」自己算脏，脏时才允许保存并拦截切 tab。
 import { createEffect, createMemo, createSignal, For, onCleanup, Show } from 'solid-js';
 import { render } from 'solid-js/web';
 import {
-  adminCreateInvite,
   adminCreateProvider,
   adminDeleteChannel,
-  adminDeleteInvite,
   adminDeleteProvider,
   adminDeleteUser,
   adminGetConfig,
-  adminListInvites,
+  adminGetPolicy,
   adminListProviders,
   adminListUsers,
   adminNetcheck,
@@ -19,23 +17,24 @@ import {
   adminSetConfig,
   adminSetPolicy,
   adminSetUserDisabled,
+  adminSetUserRole,
   adminUpdateProvider,
   downloadCACert,
   getUser,
   listChannels,
 } from '../api';
-import type { AdminOverview, AdminUser, Channel, ConfigItem, Invite, NetcheckResult, ProviderField, ProviderInstance, ProviderType } from '../api';
-import { avatarHtml, confirmDialog, copyText, el, fmtClock, icon, menuButtonHtml, timeAgo, toast, wireMenuButton } from '../ui';
+import type { AdminOverview, AdminUser, Channel, ConfigItem, NetcheckResult, ProviderField, ProviderInstance, ProviderType } from '../api';
+import { avatarHtml, confirmDialog, el, fmtClock, icon, menuButtonHtml, timeAgo, toast, wireMenuButton } from '../ui';
+import { openSettings } from './settings';
 
-type Tab = 'status' | 'config' | 'network' | 'users' | 'rooms' | 'invites';
+type Tab = 'status' | 'config' | 'network' | 'users' | 'rooms';
 
 const NAV: { id: Tab; label: string; icon: string; sub: string }[] = [
   { id: 'status', label: '服务状态', icon: 'pulse', sub: '常驻进程与宿主资源' },
   { id: 'config', label: '服务参数', icon: 'gear', sub: '组件地址与注册策略' },
   { id: 'network', label: '网络', icon: 'globe', sub: '端口映射、证书与外部可达性' },
-  { id: 'users', label: '用户', icon: 'users', sub: '账号、设备与启停' },
+  { id: 'users', label: '用户', icon: 'users', sub: '账号、角色与启停' },
   { id: 'rooms', label: '房间', icon: 'volume', sub: '频道、房主与可见性' },
-  { id: 'invites', label: '邀请', icon: 'mail', sub: '生成有时效的注册链接' },
 ];
 
 // 各 tab 共用的「加载中 / 出错」占位
@@ -165,10 +164,8 @@ export async function renderAdmin(root: HTMLElement, tab: Tab) {
             <NetworkTab />
           ) : tab === 'users' ? (
             <UsersTab />
-          ) : tab === 'rooms' ? (
-            <RoomsTab />
           ) : (
-            <InvitesTab />
+            <RoomsTab />
           )}
         </div>
       </div>
@@ -567,7 +564,8 @@ function ConfigTab(props: { onDirty: (groups: string[]) => void }) {
   const [instances, setInstances] = createSignal<ProviderInstance[]>([]);
   const [types, setTypes] = createSignal<ProviderType[]>([]);
   const [policy, setPolicy] = createSignal('');
-  const [policyBusy, setPolicyBusy] = createSignal(''); // 正在切换的策略 id
+  const [defaultRole, setDefaultRole] = createSignal(''); // 注册产出默认档（user/power）
+  const [policyBusy, setPolicyBusy] = createSignal(''); // 正在切换的策略/默认档标识
   const [err, setErr] = createSignal('');
   // 输入草稿：只存被改过的键，未改的键取 ConfigItem.value（= 已保存值），两者比较即脏标记
   const [draft, setDraft] = createSignal<Record<string, string>>({});
@@ -583,17 +581,34 @@ function ConfigTab(props: { onDirty: (groups: string[]) => void }) {
 
   void (async () => {
     try {
-      const [o, its, provs] = await Promise.all([adminOverview(), adminGetConfig(), adminListProviders()]);
+      const [o, its, provs, pol] = await Promise.all([adminOverview(), adminGetConfig(), adminListProviders(), adminGetPolicy()]);
       setItems(its);
       setInstances(provs.instances);
       setTypes(provs.types);
       setPType(provs.types[0]?.type ?? '');
-      setPolicy(o.policy);
+      setPolicy(pol.policy);
+      setDefaultRole(pol.default_role);
       setOv(o);
     } catch (e) {
       setErr((e as Error).message);
     }
   })();
+
+  // 策略与默认档是同一份设置，任一变都两项一起提交
+  const savePolicy = async (nextPolicy: string, nextRole: string, busyKey: string) => {
+    if (policyBusy()) return;
+    setPolicyBusy(busyKey);
+    try {
+      const r = await adminSetPolicy(nextPolicy, nextRole);
+      setPolicy(r.policy);
+      setDefaultRole(r.default_role);
+      toast('注册策略已更新', 'ok');
+    } catch (e) {
+      toast((e as Error).message, 'bad');
+    } finally {
+      setPolicyBusy('');
+    }
+  };
 
   const typeLabel = (t: string) => types().find((x) => x.type === t)?.label ?? TYPE_LABELS[t] ?? t;
   const fieldsOf = (t: string) => types().find((x) => x.type === t)?.fields ?? [];
@@ -1023,18 +1038,8 @@ function ConfigTab(props: { onDirty: (groups: string[]) => void }) {
                     aria-checked={on()}
                     disabled={policyBusy() !== ''}
                     style={`display:flex;align-items:flex-start;gap:11px;padding:11px 12px;border-radius:9px;border:1px solid ${on() ? 'var(--ember-line)' : 'var(--line)'};background:${on() ? 'var(--ember-tint)' : 'var(--bg-2)'};text-align:left;width:100%`}
-                    onClick={async () => {
-                      if (on() || policyBusy()) return;
-                      setPolicyBusy(p.id);
-                      try {
-                        const r = await adminSetPolicy(p.id);
-                        setPolicy(r.policy);
-                        toast('注册策略已更新', 'ok');
-                      } catch (e) {
-                        toast((e as Error).message, 'bad');
-                      } finally {
-                        setPolicyBusy('');
-                      }
+                    onClick={() => {
+                      if (!on()) void savePolicy(p.id, defaultRole(), p.id);
                     }}
                   >
                     <div class="radio" classList={{ on: on() }} style="margin-top:1px">
@@ -1053,6 +1058,31 @@ function ConfigTab(props: { onDirty: (groups: string[]) => void }) {
               }}
             </For>
           </div>
+          <div style="display:flex;align-items:center;gap:10px;margin-top:13px">
+            <span style="font-size:11.5px;color:var(--text-2);flex-shrink:0">注册默认档</span>
+            <div class="seg-group" style="background:var(--bg-2);flex-grow:1">
+              <For
+                each={[
+                  ['user', '普通用户'],
+                  ['power', '高级用户'],
+                ]}
+              >
+                {([v, label]) => (
+                  <button
+                    class="hit seg"
+                    classList={{ on: defaultRole() === v }}
+                    disabled={policyBusy() !== ''}
+                    title={v === 'power' ? '新账号落地即可创建频道、发邀请' : '新账号不能创建频道，需要时由管理员提升'}
+                    onClick={() => {
+                      if (defaultRole() !== v) void savePolicy(policy(), v, `role-${v}`);
+                    }}
+                  >
+                    {label}
+                  </button>
+                )}
+              </For>
+            </div>
+          </div>
           <div style="margin-top:13px;font-size:11px;line-height:1.6;color:var(--text-3)">
             数据库：<span class="mono">{ov()!.services.db?.url ?? ''}</span>
             <br />
@@ -1066,11 +1096,28 @@ function ConfigTab(props: { onDirty: (groups: string[]) => void }) {
 
 // ---- 用户 ----
 
+const ROLE_LABELS: Record<string, string> = {
+  super: '超级管理员',
+  admin: '管理员',
+  power: '高级用户',
+  user: '成员',
+  guest: '访客',
+};
+
+// 访客行的过期时间：未来 = 还剩多久，已过 = 已过期（清理协程每 10 分钟扫一次，可能短暂滞留）
+function fmtExpiry(iso: string | null): string {
+  if (!iso) return '';
+  const ms = new Date(iso).getTime() - Date.now();
+  if (ms <= 0) return '已过期';
+  const h = Math.ceil(ms / 3600_000);
+  return h > 48 ? `${Math.ceil(h / 24)} 天后过期` : `${h} 小时后过期`;
+}
+
 function UsersTab() {
   const [users, setUsers] = createSignal<AdminUser[]>();
   const [err, setErr] = createSignal('');
   const [query, setQuery] = createSignal('');
-  const [busy, setBusy] = createSignal(''); // 正在操作的用户 key（"toggle-<id>" / "del-<id>"）
+  const [busy, setBusy] = createSignal(''); // 正在操作的用户 key（"toggle-<id>" / "del-<id>" / "role-<id>"）
   const meId = getUser()?.id;
 
   const load = async () => {
@@ -1086,6 +1133,25 @@ function UsersTab() {
     const q = query().trim().toLowerCase();
     const all = users() ?? [];
     return q ? all.filter((u) => u.username.toLowerCase().includes(q)) : all;
+  };
+
+  const setRole = async (u: AdminUser, role: string) => {
+    if (busy() || role === u.role) return;
+    setBusy(`role-${u.id}`);
+    try {
+      const r = await adminSetUserRole(u.id, role);
+      toast(
+        r.owned_channels > 0
+          ? `已把 ${u.username} 调整为「${ROLE_LABELS[r.role] ?? r.role}」；其名下仍有 ${r.owned_channels} 个频道`
+          : `已把 ${u.username} 调整为「${ROLE_LABELS[r.role] ?? r.role}」`,
+        'ok',
+      );
+      await load();
+    } catch (e) {
+      toast((e as Error).message, 'bad');
+    } finally {
+      setBusy('');
+    }
   };
 
   const toggle = async (u: AdminUser) => {
@@ -1110,15 +1176,15 @@ function UsersTab() {
     if (busy()) return;
     const ok = await confirmDialog({
       title: `删除用户 ${u.username}？`,
-      body: '其会话、设备档案和白名单记录一并清除，不可恢复。',
+      body: '其会话、设备档案和白名单记录一并清除，名下的频道会转到你的名下。不可恢复。',
       danger: true,
       confirmText: '删除',
     });
     if (!ok) return;
     setBusy(`del-${u.id}`);
     try {
-      await adminDeleteUser(u.id);
-      toast('用户已删除', 'ok');
+      const r = await adminDeleteUser(u.id);
+      toast(r.adopted_channels > 0 ? `用户已删除，其 ${r.adopted_channels} 个频道已转到你的名下` : '用户已删除', 'ok');
       await load();
     } catch (e) {
       toast((e as Error).message, 'bad');
@@ -1137,11 +1203,11 @@ function UsersTab() {
           </div>
         </form>
         <div class="spacer"></div>
-        <a class="hit btn btn-primary" href="#/admin/invites">
+        <button class="hit btn btn-primary" onClick={() => openSettings('invites')}>
           {el(icon('plus', 15, 'var(--on-ember)', 1.9))} 邀请新用户
-        </a>
+        </button>
       </div>
-      <div class="table-box" style={{ '--col-1': '200px', '--col-2': '90px', '--col-3': '80px', '--col-5': '170px' }}>
+      <div class="table-box" style={{ '--col-1': '200px', '--col-2': '150px', '--col-3': '80px', '--col-5': '170px' }}>
         <div class="table-head">
           <div>用户</div>
           <div>角色</div>
@@ -1153,6 +1219,8 @@ function UsersTab() {
           <For each={shown()}>
             {(u) => {
               const self = u.id === meId;
+              // 可授角色候选由服务端随行下发（can_set_roles），前端不推导阶梯；null/空 = 不可操作
+              const settable = () => (u.can_set_roles ?? []).filter((r) => r !== u.role);
               return (
                 <div class="table-row" classList={{ dim: u.disabled }}>
                   <div data-label="用户" style="display:flex;align-items:center;gap:10px;min-width:0">
@@ -1161,17 +1229,37 @@ function UsersTab() {
                       <div class="cell-ellipsis" style="font-size:13px;font-weight:500">{u.username}</div>
                       <div class="mono" style="font-size:10px;color:var(--text-2);margin-top:2px">
                         usr_{u.id}
+                        {u.role === 'guest' && u.invite ? ` · 来自邀请 ${u.invite}` : ''}
                       </div>
                     </div>
                   </div>
                   <div data-label="角色">
-                    <span
-                      class="chip"
-                      classList={{ 'tag-ember': u.is_admin }}
-                      style={u.is_admin ? '' : 'background:var(--bg-4);color:var(--text-1)'}
+                    <Show
+                      when={settable().length > 0}
+                      fallback={
+                        <span
+                          class="chip"
+                          classList={{ 'tag-ember': u.is_admin }}
+                          style={u.is_admin ? '' : 'background:var(--bg-4);color:var(--text-1)'}
+                        >
+                          {ROLE_LABELS[u.role] ?? u.role}
+                        </span>
+                      }
                     >
-                      {u.is_admin ? '管理员' : '成员'}
-                    </span>
+                      <select
+                        class="hit"
+                        style="height:28px;padding:0 6px;border-radius:7px;border:1px solid var(--line);background:var(--bg-2);color:var(--text-1);font-size:12px"
+                        disabled={busy() !== ''}
+                        value={u.role}
+                        onChange={(ev) => void setRole(u, ev.currentTarget.value)}
+                      >
+                        <option value={u.role}>{ROLE_LABELS[u.role] ?? u.role}</option>
+                        <For each={settable()}>{(r) => <option value={r}>{ROLE_LABELS[r] ?? r}</option>}</For>
+                      </select>
+                    </Show>
+                    <Show when={u.role === 'guest' && u.expires_at}>
+                      <div class="mono" style="font-size:10px;color:var(--text-2);margin-top:3px">{fmtExpiry(u.expires_at)}</div>
+                    </Show>
                   </div>
                   <div class="mono" data-label="设备" style="font-size:12px;color:var(--text-1)">
                     {u.devices}
@@ -1299,206 +1387,3 @@ function RoomsTab() {
   );
 }
 
-// ---- 邀请 ----
-
-function stateOf(iv: Invite): { label: string; cls: string; dead: boolean } {
-  const now = Date.now();
-  const exp = new Date(iv.expires_at).getTime();
-  if (iv.revoked) return { label: '已撤销', cls: 'tag-red', dead: true };
-  if (exp < now) return { label: '已过期', cls: 'tag-red', dead: true };
-  if (iv.max_uses > 0 && iv.used >= iv.max_uses) return { label: '已用完', cls: '', dead: true };
-  const leftH = Math.ceil((exp - now) / 3600_000);
-  return {
-    label: `有效 · 剩 ${leftH > 48 ? `${Math.ceil(leftH / 24)} 天` : `${leftH} 小时`}`,
-    cls: 'tag-sage',
-    dead: false,
-  };
-}
-
-function InvitesTab() {
-  const [invites, setInvites] = createSignal<Invite[]>();
-  const [base, setBase] = createSignal('');
-  const [err, setErr] = createSignal('');
-  const [ttl, setTtl] = createSignal('24h');
-  const [uses, setUses] = createSignal('1');
-  const [note, setNote] = createSignal('');
-  const [fresh, setFresh] = createSignal('');
-  const [making, setMaking] = createSignal(false);
-  const [revokeBusy, setRevokeBusy] = createSignal(0); // 正在撤销/删除的邀请 id，0=空闲
-
-  const load = async () => {
-    try {
-      const r = await adminListInvites();
-      setInvites(r.invites);
-      setBase(r.base);
-    } catch (e) {
-      setErr((e as Error).message);
-    }
-  };
-  void load();
-
-  const make = async () => {
-    if (making()) return;
-    setMaking(true);
-    try {
-      const r = await adminCreateInvite(note(), Number(uses()), ttl());
-      setFresh(r.url);
-      setNote('');
-      toast('邀请链接已生成', 'ok');
-      await load();
-    } catch (e) {
-      toast((e as Error).message, 'bad');
-    } finally {
-      setMaking(false);
-    }
-  };
-
-  const revoke = async (iv: Invite, dead: boolean) => {
-    if (revokeBusy()) return;
-    if (!dead) {
-      const ok = await confirmDialog({ title: '撤销这条邀请？', body: '撤销后这条链接立即失效，未使用的次数作废。', danger: true, confirmText: '撤销' });
-      if (!ok) return;
-    }
-    setRevokeBusy(iv.id);
-    try {
-      await adminDeleteInvite(iv.id);
-      toast(dead ? '邀请已删除' : '邀请已撤销', 'ok');
-      await load();
-    } catch (e) {
-      toast((e as Error).message, 'bad');
-    } finally {
-      setRevokeBusy(0);
-    }
-  };
-
-  const Seg = (p: { val: () => string; set: (v: string) => void; opts: [string, string][] }) => (
-    <div class="seg-group" style="background:var(--bg-2)">
-      <For each={p.opts}>
-        {([v, label]) => (
-          <button type="button" class="hit seg" classList={{ on: p.val() === v }} onClick={() => p.set(v)}>
-            {label}
-          </button>
-        )}
-      </For>
-    </div>
-  );
-
-  return (
-    <Show when={invites()} fallback={<Placeholder err={err()} />}>
-      <div class="card" style="padding:18px 20px">
-        <div style="font-size:13.5px;font-weight:600">生成邀请链接</div>
-        <div style="font-size:11.5px;color:var(--text-2);margin-top:4px">链接在有效期内可用，点开就能自己设账号密码</div>
-        <form
-          style="display:flex;gap:20px;margin-top:16px;align-items:flex-end;flex-wrap:wrap"
-          onSubmit={(ev) => {
-            ev.preventDefault();
-            void make();
-          }}
-        >
-          <div>
-            <div style="font-size:11px;color:var(--text-2);margin-bottom:7px">有效期</div>
-            <Seg
-              val={ttl}
-              set={setTtl}
-              opts={[
-                ['1h', '1 小时'],
-                ['24h', '24 小时'],
-                ['7d', '7 天'],
-              ]}
-            />
-          </div>
-          <div>
-            <div style="font-size:11px;color:var(--text-2);margin-bottom:7px">可用次数</div>
-            <Seg
-              val={uses}
-              set={setUses}
-              opts={[
-                ['1', '1 次'],
-                ['5', '5 次'],
-                ['0', '不限'],
-              ]}
-            />
-          </div>
-          <div style="flex-grow:1;min-width:160px">
-            <div style="font-size:11px;color:var(--text-2);margin-bottom:7px">备注（给谁）</div>
-            <div class="field" style="height:38px;background:var(--bg-2)">
-              <input id="iv-note" value={note()} onInput={(ev) => setNote(ev.currentTarget.value)} />
-            </div>
-          </div>
-          <button type="submit" class="hit btn btn-primary" id="iv-make" classList={{ loading: making() }} disabled={making()}>
-            生成链接
-          </button>
-        </form>
-        <Show when={fresh()}>
-          <div style="display:flex;align-items:center;gap:10px;height:42px;margin-top:14px;padding:0 6px 0 14px;border-radius:9px;background:var(--sage-tint);border:1px solid var(--sage-line)">
-            <span class="mono" style="font-size:12.5px;flex-grow:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">
-              {fresh()}
-            </span>
-            <button
-              class="hit btn btn-sm"
-              id="iv-copy"
-              onClick={async () => {
-                if (await copyText(fresh())) toast('已复制', 'ok', 1400);
-              }}
-            >
-              {el(icon('copy', 13))} 复制
-            </button>
-          </div>
-        </Show>
-      </div>
-      <div class="table-box" style={{ '--col-1': '150px', '--col-2': '150px', '--col-3': '110px', '--col-5': '150px' }}>
-        <div class="table-head">
-          <div>邀请码</div>
-          <div>备注</div>
-          <div>可用次数</div>
-          <div style="flex-grow:1">状态</div>
-          <div style="text-align:right">操作</div>
-        </div>
-        <Show when={invites()!.length > 0} fallback={<div class="table-empty">还没有发过邀请。</div>}>
-          <For each={invites()}>
-            {(iv) => {
-              const st = stateOf(iv);
-              return (
-                <div class="table-row" classList={{ dim: st.dead }}>
-                  <div class="mono" data-label="邀请码" style="font-size:12px;color:var(--text-1)">
-                    {iv.code}
-                  </div>
-                  <div class="cell-ellipsis" data-label="备注" style="font-size:12.5px;color:var(--text-1)">{iv.note || '（无）'}</div>
-                  <div class="mono" data-label="可用次数" style="font-size:12px;color:var(--text-1)">
-                    {iv.used} / {iv.max_uses === 0 ? '∞' : iv.max_uses}
-                  </div>
-                  <div data-label="状态" style="flex-grow:1">
-                    <span class={`chip ${st.cls}`} style={st.cls ? '' : 'background:var(--bg-4);color:var(--text-2)'}>
-                      {st.label}
-                    </span>
-                  </div>
-                  <div class="table-actions">
-                    <Show when={!st.dead}>
-                      <button
-                        class="hit btn btn-sm"
-                        disabled={revokeBusy() !== 0}
-                        onClick={async () => {
-                          if (await copyText(`${base()}/#/join/${iv.code}`)) toast('已复制', 'ok', 1400);
-                        }}
-                      >
-                        复制链接
-                      </button>
-                    </Show>
-                    <button
-                      class="hit btn btn-sm"
-                      classList={{ loading: revokeBusy() === iv.id }}
-                      disabled={revokeBusy() !== 0}
-                      onClick={() => void revoke(iv, st.dead)}
-                    >
-                      {st.dead ? '删除' : '撤销'}
-                    </button>
-                  </div>
-                </div>
-              );
-            }}
-          </For>
-        </Show>
-      </div>
-    </Show>
-  );
-}

@@ -1,25 +1,29 @@
-// 频道管理（房主视角）：在房成员 / 黑名单 / 白名单 / 邀请制。
+// 频道管理（房主与频道管理员视角）：在房成员 / 黑名单 / 白名单 / 邀请制；归属类操作（管理员、转让、邀请制开关）仅房主可见。
 // ChannelManage 嵌在设置浮层的「频道」分区；#/manage/<频道名> 保留为直达路由，页面只是给它套个头。
 import { createMemo, createSignal, For, Show } from 'solid-js';
 import { render } from 'solid-js/web';
 import {
   addMember,
+  addModerator,
   banUser,
   getUser,
   kickUser,
   listBans,
   listChannels,
   listMembers,
+  listModerators,
   listParticipants,
   removeMember,
+  removeModerator,
   setInviteOnly,
+  transferChannel,
   unbanUser,
 } from '../api';
-import type { RoomParticipant, UserRef } from '../api';
-import { avatarHtml, confirmDialog, el, icon, menuButtonHtml, timeAgo, toast, wireMenuButton } from '../ui';
+import type { ChannelRole, RoomParticipant, UserRef } from '../api';
+import { avatarHtml, confirmDialog, el, esc, icon, menuButtonHtml, timeAgo, toast, wireMenuButton } from '../ui';
 import type { ConfirmOpts } from '../ui';
 
-type Tab = 'members' | 'bans' | 'allow';
+type Tab = 'members' | 'bans' | 'allow' | 'mods' | 'transfer';
 
 export function ChannelManage(p: { channel: string }) {
   const me = getUser();
@@ -30,9 +34,14 @@ export function ChannelManage(p: { channel: string }) {
   const [pErr, setPErr] = createSignal(''); // 在房成员单独拉取，失败不吞掉，面板顶部给重试
   const [bans, setBans] = createSignal<UserRef[]>();
   const [allow, setAllow] = createSignal<UserRef[]>();
-  const [denied, setDenied] = createSignal<string | null>(null); // 频道不存在 / 非房主：服务端会拒，前端只提示
+  const [mods, setMods] = createSignal<UserRef[]>();
+  const [myRole, setMyRole] = createSignal<ChannelRole>(''); // 服务端下发的我的频道角色；owner 才有归属类操作
+  const [denied, setDenied] = createSignal<string | null>(null); // 频道不存在 / 没有管理角色：服务端会拒，前端只提示
   const [busy, setBusy] = createSignal(''); // 正在执行的操作 key，空串=空闲
   let allowInput!: HTMLInputElement;
+  let transferSel!: HTMLSelectElement;
+
+  const isOwner = () => myRole() === 'owner';
 
   async function loadParticipants() {
     try {
@@ -43,16 +52,27 @@ export function ChannelManage(p: { channel: string }) {
     }
   }
 
+  // moderators 接口是房主限定，管理员视角不拉
+  async function loadMods() {
+    try {
+      setMods(await listModerators(p.channel));
+    } catch {
+      setMods([]);
+    }
+  }
+
   async function load() {
     void loadParticipants();
     try {
       const [chs, bs, ms] = await Promise.all([listChannels(), listBans(p.channel), listMembers(p.channel)]);
       const ch = chs.find((c) => c.name === p.channel);
       if (!ch) return setDenied('频道不存在');
-      if (!ch.is_owner) return setDenied('只有房主能进频道管理');
+      if (ch.my_role !== 'owner' && ch.my_role !== 'moderator') return setDenied('只有房主和频道管理员能进频道管理');
+      setMyRole(ch.my_role);
       setInvite(ch.invite_only);
       setBans(bs);
       setAllow(ms);
+      if (ch.my_role === 'owner') void loadMods();
     } catch (err) {
       toast((err as Error).message, 'bad');
     }
@@ -68,6 +88,91 @@ export function ChannelManage(p: { channel: string }) {
     }
     return [...m.entries()];
   });
+
+  // 房主 uid：白名单行里 role=owner 的那位；自己就是房主时白名单还没回来先用自己兜
+  const ownerUid = () => (allow() ?? []).find((m) => m.role === 'owner')?.id ?? (isOwner() ? (me?.id ?? 0) : 0);
+
+  // 「授予管理员 / 转让」候选人：在房成员与白名单合并去重（按 uid），排除自己与房主；
+  // 授予管理员再排除已是管理员的（转让不排除——管理员是合法的接让人）。
+  // 访客等不合法目标由服务端拒绝（错误文案直接 toast），前端拿不到别人的系统角色、不做推导
+  const mergedCandidates = (excludeMods: boolean): UserRef[] => {
+    const m = new Map<number, string>();
+    for (const x of participants() ?? []) {
+      if (x.kind === 'ingest') continue; // 推流设备不是人
+      if (!m.has(x.uid)) m.set(x.uid, x.username || x.name);
+    }
+    for (const x of allow() ?? []) {
+      if (!m.has(x.id)) m.set(x.id, x.username);
+    }
+    m.delete(me?.id ?? 0);
+    m.delete(ownerUid());
+    if (excludeMods) for (const mod of mods() ?? []) m.delete(mod.id);
+    return [...m.entries()].map(([id, username]) => ({ id, username }));
+  };
+  const modCandidates = createMemo(() => mergedCandidates(true));
+  const transferCandidates = createMemo(() => mergedCandidates(false));
+
+  // 转让确认：要手输一遍频道名才点得动确认（ui.ts 的 confirmDialog 没有输入框，这里复刻同一套 dialog 样式）
+  function confirmTransfer(target: UserRef): Promise<boolean> {
+    const prev = document.activeElement as HTMLElement | null;
+    const dlg = document.createElement('dialog');
+    dlg.className = 'dialog';
+    dlg.innerHTML = `<div class="dialog-box">
+  <div class="dialog-title">把「${esc(p.channel)}」转让给 ${esc(target.username)}？</div>
+  <div class="dialog-body">转让后你是频道管理员，对方成为频道主。输入频道名 <b>${esc(p.channel)}</b> 确认。</div>
+  <div class="field" style="margin:4px 0 14px"><input data-act="name" placeholder="${esc(p.channel)}" autocomplete="off" /></div>
+  <div class="dialog-actions">
+    <button type="button" class="btn" data-act="cancel">取消</button>
+    <button type="button" class="btn btn-danger-solid" data-act="ok" disabled>转让</button>
+  </div>
+</div>`;
+    const input = dlg.querySelector<HTMLInputElement>('[data-act="name"]')!;
+    const okBtn = dlg.querySelector<HTMLButtonElement>('[data-act="ok"]')!;
+    input.addEventListener('input', () => {
+      okBtn.disabled = input.value.trim() !== p.channel;
+    });
+    return new Promise<boolean>((resolve) => {
+      let settled = false;
+      const settle = (ok: boolean) => {
+        if (settled) return;
+        settled = true;
+        dlg.close();
+        dlg.remove();
+        if (prev?.isConnected) prev.focus?.();
+        resolve(ok);
+      };
+      dlg.addEventListener('cancel', (e) => {
+        e.preventDefault();
+        settle(false);
+      });
+      dlg.addEventListener('click', (e) => {
+        if (e.target === dlg) settle(false);
+      });
+      dlg.querySelector('[data-act="cancel"]')!.addEventListener('click', () => settle(false));
+      okBtn.addEventListener('click', () => {
+        if (!okBtn.disabled) settle(true);
+      });
+      document.body.appendChild(dlg);
+      dlg.showModal();
+      input.focus();
+    });
+  }
+
+  const doTransfer = async (target: UserRef) => {
+    if (busy()) return;
+    if (!(await confirmTransfer(target))) return;
+    setBusy(`transfer-${target.id}`);
+    try {
+      const r = await transferChannel(p.channel, target.id);
+      toast(`已把「${p.channel}」转让给 ${r.owner}，你现在是频道管理员。`, 'ok');
+      setTab('members');
+      await load(); // 转让后自己是 moderator：归属类分区随 my_role 刷新消失
+    } catch (err) {
+      toast((err as Error).message, 'bad');
+    } finally {
+      setBusy('');
+    }
+  };
 
   // 频道维度的操作都是落库即生效：每次都给回执，再重拉一遍；confirmOpts 给了就先过一道确认
   const act = (key: string, fn: () => Promise<unknown>, okMsg: string, confirmOpts?: ConfirmOpts) => async () => {
@@ -132,16 +237,26 @@ export function ChannelManage(p: { channel: string }) {
     </div>
   );
 
-  const tabs: { id: Tab; label: string; n: () => number | undefined }[] = [
-    { id: 'members', label: '在房成员', n: () => (participants() ? users().length : undefined) },
-    { id: 'bans', label: '黑名单', n: () => bans()?.length },
-    { id: 'allow', label: '白名单', n: () => allow()?.length },
-  ];
+  const tabs = (): { id: Tab; label: string; n: () => number | undefined }[] => {
+    const base = [
+      { id: 'members' as Tab, label: '在房成员', n: () => (participants() ? users().length : undefined) },
+      { id: 'bans' as Tab, label: '黑名单', n: () => bans()?.length },
+      { id: 'allow' as Tab, label: '白名单', n: () => allow()?.length },
+    ];
+    // 归属类分区仅房主可见：频道管理员只管现场管制与名单
+    if (isOwner()) {
+      base.push(
+        { id: 'mods', label: '管理员', n: () => mods()?.length },
+        { id: 'transfer', label: '转让频道', n: () => undefined },
+      );
+    }
+    return base;
+  };
 
   return (
     <Show when={!denied()} fallback={<div class="error-text" style="padding:22px 26px">{denied()}</div>}>
       <div class="mtabs" role="tablist">
-        <For each={tabs}>
+        <For each={tabs()}>
           {(t) => (
             <button class="hit mtab" role="tab" aria-selected={tab() === t.id} classList={{ on: tab() === t.id }} onClick={() => setTab(t.id)}>
               {t.label} <Show when={t.n() !== undefined}><span class="n">{t.n()}</span></Show>
@@ -173,7 +288,7 @@ export function ChannelManage(p: { channel: string }) {
                   <For each={users()}>
                     {([uid, plist]) => {
                       const uname = plist[0].username || plist[0].name;
-                      const isMe = uid === (me?.id ?? 0);
+                      const isChOwner = uid === ownerUid();
                       // 推流设备按内核透传的 kind=ingest 判断（不解析 identity 后缀），标签随行展示
                       const ing = plist.find((x) => x.kind === 'ingest');
                       const meta = [
@@ -189,15 +304,15 @@ export function ChannelManage(p: { channel: string }) {
                           <div style="flex-grow:1;min-width:0">
                             <div style="display:flex;align-items:center;gap:8px">
                               <span class="cell-ellipsis" style="font-size:13.5px;font-weight:500">{uname}</span>
-                              <Show when={isMe}>
+                              <Show when={isChOwner}>
                                 <span class="tag tag-ember">房主</span>
                               </Show>
                             </div>
                             <div class="mono" style="font-size:11px;color:var(--text-2);margin-top:2px">
-                              {isMe ? 'created_by · 不可移出' : meta}
+                              {isChOwner ? 'owner · 不可移出' : meta}
                             </div>
                           </div>
-                          <Show when={!isMe}>
+                          <Show when={!isChOwner}>
                             <div class="table-actions">
                               <button
                                 class="hit btn btn-sm"
@@ -230,7 +345,9 @@ export function ChannelManage(p: { channel: string }) {
               </Show>
             </div>
           </div>
-          <InviteCard />
+          <Show when={isOwner()}>
+            <InviteCard />
+          </Show>
         </Show>
 
         <Show when={tab() === 'bans'}>
@@ -273,20 +390,15 @@ export function ChannelManage(p: { channel: string }) {
         </Show>
 
         <Show when={tab() === 'allow'}>
-          <InviteCard />
+          <Show when={isOwner()}>
+            <InviteCard />
+          </Show>
           <div style={{ opacity: inviteOnly() ? '' : '0.6' }}>
             <div style="display:flex;align-items:baseline;gap:10px;padding:0 2px">
-              <div style="font-size:13.5px;font-weight:600">可进入的人 {(allow()?.length ?? 0) + 1}</div>
-              <div style="font-size:11.5px;color:var(--text-2)">房主始终在列</div>
+              <div style="font-size:13.5px;font-weight:600">可进入的人 {allow()?.length ?? '…'}</div>
+              <div style="font-size:11.5px;color:var(--text-2)">房主与频道管理员始终在列</div>
             </div>
             <div class="list-box" style="margin-top:8px;background:var(--bg-2)">
-              <div class="list-row" style="padding:11px 16px">
-                {el(avatarHtml(me?.username ?? '?', 'avatar'))}
-                <div style="flex-grow:1;display:flex;align-items:center;gap:8px">
-                  <span class="cell-ellipsis" style="font-size:13px">{me?.username ?? ''}</span>
-                  <span class="tag tag-ember">房主</span>
-                </div>
-              </div>
               <Show when={allow() === undefined}>
                 <div class="table-empty">加载中…</div>
               </Show>
@@ -294,20 +406,30 @@ export function ChannelManage(p: { channel: string }) {
                 {(m) => (
                   <div class="list-row" style="padding:11px 16px">
                     {el(avatarHtml(m.username, 'avatar'))}
-                    <div class="cell-ellipsis" style="flex-grow:1;font-size:13px">{m.username}</div>
-                    <button
-                      class="hit btn btn-sm"
-                      classList={{ loading: busy() === `remove-${m.id}` }}
-                      disabled={busy() !== ''}
-                      onClick={act(
-                        `remove-${m.id}`,
-                        () => removeMember(p.channel, m.id),
-                        `已把 ${m.username} 移出白名单。`,
-                        { title: `移出 ${m.username}？`, body: '移出后这个账号不在白名单里了，邀请制开着的话会进不来。', danger: true, confirmText: '移出' },
-                      )}
-                    >
-                      移出
-                    </button>
+                    <div style="flex-grow:1;display:flex;align-items:center;gap:8px;min-width:0">
+                      <span class="cell-ellipsis" style="font-size:13px">{m.username}</span>
+                      <Show when={m.role === 'owner'}>
+                        <span class="tag tag-ember">房主</span>
+                      </Show>
+                      <Show when={m.role === 'moderator'}>
+                        <span class="tag">管理员</span>
+                      </Show>
+                    </div>
+                    <Show when={m.role !== 'owner' && m.role !== 'moderator'}>
+                      <button
+                        class="hit btn btn-sm"
+                        classList={{ loading: busy() === `remove-${m.id}` }}
+                        disabled={busy() !== ''}
+                        onClick={act(
+                          `remove-${m.id}`,
+                          () => removeMember(p.channel, m.id),
+                          `已把 ${m.username} 移出白名单。`,
+                          { title: `移出 ${m.username}？`, body: '移出后这个账号不在白名单里了，邀请制开着的话会进不来。', danger: true, confirmText: '移出' },
+                        )}
+                      >
+                        移出
+                      </button>
+                    </Show>
                   </div>
                 )}
               </For>
@@ -338,6 +460,102 @@ export function ChannelManage(p: { channel: string }) {
               <span>邀请制没开，白名单只是一份草稿——现在所有账号都能进「{p.channel}」。</span>
             </div>
           </Show>
+        </Show>
+
+        <Show when={tab() === 'mods'}>
+          <div style="display:flex;flex-direction:column;gap:8px">
+            <div style="display:flex;align-items:baseline;gap:10px;flex-wrap:wrap">
+              <div style="font-size:13.5px;font-weight:600">频道管理员 {mods() ? mods()!.length : '…'} 人</div>
+              <div style="font-size:11.5px;color:var(--text-2)">管理员能踢人、拉黑、管白名单；邀请制开关与转让仍是房主专属</div>
+            </div>
+            <div class="list-box" style="background:var(--bg-2)">
+              <Show when={mods() === undefined}>
+                <div class="table-empty">加载中…</div>
+              </Show>
+              <Show when={mods()}>
+                <Show when={mods()!.length > 0} fallback={<div class="table-empty">还没有频道管理员。</div>}>
+                  <For each={mods()}>
+                    {(m) => (
+                      <div class="list-row">
+                        {el(avatarHtml(m.username, 'avatar'))}
+                        <div class="cell-ellipsis" style="flex-grow:1;font-size:13px">{m.username}</div>
+                        <button
+                          class="hit btn btn-sm"
+                          classList={{ loading: busy() === `demod-${m.id}` }}
+                          disabled={busy() !== ''}
+                          onClick={act(
+                            `demod-${m.id}`,
+                            () => removeModerator(p.channel, m.id),
+                            `已收回 ${m.username} 的管理员。`,
+                            { title: `收回 ${m.username} 的管理员？`, body: '收回后对方只是普通成员，白名单里的位置保留。', danger: true, confirmText: '收回' },
+                          )}
+                        >
+                          收回
+                        </button>
+                      </div>
+                    )}
+                  </For>
+                </Show>
+              </Show>
+            </div>
+            <div style="display:flex;align-items:baseline;gap:10px;padding:12px 2px 0">
+              <div style="font-size:13.5px;font-weight:600">授予管理员</div>
+              <div style="font-size:11.5px;color:var(--text-2)">候选人来自在房成员与白名单</div>
+            </div>
+            <div class="list-box" style="background:var(--bg-2)">
+              <Show when={modCandidates().length > 0} fallback={<div class="table-empty">没有可授予的人（在房成员与白名单里的人都已是管理员）。</div>}>
+                <For each={modCandidates()}>
+                  {(c) => (
+                    <div class="list-row">
+                      {el(avatarHtml(c.username, 'avatar'))}
+                      <div class="cell-ellipsis" style="flex-grow:1;font-size:13px">{c.username}</div>
+                      <button
+                        class="hit btn btn-sm"
+                        classList={{ loading: busy() === `mod-${c.id}` }}
+                        disabled={busy() !== ''}
+                        onClick={act(`mod-${c.id}`, () => addModerator(p.channel, c.id), `已把 ${c.username} 设为频道管理员。`)}
+                      >
+                        授予
+                      </button>
+                    </div>
+                  )}
+                </For>
+              </Show>
+            </div>
+          </div>
+        </Show>
+
+        <Show when={tab() === 'transfer'}>
+          <div style="display:flex;flex-direction:column;gap:8px">
+            <div class="card" style="display:flex;flex-direction:column;gap:10px">
+              <div style="font-size:13.5px;font-weight:600">转让频道</div>
+              <div style="font-size:11.5px;line-height:1.6;color:var(--text-2);text-wrap:pretty">
+                把「{p.channel}」的房主身份交给别人：对方成为频道主，你自动降为频道管理员。频道本身、聊天记录与名单都不动。
+              </div>
+              <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+                <select
+                  class="hit"
+                  style="height:36px;padding:0 10px;border-radius:8px;border:1px solid var(--line);background:var(--bg-2);color:var(--text-1);font-size:12.5px;flex-grow:1;min-width:180px"
+                  ref={transferSel}
+                >
+                  <For each={transferCandidates()}>{(c) => <option value={c.id}>{c.username}</option>}</For>
+                </select>
+                <button
+                  class="hit btn btn-danger-solid"
+                  disabled={busy() !== '' || transferCandidates().length === 0}
+                  onClick={() => {
+                    const c = transferCandidates().find((x) => x.id === Number(transferSel.value));
+                    if (c) void doTransfer(c);
+                  }}
+                >
+                  转让频道
+                </button>
+              </div>
+              <Show when={transferCandidates().length === 0}>
+                <div style="font-size:11.5px;color:var(--text-3)">没有可接手的人：让对方先进一次房间，或先把对方加进白名单。</div>
+              </Show>
+            </div>
+          </div>
         </Show>
       </div>
     </Show>

@@ -66,7 +66,27 @@ func main() {
 		if err != nil {
 			log.Fatalf("创建用户失败: %v", err)
 		}
-		fmt.Printf("用户 %s (id=%d) 创建成功\n", u.Username, u.ID)
+		fmt.Printf("用户 %s (id=%d, role=%s) 创建成功\n", u.Username, u.ID, u.Role)
+		return
+	}
+
+	// CLI 子命令: promote <用户名> —— 转移超级管理员（旧 super 降为 admin，全站恰好一个 super）
+	if len(os.Args) > 1 && os.Args[1] == "promote" {
+		if len(os.Args) != 3 {
+			fmt.Fprintln(os.Stderr, "用法: hearth promote <用户名>")
+			os.Exit(2)
+		}
+		u, _, err := st.UserByName(context.Background(), os.Args[2])
+		if err != nil {
+			log.Fatalf("用户不存在: %v", err)
+		}
+		if u.Role == store.RoleGuest {
+			log.Fatal("访客不能成为超级管理员")
+		}
+		if err := st.TransferSuper(context.Background(), u.ID); err != nil {
+			log.Fatalf("转移失败: %v", err)
+		}
+		fmt.Printf("超级管理员已转移给 %s (id=%d)，原超级管理员降为 admin\n", u.Username, u.ID)
 		return
 	}
 

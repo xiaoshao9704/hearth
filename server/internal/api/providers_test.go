@@ -98,8 +98,8 @@ func TestMigrateImportsLegacyCfg(t *testing.T) {
 	a.st.SetSetting(ctx, "cfg_ingest_provider", "livekit") // 旧值：livekit 的 ingress 面
 	a.st.SetSetting(ctx, "cfg_ingress_upstream_url", "http://old:58080")
 	a.runMigrations(ctx)
-	if v, _ := a.st.MigrationVersion(ctx); v != 4 {
-		t.Fatalf("迁移成功后游标应为最新版本 4，实际 %d", v)
+	if v, _ := a.st.MigrationVersion(ctx); v != 5 {
+		t.Fatalf("迁移成功后游标应为最新版本 5，实际 %d", v)
 	}
 	if a.instance("livekit") == nil || a.instance("livekit").Locked {
 		t.Fatal("旧 cfg_livekit_* 应导入为 DB 实例 livekit")

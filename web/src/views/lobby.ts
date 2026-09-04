@@ -1,5 +1,5 @@
 // 大厅：频道卡片、创建频道、设备提示。
-import { createChannel, getUser, listChannels } from '../api';
+import { canInvite, createChannel, getUser, listChannels } from '../api';
 import type { Channel } from '../api';
 import { renderShell } from '../shell';
 import { esc, icon, menuButtonHtml, toast, wireMenuButton } from '../ui';
@@ -30,6 +30,9 @@ function statusOf(online: number, inviteOnly: boolean): string {
 
 function cardHtml(c: Channel): string {
   const busy = c.online > 0;
+  const roleTag =
+    c.my_role === 'owner' ? '<span class="tag">我的频道</span>' : c.my_role === 'moderator' ? '<span class="tag">我管理的</span>' : '';
+  const canManage = c.my_role === 'owner' || c.my_role === 'moderator';
   return `
     <div class="channel-card-wrap">
       <a class="hit channel-card" href="#/room/${encodeURIComponent(c.name)}">
@@ -39,7 +42,7 @@ function cardHtml(c: Channel): string {
             <div style="display:flex;align-items:center;gap:8px">
               <span class="name">${esc(c.name)}</span>
               ${c.invite_only ? '<span class="tag tag-ember">邀请制</span>' : ''}
-              ${c.is_owner ? '<span class="tag">我的频道</span>' : ''}
+              ${roleTag}
             </div>
             <div class="status ${busy ? 'busy' : ''}">${statusOf(c.online, c.invite_only)}</div>
           </div>
@@ -50,12 +53,14 @@ function cardHtml(c: Channel): string {
           <div class="join-btn">${icon('back', 15, 'var(--on-ember)', 1.8)}<span>加入</span></div>
         </div>
       </a>
-      ${c.is_owner ? `<button type="button" class="hit btn btn-icon btn-sm card-gear" data-gear="${esc(c.name)}" title="频道管理" aria-label="频道管理">${icon('gear', 14, 'var(--text-1)', 1.7)}</button>` : ''}
+      ${canManage ? `<button type="button" class="hit btn btn-icon btn-sm card-gear" data-gear="${esc(c.name)}" title="频道管理" aria-label="频道管理">${icon('gear', 14, 'var(--text-1)', 1.7)}</button>` : ''}
     </div>`;
 }
 
 export async function renderLobby(root: HTMLElement, alive: () => boolean) {
   const user = getUser();
+  // 创建频道需 power 及以上（服务端 POST /api/channels 也会拒，这里只做显隐）
+  const canCreate = canInvite(user);
   const shell = renderShell(root, {});
   shell.setConn(false, '进入频道后自动协商');
 
@@ -73,12 +78,16 @@ export async function renderLobby(root: HTMLElement, alive: () => boolean) {
         <div class="sub">挑一个进去，或者等人来找你</div>
       </div>
       <div class="channel-cards" id="cards"><div class="muted">加载中…</div></div>
-      <form class="card" id="create-form" style="display:flex;align-items:center;gap:10px;padding:12px 14px">
+      ${
+        canCreate
+          ? `<form class="card" id="create-form" style="display:flex;align-items:center;gap:10px;padding:12px 14px">
         <span style="flex-shrink:0">${icon('plus', 16, 'var(--text-2)', 1.8)}</span>
         <input id="new-name" placeholder="新频道名（字母数字 - _）" autocomplete="off" maxlength="64"
           style="flex-grow:1;min-width:0;background:transparent;border:0;outline:0;font:inherit;font-size:13.5px;color:var(--text-0)" />
         <button type="submit" class="hit btn btn-primary btn-sm" id="create-btn">创建频道</button>
-      </form>
+      </form>`
+          : ''
+      }
       <div class="spacer"></div>
       <div class="lobby-foot">
         <span style="flex-shrink:0">${icon('mic', 20, 'var(--text-3)', 1.5)}</span>
@@ -140,12 +149,14 @@ export async function renderLobby(root: HTMLElement, alive: () => boolean) {
     if (!alive()) return;
     setServerStatus(true);
     if (channels.length === 0) {
-      cardsEl.innerHTML = `
+      cardsEl.innerHTML = canCreate
+        ? `
         <div class="state-block">
           <span>还没有频道，先创建一个吧</span>
           <button type="button" class="hit btn btn-sm" id="cards-empty-create">创建一个</button>
-        </div>`;
-      cardsEl.querySelector('#cards-empty-create')!.addEventListener('click', () => {
+        </div>`
+        : `<div class="state-block"><span>还没有频道</span></div>`;
+      cardsEl.querySelector('#cards-empty-create')?.addEventListener('click', () => {
         root.querySelector<HTMLInputElement>('#new-name')?.focus();
       });
       return;
@@ -160,36 +171,39 @@ export async function renderLobby(root: HTMLElement, alive: () => boolean) {
   }
 
   // 创建频道：前端先做一次正则校验，通过再发请求；进行中禁用按钮防重复提交
-  const input = root.querySelector<HTMLInputElement>('#new-name')!;
-  const createBtn = root.querySelector<HTMLButtonElement>('#create-btn')!;
-  input.addEventListener('input', () => input.classList.remove('input-bad'));
-  let creating = false;
-  root.querySelector('#create-form')!.addEventListener('submit', async (ev) => {
-    ev.preventDefault();
-    if (creating) return;
-    const name = input.value.trim();
-    if (!NAME_RE.test(name)) {
-      input.classList.add('input-bad');
-      toast('频道名只能是字母、数字、- 或 _，最多 64 位', 'bad');
-      return;
-    }
-    creating = true;
-    createBtn.classList.add('loading');
-    createBtn.disabled = true;
-    try {
-      const ch = await createChannel(name);
-      if (!alive()) return;
-      toast('频道已创建', 'ok');
-      input.value = '';
-      location.hash = `#/room/${encodeURIComponent(ch.name)}`;
-    } catch (err) {
-      toast((err as Error).message, 'bad');
-    } finally {
-      creating = false;
-      createBtn.classList.remove('loading');
-      createBtn.disabled = false;
-    }
-  });
+  // 非 power 用户没有创建表单，整段跳过
+  const input = root.querySelector<HTMLInputElement>('#new-name');
+  const createBtn = root.querySelector<HTMLButtonElement>('#create-btn');
+  if (canCreate && input && createBtn) {
+    input.addEventListener('input', () => input.classList.remove('input-bad'));
+    let creating = false;
+    root.querySelector('#create-form')!.addEventListener('submit', async (ev) => {
+      ev.preventDefault();
+      if (creating) return;
+      const name = input.value.trim();
+      if (!NAME_RE.test(name)) {
+        input.classList.add('input-bad');
+        toast('频道名只能是字母、数字、- 或 _，最多 64 位', 'bad');
+        return;
+      }
+      creating = true;
+      createBtn.classList.add('loading');
+      createBtn.disabled = true;
+      try {
+        const ch = await createChannel(name);
+        if (!alive()) return;
+        toast('频道已创建', 'ok');
+        input.value = '';
+        location.hash = `#/room/${encodeURIComponent(ch.name)}`;
+      } catch (err) {
+        toast((err as Error).message, 'bad');
+      } finally {
+        creating = false;
+        createBtn.classList.remove('loading');
+        createBtn.disabled = false;
+      }
+    });
+  }
 
   await paint();
   if (!alive()) return;

@@ -197,11 +197,14 @@ func TestOpenUpgradesLegacyDB(t *testing.T) {
 		t.Fatalf("升级后表集合不符:\n got %v\nwant %v", after, want)
 	}
 
-	// compat 加列生效
+	// compat 加列生效（baseline 四条 + 00003 角色/访客列）
 	for table, cols := range map[string][]string{
-		"users":     {"is_admin", "disabled"},
-		"channels":  {"invite_only"},
-		"ingresses": {"provider"},
+		"users":           {"is_admin", "disabled", "role", "expires_at", "invite_id"},
+		"channels":        {"invite_only"},
+		"ingresses":       {"provider"},
+		"channel_members": {"role"},
+		"sessions":        {"device_id"},
+		"invites":         {"kind", "channel_id", "role", "guest_ttl_sec", "allow_guest"},
 	} {
 		have := columnNames(t, s.bun.DB, table)
 		for _, c := range cols {
@@ -234,8 +237,8 @@ func TestOpenUpgradesLegacyDB(t *testing.T) {
 	if len(msgs) != 1 || msgs[0].Content != "hello" || msgs[0].CreatedAt.IsZero() {
 		t.Fatalf("消息数据不符: %+v", msgs)
 	}
-	if n := migrationRows(t, s.bun.DB); n != 2 {
-		t.Fatalf("bun_migrations 应有 2 行，实际 %d", n)
+	if n := migrationRows(t, s.bun.DB); n != 3 {
+		t.Fatalf("bun_migrations 应有 3 行，实际 %d", n)
 	}
 	s.Close()
 
@@ -244,8 +247,8 @@ func TestOpenUpgradesLegacyDB(t *testing.T) {
 	if err != nil {
 		t.Fatalf("重复 Open 失败: %v", err)
 	}
-	if n := migrationRows(t, s2.bun.DB); n != 2 {
-		t.Fatalf("重复 Open 后 bun_migrations 应仍为 2 行，实际 %d", n)
+	if n := migrationRows(t, s2.bun.DB); n != 3 {
+		t.Fatalf("重复 Open 后 bun_migrations 应仍为 3 行，实际 %d", n)
 	}
 	s2.Close()
 }

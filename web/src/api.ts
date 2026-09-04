@@ -8,10 +8,17 @@ export const LIVEKIT_URL_FALLBACK: string =
 const TOKEN_KEY = 'hearth_token';
 const USER_KEY = 'hearth_user';
 
+// 系统角色阶梯：guest < user < power < admin < super（前端不推导，只做显隐）
+export type Role = 'guest' | 'user' | 'power' | 'admin' | 'super';
+// 频道角色：owner / moderator / member，空串 = 无角色
+export type ChannelRole = 'owner' | 'moderator' | 'member' | '';
+
 export interface User {
   id: number;
   username: string;
-  is_admin: boolean;
+  role: Role;
+  expires_at: string | null; // 仅访客有值
+  is_admin: boolean; // 派生只读（role ≥ admin），过渡一个版本后删
 }
 
 export interface Channel {
@@ -20,8 +27,13 @@ export interface Channel {
   created_by: string;
   created_at: string;
   invite_only: boolean;
-  is_owner: boolean;
+  my_role: ChannelRole; // 当前用户在该频道的角色（服务端下发）
   online: number;
+}
+
+// 能不能发注册邀请（建频道同此档）：power 及以上
+export function canInvite(u: User | null): boolean {
+  return u?.role === 'power' || u?.role === 'admin' || u?.role === 'super';
 }
 
 export function getToken(): string | null {
@@ -247,10 +259,11 @@ export function unbanUser(channel: string, uid: number): Promise<void> {
   return req(`/api/channels/${encodeURIComponent(channel)}/unban`, { method: 'POST', body: { user_id: uid } });
 }
 
-// UserRef 名单条目：id 是操作目标，username 只用于展示
+// UserRef 名单条目：id 是操作目标，username 只用于展示；role 是该条目在频道里的角色（members 列表带）
 export interface UserRef {
   id: number;
   username: string;
+  role?: ChannelRole;
 }
 
 export async function listBans(channel: string): Promise<UserRef[]> {
@@ -283,6 +296,36 @@ export function addMember(channel: string, username: string): Promise<void> {
 
 export function removeMember(channel: string, uid: number): Promise<void> {
   return req(`/api/channels/${encodeURIComponent(channel)}/members`, {
+    method: 'DELETE',
+    body: { user_id: uid },
+  });
+}
+
+// ---- 频道归属（仅频道主）----
+
+export function transferChannel(channel: string, uid: number): Promise<{ owner: string }> {
+  return req(`/api/channels/${encodeURIComponent(channel)}/transfer`, {
+    method: 'POST',
+    body: { user_id: uid },
+  });
+}
+
+export async function listModerators(channel: string): Promise<UserRef[]> {
+  const data = await req<{ moderators: UserRef[] | null }>(
+    `/api/channels/${encodeURIComponent(channel)}/moderators`,
+  );
+  return data.moderators ?? [];
+}
+
+export function addModerator(channel: string, uid: number): Promise<void> {
+  return req(`/api/channels/${encodeURIComponent(channel)}/moderators`, {
+    method: 'POST',
+    body: { user_id: uid },
+  });
+}
+
+export function removeModerator(channel: string, uid: number): Promise<void> {
+  return req(`/api/channels/${encodeURIComponent(channel)}/moderators`, {
     method: 'DELETE',
     body: { user_id: uid },
   });
@@ -346,6 +389,39 @@ export function inviteInfo(code: string): Promise<InviteInfo> {
   return req(`/api/invites/${encodeURIComponent(code)}`);
 }
 
+// 注册邀请管理（power+）：发链接、列自己发的（admin+ 列全部）、撤销
+export interface Invite {
+  id: number;
+  code: string;
+  kind: string; // register / guest（guest 类由频道管理出，阶段二）
+  channel_id: number | null;
+  channel_name: string;
+  role: string; // register 类产出档（空 = 跟随注册默认档）
+  guest_ttl_sec: number;
+  allow_guest: boolean;
+  note: string;
+  max_uses: number;
+  used: number;
+  revoked: boolean;
+  created_by: string;
+  created_at: string;
+  expires_at: string;
+}
+
+export async function listInvites(): Promise<{ invites: Invite[]; base: string }> {
+  const data = await req<{ invites: Invite[] | null; base: string }>('/api/invites');
+  return { invites: data.invites ?? [], base: data.base };
+}
+
+// role 仅 admin+ 可指定（user/power）；空 = 跟随注册默认档
+export function createInvite(note: string, maxUses: number, ttl: string, role = ''): Promise<{ invite: Invite; url: string }> {
+  return req('/api/invites', { method: 'POST', body: { note, max_uses: maxUses, ttl, role } });
+}
+
+export function deleteInvite(id: number): Promise<void> {
+  return req(`/api/invites/${id}`, { method: 'DELETE' });
+}
+
 // ---- 管理后台 ----
 
 export interface AdminOverview {
@@ -372,11 +448,15 @@ export function adminOverview(): Promise<AdminOverview> {
 export interface AdminUser {
   id: number;
   username: string;
-  is_admin: boolean;
+  role: Role;
+  is_admin: boolean; // 派生只读（role ≥ admin），过渡一个版本后删
   disabled: boolean;
+  expires_at: string | null; // 访客行：过期时间
+  invite: string; // 访客行：来源邀请码（无则空）
   created_at: string;
   devices: number;
   last_seen: string | null;
+  can_set_roles: Role[] | null; // 当前管理员可授予的角色候选（服务端按阶梯算好；null/空 = 不可操作）
 }
 
 export async function adminListUsers(): Promise<AdminUser[]> {
@@ -388,41 +468,18 @@ export function adminSetUserDisabled(id: number, disabled: boolean): Promise<voi
   return req(`/api/admin/users/${id}/${disabled ? 'disable' : 'enable'}`, { method: 'POST', body: {} });
 }
 
-export function adminDeleteUser(id: number): Promise<void> {
+// 降级时若对方名下还有频道，owned_channels 带回数量（频道不跟着动，提示用）
+export function adminSetUserRole(id: number, role: string): Promise<{ role: string; owned_channels: number }> {
+  return req(`/api/admin/users/${id}/role`, { method: 'POST', body: { role } });
+}
+
+// 名下频道过户给执行删除的管理员，adopted_channels 是过户数量
+export function adminDeleteUser(id: number): Promise<{ adopted_channels: number }> {
   return req(`/api/admin/users/${id}`, { method: 'DELETE' });
 }
 
 export function adminDeleteChannel(id: number): Promise<void> {
   return req(`/api/admin/channels/${id}`, { method: 'DELETE' });
-}
-
-export interface Invite {
-  id: number;
-  code: string;
-  note: string;
-  max_uses: number;
-  used: number;
-  revoked: boolean;
-  created_by: string;
-  created_at: string;
-  expires_at: string;
-}
-
-export async function adminListInvites(): Promise<{ invites: Invite[]; base: string }> {
-  const data = await req<{ invites: Invite[] | null; base: string }>('/api/admin/invites');
-  return { invites: data.invites ?? [], base: data.base };
-}
-
-export function adminCreateInvite(note: string, maxUses: number, ttl: string): Promise<{ invite: Invite; url: string }> {
-  return req('/api/admin/invites', { method: 'POST', body: { note, max_uses: maxUses, ttl } });
-}
-
-export function adminDeleteInvite(id: number): Promise<void> {
-  return req(`/api/admin/invites/${id}`, { method: 'DELETE' });
-}
-
-export function adminGetPolicy(): Promise<{ policy: string }> {
-  return req('/api/admin/policy');
 }
 
 export interface ConfigItem {
@@ -572,6 +629,10 @@ export function adminDeleteProvider(alias: string): Promise<void> {
   return req(`/api/admin/providers/${encodeURIComponent(alias)}`, { method: 'DELETE' });
 }
 
-export function adminSetPolicy(policy: string): Promise<{ policy: string }> {
-  return req('/api/admin/policy', { method: 'POST', body: { policy } });
+export function adminGetPolicy(): Promise<{ policy: string; default_role: string }> {
+  return req('/api/admin/policy');
+}
+
+export function adminSetPolicy(policy: string, defaultRole: string): Promise<{ policy: string; default_role: string }> {
+  return req('/api/admin/policy', { method: 'POST', body: { policy, default_role: defaultRole } });
 }

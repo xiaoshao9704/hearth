@@ -315,7 +315,7 @@ type migrationStep struct {
 // 以后所有跨版本兼容处理都作为新版本步挂在这里。
 func (a *API) runMigrations(ctx context.Context) {
 	a.runMigrationSteps(ctx, []migrationStep{{1, a.migrateProviders}, {2, a.importSelectorEnv},
-		{3, a.migrateIngestTokens}, {4, a.migrateEndpointIdentity}})
+		{3, a.migrateIngestTokens}, {4, a.migrateEndpointIdentity}, {5, a.migrateRoles}})
 	a.reloadProviders(ctx)
 }
 
