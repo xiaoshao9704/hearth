@@ -13,9 +13,17 @@ import (
 	"github.com/libdns/libdns"
 )
 
-const ddnsTTL = 2 * time.Minute
+const (
+	ddnsTTL       = 2 * time.Minute
+	aliyunDDNSTTL = 10 * time.Minute
+)
 
 type recordSetter interface {
+	SetRecords(context.Context, string, []libdns.Record) ([]libdns.Record, error)
+}
+
+type aliRecordProvider interface {
+	GetRecords(context.Context, string) ([]libdns.Record, error)
 	SetRecords(context.Context, string, []libdns.Record) ([]libdns.Record, error)
 }
 
@@ -23,6 +31,7 @@ type recordSetter interface {
 type libDNSProvider struct {
 	name   string
 	zone   string
+	ttl    time.Duration
 	setter recordSetter
 }
 
@@ -41,13 +50,14 @@ func newAliyun(id, secret, zone string) Provider {
 	return &libDNSProvider{
 		name:   "aliyun",
 		zone:   zone,
+		ttl:    aliyunDDNSTTL,
 		setter: &aliDNSSetter{provider: provider},
 	}
 }
 
 // aliDNSSetter 先补齐已有记录 ID，规避上游按新值查旧记录时误创建重复记录。
 type aliDNSSetter struct {
-	provider *alidnslib.Provider
+	provider aliRecordProvider
 }
 
 func (s *aliDNSSetter) SetRecords(ctx context.Context, zone string, records []libdns.Record) ([]libdns.Record, error) {
@@ -56,6 +66,16 @@ func (s *aliDNSSetter) SetRecords(ctx context.Context, zone string, records []li
 		return nil, err
 	}
 	pending, unchanged := prepareAliRecords(existing, records)
+	// alidns v1.0.7 的 GetRecords 未翻页，API 默认只返回 20 条。第一页已满且
+	// 目标未命中时无法区分“记录不存在”和“记录在后续页”，宁可失败也不能建重复记录。
+	if len(existing) >= 20 {
+		for _, record := range pending {
+			current, ok := record.(alidnslib.DomainRecord)
+			if !ok || current.ID == "" {
+				return nil, errors.New("aliyun: zone 的首批记录已满，libdns/alidns v1.0.7 无法安全查询后续记录")
+			}
+		}
+	}
 	if len(pending) == 0 {
 		return unchanged, nil
 	}
@@ -118,12 +138,21 @@ func (p *libDNSProvider) updateZone(ctx context.Context, host, zone string, v4, 
 	if !ok {
 		return apiErr(p.name, fmt.Sprintf("主机名 %s 不属于 zone %s", host, zone))
 	}
+	// Cloudflare API 的 name 要求完整记录名；绝对 FQDN 在 libdns 的查询路径中
+	// 仍是幂等的，创建与更新请求也不会直接携带字面量 @。
+	if p.name == "cloudflare" && name == "@" {
+		name = zone + "."
+	}
 	records := make([]libdns.Record, 0, 2)
+	ttl := p.ttl
+	if ttl == 0 {
+		ttl = ddnsTTL
+	}
 	if v4.IsValid() {
-		records = append(records, libdns.Address{Name: name, TTL: ddnsTTL, IP: v4})
+		records = append(records, libdns.Address{Name: name, TTL: ttl, IP: v4})
 	}
 	if v6.IsValid() {
-		records = append(records, libdns.Address{Name: name, TTL: ddnsTTL, IP: v6})
+		records = append(records, libdns.Address{Name: name, TTL: ttl, IP: v6})
 	}
 	if len(records) == 0 {
 		return nil

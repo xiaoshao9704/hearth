@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	alidnslib "github.com/libdns/alidns"
 	"github.com/libdns/libdns"
@@ -51,14 +52,22 @@ func TestSplitExternals(t *testing.T) {
 
 // fakeProvider 记录调用的测试提供方（单测不打真实 API）。
 type fakeProvider struct {
-	calls atomic.Int32
-	fail  bool
-	err   error
+	calls   atomic.Int32
+	fail    bool
+	err     error
+	entered chan struct{}
+	release <-chan struct{}
 }
 
 func (f *fakeProvider) Name() string { return "duckdns" }
 func (f *fakeProvider) Update(context.Context, string, netip.Addr, netip.Addr) error {
 	f.calls.Add(1)
+	if f.entered != nil {
+		f.entered <- struct{}{}
+	}
+	if f.release != nil {
+		<-f.release
+	}
 	if f.err != nil {
 		return f.err
 	}
@@ -84,11 +93,29 @@ func TestRunnerRedactsURLError(t *testing.T) {
 	t.Cleanup(func() { log.SetOutput(oldWriter) })
 	r.Sync(context.Background(), Config{Provider: "aliyun", Host: "voice.example.com"}, []string{"203.0.113.10"})
 
-	if got := r.Status().LastError; got != "模拟网络错误" {
-		t.Fatalf("LastError 应只保留底层错误，实际 %q", got)
+	if got := r.Status().LastError; got != "provider 调用失败: 模拟网络错误" {
+		t.Fatalf("LastError 应保留外层排障上下文，实际 %q", got)
 	}
 	if got := logs.String(); strings.Contains(got, secret) || strings.Contains(got, "AccessKeyId") || strings.Contains(got, "Signature") {
 		t.Fatalf("日志不得包含请求 URL 或凭证: %s", got)
+	}
+}
+
+func TestRedactURLErrorPreservesJoinedContexts(t *testing.T) {
+	const secret = "change-me-secret"
+	err := fmt.Errorf("aliyun: 逐级尝试: %w", errors.Join(
+		fmt.Errorf("zone example: %w", &url.Error{URL: "https://example.com/?Signature=" + secret, Err: errors.New("i/o timeout")}),
+		fmt.Errorf("zone example.com: %w", &url.Error{URL: "https://example.com/?AccessKeyId=" + secret, Err: errors.New("403")}),
+	))
+
+	got := redactURLError(err).Error()
+	for _, want := range []string{"aliyun: 逐级尝试", "zone example: i/o timeout", "zone example.com: 403"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("脱敏后缺少 %q: %s", want, got)
+		}
+	}
+	if strings.Contains(got, secret) || strings.Contains(got, "Signature") || strings.Contains(got, "AccessKeyId") {
+		t.Fatalf("脱敏后不得包含请求 URL 或凭证: %s", got)
 	}
 }
 
@@ -217,20 +244,29 @@ func TestDuckDNSIPv6OnlyDoesNotRewriteA(t *testing.T) {
 }
 
 func TestRunnerSerializesConcurrentSync(t *testing.T) {
-	fp := &fakeProvider{}
+	entered := make(chan struct{}, 2)
+	release := make(chan struct{})
+	fp := &fakeProvider{entered: entered, release: release}
 	r := NewRunner(filepath.Join(t.TempDir(), "state.json"))
 	r.prov = fp
 	cfg := Config{Provider: "duckdns", Host: "voice.duckdns.org", DuckDNSToken: "change-me"}
-	start := make(chan struct{})
 	done := make(chan struct{}, 2)
-	for range 2 {
-		go func() {
-			<-start
-			r.Sync(context.Background(), cfg, []string{"203.0.113.10"})
-			done <- struct{}{}
-		}()
+	go func() {
+		r.Sync(context.Background(), cfg, []string{"203.0.113.10"})
+		done <- struct{}{}
+	}()
+	<-entered
+	go func() {
+		r.Sync(context.Background(), cfg, []string{"203.0.113.10"})
+		done <- struct{}{}
+	}()
+	select {
+	case <-entered:
+		close(release)
+		t.Fatal("第一个 Update 返回前，第二个 Sync 不得进入提供方")
+	case <-time.After(100 * time.Millisecond):
 	}
-	close(start)
+	close(release)
 	<-done
 	<-done
 	if got := fp.calls.Load(); got != 1 {
@@ -325,6 +361,77 @@ func TestLibDNSExplicitZoneCreatesRelativeAddressRecords(t *testing.T) {
 	}
 }
 
+func TestLibDNSSingleStackAndApexRecords(t *testing.T) {
+	tests := []struct {
+		name     string
+		host     string
+		v4       netip.Addr
+		v6       netip.Addr
+		rr       string
+		typeName string
+	}{
+		{name: "仅 IPv4", host: "voice.example.com", v4: netip.MustParseAddr("203.0.113.10"), rr: "voice", typeName: "A"},
+		{name: "仅 IPv6", host: "voice.example.com", v6: netip.MustParseAddr("2001:db8::1"), rr: "voice", typeName: "AAAA"},
+		{name: "zone apex", host: "example.com", v4: netip.MustParseAddr("203.0.113.10"), rr: "example.com.", typeName: "A"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			setter := &fakeRecordSetter{}
+			p := &libDNSProvider{name: "cloudflare", zone: "example.com", setter: setter}
+			if err := p.Update(context.Background(), tt.host, tt.v4, tt.v6); err != nil {
+				t.Fatal(err)
+			}
+			if len(setter.records) != 1 || len(setter.records[0]) != 1 {
+				t.Fatalf("只应写一条记录: %v", setter.records)
+			}
+			rr := setter.records[0][0].RR()
+			if rr.Name != tt.rr || rr.Type != tt.typeName {
+				t.Fatalf("记录不对: %#v", rr)
+			}
+		})
+	}
+}
+
+type fakeAliRecordProvider struct {
+	existing []libdns.Record
+	setCalls int
+}
+
+func (p *fakeAliRecordProvider) GetRecords(context.Context, string) ([]libdns.Record, error) {
+	return p.existing, nil
+}
+
+func (p *fakeAliRecordProvider) SetRecords(_ context.Context, _ string, records []libdns.Record) ([]libdns.Record, error) {
+	p.setCalls++
+	return records, nil
+}
+
+func TestAliyunFullFirstPageDoesNotCreateDuplicateRecord(t *testing.T) {
+	existing := make([]libdns.Record, 20)
+	for i := range existing {
+		existing[i] = alidnsRecord(fmt.Sprintf("id-%d", i), fmt.Sprintf("other-%d", i), "A", "203.0.113.1")
+	}
+	provider := &fakeAliRecordProvider{existing: existing}
+	setter := &aliDNSSetter{provider: provider}
+	_, err := setter.SetRecords(context.Background(), "example.com", []libdns.Record{
+		libdns.Address{Name: "voice", TTL: aliyunDDNSTTL, IP: netip.MustParseAddr("203.0.113.10")},
+	})
+	if err == nil || provider.setCalls != 0 {
+		t.Fatalf("第一页已满且未命中时必须拒绝创建，避免重复记录: err=%v calls=%d", err, provider.setCalls)
+	}
+}
+
+func TestAliyunUsesFreeEditionMinimumTTL(t *testing.T) {
+	setter := &fakeRecordSetter{}
+	p := &libDNSProvider{name: "aliyun", zone: "example.com", ttl: aliyunDDNSTTL, setter: setter}
+	if err := p.Update(context.Background(), "voice.example.com", netip.MustParseAddr("203.0.113.10"), netip.Addr{}); err != nil {
+		t.Fatal(err)
+	}
+	if got := setter.records[0][0].RR().TTL; got != 10*time.Minute {
+		t.Fatalf("阿里云 TTL 应显式使用免费版下限 600 秒，实际 %s", got)
+	}
+}
+
 func TestLibDNSGuessesZoneWithoutMatchingErrorStrings(t *testing.T) {
 	setter := &fakeRecordSetter{succeedZone: "example.co.uk"}
 	p := &libDNSProvider{name: "aliyun", setter: setter}
@@ -368,13 +475,15 @@ func alidnsRecord(id, name, recordType, value string) alidnslib.DomainRecord {
 	return alidnslib.DomainRecord{ID: id, Name: name, Type: recordType, Value: value, TTL: uint32(ddnsTTL.Seconds())}
 }
 
-type fakeDNSProvider struct{}
+type fakeDNSProvider struct{ zones []string }
 
-func (*fakeDNSProvider) AppendRecords(_ context.Context, _ string, records []libdns.Record) ([]libdns.Record, error) {
+func (p *fakeDNSProvider) AppendRecords(_ context.Context, zone string, records []libdns.Record) ([]libdns.Record, error) {
+	p.zones = append(p.zones, zone)
 	return records, nil
 }
 
-func (*fakeDNSProvider) DeleteRecords(_ context.Context, _ string, records []libdns.Record) ([]libdns.Record, error) {
+func (p *fakeDNSProvider) DeleteRecords(_ context.Context, zone string, records []libdns.Record) ([]libdns.Record, error) {
+	p.zones = append(p.zones, zone)
 	return records, nil
 }
 
@@ -385,9 +494,13 @@ func (*failingDNSProvider) AppendRecords(context.Context, string, []libdns.Recor
 }
 
 func TestConfiguredZoneProvider(t *testing.T) {
-	p := &configuredZoneProvider{upstream: &fakeDNSProvider{}, zone: "example.com"}
+	upstream := &fakeDNSProvider{}
+	p := &configuredZoneProvider{upstream: upstream, zone: "example.com"}
 	if _, err := p.AppendRecords(context.Background(), "example.com.", nil); err != nil {
 		t.Fatalf("同一 zone 应允许尾点差异: %v", err)
+	}
+	if len(upstream.zones) != 1 || upstream.zones[0] != "example.com" {
+		t.Fatalf("传给当前 provider 的 zone 应统一去掉尾点: %v", upstream.zones)
 	}
 	if _, err := p.AppendRecords(context.Background(), "other.example", nil); err == nil {
 		t.Fatal("显式 ddns_zone 与权威 zone 不一致时必须拒绝")

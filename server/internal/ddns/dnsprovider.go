@@ -61,7 +61,8 @@ func (p *configuredZoneProvider) AppendRecords(ctx context.Context, zone string,
 	if err := p.checkZone(zone); err != nil {
 		return nil, err
 	}
-	result, err := p.upstream.AppendRecords(ctx, zone, records)
+	// 当前接入的 Cloudflare 与 AliDNS 模块都用不带尾点的 zone 查询供应商 API。
+	result, err := p.upstream.AppendRecords(ctx, normalizeDNSName(zone), records)
 	return result, redactURLError(err)
 }
 
@@ -69,7 +70,7 @@ func (p *configuredZoneProvider) DeleteRecords(ctx context.Context, zone string,
 	if err := p.checkZone(zone); err != nil {
 		return nil, err
 	}
-	result, err := p.upstream.DeleteRecords(ctx, zone, records)
+	result, err := p.upstream.DeleteRecords(ctx, normalizeDNSName(zone), records)
 	return result, redactURLError(err)
 }
 

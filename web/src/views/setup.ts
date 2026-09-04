@@ -21,6 +21,7 @@ interface WizardState {
   ddnsHost: string;
   ddnsZone: string;
   ddnsProvider: 'off' | 'duckdns' | 'cloudflare' | 'dnspod' | 'aliyun';
+  ddnsCredentials: Record<string, string>;
   tlsChoice: 'domain' | 'ip' | 'selfsigned';
 }
 
@@ -51,6 +52,7 @@ export function renderSetup(root: HTMLElement, alive: () => boolean) {
     ddnsHost: '',
     ddnsZone: '',
     ddnsProvider: 'off',
+    ddnsCredentials: {},
     tlsChoice: 'selfsigned',
   };
   let tlsChosen = false;
@@ -165,6 +167,11 @@ export function renderSetup(root: HTMLElement, alive: () => boolean) {
     const zoneBox = el.querySelector<HTMLDivElement>('#wz-ddns-zone-box')!;
     const credsBox = el.querySelector<HTMLDivElement>('#wz-ddns-creds')!;
     let provider: WizardState['ddnsProvider'] = state.ddnsProvider;
+    const rememberCredentials = () => {
+      credsBox.querySelectorAll<HTMLInputElement>('input[data-key]').forEach((input) => {
+        state.ddnsCredentials[input.dataset.key!] = input.value;
+      });
+    };
     const syncDdns = () => {
       el.querySelectorAll<HTMLButtonElement>('#wz-ddns .seg').forEach((b) => b.classList.toggle('on', b.dataset.id === provider));
       fieldsBox.style.display = provider === 'off' ? 'none' : 'flex';
@@ -174,13 +181,14 @@ export function renderSetup(root: HTMLElement, alive: () => boolean) {
           (c) => `
         <div style="display:flex;flex-direction:column;gap:7px">
           <label class="field-label" for="wz-cred-${c.key}">${DDNS_LABELS[provider]} ${c.label}</label>
-          <div class="field" style="height:44px"><input id="wz-cred-${c.key}" data-key="${c.key}" type="password" placeholder="${esc(c.hint)}" autocomplete="off" /></div>
+          <div class="field" style="height:44px"><input id="wz-cred-${c.key}" data-key="${c.key}" type="password" value="${esc(state.ddnsCredentials[c.key] ?? '')}" placeholder="${esc(c.hint)}" autocomplete="off" /></div>
         </div>`,
         )
         .join('');
     };
     el.querySelectorAll<HTMLButtonElement>('#wz-ddns .seg').forEach((b) => {
       b.addEventListener('click', () => {
+        rememberCredentials();
         provider = b.dataset.id as WizardState['ddnsProvider'];
         syncDdns();
       });
@@ -228,6 +236,7 @@ export function renderSetup(root: HTMLElement, alive: () => boolean) {
             showErr(new Error(`请填 ${DDNS_LABELS[provider]} 的 ${c.label}`));
             return false;
           }
+          state.ddnsCredentials[c.key] = v;
           values[c.key] = v;
         }
         // 域名留空时服务端会把 ddns_host 回填进 site_domain，前端同步这个结论

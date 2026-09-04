@@ -14,6 +14,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"net/netip"
 	"net/url"
@@ -211,15 +212,47 @@ func (r *Runner) Sync(ctx context.Context, cfg Config, externals []string) {
 	r.persist(target)
 }
 
-// redactURLError 丢掉可能带完整请求 URL 的外层错误，避免 query 中的凭证进入日志与状态。
+// redactURLError 只剥掉可能带完整请求 URL 的 url.Error 层，同时保留提供方、
+// zone 与 errors.Join 中其他分支的排障上下文。
 func redactURLError(err error) error {
-	for {
-		var ue *url.Error
-		if !errors.As(err, &ue) || ue == nil || ue.Err == nil || ue.Err == err {
+	var target *url.Error
+	if !errors.As(err, &target) {
+		return err
+	}
+	return redactURLErrorTree(err)
+}
+
+func redactURLErrorTree(err error) error {
+	if err == nil {
+		return nil
+	}
+	if ue, ok := err.(*url.Error); ok {
+		if ue.Err == nil || ue.Err == err {
+			return errors.New("网络请求失败")
+		}
+		return redactURLErrorTree(ue.Err)
+	}
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		children := joined.Unwrap()
+		redacted := make([]error, 0, len(children))
+		for _, child := range children {
+			redacted = append(redacted, redactURLErrorTree(child))
+		}
+		return errors.Join(redacted...)
+	}
+	if wrapped, ok := err.(interface{ Unwrap() error }); ok {
+		child := wrapped.Unwrap()
+		if child == nil || child == err {
 			return err
 		}
-		err = ue.Err
+		redacted := redactURLErrorTree(child)
+		message, childMessage := err.Error(), child.Error()
+		if prefix, ok := strings.CutSuffix(message, childMessage); ok {
+			return fmt.Errorf("%s%w", prefix, redacted)
+		}
+		return errors.New(strings.ReplaceAll(message, childMessage, redacted.Error()))
 	}
+	return err
 }
 
 func normalizeDNSName(name string) string {
