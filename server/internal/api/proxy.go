@@ -1,6 +1,6 @@
 // 内置反向代理与接入分发：内核接入路径统一挂在 /providers/{alias}/ 下，按 alias 找到
 // 注册实例后按子路径分发——livekit 信令反代（/rtc/*，剥前缀，含 WebSocket Upgrade）、
-// ember WS 信令（/voice）、WHIP 推流（/w[/*]）。上游由实例逐请求声明（配置改动即时生效）。
+// WHIP 推流（/w[/*]）。上游由实例逐请求声明（配置改动即时生效）。
 // 部署因此不再强制需要 Caddy/nginx，TLS 由用户自选（也可裸 HTTP 内网用）。
 package api
 
@@ -26,7 +26,6 @@ func (a *API) RegisterProxies(r chi.Router) {
 // 子路径形状：
 //
 //	/providers/{alias}/rtc/*   livekit 信令反代（剥 /providers/{alias} 前缀）
-//	/providers/{alias}/voice   ember 类型实例的 WS 信令（当前仅内建 ember 可达）
 //	/providers/{alias}/w[/*]   WHIP 推流（r.URL.Path 改写为 /w 段后复用 WHIP 逻辑）
 func (a *API) serveProvider(w http.ResponseWriter, r *http.Request) {
 	alias := chi.URLParam(r, "alias")
@@ -37,8 +36,6 @@ func (a *API) serveProvider(w http.ResponseWriter, r *http.Request) {
 	}
 	sub := "/" + chi.URLParam(r, "*")
 	switch {
-	case sub == "/voice" && inst.Type == TypeEmber:
-		a.voiceWS(w, r)
 	case sub == "/w" || strings.HasPrefix(sub, "/w/"):
 		if inst.Ingest == nil {
 			writeErr(w, http.StatusNotFound, "该实例无推流能力")
@@ -47,7 +44,7 @@ func (a *API) serveProvider(w http.ResponseWriter, r *http.Request) {
 		r.URL.Path = sub // WHIP 逻辑与上游都按 /w 形状工作，剥到 /w 后原样复用
 		a.serveWHIP(w, r, inst)
 	case sub == "/rtc" || strings.HasPrefix(sub, "/rtc/"):
-		// 内建 lkembed 只占舞台槽位（语音仍是 ember），信令代理取它的 Stage 对象
+		// livekit 类型实例的信令代理：Voice/Stage 槽位是同一个 Provider 对象
 		p := inst.Voice
 		if p == nil {
 			p = inst.Stage

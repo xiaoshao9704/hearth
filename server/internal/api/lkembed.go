@@ -47,10 +47,10 @@ func (a *API) ensureEmbedKeys(ctx context.Context) (key, secret string, err erro
 }
 
 // stageExternalIPs 补丁二的回调：进程内 LiveKit 每建一个 PeerConnection 取一次当前外部
-// IPv4，追加为候选。数据源是 Ember 那一个 Announcer 的快照（映射结果排最前，其次 STUN
+// IPv4，追加为候选。数据源是进程内唯一的 Announcer 的快照（映射结果排最前，其次 STUN
 // 探测结果）——同一台机器只有一个公网地址，不另起第二个探测器。
 func (a *API) stageExternalIPs() []string {
-	externals, _ := a.ember.AnnounceSnapshot()
+	externals, _ := a.announcer.Snapshot()
 	return lite.ExternalIPv4s(externals)
 }
 
@@ -92,19 +92,15 @@ func (a *API) EnsureStageKernel(ctx context.Context) {
 		return
 	}
 	a.embedSrv = srv
-	// 显式登记舞台 UDP 端口：LiveKit 自己建 PeerConnection、不经过 ember 的 Announce()，
-	// 不登记的话 Announcer 要等语音线出过一条 SDP 才知道有个端口需要查映射（见
-	// lite.Announcer 的 registered 字段注释），语音线一次没用过时舞台端口的映射结果
-	// 就进不了 stageExternalIPs 的快照。
+	// 显式登记舞台 UDP 端口：LiveKit 自己建 PeerConnection、不经过这个 Announcer 的
+	// Announce()，不登记的话 Snapshot 查不到舞台端口的映射结果（见 lite.Announcer
+	// 的 registered 字段注释），stageExternalIPs 就少一条候选。
 	a.registerStageAnnouncePort(udpPort)
 }
 
-// registerStageAnnouncePort 见 EnsureStageKernel 调用处的注释；a.ember 恒非空（New 里已建），
-// 这里仍判空防御式编程，避免测试或未来重构漏初始化时 panic。
+// registerStageAnnouncePort 见 EnsureStageKernel 调用处的注释。
 func (a *API) registerStageAnnouncePort(port int) {
-	if a.ember != nil {
-		a.ember.RegisterAnnouncePort(AliasLkembed, port)
-	}
+	a.announcer.RegisterMediaPort(AliasLkembed, port)
 }
 
 // StopStageKernel 进程退出时收尾。

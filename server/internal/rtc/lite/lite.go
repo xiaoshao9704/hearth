@@ -1,6 +1,6 @@
-// Package lite 是进程内 ICE-Lite 内核（ember / bellows）共用的传输基建：
+// Package lite 是进程内 ICE-Lite 内核（bellows）的传输基建与宣告设施：
 // UDP 单端口 Transport + ICE-Lite + 宣告（Announcer：探测缓存 + SDP 出口追加候选）。
-// 各内核只带自己的 MediaEngine 与配置键。
+// lkembed 的 LiveKit 自己建 PeerConnection，只用这里的 Announcer 做宣告探测。
 package lite
 
 import (

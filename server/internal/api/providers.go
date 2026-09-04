@@ -1,5 +1,5 @@
 // 内核实例注册表：实例即对象，每条注册构造独立的 rtc 接口对象，api 持 map[alias]实例。
-// 实例来源三类：内建（ember/bellows，进程内零依赖兜底）、env 锁定（环境变量合成，只读）、
+// 实例来源三类：内建（bellows 进程内推流、lkembed 进程内 LiveKit）、env 锁定（环境变量合成，只读）、
 // DB 注册（providers 表，params 即旧命名空间键名，rtc 实现零改动）。
 // 选择器（voice_provider/stage_provider）的值是实例 alias；推流无选择器，一律随舞台实例。
 package api
@@ -26,7 +26,6 @@ const (
 	TypeLivekit        = "livekit"
 	TypeLivekitIngress = "livekit-ingress"
 	TypeBellowsRemote  = "bellows-remote"
-	TypeEmber          = "ember"   // 内建
 	TypeBellows        = "bellows" // 内建（进程内 WHIP 直通）
 	// TypeLivekitEmbedded 内建：补丁式 fork 的 LiveKit 跑在本进程内，只监听回环，
 	// 浏览器经 /providers/lkembed/rtc 同源反代访问（见 lkembed.go）
@@ -39,7 +38,8 @@ const AliasLkembed = "lkembed"
 // alias 规则：单段小写，出现在 URL 路径里；类型同名的 alias 保留给 env 锁定实例
 var aliasRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,31}$`)
 var reservedAliases = map[string]bool{
-	TypeEmber: true, TypeBellows: true, TypeLivekit: true,
+	// "ember" 是退场内建语音内核的 alias：不再放出注册，免得与历史部署的认知冲突
+	"ember": true, TypeBellows: true, TypeLivekit: true,
 	TypeLivekitIngress: true, TypeBellowsRemote: true, AliasLkembed: true,
 }
 
@@ -51,7 +51,7 @@ type ProviderInstance struct {
 	Cfg     rtc.ConfigFunc // params + 字段模式 Default 的解析（跨实例委托读配置统一走它）
 	Locked  bool           // env 锁定，只读
 	Builtin bool
-	Voice   rtc.Provider       // livekit/ember 非空
+	Voice   rtc.Provider       // livekit/lkembed 非空
 	Stage   rtc.StageProvider  // livekit 非空
 	Ingest  rtc.IngestProvider // livekit-ingress/bellows/bellows-remote 非空
 }
@@ -100,11 +100,10 @@ func paramsCfg(params map[string]string, fields []rtc.ConfigKey) rtc.ConfigFunc 
 	}
 }
 
-// builtinInstances 内建实例：ember 语音；bellows 进程内 WHIP 直通（发布出口 = 当前舞台线实例的 Publisher）；
+// builtinInstances 内建实例：bellows 进程内 WHIP 直通（发布出口 = 当前舞台线实例的 Publisher）；
 // lkembed 进程内 LiveKit，语音/舞台/推流三面齐全（语音舞台同选它即 combined 单连接，也是默认形态）。
 func (a *API) builtinInstances() []*ProviderInstance {
 	return []*ProviderInstance{
-		{Alias: TypeEmber, Type: TypeEmber, Builtin: true, Cfg: a.dynVal, Voice: a.ember},
 		{Alias: TypeBellows, Type: TypeBellows, Builtin: true, Cfg: a.dynVal,
 			Ingest: bellows.New(a.dynVal, a.ingressResolver, a.stagePublisherSink, a.mapped)},
 		{Alias: AliasLkembed, Type: TypeLivekitEmbedded, Builtin: true, Cfg: a.embedCfg,
@@ -281,12 +280,12 @@ func (a *API) listInstances(ctx context.Context) []*ProviderInstance {
 	return out
 }
 
-// voiceInstance 按选择器取语音实例；未知 alias 或无语音能力回落内建 ember。
+// voiceInstance 按选择器取语音实例；未知 alias 或无语音能力回落内建 lkembed。
 func (a *API) voiceInstance(ctx context.Context) (string, rtc.Provider) {
 	if inst := a.instance(a.dynVal(ctx, "voice_provider")); inst != nil && inst.Voice != nil {
 		return inst.Alias, inst.Voice
 	}
-	return TypeEmber, a.instance(TypeEmber).Voice
+	return AliasLkembed, a.instance(AliasLkembed).Voice
 }
 
 // stageInstance 按选择器取舞台实例；"none"、未知 alias 或无舞台能力 → ("", nil)（纯语音部署）。

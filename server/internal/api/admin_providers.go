@@ -13,7 +13,7 @@ import (
 	"github.com/go-chi/chi/v5"
 )
 
-// 可注册类型（内建 ember/bellows 不在列）；Label 供管理后台渲染。
+// 可注册类型（内建 bellows/lkembed 不在列）；Label 供管理后台渲染。
 var registrableTypes = []struct {
 	Type  string
 	Label string

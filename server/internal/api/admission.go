@@ -1,6 +1,5 @@
 // 入场判定统一：谁能进房、能否发布（封禁/邀请制/禁言）收敛到本文件，
-// joinToken、ember 信令（/providers/ember/voice）与 WHIP 推流（/w POST 的 admitIngest）
-// 三个入口共用同一套判定。
+// joinToken（凭证签发）与 WHIP 推流（/w POST 的 admitIngest）两个入口共用同一套判定。
 package api
 
 import (
@@ -8,7 +7,6 @@ import (
 	"errors"
 	"log"
 	"net/http"
-	"time"
 
 	"hearth/server/internal/rtc"
 	"hearth/server/internal/store"
@@ -37,52 +35,6 @@ func (a *API) admitUser(ctx context.Context, c *store.Channel, u *store.User) (a
 		return admission{}, false, "", err
 	}
 	return admission{UID: u.ID, Username: u.Username, CanPublish: !gagged}, true, "", nil
-}
-
-// ---- ember 线一次性入场票 ----
-// joinToken 完成入场判定后签发，ember 信令入口凭票直接入会，不再二次判定。
-
-const voiceTicketTTL = 60 * time.Second
-
-type voiceTicket struct {
-	room    string   // 频道名（与信令 URL 的 channel 参数比对）
-	meta    rtc.Meta // 入会身份与展示信息（joinToken 已组好，ember 据此建 identity）
-	userID  int64    // 持票人（与信令入口的会话用户比对，防票据挪用）
-	muted   bool     // 入会即禁言
-	expires time.Time
-}
-
-// issueVoiceTicket 签发一次性入场票，返回票号（拼进信令 URL query）。
-func (a *API) issueVoiceTicket(t voiceTicket) string {
-	t.expires = time.Now().Add(voiceTicketTTL)
-	nonce := randHex(16)
-	a.ticketMu.Lock()
-	defer a.ticketMu.Unlock()
-	a.cleanTicketsLocked()
-	a.tickets[nonce] = t
-	return nonce
-}
-
-// takeVoiceTicket 取票（一次性：取出即删）；票不存在或已过期返回 false。
-func (a *API) takeVoiceTicket(nonce string) (voiceTicket, bool) {
-	a.ticketMu.Lock()
-	defer a.ticketMu.Unlock()
-	a.cleanTicketsLocked()
-	t, ok := a.tickets[nonce]
-	if ok {
-		delete(a.tickets, nonce)
-	}
-	return t, ok
-}
-
-// cleanTicketsLocked 惰性清理过期票（须持有 ticketMu，签发/取票时顺带执行）。
-func (a *API) cleanTicketsLocked() {
-	now := time.Now()
-	for k, t := range a.tickets {
-		if now.After(t.expires) {
-			delete(a.tickets, k)
-		}
-	}
 }
 
 // ---- 推流入场判定（/w POST）----

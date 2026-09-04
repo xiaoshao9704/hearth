@@ -39,6 +39,10 @@ func ConfigKeys() []rtc.ConfigKey {
 			Label: "API Key", Hint: "留空 = 首次启动自动生成并落库（随数据库一起备份）"},
 		{Name: "lkembed_api_secret", Group: "stage", Secret: true,
 			Label: "API Secret", Hint: "留空 = 首次启动自动生成并落库"},
+		{Name: "lkembed_public_ip", Env: "LKEMBED_PUBLIC_IP", Group: "stage",
+			Label: "公网 IP", Hint: "留空 = 自动宣告全部网卡地址与 STUN 探测到的公网映射；显式设置则只通告该地址（覆盖）"},
+		{Name: "lkembed_stun_servers", Env: "LKEMBED_STUN_SERVERS", Group: "stage",
+			Label: "STUN 服务器", Hint: "逗号分隔；探测各网卡公网映射用，留空用内置默认（不可达时改填可用地址）"},
 	}
 }
 
@@ -280,7 +284,7 @@ func (s *Server) logf(format string, args ...any) {
 // DisableICELite 把 SettingEngine 现改回非 lite，本机 host 候选、补丁二注入的映射外部地址
 //（直接操作 SettingEngine.ICEAddressRewriteRules，不经过 ICEServers）都不受影响。
 // 浏览器的常规信令走 trickle ICE，不等 gathering complete，本来就不受这条影响。
-// 开了之后舞台内核与 ember/bellows 同为 ICE-Lite：对外地址一律由 lite.Announcer 宣告，
+// 开了之后舞台内核就是 ICE-Lite：对外地址一律由 lite.Announcer 宣告，
 // 可达性由 portmap 负责。
 func buildYAML(o Options) string {
 	return fmt.Sprintf(`port: %d

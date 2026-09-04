@@ -68,7 +68,7 @@ type ConfigKey struct {
 type Credentials struct {
 	URL    string // 浏览器连接地址；空 = 由接入层推导同源信令代理地址
 	Token  string
-	Engine string // 客户端引擎名：livekit / ember …
+	Engine string // 客户端引擎名（前端注册表的键），当前唯一实现是 livekit
 }
 
 // Participant 房间参与者的精简信息。
@@ -107,7 +107,7 @@ type Provider interface {
 }
 
 // StageProvider 舞台内核：投屏/摄像头等视频能力，**包含全部语音能力**（内嵌 Provider）。
-// 舞台槽位只接受本接口：纯语音内核（如 ember）不能被选作舞台线；
+// 舞台槽位只接受本接口：纯语音内核不能被选作舞台线；
 // 语音内核补齐视频能力时实现本接口即可上舞台线，视频专属方法届时加在这里。
 type StageProvider interface {
 	Provider

@@ -328,15 +328,15 @@ func TestMigrateV3EmptyDB(t *testing.T) {
 	}
 }
 
-// 分发路由里 /w 子路径对无推流能力的实例 404（回归保护：serveProvider 分支顺序）。
-func TestWhipNoIngestCap(t *testing.T) {
+// 分发路由里 /w 子路径对不存在的实例 404（ember 已退场，其 alias 不再注册）。
+func TestWhipUnknownInstance(t *testing.T) {
 	a := testAPI(t)
 	r := chi.NewRouter()
 	a.RegisterProxies(r)
 	rec := httptest.NewRecorder()
 	r.ServeHTTP(rec, httptest.NewRequest("POST", "/providers/ember/w/chan1/x", strings.NewReader("sdp")))
 	if rec.Code != 404 {
-		t.Fatalf("无推流能力的实例应 404，实际 %d", rec.Code)
+		t.Fatalf("不存在的实例应 404，实际 %d", rec.Code)
 	}
 }
 

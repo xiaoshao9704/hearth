@@ -156,7 +156,7 @@ export async function createChannel(name: string): Promise<Channel> {
 }
 
 export interface EngineCred {
-  engine: string; // 客户端引擎名（livekit / ember …）
+  engine: string; // 客户端引擎名（engine/index.ts 注册表的键）
   url: string;
   token: string;
 }
@@ -462,7 +462,7 @@ export interface ProviderInstance {
   type: string;
   caps: string[]; // 槽位能力：voice / stage / ingest
   locked: boolean; // 环境变量锁定，只读
-  builtin: boolean; // 内建（ember/bellows），只读
+  builtin: boolean; // 内建（lkembed/bellows），只读
   params: Record<string, string>; // Secret 字段掩码为空串
   params_set: Record<string, boolean>; // Secret 字段是否已设置
 }

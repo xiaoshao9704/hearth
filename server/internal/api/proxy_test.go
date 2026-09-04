@@ -10,7 +10,7 @@ import (
 	"hearth/server/internal/store"
 )
 
-// 分发：未知 alias 404；livekit /rtc 反代到实例 api_url；ember /voice 无 token → 401
+// 分发：未知 alias 404；livekit /rtc 反代到实例 api_url
 func TestProviderDispatch(t *testing.T) {
 	a := testAPI(t)
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -37,16 +37,6 @@ func TestProviderDispatch(t *testing.T) {
 	r.ServeHTTP(rec, httptest.NewRequest("GET", "/providers/lk1/rtc/validate", nil))
 	if rec.Code != 200 || rec.Header().Get("X-Upstream-Path") != "/rtc/validate" {
 		t.Fatalf("livekit 反代路径错误: %d %q", rec.Code, rec.Header().Get("X-Upstream-Path"))
-	}
-	// ember WS 信令：无 token 时 voiceWS 在校验会话处返回精确 401（未走到 WS 升级）。
-	// 语音默认已是 lkembed，这里显式选回 ember 才能走到 ember 信令入口（否则按未选中 409）。
-	if err := a.st.SetSetting(ctx, "cfg_voice_provider", TypeEmber); err != nil {
-		t.Fatalf("选回 ember 失败: %v", err)
-	}
-	rec = httptest.NewRecorder()
-	r.ServeHTTP(rec, httptest.NewRequest("GET", "/providers/ember/voice", nil))
-	if rec.Code != 401 {
-		t.Fatalf("ember /voice 无 token 应 401，实际 %d", rec.Code)
 	}
 }
 

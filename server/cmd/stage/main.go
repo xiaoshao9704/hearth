@@ -53,7 +53,7 @@ func main() {
 	}
 
 	udpPort, tcpPort := port("STAGE_UDP_PORT", 47720), port("STAGE_TCP_PORT", 0)
-	// 宣告：本进程自己的 Announcer（这里没有 Ember），显式登记媒体端口——LiveKit 的
+	// 宣告：本进程自己的 Announcer，显式登记媒体端口——LiveKit 的
 	// PeerConnection 由它自己建、不经 Announcer 的 Announce()，不登记的话快照查不到
 	// 映射结果（见 lite.Announcer 的 registered 字段注释）。
 	mapper := portmap.New()

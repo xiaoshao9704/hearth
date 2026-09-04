@@ -74,7 +74,7 @@ func main() {
 	a := api.New(st, cfg, hub, lite.MappedFunc(mapper.UDPExternal))
 
 	// 语音线或舞台线选中 lkembed 时拉起进程内 LiveKit（默认两线同选，即默认常驻；
-	// 语音改选 ember 且舞台选 none 或外部实例时什么都不起）
+	// 两线都切走——语音选外部实例、舞台选 none——时什么都不起）
 	a.EnsureStageKernel(context.Background())
 
 	// chi 路由：API + 聊天 WS + /providers/* 接入分发；具体路由优先于静态通配，无 ServeMux 模式冲突问题

@@ -91,9 +91,6 @@ func (a *API) PortWants(ctx context.Context) []portmap.Want {
 			ws = append(ws, portmap.Want{Proto: "tcp", Port: p, Desc: "hearth http"})
 		}
 	}
-	if alias, _ := a.voiceInstance(ctx); alias == TypeEmber {
-		ws = append(ws, portmap.Want{Proto: "udp", Port: dynPort(a.dynVal(ctx, "ember_udp_port")), Desc: "hearth voice"})
-	}
 	// lkembed（进程内 LiveKit）的媒体端口必须 StrictPort：LiveKit 的候选地址改写（补丁二）只换
 	// IP 不换端口，与 pion 的 SDP 宣告同源限制一致；网关若把外部端口改派成别的号，宣告出去的
 	// 候选端口就是错的，宁可让 Mapper 判定失败、走 port_conflict 诊断，也不能假装映射成功。

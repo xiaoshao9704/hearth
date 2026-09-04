@@ -26,11 +26,11 @@ func TestBuiltinInstancesFirst(t *testing.T) {
 	ctx := context.Background()
 	a.reloadProviders(ctx)
 	list := a.listInstances(ctx)
-	if len(list) < 2 || list[0].Alias != "ember" || list[1].Alias != "bellows" {
+	if len(list) < 2 || list[0].Alias != "bellows" || list[1].Alias != AliasLkembed {
 		t.Fatalf("内建实例应排最前: %+v", list)
 	}
-	if !list[0].Builtin || list[0].Voice == nil || list[1].Ingest == nil {
-		t.Fatal("ember 应有语音能力，bellows 应有推流能力")
+	if !list[0].Builtin || list[0].Ingest == nil || list[1].Voice == nil {
+		t.Fatal("bellows 应有推流能力，lkembed 应有语音能力")
 	}
 }
 
@@ -87,8 +87,8 @@ func TestSelectorResolutionAndFallback(t *testing.T) {
 		Params: map[string]string{"ingress_upstream_url": "http://x:58080"}})
 	a.reloadProviders(ctx)
 	a.st.SetSetting(ctx, "cfg_voice_provider", "ing2")
-	if alias, _ := a.voiceInstance(ctx); alias != TypeEmber {
-		t.Fatalf("无语音能力的实例应回落 ember，实际 %q", alias)
+	if alias, _ := a.voiceInstance(ctx); alias != AliasLkembed {
+		t.Fatalf("无语音能力的实例应回落 lkembed，实际 %q", alias)
 	}
 }
 
@@ -150,8 +150,8 @@ func TestReloadReusesUnchangedInstances(t *testing.T) {
 		t.Fatal("其余未变化实例仍应复用旧对象")
 	}
 	list := a.listInstances(ctx)
-	if len(list) < 4 || list[0].Alias != "ember" || list[1].Alias != "bellows" ||
-		list[2].Alias != AliasLkembed || list[3].Alias != "br1" {
+	if len(list) < 3 || list[0].Alias != "bellows" || list[1].Alias != AliasLkembed ||
+		list[2].Alias != "br1" {
 		t.Fatalf("实例顺序应保持 内建→DB: %+v", list)
 	}
 }
@@ -268,21 +268,18 @@ func TestMigrateFreshDeployKeepsBuiltinDefaults(t *testing.T) {
 	}
 }
 
-// 选择器取未知值时语音回落 ember：joinToken 签的是 ember 票，/providers/ember/voice
-// 不得按原始选择器串 409（无 token → 401 即证明过了守卫）。
-func TestVoiceWSFallbackSelector(t *testing.T) {
+// ember 信令入口已随内核一并退场：/providers/ember/voice 一律 404（实例本身不存在）。
+func TestEmberVoiceEndpointGone(t *testing.T) {
 	maskProviderEnv(t)
 	a := testAPI(t)
-	a.st.SetSetting(context.Background(), "cfg_voice_provider", "nope")
 	r := a.Router()
 	a.RegisterProxies(r)
-	rec := httptest.NewRecorder()
-	r.ServeHTTP(rec, httptest.NewRequest("GET", "/providers/ember/voice", nil))
-	if rec.Code == 409 {
-		t.Fatal("选择器未知值回落 ember 时不应 409")
-	}
-	if rec.Code != 401 {
-		t.Fatalf("无 token 应 401，实际 %d", rec.Code)
+	for _, method := range []string{"GET", "POST"} {
+		rec := httptest.NewRecorder()
+		r.ServeHTTP(rec, httptest.NewRequest(method, "/providers/ember/voice", nil))
+		if rec.Code != 404 {
+			t.Fatalf("%s /providers/ember/voice 应 404，实际 %d", method, rec.Code)
+		}
 	}
 }
 

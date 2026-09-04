@@ -16,7 +16,6 @@ import (
 	"hearth/server/internal/config"
 	"hearth/server/internal/rtc"
 	"hearth/server/internal/rtc/bellows"
-	"hearth/server/internal/rtc/ember"
 	"hearth/server/internal/rtc/lite"
 	"hearth/server/internal/rtc/livekitembed"
 	"hearth/server/internal/rtc/livekitrtc"
@@ -41,7 +40,6 @@ type API struct {
 	providers     map[string]*ProviderInstance
 	providerOrder []string        // listInstances 顺序：内建 → env 锁定 → DB
 	kernelKeys    []rtc.ConfigKey // 内建实例的全局配置键汇总
-	ember         *ember.Provider // /providers/ember/voice 信令端点直连（进程内实现）
 	// ingressResolver 进程内推流网关的归属反查闭包：判定已在 serveWHIP 的 admitIngest
 	// 做完并挂到请求 ctx（ingestCtxKey），这里原样取回四元组；无判定结果按未知令牌处理。
 	// 写成无名函数类型是为了同时喂给 bellows.ResolveFunc 与 livekitrtc.ResolveFunc
@@ -53,9 +51,9 @@ type API struct {
 	counts   map[string]int
 	countsAt time.Time
 
-	// ember 线一次性入场票表（见 admission.go）
-	ticketMu sync.Mutex
-	tickets  map[string]voiceTicket
+	// announcer 进程内唯一的宣告探测器（STUN/显式公网 IP + 端口映射 → 宣告候选）：
+	// lkembed 的 ExternalIPs 回调从它的快照取外部地址（见 lkembed.go）
+	announcer *lite.Announcer
 
 	// mapped 端口映射结果查询，透传给进程内 ICE-Lite 内核做宣告（无映射来源时为 nil）
 	mapped lite.MappedFunc
@@ -71,10 +69,13 @@ type API struct {
 
 func New(st *store.Store, cfg config.Config, hub *chat.Hub, mapped lite.MappedFunc) *API {
 	a := &API{st: st, cfg: cfg, hub: hub, mapped: mapped,
-		tickets: map[string]voiceTicket{}, providers: map[string]*ProviderInstance{}}
-	// 内建实例：ember 是进程内纯音频语音内核；bellows 是进程内 WHIP 直通推流网关
-	//（OBS HEVC/AV1 的接入路径），其余形态由 env/DB 注册成实例（见 providers.go）
-	a.ember = ember.New(a.dynVal, a.mapped)
+		providers: map[string]*ProviderInstance{}}
+	// 内建实例：bellows 是进程内 WHIP 直通推流网关（OBS HEVC/AV1 的接入路径），
+	// 其余形态由 env/DB 注册成实例（见 providers.go）
+	a.announcer = lite.NewAnnouncer(
+		func(ctx context.Context) string { return a.dynVal(ctx, "lkembed_public_ip") },
+		func(ctx context.Context) string { return a.dynVal(ctx, "lkembed_stun_servers") },
+		a.mapped)
 	a.ingressResolver = func(ctx context.Context, _ string) (string, string, rtc.Meta, error) {
 		adm, ok := ctx.Value(ingestCtxKey{}).(ingestAdmission)
 		if !ok {
@@ -84,8 +85,7 @@ func New(st *store.Store, cfg config.Config, hub *chat.Hub, mapped lite.MappedFu
 	}
 	a.lkembed = livekitrtc.New(a.embedCfg)
 	a.lkembedWHIP = livekitrtc.NewWHIP(a.embedCfg, a.ingressResolver, a.stageKernelRunning)
-	a.kernelKeys = append(ember.ConfigKeys(), bellows.ConfigKeys()...)
-	a.kernelKeys = append(a.kernelKeys, livekitembed.ConfigKeys()...)
+	a.kernelKeys = append(bellows.ConfigKeys(), livekitembed.ConfigKeys()...)
 	// 注册表先种内建实例：启动期迁移或 ListProviders 失败（保留旧表）时，
 	// 各选择器的默认/回落路径仍有内建对象可用
 	for _, inst := range a.builtinInstances() {
@@ -450,17 +450,7 @@ func (a *API) joinToken(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "签发令牌失败")
 		return
 	}
-	// ember 信令走一次性入场票：判定结果在此定格，/providers/ember/voice 凭票直接入会（见 admission.go）
-	ticket := ""
-	if vc.Engine == "ember" {
-		ticket = a.issueVoiceTicket(voiceTicket{
-			room:   c.Name,
-			meta:   meta,
-			userID: u.ID,
-			muted:  !adm.CanPublish,
-		})
-	}
-	resp := map[string]any{"voice": a.fillCred(r, vc, c.Name, ticket, voiceAlias)}
+	resp := map[string]any{"voice": a.fillCred(r, vc, voiceAlias)}
 	combined := stageP != nil && voiceAlias == stageAlias
 	resp["combined"] = combined
 	if stageP != nil && !combined {
@@ -468,30 +458,17 @@ func (a *API) joinToken(w http.ResponseWriter, r *http.Request) {
 		if serr != nil {
 			log.Printf("舞台线签发失败（语音照常）: %v", serr)
 		} else {
-			resp["stage"] = a.fillCred(r, sc, c.Name, "", stageAlias)
+			resp["stage"] = a.fillCred(r, sc, stageAlias)
 		}
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
 
-// fillCred 补全内核未声明的连接信息：ember 语音走同源 /providers/{alias}/voice 信令并
-// 透传会话 token（附一次性入场票），livekit 等走同源 /providers/{alias} 信令代理。
-func (a *API) fillCred(r *http.Request, c rtc.Credentials, channel, ticket, alias string) map[string]string {
+// fillCred 补全内核未声明的连接信息：走同源 /providers/{alias} 信令代理。
+func (a *API) fillCred(r *http.Request, c rtc.Credentials, alias string) map[string]string {
 	u := c.URL
 	if u == "" {
-		if c.Engine == "ember" {
-			scheme := "ws"
-			if requestScheme(r) == "https" {
-				scheme = "wss"
-			}
-			q := neturl.Values{"channel": {channel}}
-			if ticket != "" {
-				q.Set("ticket", ticket)
-			}
-			u = (&neturl.URL{Scheme: scheme, Host: r.Host, Path: "/providers/" + alias + "/voice", RawQuery: q.Encode()}).String()
-		} else {
-			u = a.signalURL(r, alias)
-		}
+		u = a.signalURL(r, alias)
 	}
 	token := c.Token
 	if token == "" {
@@ -681,7 +658,7 @@ func (a *API) unban(w http.ResponseWriter, r *http.Request) {
 }
 
 // setGag 禁言/解禁目标用户（模式同 ban：落库为权威，现场传播尽力）。
-// 落库（channel_gags）保证离房/重进都生效——joinToken 与 ember 信令入会都按它签发/拦截；
+// 落库（channel_gags）保证离房/重进都生效——joinToken 与推流入场判定都按它签发/拦截；
 // 内核调用只负责让"当前在房"的设备立即失声，目标不在房（ErrNoParticipant）不算失败。
 func (a *API) setGag(w http.ResponseWriter, r *http.Request, muted bool) {
 	c := channelFrom(r)

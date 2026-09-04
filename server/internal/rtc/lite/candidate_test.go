@@ -95,7 +95,7 @@ func TestAppendMappedCandidateFoundationNoConflict(t *testing.T) {
 
 // 实测：BUNDLE 下 pion 只把候选放进第一个 m= 段；且候选要等 GatheringCompletePromise 之后
 // 才出现在 LocalDescription 里（SetLocalDescription 返回时 SDP 里一条候选都没有）。
-// ember/bellows 三处 SDP 出口都已在 <-done 之后取 LocalDescription，Announce 因此拿得到候选。
+// bellows 的 SDP 出口已在 <-done 之后取 LocalDescription，Announce 因此拿得到候选。
 func TestBundleCandidatesOnlyInFirstSection(t *testing.T) {
 	m := &webrtc.MediaEngine{}
 	if err := m.RegisterDefaultCodecs(); err != nil {

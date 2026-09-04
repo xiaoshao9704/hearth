@@ -6,7 +6,7 @@ import (
 	"time"
 )
 
-// refreshableAnnouncer 进程内 ICE-Lite 内核（ember / 进程内 bellows）的宣告探测出口。
+// refreshableAnnouncer 进程内 ICE-Lite 内核（进程内 bellows）的宣告探测出口。
 type refreshableAnnouncer interface {
 	RefreshAnnounce(ctx context.Context) (changed bool, externals []string, probedAt time.Time)
 	AnnounceSnapshot() (externals []string, probedAt time.Time)
@@ -20,9 +20,7 @@ func (a *API) healthz(w http.ResponseWriter, _ *http.Request) {
 
 // RefreshAnnounce 刷新全部进程内内核的宣告探测，给进程内周期任务与端口映射变化回调用。
 func (a *API) RefreshAnnounce(ctx context.Context) {
-	if a.ember != nil {
-		a.ember.RefreshAnnounce(ctx)
-	}
+	a.announcer.Refresh(ctx)
 	a.providersMu.RLock()
 	var ras []refreshableAnnouncer
 	for _, inst := range a.providers {

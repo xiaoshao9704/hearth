@@ -26,7 +26,7 @@ func TestHealthz(t *testing.T) {
 	}
 }
 
-// RefreshAnnounce 是进程内周期刷新的入口：遍历内建 ember 与实现了接口的 ingest 实例，不炸即可。
+// RefreshAnnounce 是进程内周期刷新的入口：刷新 API 持有的 Announcer 与实现了接口的 ingest 实例，不炸即可。
 func TestRefreshAnnounce(t *testing.T) {
 	testAPI(t).RefreshAnnounce(context.Background())
 }
