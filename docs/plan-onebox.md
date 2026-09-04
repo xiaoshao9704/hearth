@@ -154,7 +154,7 @@ type Provider interface {
 
 - **验收 0**：`for os in linux windows darwin; for arch in amd64 arm64; CGO_ENABLED=0 GOOS=$os GOARCH=$arch go build ./cmd/server` 全绿，
   这是阶段一的入口条件。**写方案时已试编：`windows/amd64` 通过，`darwin/arm64` 失败**——`github.com/livekit/protocol/utils/hwstats/cpu_all.go`
-  调用 `go-osstat/cpu` 的 `Stats/Get`，而 go-osstat 的 darwin 实现只有 cgo 版（`cpu_darwin_cgo.go`），`CGO_ENABLED=0` 下这两个符号不存在。
+  调用 `go-osstat/cpu` 的 `Stats/Get`，而 go-osstat 的 darwin 实现只在 cgo 版（`cpu_darwin_cgo.go`）里定义它们，`cpu_darwin_nocgo.go` 是不含这两个符号的空壳，`CGO_ENABLED=0` 下编不过。
   两条路：(a) CI 的 darwin 目标改在 `macos-latest` runner 上 `CGO_ENABLED=1` 原生编译（产物仍是单文件，但 CI 多一台 runner、失去「全程 linux 交叉编译」的整齐）；
   (b) `livekit/protocol` 也走 replace 到自己的 fork，给 `hwstats` 加一个 `darwin && !cgo` 的降级文件（返回零值，LiveKit 只用它做负载统计，不影响转发）。
   推荐 (b)：改动是一个文件，且 `livekit-server` 已经在 replace 自家 fork，多一个同源 fork 不增加心智负担。
