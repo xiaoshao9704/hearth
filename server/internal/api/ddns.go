@@ -18,6 +18,7 @@ func (a *API) ddnsConfig(ctx context.Context) ddns.Config {
 	return ddns.Config{
 		Provider:     a.dynVal(ctx, "ddns_provider"),
 		Host:         a.dynVal(ctx, "ddns_host"),
+		Zone:         a.dynVal(ctx, "ddns_zone"),
 		DuckDNSToken: a.dynVal(ctx, "ddns_duckdns_token"),
 		CFToken:      a.dynVal(ctx, "ddns_cf_token"),
 		DNSPodID:     a.dynVal(ctx, "ddns_dnspod_id"),

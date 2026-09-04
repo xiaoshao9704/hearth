@@ -19,6 +19,7 @@ interface WizardState {
   domain: string;
   siteDomain: string;
   ddnsHost: string;
+  ddnsZone: string;
   ddnsProvider: 'off' | 'duckdns' | 'cloudflare' | 'dnspod' | 'aliyun';
   tlsMode: 'acme' | 'selfsigned' | 'off';
 }
@@ -44,7 +45,14 @@ const DDNS_LABELS: Record<string, string> = {
 };
 
 export function renderSetup(root: HTMLElement, alive: () => boolean) {
-  const state: WizardState = { domain: '', siteDomain: '', ddnsHost: '', ddnsProvider: 'off', tlsMode: 'selfsigned' };
+  const state: WizardState = {
+    domain: '',
+    siteDomain: '',
+    ddnsHost: '',
+    ddnsZone: '',
+    ddnsProvider: 'off',
+    tlsMode: 'selfsigned',
+  };
   let tlsChosen = false;
 
   const paint = (inner: string) => {
@@ -140,6 +148,11 @@ export function renderSetup(root: HTMLElement, alive: () => boolean) {
           <label class="field-label" for="wz-ddns-host">DDNS 主机名</label>
           <div class="field" style="height:44px"><input id="wz-ddns-host" class="mono" placeholder="如 voice.duckdns.org" autocapitalize="off" spellcheck="false" /></div>
         </div>
+        <div id="wz-ddns-zone-box" style="display:none;flex-direction:column;gap:7px">
+          <label class="field-label" for="wz-ddns-zone">DNS Zone（建议填写）</label>
+          <div class="field" style="height:44px"><input id="wz-ddns-zone" class="mono" placeholder="如 example.com" autocapitalize="off" spellcheck="false" /></div>
+          <div style="font-size:11.5px;line-height:1.6;color:var(--text-2)">由 DNS 服务商管理的区域；留空时才按主机名逐级猜测。</div>
+        </div>
         <div id="wz-ddns-creds" style="display:flex;flex-direction:column;gap:11px"></div>
       </div>
       ${errLine}
@@ -149,11 +162,13 @@ export function renderSetup(root: HTMLElement, alive: () => boolean) {
       </div>`);
 
     const fieldsBox = el.querySelector<HTMLDivElement>('#wz-ddns-fields')!;
+    const zoneBox = el.querySelector<HTMLDivElement>('#wz-ddns-zone-box')!;
     const credsBox = el.querySelector<HTMLDivElement>('#wz-ddns-creds')!;
     let provider: WizardState['ddnsProvider'] = state.ddnsProvider;
     const syncDdns = () => {
       el.querySelectorAll<HTMLButtonElement>('#wz-ddns .seg').forEach((b) => b.classList.toggle('on', b.dataset.id === provider));
       fieldsBox.style.display = provider === 'off' ? 'none' : 'flex';
+      zoneBox.style.display = provider === 'off' || provider === 'duckdns' ? 'none' : 'flex';
       credsBox.innerHTML = (DDNS_CREDS[provider] ?? [])
         .map(
           (c) => `
@@ -175,6 +190,7 @@ export function renderSetup(root: HTMLElement, alive: () => boolean) {
     const input = el.querySelector<HTMLInputElement>('#wz-domain')!;
     input.value = state.siteDomain;
     el.querySelector<HTMLInputElement>('#wz-ddns-host')!.value = state.ddnsHost;
+    el.querySelector<HTMLInputElement>('#wz-ddns-zone')!.value = state.ddnsZone;
     const save = async () => {
       const domain = input.value.trim().toLowerCase();
       if (domain && !DOMAIN_RE.test(domain)) {
@@ -195,6 +211,17 @@ export function renderSetup(root: HTMLElement, alive: () => boolean) {
         values.ddns_provider = provider;
         values.ddns_host = host;
         state.ddnsHost = host;
+        const zone = provider === 'duckdns' ? '' : el.querySelector<HTMLInputElement>('#wz-ddns-zone')!.value.trim().toLowerCase();
+        if (zone && !DOMAIN_RE.test(zone)) {
+          showErr(new Error('DNS Zone 格式不对，如 example.com'));
+          return false;
+        }
+        if (zone && host !== zone && !host.endsWith(`.${zone}`)) {
+          showErr(new Error('DDNS 主机名必须属于填写的 DNS Zone'));
+          return false;
+        }
+        values.ddns_zone = zone;
+        state.ddnsZone = zone;
         for (const c of DDNS_CREDS[provider] ?? []) {
           const v = credsBox.querySelector<HTMLInputElement>(`#wz-cred-${c.key}`)!.value.trim();
           if (!v) {
@@ -207,7 +234,11 @@ export function renderSetup(root: HTMLElement, alive: () => boolean) {
         if (!domain) state.domain = host;
       } else {
         state.ddnsHost = '';
+        state.ddnsZone = '';
         state.domain = domain;
+        values.ddns_provider = 'off';
+        values.ddns_host = '';
+        values.ddns_zone = '';
       }
       if (Object.keys(values).length > 0) {
         try {
@@ -230,6 +261,7 @@ export function renderSetup(root: HTMLElement, alive: () => boolean) {
       state.domain = '';
       state.siteDomain = '';
       state.ddnsHost = '';
+      state.ddnsZone = '';
       state.ddnsProvider = 'off';
       state.tlsMode = 'selfsigned';
       stepTLS();

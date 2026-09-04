@@ -20,6 +20,7 @@ import (
 type DNSPod struct {
 	ID    string
 	Token string
+	Zone  string
 }
 
 func (d *DNSPod) Name() string { return "dnspod" }
@@ -115,6 +116,13 @@ func (d *DNSPod) upsert(ctx context.Context, domain, sub, rtype string, addr net
 // updateOne 对一种记录类型做主域拆分试探：主域从最短（两段）逐级加长，
 // 「域名不存在」就再试；试通或穷尽后返回首个非域名类错误。
 func (d *DNSPod) updateOne(ctx context.Context, host, rtype string, addr netip.Addr) error {
+	if zone := normalizeDNSName(d.Zone); zone != "" {
+		sub, ok := relativeHost(host, zone)
+		if !ok {
+			return apiErr(d.Name(), fmt.Sprintf("主机名 %s 不属于 zone %s", host, zone))
+		}
+		return d.upsert(ctx, zone, sub, rtype, addr)
+	}
 	labels := strings.Split(host, ".")
 	if len(labels) < 2 {
 		return apiErr(d.Name(), "主机名格式不对")
@@ -144,7 +152,7 @@ func isDomainNotFound(err error) bool {
 }
 
 func (d *DNSPod) Update(ctx context.Context, host string, v4, v6 netip.Addr) error {
-	host = strings.ToLower(host)
+	host = normalizeDNSName(host)
 	if v4.IsValid() {
 		if err := d.updateOne(ctx, host, "A", v4); err != nil {
 			return err

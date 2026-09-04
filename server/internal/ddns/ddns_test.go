@@ -1,16 +1,23 @@
 package ddns
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/netip"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
+
+	alidnslib "github.com/libdns/alidns"
+	"github.com/libdns/libdns"
 )
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
@@ -26,30 +33,6 @@ func withHTTPClient(t *testing.T, fn roundTripFunc) {
 
 func response(body string) *http.Response {
 	return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header)}
-}
-
-// 阿里云签名：固定 key+参数（含固定 nonce/时间戳）必须得到稳定的签名串。
-// 期望值由同一算法的独立实现（Python hmac）算出，防「实现改了但自洽」的假绿。
-func TestAliyunSignStable(t *testing.T) {
-	params := map[string]string{
-		"Format":           "JSON",
-		"Version":          "2015-01-09",
-		"AccessKeyId":      "test-key-id",
-		"SignatureMethod":  "HMAC-SHA1",
-		"Timestamp":        "2026-01-02T03:04:05Z",
-		"SignatureVersion": "1.0",
-		"SignatureNonce":   "abc123",
-		"Action":           "DescribeDomainRecords",
-		"DomainName":       "example.com",
-		"RRKeyWord":        "voice",
-		"TypeKeyWord":      "A",
-		"PageSize":         "100",
-	}
-	got := aliSign("test-secret", params)
-	want := "a+7aK6N+Q7vyGNcbUKoqtI/bITQ="
-	if got != want {
-		t.Fatalf("签名不稳定: got %s, want %s", got, want)
-	}
 }
 
 func TestSplitExternals(t *testing.T) {
@@ -70,15 +53,56 @@ func TestSplitExternals(t *testing.T) {
 type fakeProvider struct {
 	calls atomic.Int32
 	fail  bool
+	err   error
 }
 
 func (f *fakeProvider) Name() string { return "duckdns" }
 func (f *fakeProvider) Update(context.Context, string, netip.Addr, netip.Addr) error {
 	f.calls.Add(1)
+	if f.err != nil {
+		return f.err
+	}
 	if f.fail {
 		return errors.New("模拟 API 拒绝")
 	}
 	return nil
+}
+
+func TestRunnerRedactsURLError(t *testing.T) {
+	const secret = "change-me-secret"
+	fp := &fakeProvider{err: fmt.Errorf("provider 调用失败: %w", &url.Error{
+		Op:  "Get",
+		URL: "https://example.com/update?AccessKeyId=" + secret + "&Signature=" + secret,
+		Err: errors.New("模拟网络错误"),
+	})}
+	r := NewRunner(filepath.Join(t.TempDir(), "state.json"))
+	r.prov = fp
+
+	var logs bytes.Buffer
+	oldWriter := log.Writer()
+	log.SetOutput(&logs)
+	t.Cleanup(func() { log.SetOutput(oldWriter) })
+	r.Sync(context.Background(), Config{Provider: "aliyun", Host: "voice.example.com"}, []string{"203.0.113.10"})
+
+	if got := r.Status().LastError; got != "模拟网络错误" {
+		t.Fatalf("LastError 应只保留底层错误，实际 %q", got)
+	}
+	if got := logs.String(); strings.Contains(got, secret) || strings.Contains(got, "AccessKeyId") || strings.Contains(got, "Signature") {
+		t.Fatalf("日志不得包含请求 URL 或凭证: %s", got)
+	}
+}
+
+func TestRunnerZoneChangeTriggersUpdate(t *testing.T) {
+	fp := &fakeProvider{}
+	r := NewRunner(filepath.Join(t.TempDir(), "state.json"))
+	r.prov = fp
+	cfg := Config{Provider: "cloudflare", Host: "voice.example.com", Zone: "example.com"}
+	r.Sync(context.Background(), cfg, []string{"203.0.113.10"})
+	cfg.Zone = "voice.example.com"
+	r.Sync(context.Background(), cfg, []string{"203.0.113.10"})
+	if got := fp.calls.Load(); got != 2 {
+		t.Fatalf("zone 改变必须绕过地址判重，实际调用 %d 次", got)
+	}
 }
 
 func TestRunnerDedupBackoffAndState(t *testing.T) {
@@ -239,6 +263,22 @@ func TestDNSPodCreatesMissingRootRecord(t *testing.T) {
 	}
 }
 
+func TestDNSPodUsesExplicitZone(t *testing.T) {
+	withHTTPClient(t, func(r *http.Request) (*http.Response, error) {
+		if err := r.ParseForm(); err != nil {
+			t.Fatal(err)
+		}
+		if r.Form.Get("domain") != "example.com" || r.Form.Get("sub_domain") != "voice" {
+			t.Fatalf("应直接使用显式 zone: %v", r.Form)
+		}
+		return response(`{"status":{"code":"1","message":"ok"},"records":[{"id":"1","value":"203.0.113.10"}]}`), nil
+	})
+	err := (&DNSPod{ID: "id", Token: "change-me", Zone: "example.com"}).Update(context.Background(), "voice.example.com", netip.MustParseAddr("203.0.113.10"), netip.Addr{})
+	if err != nil {
+		t.Fatalf("显式 zone 更新失败: %v", err)
+	}
+}
+
 func TestDNSPodDomainNotFoundUsesErrorCode(t *testing.T) {
 	if !isDomainNotFound(&dpError{Code: "6", Message: "域名不存在"}) {
 		t.Fatal("错误码 6 应识别为域名不存在")
@@ -248,25 +288,82 @@ func TestDNSPodDomainNotFoundUsesErrorCode(t *testing.T) {
 	}
 }
 
-func TestAliyunCreatesMissingRootRecord(t *testing.T) {
-	var actions []string
-	withHTTPClient(t, func(r *http.Request) (*http.Response, error) {
-		action := r.URL.Query().Get("Action")
-		actions = append(actions, action)
-		rrKey := r.URL.Query().Get("RRKeyWord")
-		if action == "AddDomainRecord" {
-			rrKey = r.URL.Query().Get("RR")
-		}
-		if r.URL.Query().Get("DomainName") != "example.com" || rrKey != "@" {
-			t.Fatalf("主域拆分错误: %s", r.URL.RawQuery)
-		}
-		return response(`{}`), nil
-	})
-	err := (&Aliyun{ID: "id", Secret: "change-me"}).Update(context.Background(), "example.com", netip.MustParseAddr("203.0.113.10"), netip.Addr{})
-	if err != nil {
-		t.Fatalf("缺失的主域记录应进入创建分支: %v", err)
+type fakeRecordSetter struct {
+	zones       []string
+	records     [][]libdns.Record
+	succeedZone string
+}
+
+func (f *fakeRecordSetter) SetRecords(_ context.Context, zone string, records []libdns.Record) ([]libdns.Record, error) {
+	f.zones = append(f.zones, zone)
+	f.records = append(f.records, append([]libdns.Record(nil), records...))
+	if f.succeedZone != "" && zone != f.succeedZone {
+		return nil, errors.New("zone 不存在")
 	}
-	if got := strings.Join(actions, ","); got != "DescribeDomainRecords,AddDomainRecord" {
-		t.Fatalf("调用顺序错误: %s", got)
+	return records, nil
+}
+
+func TestLibDNSExplicitZoneCreatesRelativeAddressRecords(t *testing.T) {
+	setter := &fakeRecordSetter{}
+	p := &libDNSProvider{name: "cloudflare", zone: "example.com", setter: setter}
+	v4 := netip.MustParseAddr("203.0.113.10")
+	v6 := netip.MustParseAddr("2001:db8::1")
+	if err := p.Update(context.Background(), "voice.example.com", v4, v6); err != nil {
+		t.Fatal(err)
 	}
+	if len(setter.zones) != 1 || setter.zones[0] != "example.com" {
+		t.Fatalf("应只调用显式 zone 一次: %v", setter.zones)
+	}
+	if len(setter.records[0]) != 2 {
+		t.Fatalf("应同时写 A/AAAA: %v", setter.records[0])
+	}
+	for i, want := range []netip.Addr{v4, v6} {
+		rec, ok := setter.records[0][i].(libdns.Address)
+		if !ok || rec.Name != "voice" || rec.IP != want || rec.TTL != ddnsTTL {
+			t.Fatalf("记录 %d 不对: %#v", i, setter.records[0][i])
+		}
+	}
+}
+
+func TestLibDNSGuessesZoneWithoutMatchingErrorStrings(t *testing.T) {
+	setter := &fakeRecordSetter{succeedZone: "example.co.uk"}
+	p := &libDNSProvider{name: "aliyun", setter: setter}
+	if err := p.Update(context.Background(), "voice.example.co.uk", netip.MustParseAddr("203.0.113.10"), netip.Addr{}); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(setter.zones, ","); got != "co.uk,example.co.uk" {
+		t.Fatalf("应从最短后缀逐级尝试: %s", got)
+	}
+}
+
+func TestLibDNSRejectsHostOutsideExplicitZone(t *testing.T) {
+	setter := &fakeRecordSetter{}
+	p := &libDNSProvider{name: "cloudflare", zone: "example.net", setter: setter}
+	err := p.Update(context.Background(), "voice.example.com", netip.MustParseAddr("203.0.113.10"), netip.Addr{})
+	if err == nil || len(setter.zones) != 0 {
+		t.Fatalf("zone 不匹配应在调用提供方前拒绝: err=%v calls=%v", err, setter.zones)
+	}
+}
+
+func TestPrepareAliRecordsPreservesExistingID(t *testing.T) {
+	existing := []libdns.Record{
+		alidnsRecord("record-id", "voice", "A", "203.0.113.9"),
+		alidnsRecord("same-id", "voice", "AAAA", "2001:db8::1"),
+	}
+	desired := []libdns.Record{
+		libdns.Address{Name: "voice", TTL: ddnsTTL, IP: netip.MustParseAddr("203.0.113.10")},
+		libdns.Address{Name: "voice", TTL: ddnsTTL, IP: netip.MustParseAddr("2001:db8::1")},
+	}
+	pending, unchanged := prepareAliRecords(existing, desired)
+	if len(pending) != 1 || len(unchanged) != 1 {
+		t.Fatalf("应只更新变化的记录: pending=%v unchanged=%v", pending, unchanged)
+	}
+	got, ok := pending[0].(alidnslib.DomainRecord)
+	if !ok || got.ID != "record-id" || got.Value != "203.0.113.10" || got.TTL != uint32(ddnsTTL.Seconds()) {
+		t.Fatalf("更新记录必须保留上游 ID: %#v", pending[0])
+	}
+}
+
+func alidnsRecord(id, name, recordType, value string) alidnslib.DomainRecord {
+	return alidnslib.DomainRecord{ID: id, Name: name, Type: recordType, Value: value, TTL: uint32(ddnsTTL.Seconds())}
 }

@@ -16,7 +16,9 @@ import (
 	"errors"
 	"log"
 	"net/netip"
+	"net/url"
 	"os"
+	"strings"
 	"sync"
 	"time"
 )
@@ -32,6 +34,7 @@ type Provider interface {
 type Config struct {
 	Provider string // off / duckdns / cloudflare / dnspod / aliyun
 	Host     string // 要更新的主机名（FQDN）
+	Zone     string // DNS zone；留空时由适配层逐级猜测
 
 	DuckDNSToken string
 	CFToken      string // Cloudflare API Token
@@ -65,17 +68,17 @@ func New(cfg Config) Provider {
 		if cfg.CFToken == "" {
 			return nil
 		}
-		return &Cloudflare{Token: cfg.CFToken}
+		return newCloudflare(cfg.CFToken, cfg.Zone)
 	case "dnspod":
 		if cfg.DNSPodID == "" || cfg.DNSPodToken == "" {
 			return nil
 		}
-		return &DNSPod{ID: cfg.DNSPodID, Token: cfg.DNSPodToken}
+		return &DNSPod{ID: cfg.DNSPodID, Token: cfg.DNSPodToken, Zone: cfg.Zone}
 	case "aliyun":
 		if cfg.AliyunID == "" || cfg.AliyunSecret == "" {
 			return nil
 		}
-		return &Aliyun{ID: cfg.AliyunID, Secret: cfg.AliyunSecret}
+		return newAliyun(cfg.AliyunID, cfg.AliyunSecret, cfg.Zone)
 	}
 	return nil
 }
@@ -90,6 +93,7 @@ const (
 type storedState struct {
 	Provider  string    `json:"provider"`
 	Host      string    `json:"host"`
+	Zone      string    `json:"zone,omitempty"`
 	V4        string    `json:"v4"`
 	V6        string    `json:"v6"`
 	UpdatedAt time.Time `json:"updated_at"`
@@ -165,7 +169,7 @@ func (r *Runner) Sync(ctx context.Context, cfg Config, externals []string) {
 		return
 	}
 
-	target := storedState{Provider: cfg.Provider, Host: cfg.Host, UpdatedAt: r.pushed.UpdatedAt}
+	target := storedState{Provider: cfg.Provider, Host: cfg.Host, Zone: normalizeDNSName(cfg.Zone), UpdatedAt: r.pushed.UpdatedAt}
 	if v4.IsValid() {
 		target.V4 = v4.String()
 	}
@@ -176,6 +180,7 @@ func (r *Runner) Sync(ctx context.Context, cfg Config, externals []string) {
 	r.mu.Lock()
 	unchanged := r.hasPushed && r.status.LastError == "" &&
 		r.pushed.Provider == target.Provider && r.pushed.Host == target.Host &&
+		r.pushed.Zone == target.Zone &&
 		r.pushed.V4 == target.V4 && r.pushed.V6 == target.V6
 	backoff := !r.nextRetry.IsZero() && time.Now().Before(r.nextRetry)
 	r.mu.Unlock()
@@ -184,6 +189,7 @@ func (r *Runner) Sync(ctx context.Context, cfg Config, externals []string) {
 	}
 
 	if err := p.Update(ctx, cfg.Host, v4, v6); err != nil {
+		err = redactURLError(err)
 		log.Printf("DDNS 更新失败（%s）: %v", cfg.Provider, err)
 		r.mu.Lock()
 		r.status.LastError = err.Error()
@@ -203,6 +209,38 @@ func (r *Runner) Sync(ctx context.Context, cfg Config, externals []string) {
 	r.retryWait = retryStart
 	r.mu.Unlock()
 	r.persist(target)
+}
+
+// redactURLError 丢掉可能带完整请求 URL 的外层错误，避免 query 中的凭证进入日志与状态。
+func redactURLError(err error) error {
+	for {
+		var ue *url.Error
+		if !errors.As(err, &ue) || ue == nil || ue.Err == nil || ue.Err == err {
+			return err
+		}
+		err = ue.Err
+	}
+}
+
+func normalizeDNSName(name string) string {
+	return strings.ToLower(strings.Trim(strings.TrimSpace(name), "."))
+}
+
+// relativeHost 验证 host 属于 zone，并返回记录名；zone apex 返回 @。
+func relativeHost(host, zone string) (string, bool) {
+	host = normalizeDNSName(host)
+	zone = normalizeDNSName(zone)
+	if host == "" || zone == "" {
+		return "", false
+	}
+	if host == zone {
+		return "@", true
+	}
+	suffix := "." + zone
+	if !strings.HasSuffix(host, suffix) {
+		return "", false
+	}
+	return strings.TrimSuffix(host, suffix), true
 }
 
 func (r *Runner) setError(msg string) {

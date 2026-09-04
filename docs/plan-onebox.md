@@ -98,7 +98,7 @@ type Provider interface {
 
 - 内置实现按「零成本先行」排：**DuckDNS**（只要 token，免费子域，最适合没有域名的人）、**Cloudflare**（API token + zone）、
   **DNSPod（腾讯云）**、**阿里云**；`dyndns2` 通用协议（No-IP、dynv6 等）第二阶段。
-- 配置走 `dyncfg`：`ddns_provider`（选择器，`off` 默认）、`ddns_host`、各提供方的凭证键（`ddns_duckdns_token`、`ddns_cf_token`…，Secret）。
+- 配置走 `dyncfg`：`ddns_provider`（选择器，`off` 默认）、`ddns_host`、`ddns_zone`（可空）、各提供方的凭证键（`ddns_duckdns_token`、`ddns_cf_token`…，Secret）。
 - 触发：与 `RefreshAnnounce` 同节拍——探测结果里的公网地址变了才调 `Update`，不变不打 API；失败退避重试，状态（上次更新时间、当前记录值、错误）进 `adminOverview`。
 - 公网地址来源就是 `lite.Announcer` 的 STUN 结果 + portmap 网关给的外部地址（映射成功但网关报私网地址时以 STUN 为准，与 `plan-portmap.md` 的口径一致）。
 - 选了 DDNS 且 `site_domain` 为空时自动填 `ddns_host`，向导里 TLS 默认切到 `acme`。
@@ -136,6 +136,7 @@ type Provider interface {
 | `acme_directory` / `acme_email` | tls | LE / 空 | ACME 目录与账户邮箱 |
 | `ddns_provider` | ddns | `off` | 选择器：`off` / `duckdns` / `cloudflare` / `dnspod` / `aliyun` |
 | `ddns_host` | ddns | 空 | 要更新的主机名 |
+| `ddns_zone` | ddns | 空 | DNS zone；建议显式填写，留空才逐级猜测 |
 | `ddns_*_token` 等 | ddns | 空 | 各提供方凭证（Secret） |
 
 `PUBLIC_URL` 保留为 env 锁定形态（有它就不看 `site_domain`）。
@@ -254,3 +255,12 @@ Let's Encrypt 的 **6 天（160 小时）短时效证书与 IP 地址证书已�
   但要在 `go.mod` 里盯住间接依赖膨胀。
 - **ACME 速率限制**：6 天证书 + IP 抖动 = 签发频率显著高于域名证书。去抖与退避是必须项，不是优化项。
 - **staging 与生产目录切换**：`acme_directory` 已是配置键，实测走 staging，发布默认回生产；不要把 staging 目录写死进默认值。
+
+### 7.7 staging 闸门实测结论（2026-09-04）
+
+用 `CertMagic v0.25.4`、`acmez v3.1.6` 与 Let's Encrypt staging 目录做了最小实测：IPv6 IP 标识加
+`shortlived` profile 的订单能被 CA 接受并进入 HTTP-01 验证，但当前验证环境的入站连接超时；IPv4 又无法取得可供验证的公网映射。
+因此 IPv4、IPv6 都没有完成实际签发，严格闸门判定为**不通过**。
+
+本轮只落地 7.4 的 libdns/DDNS 部分；`tlsx` 迁 CertMagic、DNS-01、IP 证书接线和向导证书模式调整全部延后。
+后续必须在 IPv4、IPv6 均公网可直连的环境中让 staging 实际签发成功，才重新打开这些工作项。生产默认 ACME 目录保持不变。

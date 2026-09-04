@@ -7,6 +7,9 @@ require (
 	github.com/go-sql-driver/mysql v1.10.0
 	github.com/huin/goupnp v1.3.0
 	github.com/jackc/pgx/v5 v5.10.0
+	github.com/libdns/alidns v1.0.7
+	github.com/libdns/cloudflare v0.2.2
+	github.com/libdns/libdns v1.1.1
 	github.com/livekit/livekit-server v1.13.6
 	github.com/livekit/protocol v1.51.1-0.20260903060125-0cf5ba018b8e
 	github.com/livekit/server-sdk-go/v2 v2.18.2-0.20260903135950-af5ddd69d657
