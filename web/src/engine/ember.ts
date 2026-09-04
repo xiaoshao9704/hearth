@@ -46,6 +46,7 @@ export class EmberEngine implements AVEngine {
   private trackEls = new Map<string, HTMLMediaElement[]>();
   private closed = false;
   private ended = false;
+  private audioBlocked = false; // 自动播放被拦截：只回调一次，恢复后复位
 
   constructor(cbs: EngineCallbacks) {
     this.cbs = cbs;
@@ -242,6 +243,12 @@ export class EmberEngine implements AVEngine {
       list.push(el);
       this.trackEls.set(identity, list);
       this.cbs.onAudioTrack(identity, el);
+      // autoplay 被策略拦截时 play() 会 reject（NotAllowedError）：告诉房间层去要一次用户手势
+      void el.play().catch(() => {
+        if (this.audioBlocked) return;
+        this.audioBlocked = true;
+        this.cbs.onAudioBlocked?.();
+      });
     };
     pc.onconnectionstatechange = () => {
       console.info('ember PC:', pc.connectionState);
@@ -321,6 +328,13 @@ export class EmberEngine implements AVEngine {
 
   async switchCamera() {
     // 语音线无摄像头
+  }
+
+  async resumeAudio() {
+    this.audioBlocked = false;
+    for (const els of this.trackEls.values()) {
+      for (const el of els) await el.play().catch(() => {});
+    }
   }
 
   disconnect() {

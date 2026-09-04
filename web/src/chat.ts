@@ -27,7 +27,10 @@ export interface ChatHandlers {
 }
 
 // connectChat 连接频道聊天，返回发送函数；关闭时调用返回的 close。
-export function connectChat(channel: string, handlers: ChatHandlers): { send: (content: string) => void; close: () => void } {
+export function connectChat(
+  channel: string,
+  handlers: ChatHandlers,
+): { send: (content: string) => void; connected: () => boolean; close: () => void } {
   let ws: WebSocket | null = null;
   let closed = false;
   let attempts = 0;
@@ -90,6 +93,7 @@ export function connectChat(channel: string, handlers: ChatHandlers): { send: (c
         ws.send(JSON.stringify({ content }));
       }
     },
+    connected: () => ws?.readyState === WebSocket.OPEN,
     close: () => {
       closed = true;
       clearTimeout(timer);

@@ -43,6 +43,7 @@ export interface RoomPrefs {
   volume: number; // 0-100 输出音量
   mirror: boolean; // 摄像头预览镜像（仅本地）
   voiceBitrate: number; // bps
+  joinCue: boolean; // 他人进出房间时的短提示音
 }
 
 const PREFS_KEY = 'hearth_room_prefs';
@@ -68,6 +69,7 @@ export function defaultPrefs(): RoomPrefs {
     volume: 100,
     mirror: true,
     voiceBitrate: 64000,
+    joinCue: true,
   };
 }
 
@@ -109,6 +111,7 @@ export function loadPrefs(): RoomPrefs {
       volume: typeof p.volume === 'number' && p.volume >= 0 && p.volume <= 100 ? p.volume : def.volume,
       mirror: p.mirror !== false,
       voiceBitrate: VOICE_BITRATES.includes(p.voiceBitrate as number) ? (p.voiceBitrate as number) : def.voiceBitrate,
+      joinCue: p.joinCue !== false,
     };
   } catch {
     return def;

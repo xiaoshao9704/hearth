@@ -57,6 +57,47 @@ export class RnnoisePipeline {
   }
 }
 
+// ---- 进出房间提示音（WebAudio 合成，不引资源文件）----
+
+// 两声短音共用一个上下文：房间页每次进出都要响，反复建上下文会被浏览器数量上限卡住
+let cueCtx: AudioContext | null = null;
+
+// 单音：5ms attack + 60ms release，直接切方波会爆音
+function cueNote(ctx: AudioContext, freq: number, at: number) {
+  const osc = ctx.createOscillator();
+  const gain = ctx.createGain();
+  osc.type = 'sine';
+  osc.frequency.value = freq;
+  gain.gain.setValueAtTime(0, at);
+  gain.gain.linearRampToValueAtTime(0.15, at + 0.005);
+  gain.gain.setValueAtTime(0.15, at + 0.03);
+  gain.gain.linearRampToValueAtTime(0, at + 0.09);
+  osc.connect(gain).connect(ctx.destination);
+  osc.start(at);
+  osc.stop(at + 0.1);
+}
+
+// playCue 播放进入（两个上行音）/ 离开（两个下行音）提示；
+// 自动播放策略下上下文可能是 suspended，恢复失败就静默跳过（提示音不值得打扰用户）
+export function playCue(kind: 'join' | 'leave') {
+  try {
+    if (!cueCtx) cueCtx = new AudioContext();
+    const ctx = cueCtx;
+    const play = () => {
+      const [a, b] = kind === 'join' ? [660, 880] : [660, 440];
+      cueNote(ctx, a, ctx.currentTime);
+      cueNote(ctx, b, ctx.currentTime + 0.09);
+    };
+    if (ctx.state === 'suspended') {
+      void ctx.resume().then(play).catch(() => {});
+      return;
+    }
+    play();
+  } catch {
+    // 不支持 WebAudio 或上下文创建失败：不出声即可
+  }
+}
+
 // listAudioInputs 枚举麦克风设备（未授权时 label 为空，授权后再调用一次即可拿到名称）
 export async function listAudioInputs(): Promise<MediaDeviceInfo[]> {
   const devices = await navigator.mediaDevices.enumerateDevices();

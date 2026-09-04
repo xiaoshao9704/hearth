@@ -1,11 +1,14 @@
-// UI 工具：SVG 图标、头像颜色、HTML 转义、toast、时间格式化。
+// UI 工具：SVG 图标、头像颜色、HTML 转义、toast、确认对话框、时间格式化。
 
+// 约定：模板里凡是插值都必须过 esc()，包括属性值——本项目的属性既有双引号也有单引号
+// （如 style="...'...'"），所以单引号也一并转义，调用方不必再关心用的是哪种引号。
 export function esc(s: string): string {
   return s
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
 }
 
 // ---- SVG 图标（路径取自原型，20x20 viewBox 线性图标）----
@@ -118,13 +121,42 @@ export function avatarHtml(name: string, cls = 'avatar'): string {
 }
 
 // ---- toast ----
-let toastWrap: HTMLDivElement | null = null;
+const TOAST_MAX = 3;
+const TOAST_FADE_MS = 160; // 与 .toast.out 的动画时长一致
 
-export function toast(msg: string, tone: 'ok' | 'bad' | '' = '', ms = 3200) {
+interface ToastRec {
+  key: string; // msg + tone：同内容的 toast 不重复堆叠，只续命
+  el: HTMLDivElement;
+  timer: number;
+}
+
+let toastWrap: HTMLDivElement | null = null;
+const toasts: ToastRec[] = [];
+
+function dropToast(rec: ToastRec) {
+  clearTimeout(rec.timer);
+  const i = toasts.indexOf(rec);
+  if (i < 0) return; // 已经在退场
+  toasts.splice(i, 1);
+  rec.el.classList.add('out');
+  setTimeout(() => rec.el.remove(), TOAST_FADE_MS);
+}
+
+// 返回关闭句柄：需要提前撤掉某条提示（如「保存中…」）时调用，旧调用方忽略即可
+export function toast(msg: string, tone: 'ok' | 'bad' | '' = '', ms = 3200): () => void {
   if (!toastWrap || !document.body.contains(toastWrap)) {
     toastWrap = document.createElement('div');
     toastWrap.className = 'toast-wrap';
+    toastWrap.setAttribute('role', 'status');
+    toastWrap.setAttribute('aria-live', 'polite');
     document.body.appendChild(toastWrap);
+  }
+  const key = `${tone} ${msg}`;
+  const same = toasts.find((t) => t.key === key);
+  if (same) {
+    clearTimeout(same.timer);
+    same.timer = setTimeout(() => dropToast(same), ms);
+    return () => dropToast(same);
   }
   const el = document.createElement('div');
   el.className = `toast ${tone}`;
@@ -132,7 +164,72 @@ export function toast(msg: string, tone: 'ok' | 'bad' | '' = '', ms = 3200) {
   el.innerHTML = `${ic}<span></span>`;
   el.querySelector('span')!.textContent = msg;
   toastWrap.appendChild(el);
-  setTimeout(() => el.remove(), ms);
+  const rec: ToastRec = { key, el, timer: 0 };
+  rec.timer = setTimeout(() => dropToast(rec), ms);
+  el.addEventListener('click', () => dropToast(rec));
+  toasts.push(rec);
+  while (toasts.length > TOAST_MAX) dropToast(toasts[0]);
+  return () => dropToast(rec);
+}
+
+// ---- 确认对话框（替代原生 confirm，全站破坏性操作统一走它）----
+export interface ConfirmOpts {
+  title: string;
+  body?: string;
+  confirmText?: string;
+  cancelText?: string;
+  danger?: boolean;
+}
+
+// 同一时刻只允许一个：新的开出来时旧的按「取消」收尾
+let openConfirm: ((ok: boolean) => void) | null = null;
+
+export function confirmDialog(opts: ConfirmOpts): Promise<boolean> {
+  openConfirm?.(false);
+  const prev = document.activeElement as HTMLElement | null;
+  const dlg = document.createElement('dialog');
+  dlg.className = 'dialog';
+  dlg.innerHTML = `<div class="dialog-box">
+  <div class="dialog-title"></div>
+  ${opts.body ? '<div class="dialog-body"></div>' : ''}
+  <div class="dialog-actions">
+    <button type="button" class="btn" data-act="cancel"></button>
+    <button type="button" class="btn ${opts.danger ? 'btn-danger-solid' : 'btn-primary'}" data-act="ok"></button>
+  </div>
+</div>`;
+  dlg.querySelector('.dialog-title')!.textContent = opts.title;
+  if (opts.body) dlg.querySelector('.dialog-body')!.textContent = opts.body;
+  const cancelBtn = dlg.querySelector<HTMLButtonElement>('[data-act="cancel"]')!;
+  const okBtn = dlg.querySelector<HTMLButtonElement>('[data-act="ok"]')!;
+  cancelBtn.textContent = opts.cancelText ?? '取消';
+  okBtn.textContent = opts.confirmText ?? '确认';
+
+  return new Promise<boolean>((resolve) => {
+    let settled = false;
+    const settle = (ok: boolean) => {
+      if (settled) return;
+      settled = true;
+      if (openConfirm === settle) openConfirm = null;
+      dlg.close();
+      dlg.remove();
+      if (prev?.isConnected) prev.focus?.();
+      resolve(ok);
+    };
+    openConfirm = settle;
+    // Esc 走 cancel 事件：拦下默认关闭，统一由 settle 收尾（否则 DOM 与句柄会不同步）
+    dlg.addEventListener('cancel', (e) => {
+      e.preventDefault();
+      settle(false);
+    });
+    dlg.addEventListener('click', (e) => {
+      if (e.target === dlg) settle(false); // 点遮罩（dialog 本体）= 取消
+    });
+    cancelBtn.addEventListener('click', () => settle(false));
+    okBtn.addEventListener('click', () => settle(true));
+    document.body.appendChild(dlg);
+    dlg.showModal();
+    cancelBtn.focus(); // 默认焦点给取消：误触回车不会执行破坏性操作
+  });
 }
 
 // ---- 时间 ----
@@ -192,4 +289,33 @@ export function el(html: string): Element {
   const t = document.createElement('template');
   t.innerHTML = html;
   return t.content.firstElementChild!;
+}
+
+// ---- 移动端抽屉菜单按钮（各视图往 topbar 里塞）----
+export function menuButtonHtml(): string {
+  return `<button class="hit btn btn-icon menu-btn" id="menu-btn" aria-label="菜单">${icon('menu', 16, 'var(--text-1)')}</button>`;
+}
+
+// 返回清理函数：keydown 监听常驻挂在 document 上（只在抽屉确实开着时处理 Esc），
+// 调用方在自己的离开/清理路径里调用返回值摘掉，避免直接跳页导致监听泄漏
+export function wireMenuButton(root: HTMLElement): () => void {
+  const btn = root.querySelector<HTMLButtonElement>('#menu-btn');
+  const frame = root.querySelector<HTMLElement>('.app-frame');
+  const scrim = root.querySelector<HTMLElement>('.nav-scrim');
+  if (!btn || !frame) return () => {};
+  btn.setAttribute('aria-controls', 'app-sidebar');
+  btn.setAttribute('aria-expanded', 'false');
+
+  function setOpen(open: boolean) {
+    frame!.classList.toggle('nav-open', open);
+    btn!.setAttribute('aria-expanded', String(open));
+  }
+  const onKeydown = (ev: KeyboardEvent) => {
+    if (ev.key === 'Escape' && frame!.classList.contains('nav-open')) setOpen(false);
+  };
+  document.addEventListener('keydown', onKeydown);
+  btn.addEventListener('click', () => setOpen(!frame.classList.contains('nav-open')));
+  scrim?.addEventListener('click', () => setOpen(false));
+
+  return () => document.removeEventListener('keydown', onKeydown);
 }

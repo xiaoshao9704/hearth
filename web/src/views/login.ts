@@ -1,15 +1,19 @@
 // 登录页：邀请制服务器，不开放公开注册（凭邀请链接走 #/join/<code>）。
 import { login } from '../api';
-import { cycleTheme, getTheme, THEME_ICONS } from '../theme';
+import { wireThemeButton } from '../theme';
 import { esc, flameLogo, icon } from '../ui';
+
+const LAST_USER_KEY = 'hearth_last_user';
+const NEXT_KEY = 'hearth_next';
 
 export function renderLogin(root: HTMLElement) {
   let reveal = false;
   let busy = false;
+  const lastUser = localStorage.getItem(LAST_USER_KEY) ?? '';
 
   root.innerHTML = `
     <div class="auth-page" style="position:relative">
-      <button class="hit theme-fab" id="theme-fab">${icon(THEME_ICONS[getTheme()], 16, 'var(--text-1)', 1.6)}</button>
+      <button class="hit theme-fab" id="theme-fab"></button>
       <div class="auth-card">
         <div class="auth-brand">
           ${flameLogo(38, 42)}
@@ -18,18 +22,20 @@ export function renderLogin(root: HTMLElement) {
         </div>
         <form class="auth-form" id="login-form">
           <div style="display:flex;flex-direction:column;gap:7px">
-            <div class="field-label">用户名</div>
-            <div class="field"><input id="lg-user" placeholder="你的账号" autocomplete="username" /></div>
+            <label class="field-label" for="lg-user">用户名</label>
+            <div class="field" id="lg-user-field">
+              <input id="lg-user" placeholder="你的账号" autocapitalize="off" autocomplete="username" enterkeyhint="next" value="${esc(lastUser)}" />
+            </div>
           </div>
           <div style="display:flex;flex-direction:column;gap:7px">
-            <div class="field-label">密码</div>
-            <div class="field">
-              <input id="lg-pass" type="password" placeholder="••••••••" autocomplete="current-password" />
+            <label class="field-label" for="lg-pass">密码</label>
+            <div class="field" id="lg-pass-field">
+              <input id="lg-pass" type="password" placeholder="••••••••" autocomplete="current-password" enterkeyhint="go" />
               <button type="button" class="hit mini-btn" id="lg-reveal" style="width:28px;height:28px;border-radius:7px;display:flex;align-items:center;justify-content:center">${icon('eyeOff', 17, 'var(--text-2)', 1.6)}</button>
             </div>
           </div>
           <p class="error-text" id="lg-error" style="margin:0;min-height:1em"></p>
-          <button type="submit" class="hit btn btn-primary btn-lg disabled" id="lg-btn">进入 Hearth</button>
+          <button type="submit" class="hit btn btn-primary btn-lg disabled" id="lg-btn" disabled>进入 Hearth</button>
         </form>
         <div class="auth-note card" style="display:flex;gap:12px">
           <span style="flex-shrink:0;margin-top:1px">${icon('mail', 17, 'var(--text-2)', 1.6)}</span>
@@ -44,6 +50,8 @@ export function renderLogin(root: HTMLElement) {
   `;
 
   const form = root.querySelector<HTMLFormElement>('#login-form')!;
+  const userField = root.querySelector<HTMLDivElement>('#lg-user-field')!;
+  const passField = root.querySelector<HTMLDivElement>('#lg-pass-field')!;
   const userInput = root.querySelector<HTMLInputElement>('#lg-user')!;
   const passInput = root.querySelector<HTMLInputElement>('#lg-pass')!;
   const revealBtn = root.querySelector<HTMLButtonElement>('#lg-reveal')!;
@@ -51,10 +59,7 @@ export function renderLogin(root: HTMLElement) {
   const btn = root.querySelector<HTMLButtonElement>('#lg-btn')!;
   const themeFab = root.querySelector<HTMLButtonElement>('#theme-fab')!;
 
-  themeFab.addEventListener('click', () => {
-    const next = cycleTheme();
-    themeFab.innerHTML = icon(THEME_ICONS[next], 16, 'var(--text-1)', 1.6);
-  });
+  wireThemeButton(themeFab);
 
   revealBtn.addEventListener('click', () => {
     reveal = !reveal;
@@ -63,9 +68,24 @@ export function renderLogin(root: HTMLElement) {
   });
 
   const ready = () => userInput.value.trim().length > 0 && passInput.value.length > 0;
-  const syncBtn = () => btn.classList.toggle('disabled', !ready() || busy);
-  userInput.addEventListener('input', syncBtn);
-  passInput.addEventListener('input', syncBtn);
+  const syncBtn = () => {
+    const disabled = !ready() || busy;
+    btn.classList.toggle('disabled', disabled);
+    btn.disabled = disabled;
+  };
+  const clearBad = () => {
+    userField.classList.remove('bad');
+    passField.classList.remove('bad');
+  };
+  userInput.addEventListener('input', () => {
+    clearBad();
+    syncBtn();
+  });
+  passInput.addEventListener('input', () => {
+    clearBad();
+    syncBtn();
+  });
+  syncBtn();
 
   form.addEventListener('submit', async (ev) => {
     ev.preventDefault();
@@ -76,13 +96,25 @@ export function renderLogin(root: HTMLElement) {
     syncBtn();
     try {
       await login(userInput.value.trim(), passInput.value);
-      location.hash = '#/lobby';
+      localStorage.setItem(LAST_USER_KEY, userInput.value.trim());
+      const next = sessionStorage.getItem(NEXT_KEY);
+      sessionStorage.removeItem(NEXT_KEY);
+      location.hash = next && next.startsWith('#/') ? next : '#/lobby';
     } catch (err) {
       errEl.textContent = (err as Error).message;
+      userField.classList.add('bad');
+      passField.classList.add('bad');
+      passInput.value = '';
       busy = false;
       btn.textContent = '进入 Hearth';
       syncBtn();
+      passInput.focus();
     }
   });
-  userInput.focus();
+
+  if (lastUser) {
+    passInput.focus();
+  } else {
+    userInput.focus();
+  }
 }

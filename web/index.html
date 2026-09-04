@@ -18,13 +18,31 @@
     </script>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <!-- 非阻塞加载：先按 print 媒介取，onload 时换回 all，不挡首屏渲染（内网部署字体拉不到也不会白屏） -->
     <link
       rel="stylesheet"
       href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&family=Noto+Sans+SC:wght@400;500;700&display=swap"
+      media="print"
+      onload="this.media='all'"
     />
+    <noscript>
+      <link
+        rel="stylesheet"
+        href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&family=Noto+Sans+SC:wght@400;500;700&display=swap"
+      />
+    </noscript>
   </head>
   <body>
-    <div id="app"></div>
+    <noscript>需要启用 JavaScript</noscript>
+    <div id="app">
+      <!-- 首个视图挂载前的静态骨架，内联最小样式，不依赖 style.css 到位 -->
+      <div style="height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;color:#8a8078">
+        <svg width="22" height="24" viewBox="0 0 18 20" fill="none" aria-hidden="true">
+          <path d="M9 1.5c3.2 3.1 4.6 5.4 4.6 7.7 0 1.5-.7 2.7-1.8 3.4.5-1.6.2-3.1-1-4.6.1 2.5-1.1 3.9-2.4 5.1-1.1 1-1.7 2-1.7 3.2 0 .9.3 1.7.9 2.3C4.4 17.7 2.6 15.4 2.6 12.4 2.6 8.2 6.1 5.8 9 1.5z" fill="currentColor" />
+        </svg>
+        <span style="font-size:13px">正在启动…</span>
+      </div>
+    </div>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>
