@@ -2,7 +2,7 @@
 
 命名更新（2026-09-02）：本计划中的 pionwhip 已定名 **Bellows**（`rtc/bellows`，选择器值 `bellows`）；语音内核 pionvoice 同期定名 **Ember**（`rtc/ember`）。旧值 `pion`/`pion_*` 仅 v0.3.0 做兼容映射，v0.3.1 起回落默认值并在启动日志告警。
 
-状态：P1+P2 核心已实现（2026-09-02）。已完成：WHIP 握手（POST/PATCH/DELETE、201+Location+显式
+状态：**已退役（v0.9.0 内核收敛，2026-09-04）**：Bellows 已整体删除，WHIP 推流并入各实例自带的 LiveKit 入口。原状态：P1+P2 核心已实现（2026-09-02）。已完成：WHIP 握手（POST/PATCH/DELETE、201+Location+显式
 Content-Length）、codec 白名单显式校验（opus/h264/h265/av1，VP8 等 400 拒绝）、pion 收流、
 lksdk bot（identity={user}-obs）零转码直通发布、PLI/FIR 桥接（lksdk `WithRTCPHandler` 回调）、
 同 key 重推顶替、断流/DELETE/DeleteEndpoint 清理、`ingest_provider=pion` 动态切换。

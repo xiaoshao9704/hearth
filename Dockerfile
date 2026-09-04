@@ -29,5 +29,5 @@ ENV ADDR=:8080 \
     DB_PATH=/data/hearth.db
 VOLUME /data
 USER 65532
-EXPOSE 8080
+EXPOSE 8080 47720/udp
 ENTRYPOINT ["/app/hearth"]

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # 从 deploy/.env 生成配置到 deploy/generated/：
-#   livekit.yaml（单节点）/ livekit-redis.yaml（ingress 模式）/ ingress.yaml / Caddyfile
+#   livekit.yaml（单节点）/ Caddyfile
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -30,7 +30,7 @@ if [ -z "${DOMAIN:-}" ] || [ "${DOMAIN}" = "livekit.example.com" ]; then
 fi
 
 mkdir -p generated
-for f in livekit.yaml livekit-redis.yaml ingress.yaml Caddyfile; do
+for f in livekit.yaml Caddyfile; do
   envsubst < "$f.template" > "generated/$f"
 done
-echo "已生成 deploy/generated/{livekit.yaml, livekit-redis.yaml, ingress.yaml, Caddyfile}"
+echo "已生成 deploy/generated/{livekit.yaml, Caddyfile}"

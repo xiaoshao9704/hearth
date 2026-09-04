@@ -8,19 +8,19 @@
 - **高码率投屏**：1080p60 · 8Mbps+，VP9/AV1 SVC 分层（弱网观众自动降层不拖累全场），H.264 硬编档可选
 - **语音优先**：语音与投屏可拆成两条独立媒体线（双线模式），投屏挤爆上行时语音不陪葬
 - **纯浏览器**：推流与观看无需插件；OBS 走标准 WHIP 协议接入
-- **一体化**：单二进制 = API + 聊天 WS + 内嵌语音 SFU + 内嵌舞台 SFU（进程内 LiveKit）+ 信令/WHIP 反代 + 静态托管
+- **一体化**：单二进制 = API + 聊天 WS + 进程内 LiveKit（语音 + 舞台 + WHIP 推流一个内核）+ 信令/WHIP 反代 + 静态托管
 
 ## 架构：双线内核插槽
 
 房间的媒体按角色拆成插槽，每个插槽独立选**服务实例**（管理后台可动态切换，即时生效；选择器的值 = 实例 alias）：
 
-| 插槽 | 承载 | 可选实例 |
-|------|------|----------|
-| `voice_provider` 语音线 | 麦克风音频、名册、说话检测 | 内建 `ember`（Ember，进程内纯音频 SFU，零外部依赖，默认）；或任一已注册的外部 `livekit` 实例 |
-| `stage_provider` 舞台线 | 投屏、摄像头、OBS 推流及其伴音 | `none`（纯语音部署，默认）；内建 `lkembed`（补丁式 fork 的 LiveKit，跑在本进程内，无 redis/ingress，推荐）；或任一已注册的外部 `livekit` 实例 |
-| `ingest_provider` 推流入口 | OBS WHIP 接入 | 内建 `bellows`（Bellows，进程内直通网关，支持 HEVC/AV1，默认）；内建 `lkembed`（走进程内 LiveKit 自带的 WHIP 入口，推流不必多绕一跳）；或任一已注册 `livekit` 实例（同样走它自带的 WHIP 入口）；或已注册 `livekit-ingress` / `bellows-remote` 实例 |
+| 插槽 | 承载 | 可选实例 | 默认 |
+|------|------|----------|------|
+| `voice_provider` 语音线 | 麦克风音频、名册、说话检测 | 内建 `lkembed`（补丁式 fork 的 LiveKit，跑在本进程内，零外部依赖）；或任一已注册的外部 `livekit` 实例 | `lkembed` |
+| `stage_provider` 舞台线 | 投屏、摄像头、OBS 推流及其伴音 | `none`（纯语音部署）；内建 `lkembed`；或任一已注册的外部 `livekit` 实例 | `lkembed` |
+| 推流入口 | OBS WHIP 接入 | **不再是独立选择器**：OBS 的 WHIP 一律进当前舞台实例自带的入口（`/providers/{alias}/w/{频道}` 路径不变，alias 必须是当前舞台实例，否则 404） | — |
 
-外部服务（独立部署的 LiveKit / LiveKit Ingress / 远端 Bellows）在管理后台「服务实例」按类型注册：alias 命名、同类型可注册多个；环境变量（`LIVEKIT_API_URL`、`INGRESS_UPSTREAM_URL`、`BELLOWS_REMOTE_URL`）配置了则自动合成同名锁定实例（后台只读）。切换发生在保存配置的瞬间（内建实例热启动/热停止，不需要重启进程）。单进程默认拓扑：
+实例类型只剩两个：`livekit-embedded`（内建、alias 固定 `lkembed`，不接受注册）与 `livekit`（远端 `cmd/stage` 或官方 LiveKit，按此类型注册；环境变量 `LIVEKIT_API_URL` 配置了则自动合成同名锁定实例，后台只读）。语音线与舞台线同选一套实例即单连接（combined）形态，这是默认；舞台线换成远端实例仍是「语音留在进程内、投屏去上行充足的机器」的物理隔离形态。切换发生在保存配置的瞬间（内建实例热启动/热停止，不需要重启进程）。单进程默认拓扑：
 
 ```mermaid
 flowchart LR
@@ -33,9 +33,7 @@ flowchart LR
     API["REST · 聊天 WS · 静态托管"]
     ADM["入场判定 admitUser<br/>封禁 / 邀请制 / 禁言 · 唯一决策点"]
     DB[("SQLite / MySQL / Postgres")]
-    EMB["Ember · 语音 SFU（进程内）<br/>Opus · ICE-Lite · UDP 单端口"]
-    LKE["lkembed · 舞台 SFU（进程内 LiveKit）<br/>投屏 / 摄像头 / SVC 分层"]
-    BEL["Bellows · WHIP 推流网关<br/>零转码直通 H.264 / HEVC / AV1"]
+    LKE["lkembed · 进程内 LiveKit<br/>语音 / 投屏 / 摄像头 / SVC 分层 / WHIP 推流"]
     PRX["同源反代 /providers/{alias}"]
   end
 
@@ -43,25 +41,21 @@ flowchart LR
   API -- "每次进房 / 推流" --> ADM
   ADM --- DB
 
-  B -- "语音信令 /providers/ember/voice" --> EMB
-  B -. "语音媒体 UDP" .-> EMB
-
-  B -- "舞台信令 /providers/lkembed/rtc" --> PRX
+  B -- "语音 + 舞台信令 /providers/lkembed/rtc" --> PRX
   PRX -- "反代（回环）" --> LKE
-  B -. "投屏 / 摄像头媒体，直连宣告地址" .-> LKE
+  B -. "媒体，直连宣告地址" .-> LKE
   LKE -. "观众订阅" .-> B
 
   O -- "WHIP /providers/{alias}/w/{频道} + 令牌" --> PRX
-  PRX -- "反代" --> BEL
-  O -. "RTP 直达，不经 hearth" .-> BEL
-  BEL -- "以 bot 参与者发布（回环）" --> LKE
+  PRX -- "换票反代" --> LKE
+  O -. "RTP 直达，不经 hearth" .-> LKE
 ```
 
 实线 = 信令 / 控制面，虚线 = 媒体。语音、舞台、推流三条线**默认都在同一个进程里**：没有 redis、没有 ingress、没有第二个容器；打洞与候选宣告由 hearth 自带的 `portmap`/`Announcer` 负责，公网 IP 或映射变化不重启进程、不打断在途会话。**投屏/OBS 的视频媒体本身不经过 hearth 转发**——只走它拿到的直连/映射地址，hearth 只做鉴权、信令与同源反代，可以部署在上行很小的机器上。
 
-更大规模或分离部署时，舞台线可以换成**独立部署的外部 LiveKit 集群**，推流网关可以搬到**别的机器**（远端 Bellows，见下文），两者都是可选的高级形态，默认单进程已经是完整功能。
+更大规模或分离部署时，舞台线可以换成**独立部署的外部 LiveKit 集群**或搬到**另一台机器**（远端 `cmd/stage`，见下文），都是可选的高级形态，默认单进程已经是完整功能。
 
-内核抽象是中性的 `rtc.Provider` / `rtc.IngestProvider` 接口（`server/internal/rtc/`），配置键按实现命名空间隔离，换内核不迁移配置；前端按凭证里的引擎名动态加载对应客户端（代码分割，LiveKit SDK 只在用到时下载）。
+内核抽象是中性的 `rtc.Provider` / `rtc.StageProvider` / `rtc.IngestProvider` 接口（`server/internal/rtc/`），配置键按实现命名空间隔离，换实例不迁移配置；前端按凭证里的引擎名动态加载对应客户端（代码分割，LiveKit SDK 只在用到时下载）。
 
 ## 功能
 
@@ -71,15 +65,13 @@ flowchart LR
 - 文字聊天：频道内 WebSocket，断线重连
 - 管理：踢出、封禁、**服务端禁言**（落库持久、离房也可操作、全内核生效、推流入口同步拦截）、邀请制白名单；右键用户卡片直达操作
 - 注册：默认邀请制（管理员发有时效链接），首个账号自动管理员
-- 管理后台：内核切换（选服务实例）、**服务实例注册**（LiveKit / LiveKit Ingress / 远端 Bellows，alias 命名、同类型可多个；env 配置的合成同名锁定实例、后台只读）、用户/频道/邀请管理、宿主资源监控
+- 管理后台：内核切换（选服务实例）、**服务实例注册**（外部 LiveKit——远端 `cmd/stage` 或官方 LiveKit，alias 命名、同类型可多个；env 配置的合成同名锁定实例、后台只读）、用户/频道/邀请管理、宿主资源监控
 
 ## 技术选型
 
 | 模块 | 方案 | 理由 |
 |------|------|------|
-| 语音内核（内嵌） | pion/webrtc v4，ICE-Lite + UDP 单端口 | 进程内零依赖，公网直连免 STUN/TURN |
-| 舞台内核（内嵌，可选启用） | LiveKit（补丁式 fork，进程内跑，`lkembed`） | 高码率转发、SVC 分层；也可换成独立部署的外部 LiveKit |
-| 推流网关（内嵌） | Bellows（进程内 WHIP 直通，`bellows`） | 零转码，H.264/HEVC/AV1 直通进舞台内核 |
+| 媒体内核（内嵌） | LiveKit（补丁式 fork，进程内跑，`lkembed`） | 语音/投屏/推流一个内核：高码率转发、SVC 分层、自带 WHIP 入口；也可换成独立部署的外部 LiveKit |
 | 后端 | Go + sqlite（`modernc.org/sqlite`，无 cgo） | 单二进制，交叉编译 ARM64 |
 | 前端 | Vite + TypeScript；房间页 Solid.js，其余原生 | 主包 ~130KB；房间页状态→视图自动同步 |
 | 聊天 | WebSocket | 简单可靠 |
@@ -92,8 +84,8 @@ hearth/
 │   ├── cmd/server/          # 入口 + adduser CLI
 │   └── internal/
 │       ├── api/             # REST + WS 路由、入场判定(admission)、动态配置、反代
-│       ├── rtc/             # 内核抽象接口 + livekitrtc / ember / bellows 三个实现；livekitembed 只管进程内启停 LiveKit（接口仍由 livekitrtc 承担）
-│       ├── lkroom|lkingress|lktoken/  # LiveKit 管理面客户端
+│       ├── rtc/             # 内核抽象接口 + livekitrtc 实现；livekitembed 只管进程内启停 LiveKit（接口仍由 livekitrtc 承担）
+│       ├── lkroom|lktoken/  # LiveKit 管理面客户端
 │       ├── chat/            # 聊天 hub
 │       └── store/           # sqlite/MySQL/Postgres
 ├── web/                     # Vite + TS；views/room.tsx 为 Solid，其余 vanilla
@@ -112,34 +104,27 @@ GitHub Releases 提供六个平台的单文件产物（`hearth_<版本>_<系统>
 
 ## 自托管快速开始
 
-只有一个镜像 tag，一条 `docker run` 到位（数据与密钥全部落在 `/data` 卷，挂载即持久化/备份）。最小形态只放行语音端口：
+只有一个镜像 tag，一条 `docker run` 到位（数据与密钥全部落在 `/data` 卷，挂载即持久化/备份）：
 
 ```bash
 docker run -d --name hearth \
-  -p 8080:8080 -p 47700:47700/udp \
+  -p 8080:8080 -p 47720:47720/udp \
   -v hearth-data:/data \
   ghcr.io/xiaoshao9704/hearth:latest
 docker exec hearth /app/hearth adduser <用户名> <密码>   # 首账号自动管理员
 ```
 
-放行 `47700/udp`（语音媒体，公网 IP 自动探测），访问 `http://<主机>:8080` 即可开黑（选择器默认即 ember 语音 + 关闭舞台线）。
+放行 `47720/udp`（lkembed 媒体端口，语音与投屏同一个，公网 IP 自动探测），访问 `http://<主机>:8080` 即可开黑——选择器默认语音与舞台都选内建 `lkembed`，语音、投屏/摄像头、OBS 推流开箱全部可用，不用进管理后台改任何东西。媒体端口要在**创建容器时**一并放行，docker 的端口发布不能事后热加。
 
-要投屏/摄像头/OBS 推流时，在管理后台「服务实例」把**舞台内核**改选内建 `lkembed`——保存即在本进程里热启动一个补丁式 fork 的 LiveKit（无 redis、无 ingress、无第二个容器），推流网关默认同样在本进程内（`bellows`），OBS 直接走 WHIP 即可，不用额外配置。舞台内核用到的媒体端口（默认 `lkembed_udp_port=47720`）要在**创建容器时**一并放行，docker 的端口发布不能事后热加：
-
-```bash
-docker run -d --name hearth \
-  -p 8080:8080 -p 47700:47700/udp -p 47720:47720/udp \
-  -v hearth-data:/data \
-  ghcr.io/xiaoshao9704/hearth:latest
-```
+> **从旧版升级注意**：默认语音媒体端口从 `47700/udp` 变为 `47720/udp`（与投屏同一个端口）。只放行了 47700 的旧部署升级后语音会断；`portmap` 自动映射的部署不受影响。容器仍发布 47700/47710 不会报错，只是空放行，可以收掉。
 
 密钥（`lkembed_api_key`/`lkembed_api_secret`）留空首启自动生成并落库，随 `/data` 卷一起备份；端口号在管理后台可改，改动后重启容器生效（选择器本身切换不需要重启，见上）。
 
-只有接入**独立部署**的外部 LiveKit（更大规模的舞台集群）或把推流网关放到别的机器（见下文「Bellows 远端形态」）时才需要额外配置或额外容器——两者都是可选的高级形态，默认单容器已经是完整功能。
+只有接入**独立部署**的外部 LiveKit（更大规模的舞台集群，或把舞台搬到另一台机器，见下文「远端舞台机器」）时才需要额外配置或额外容器——那是可选的高级形态，默认单容器已经是完整功能。
 
 ### 自动端口映射（UPnP / PCP / NAT-PMP）
 
-NAT 后的宽带线路上，hearth **默认自动向本机默认网关申请端口映射**，不必手工进路由器后台做端口转发：映射的是 HTTP 端口（`ADDR`，默认 8080/tcp）与**当前选中内核**跑在本进程的媒体端口（Ember 语音 `ember_udp_port`、进程内 Bellows 推流 `bellows_udp_port`、进程内 LiveKit 舞台 `lkembed_udp_port`）——选的是外部实例时那些端口不在本机，不申请。协议按快慢依次尝试 PCP、NAT-PMP、UPnP IGD（v1/v2 都支持），租约到期前自动续租，网关重启丢了映射下一轮自愈，进程退出时撤销。
+NAT 后的宽带线路上，hearth **默认自动向本机默认网关申请端口映射**，不必手工进路由器后台做端口转发：映射的是 HTTP 端口（`ADDR`，默认 8080/tcp）与**当前选中内核**跑在本进程的媒体端口（进程内 LiveKit `lkembed_udp_port`）——选的是外部实例时那些端口不在本机，不申请。协议按快慢依次尝试 PCP、NAT-PMP、UPnP IGD（v1/v2 都支持），租约到期前自动续租，网关重启丢了映射下一轮自愈，进程退出时撤销。
 
 - **仅 `network_mode: host` 或裸机可用**：bridge 容器里 SSDP 多播出不了网桥、默认网关是网桥地址，发现不到真正的网关；这不是能靠配置绕开的（网关只允许客户端给自己的源地址开洞），要自动映射就用 host 网络。
 - **关闭**：管理后台「网络 → 自动端口映射」选「关闭」，或部署侧设 `PORTMAP_MODE=off`（环境变量优先，设了后台只读）。关闭时会撤销已建的映射，且启动不产生任何额外延迟。
@@ -193,45 +178,9 @@ LIVEKIT_API_SECRET=change-me
 LIVEKIT_URL=                                        # 留空 = 浏览器信令经 hearth 同源反代（推荐）
 ```
 
-然后在管理后台把 **`stage_provider`** 与 **`ingest_provider`** 都选成这个实例（env 合成的锁定实例 alias 就是 `livekit`）。推流地址保持 hearth 同源：bearer 模式（OBS）服务器填 `/providers/livekit/w/{频道}`、Bearer 填推流令牌；路径模式（ffmpeg 等）用 `/providers/livekit/w/{频道}/{令牌}`。入场判定仍在 hearth 做完，通过后由 hearth 现签一张短时效 LiveKit 票换掉用户令牌反代过去，舞台机器只认票、不需要访问 hearth。语音仍走 hearth 进程内的 Ember，与视频物理隔离。
+然后在管理后台把 **`stage_provider`** 选成这个实例（env 合成的锁定实例 alias 就是 `livekit`）。推流地址保持 hearth 同源：bearer 模式（OBS）服务器填 `/providers/livekit/w/{频道}`、Bearer 填推流令牌；路径模式（ffmpeg 等）用 `/providers/livekit/w/{频道}/{令牌}`。入场判定仍在 hearth 做完，通过后由 hearth 现签一张短时效 LiveKit 票换掉用户令牌反代过去，舞台机器只认票、不需要访问 hearth。语音仍走 hearth 进程内的 lkembed，与视频物理隔离。
 
 要让局域网与外网观众都能连，**不要填 `STAGE_PUBLIC_IP`**（STUN 不可达时配 `STAGE_STUN_SERVERS`）：显式配置是覆盖语义，填成公网 IP 会让局域网客户端绕 NAT 回环。
-
-### OBS 推流网关放到局域网（Bellows 远端形态，已被上一节取代）
-
-> 下一版本移除：远端机器改跑一个 `stage` 容器即可，推流直达它自带的 WHIP 入口，不必再多一跳。
-
-hearth 所在服务器上行有限、LiveKit 部署在别处时，OBS 的视频不该绕 hearth 一圈。Bellows 远端进程随 hearth 镜像分发（`/app/bellows`，Release 里也有单文件 `bellows-linux-{amd64,arm64}`），放到 LiveKit 同一局域网的任意机器（低功耗 arm64 小主机即可）：
-
-```yaml
-# 与 LiveKit 同一 compose，host 网络：端口即宿主端口
-bellows:
-  image: ghcr.io/xiaoshao9704/hearth:latest
-  entrypoint: ["/app/bellows"]
-  network_mode: host
-  environment:
-    BELLOWS_SHARED_SECRET: <随机串>              # 与 hearth 侧同值（hearth 签通行证、远端验签）
-    LIVEKIT_API_URL: http://127.0.0.1:7880
-    LIVEKIT_API_KEY: …
-    LIVEKIT_API_SECRET: …
-    BELLOWS_ADDR: ":8090"                        # WHIP 信令
-    BELLOWS_UDP_PORT: "47710"                    # 媒体
-    BELLOWS_PUBLIC_IP: 192.168.1.20              # 显式指定 = 只通告该地址（覆盖）；留空 = 自动宣告全部网卡地址 + STUN 探测的公网映射
-    # BELLOWS_STUN_SERVERS: stun.miwifi.com:3478 # 公网映射探测用，逗号分隔；留空用内置默认
-    # BELLOWS_SINK: livekit                      # 发布出口（rtc.Publisher 实现），默认 livekit，一般不设
-  healthcheck:                                   # 兼做宣告探测的刷新触发：公网 IP 变化后新会话在 interval 内拿到新候选，无需重启
-    test: ["CMD", "/app/bellows", "healthcheck"]        # 镜像无 shell/curl，用 exec 形式
-    interval: 60s
-    timeout: 12s
-    start_period: 20s
-    retries: 3
-```
-
-要让局域网与外网推流者都能连，**删掉 `BELLOWS_PUBLIC_IP`** 让它自动宣告（STUN 不可达时配 `BELLOWS_STUN_SERVERS`），而不是改成公网 IP——显式配置是覆盖语义，改成公网 IP 会让局域网推流绕 NAT 回环。
-
-hearth 侧在「管理后台 → 服务实例」注册一个 **bellows-remote** 实例（或用环境变量 `BELLOWS_REMOTE_URL` / `BELLOWS_SHARED_SECRET` 合成同名锁定实例）：`remote_url` 填 hearth 能访问到的该机器地址（如 `http://192.168.1.20:8090`），共享密钥填同一值。用户的推流地址**保持 hearth 同源**（alias 即该实例名）：推流令牌每用户一把（设置页可取、可重置），频道写在 URL 里——bearer 模式（OBS）服务器填 `/providers/{alias}/w/{频道}`、Bearer 令牌填推流令牌；路径模式（ffmpeg 等）直接用 `/providers/{alias}/w/{频道}/{令牌}`。hearth 在反代前做完入场判定并签发短时效通行证随请求头带给远端，远端本地验签、**不需要访问 hearth**；信令经 hearth 反代（TLS 不变、OBS 地址不变），媒体按通告地址直达远端。外网推流者才需要端口映射/TLS——远端 bellows 同样默认申请自动端口映射（媒体 UDP 口与 WHIP HTTP 口，同样只在 host 网络/裸机下可用，`PORTMAP_MODE=off` 关闭），见上一节。
-
-从旧版（每用户每频道一把密钥）升级时注意三点：hearth 与远端 bellows **同版本一起升级**（通行证字段变了，旧远端不认新 grant）；启动迁移自动把每用户最近创建的一把旧密钥保留为新令牌，其余丢弃；OBS 只需给服务器地址加上频道段（`/providers/{alias}/w/{频道}`），令牌沿用迁移保留的那把。
 
 多容器拆部署仍可用 `deploy/` 的 compose 一键起全家桶：
 
@@ -243,23 +192,23 @@ cd deploy && cp .env.example .env && $EDITOR .env
 要点：
 
 - **反代内置**：`/providers/{alias}` 下的内核信令与 WHIP、Web、API 同端口，不强制 Caddy/nginx；TLS 可用 `--profile caddy` 或接入自己的网关
-- **动态配置**：环境变量（含 .env）设置的项在后台只读（LiveKit / Ingress 的 env 会合成同名锁定服务实例）；未设置的可在管理后台注册服务实例、切换内核选择器，保存即生效
-- **媒体端口**：语音 `EMBER_UDP_PORT`（默认 47700/udp）、LiveKit RTC 端口需防火墙/安全组放行（媒体不经反代）；NAT 后的线路见「自动端口映射」
+- **动态配置**：环境变量（含 .env）设置的项在后台只读（LiveKit 的 env 会合成同名锁定服务实例）；未设置的可在管理后台注册服务实例、切换内核选择器，保存即生效
+- **媒体端口**：hearth 进程内内核 `lkembed_udp_port`（默认 47720/udp）、外部 LiveKit RTC 端口需防火墙/安全组放行（媒体不经反代）；NAT 后的线路见「自动端口映射」
 - **数据库**：默认 sqlite（`/data` 卷）；`DATABASE_URL` 可切 MySQL/Postgres
 - **ARM64**：镜像含 arm64 变体，arm64 小主机可用
 
 ## 开发
 
 ```bash
-# 后端（终端一）——纯语音开发零外部依赖
+# 后端（终端一）——零外部依赖（语音/舞台默认都走进程内 lkembed）
 cd server
-go run ./cmd/server   # :8080（选择器默认即 ember 语音 + 关闭舞台线）
+go run ./cmd/server   # :8080
 
 # 前端（终端二）
 cd web && npm install && npm run dev                          # :5173
 ```
 
-需要投屏/OBS 链路时无需额外起任何服务：管理后台把「舞台内核」改选内建 `lkembed` 即热启动进程内 LiveKit；要接一套独立部署的外部 LiveKit 才需要 `deploy/` 那套并在后台或 .env 配置。开发规范见 [CLAUDE.md](CLAUDE.md)。
+投屏/OBS 链路默认就可用（内建 `lkembed` 进程内 LiveKit），要接一套独立部署的外部 LiveKit 才需要 `deploy/` 那套并在后台或 .env 配置。开发规范见 [CLAUDE.md](CLAUDE.md)。
 
 发布：打 `v*` tag 触发 CI（原生交叉编译双架构 + 纯装配镜像推 ghcr，全程无 QEMU）。
 

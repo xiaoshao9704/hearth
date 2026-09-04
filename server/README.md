@@ -77,4 +77,4 @@ CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o hearth-server-arm64 ./cmd/serv
 
 ## 环境变量（.env）
 
-见 `.env.example`：`ADDR` 监听地址、`DB_PATH` 数据库文件、`CORS_ORIGIN` 跨域来源、`STATIC_DIR` 可选的前端产物托管目录（部署时指向 `../web/dist` 可单二进制运行）。LiveKit / Ingress 相关 env 是服务实例的锁定来源：`LIVEKIT_API_URL`/`LIVEKIT_API_KEY`/`LIVEKIT_API_SECRET`（`LIVEKIT_API_URL` 缺省从 `LIVEKIT_URL` 推导）任一设置即合成 alias=`livekit` 的锁定实例，`INGRESS_UPSTREAM_URL` 合成 alias=`livekit-ingress`（管理后台「服务实例」里只读）；不配 env 则可在后台注册 DB 实例（同类型可多个）。
+见 `.env.example`：`ADDR` 监听地址、`DB_PATH` 数据库文件、`CORS_ORIGIN` 跨域来源、`STATIC_DIR` 可选的前端产物托管目录（部署时指向 `../web/dist` 可单二进制运行）。LiveKit 相关 env 是服务实例的锁定来源：`LIVEKIT_API_URL`/`LIVEKIT_API_KEY`/`LIVEKIT_API_SECRET`（`LIVEKIT_API_URL` 缺省从 `LIVEKIT_URL` 推导）任一设置即合成 alias=`livekit` 的锁定实例（管理后台「服务实例」里只读）；不配 env 则可在后台注册 DB 实例（同类型可多个）。

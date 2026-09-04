@@ -4,7 +4,7 @@
 # - image 作业：用 Dockerfile.release 纯 COPY 装配多架构 OCI 镜像推 ghcr.io——
 #   没有任何 RUN 指令，不需要 QEMU，秒级完成（此前 arm64 在 QEMU 下编译要 1 小时+）。
 #   自包含 -livekit/-full 镜像档（Dockerfile.aio + aioinit）已退役：内嵌 LiveKit 并入了主镜像
-#   （进程内 lkembed，见 docs/plan-livekit-embed.md），只留这两个 tag 作为一个版本的过渡别名。
+#   （进程内 lkembed，见 docs/plan-livekit-embed.md）；两个过渡别名 tag 只保留了一个版本，已删。
 name: release
 
 on:
@@ -51,7 +51,7 @@ jobs:
           go-version-file: server/go.mod
           cache-dependency-path: server/go.sum
 
-      - name: 原生交叉编译静态二进制（hearth 六目标；stage/bellows 远端形态只发 linux）
+      - name: 原生交叉编译静态二进制（hearth 六目标；stage 远端形态只发 linux）
         working-directory: server
         env:
           CGO_ENABLED: 0
@@ -64,10 +64,8 @@ jobs:
             GOOS=$os GOARCH=$arch go build -ldflags "-s -w" -o "$GITHUB_WORKSPACE/out/$bin" ./cmd/server
           done
           for arch in amd64 arm64; do
-            # 远端舞台内核：单文件，跑在另一台机器上替代 livekit + bellows 两个容器
+            # 远端舞台内核：单文件，跑在另一台机器上替代 livekit 容器
             GOOS=linux GOARCH=$arch go build -ldflags "-s -w" -o "$GITHUB_WORKSPACE/out/stage-linux-$arch" ./cmd/stage
-            # 远端 Bellows 推流网关：已被 cmd/stage 取代，下一版本移除
-            GOOS=linux GOARCH=$arch go build -ldflags "-s -w" -o "$GITHUB_WORKSPACE/out/bellows-linux-$arch" ./cmd/bellows
           done
 
       - name: 打包 Release 产物（单文件：前端已嵌进二进制，不再随包发 web 目录）
@@ -93,7 +91,6 @@ jobs:
           path: |
             out/hearth-*
             out/stage-linux-*
-            out/bellows-linux-*
             hearth_*.tar.gz
             hearth_*.zip
           retention-days: 14
@@ -106,7 +103,6 @@ jobs:
             hearth_*.tar.gz
             hearth_*.zip
             out/stage-linux-*
-            out/bellows-linux-*
 
   image:
     runs-on: ubuntu-latest
@@ -139,40 +135,13 @@ jobs:
             type=raw,value=latest,enable=${{ github.ref_type == 'tag' }}
             type=raw,value=edge,enable=${{ github.ref_type != 'tag' }}
 
-      # 过渡别名：旧自包含镜像档 -livekit/-full（Dockerfile.aio + aioinit）已退役，内嵌 LiveKit
-      # 并入了主镜像（进程内 lkembed）。这两个 tag 只在这一个版本里指向与主镜像相同的内容，
-      # 方便旧部署把 tag 名切过来；下一个版本发布时删掉这两段 metadata 步骤与下面的 tags 拼接
-      # （比照 CLAUDE.md 里 pion_* 只保留一个版本的先例，不要长期维护）。
-      - uses: docker/metadata-action@v6
-        id: meta-livekit-alias
-        with:
-          images: ghcr.io/${{ github.repository }}
-          flavor: suffix=-livekit,onlatest=true
-          tags: |
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=raw,value=latest,enable=${{ github.ref_type == 'tag' }}
-
-      - uses: docker/metadata-action@v6
-        id: meta-full-alias
-        with:
-          images: ghcr.io/${{ github.repository }}
-          flavor: suffix=-full,onlatest=true
-          tags: |
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=raw,value=latest,enable=${{ github.ref_type == 'tag' }}
-
       - uses: docker/build-push-action@v7
         with:
           context: .
           file: Dockerfile.release
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: |
-            ${{ steps.meta.outputs.tags }}
-            ${{ steps.meta-livekit-alias.outputs.tags }}
-            ${{ steps.meta-full-alias.outputs.tags }}
+          tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
 
       # 远端舞台镜像（Dockerfile.stage）：单独的镜像名 <repo>-stage，纯装配

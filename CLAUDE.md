@@ -21,27 +21,26 @@
 
 ### rtc 内核插件模型（server/internal/rtc/）
 
-- `rtc.Provider` / `rtc.IngestProvider` 接口保持**中性命名**，不得泄漏任何具体实现（LiveKit 等）的语义。
-- **业务状态的权威在 store（DB），内核只是现场执行器**：禁言/封禁等管制状态先落库、再向内核尽力传播（`ErrNoParticipant` 不算失败）。新内核不需要理解业务状态，只需会对当前参与者执行操作。
-- 内核选择是**服务实例注册制**：`voice_provider`/`stage_provider`/`ingest_provider` 选择器的值是实例 alias（不再是实现名）。实例三来源：内建（`ember` 语音、`bellows` 进程内推流、`lkembed` 进程内 LiveKit 舞台，排最前、`ember`/`bellows` 是默认值）、env 锁定（`LIVEKIT_API_URL` / `INGRESS_UPSTREAM_URL` / `BELLOWS_REMOTE_URL` 存在即合成同名只读实例，每类至多一条）、DB 注册（`providers` 表，`/api/admin/providers` CRUD，同类型可多个）。注册表与实例对象重建在 `api/providers.go`；选择器合法性按「实例存在 + 能力匹配槽位」校验（dyncfg.go），未知 alias 回落内建默认（voice→ember、stage→none、ingest→bellows）。
-- 实例连接参数存 params（键名沿用 `livekit_*` / `ingress_upstream_url` / `bellows_remote_url` 等旧命名空间，rtc 实现零改动）；仍是全局键的只有选择器与进程内网络基建（`bellows_udp_port`/`bellows_public_ip`）。旧 `cfg_livekit_*` 等全局键启动时一次性导入为实例后删除（`migrateProviders`）。`lkembed` 类型 `livekit-embedded`（`server/internal/api/lkembed.go`），alias 固定为 `lkembed`，只能内建、不接受 DB 注册：实例对象复用 `livekitrtc.New`，`embedCfg` 把它要的 `livekit_api_url/key/secret` 映射到 `lkembed_port`（回环地址）与 `lkembed_api_key`/`lkembed_api_secret`（留空首启生成落库），`livekit_*` 命名空间因此对 lkembed 零改动地复用。
-- 接入路径统一 `/providers/{alias}/...`：`/rtc/*` livekit 信令反代、`/voice` ember 信令 WS、`/w/{channel}[/{token}]` WHIP 推流（令牌在路径段或 `Authorization: Bearer`，按路径 alias 裁决：OBS 推给哪个实例就由哪个实例判定/签发/反代）。旧路径 `/lk`、`/w`、`/api/voice` 已删除，不留兼容。
-- 自研内核命名：**Ember**（语音，`rtc/ember`，内建实例 alias `ember`）、**Bellows**（WHIP 推流网关，`rtc/bellows`，内建实例 alias `bellows`；远端形态类型 `bellows-remote`）。改名前的选择器值 `pion` 与配置键 `pion_*` 只在 v0.3.0 做过兼容映射，v0.3.1 起不再识别：`pion_*` 被忽略回落 `ember_*` 默认值，启动时 `warnLegacyConfig` 打一次告警提示改配置。不要再加回兼容映射。
-- 接口分层：`rtc.Provider` 是语音（房间）内核，`rtc.StageProvider` 内嵌 Provider 代表舞台（视频）内核——舞台槽位只接受 StageProvider，视频专属方法只加在 StageProvider 上；Ember 补齐视频能力后实现 StageProvider 即可上舞台线。进程内 ICE-Lite 内核共用的传输基建在 `rtc/lite`，不要在各内核里复制：`lite.Transport` 持有 UDP mux 与 MediaEngine（只建一次），`webrtc.API` 按 PeerConnection 用 `lite.Announcer` 的当前宣告规则组装——探测由进程内周期任务刷新（`lite.DefaultAnnounceTTL`，端口映射变化时另触发一次），公网 IP 变化不重启、不动在途会话；外部地址在 SDP 出口由 `Announcer.Announce` 追加为 srflx 候选（映射结果与 STUN 结果并列），pion 只宣告本机 host 候选，显式 `*_public_ip` 例外仍走 pion 改写规则。`/healthz` 与 `healthcheck` 子命令只表示进程活着、无副作用：探测失败/映射为空不得返回非 200（防 autoheal 误杀）；网络诊断回显走管理接口，不放进 healthz。
-- 推流出口走 `rtc.Publisher` 能力接口（「把轨发布进舞台内核」的客户端能力，挂在舞台实例对象上）：Bellows 对舞台内核中立，进程内形态每次发布时取**当前舞台线实例**的 Publisher（注册表切换即生效，取不到则 `Enabled=false`），远端 `cmd/bellows` 编译进全部实现、由 `BELLOWS_SINK`（默认 `livekit`）选用。PLI 桥接约定：`TrackRemote` 不暴露所属连接，「观众关键帧请求 → 推流端 PLI」的回执无法走接口参数，由 bellows 在调 `PublishRemote` 前用 `rtc.WithKeyframeRelay` 挂到 ctx、Publisher 经 `rtc.KeyframeRelay` 消费（取不到则丢弃关键帧请求）。**回执一律走 ctx**：`Publisher` 接口只描述「发布一条轨」，容纳不下会话级事件。同一机制的第二条是 `rtc.WithPublishLost`/`rtc.PublishLost`——Publisher 与舞台内核断连后**必须**回执给 bellows 拆掉推流会话，让推流端重推：已建立的会话不会再产生新轨去触发重连，只摘连接不拆会话的话轨会一直写进死连接，表现为推流端显示正常而观众永久黑屏。
-- `rtc.IngestProvider` 的端点方法是**按发布身份（identity, 标签）而非（用户, 房间）**的语义：`EnsureEndpoint`/`BindRoom`/`DeleteEndpoint` 管理「用户令牌 → 实例凭证」的上游映射（livekit-ingress：反代前 `BindRoom` 写房间、改写 Bearer 为上游 stream key）；Bellows 的实例凭证就是通行证，三个方法空实现。令牌重置/改标签时删除该令牌名下全部端点，下次推流重建。
+- `rtc.Provider` / `rtc.StageProvider` / `rtc.IngestProvider` 接口保持**中性命名**，不得泄漏任何具体实现（LiveKit 等）的语义。
+- **业务状态的权威在 store（DB），内核只是现场执行器**：禁言/封禁等管制状态先落库、再向内核尽力传播（`ErrNoParticipant` 不算失败）。内核不需要理解业务状态，只需会对当前参与者执行操作。
+- **唯一内核类型，两种形态**：自研内核（Ember 语音、Bellows 推流网关、livekit-ingress 适配）已全部退役，内核只剩 LiveKit 一族。实例类型只剩两个：`livekit-embedded`（内建、alias 固定 `lkembed`，补丁式 fork 的 LiveKit 进程内跑，不接受 DB 注册）与 `livekit`（远端形态 `cmd/stage` 或官方 LiveKit，DB 注册或 `LIVEKIT_API_URL` env 合成同名锁定实例，同类型可多个）。`rtc.Provider`/`rtc.StageProvider` 抽象与注册制不因只剩一个实现而拆掉——远端 `cmd/stage` 与官方 LiveKit 都是同一类型的不同实例，注册制正是为它们服务的。
+- 内核选择是**服务实例注册制**：`voice_provider`/`stage_provider` 选择器的值是实例 alias（不再是实现名）。实例三来源：内建（`lkembed`，排最前、是两个槽位的默认值）、env 锁定（`LIVEKIT_API_URL` 存在即合成 alias=`livekit` 的只读实例，至多一条）、DB 注册（`providers` 表，`/api/admin/providers` CRUD）。注册表与实例对象重建在 `api/providers.go`；选择器合法性按「实例存在 + 能力匹配槽位」校验（dyncfg.go），未知 alias 回落内建默认（voice→lkembed、stage→lkembed，显式 `none` 保持纯语音）。语音舞台同选一套实例即单连接（combined）形态，这是默认。
+- **推流入口 = 当前舞台实例**，没有独立的 ingest 选择器：剩下的每种实例都自带 WHIP 入口，「推流进哪个实例」与「舞台在哪个实例」不可能不同——推进别的实例观众看不到。OBS 的 WHIP 一律进 `/providers/{alias}/w/{channel}`（令牌在路径段或 `Authorization: Bearer`），alias 必须是当前舞台实例否则 404；hearth 做完入场判定后现签短时效 LiveKit 票换掉用户令牌反代过去（`livekitrtc/whip.go`）。
+- 实例连接参数存 params（键名沿用 `livekit_*` 命名空间，rtc 实现零改动）；仍是全局键的只有选择器与进程内网络基建（`portmap_mode`）。旧 `cfg_livekit_*` 等全局键启动时一次性导入为实例后删除（`migrateProviders`）。`lkembed` 类型 `livekit-embedded`（`server/internal/api/lkembed.go`）：实例对象复用 `livekitrtc.New`，`embedCfg` 把它要的 `livekit_api_url/key/secret` 映射到 `lkembed_port`（回环地址）与 `lkembed_api_key`/`lkembed_api_secret`（留空首启生成落库），`livekit_*` 命名空间因此对 lkembed 零改动地复用。`lkembed_public_ip`/`lkembed_stun_servers` 是显式公网 IP / STUN 覆盖键（承接已删内核的同名能力）。
+- 接入路径统一 `/providers/{alias}/...`：`/rtc/*` livekit 信令反代、`/w/{channel}[/{token}]` WHIP 推流（按路径 alias 裁决：OBS 推给哪个实例就由哪个实例判定/签发/反代）。
+- 打洞与宣告基建在 `rtc/lite`：`lite.Announcer`/`candidate` 周期探测（STUN/显式公网 IP + 端口映射结果并列），公网 IP 或映射变化不重启、不动在途会话；lkembed 的候选地址改写从它的快照取外部地址。`/healthz` 与 `healthcheck` 子命令只表示进程活着、无副作用：探测失败/映射为空不得返回非 200（防 autoheal 误杀）；网络诊断回显走管理接口，不放进 healthz。
 - **user_id 是唯一的身份键，username 只做展示/登录/注册**。identity 由 `rtc.Identity(userID, tag)` 组成 `u{user_id}` 或 `u{user_id}-{标签}`（浏览器标签 = 设备标签，推流标签 = 令牌的可改属性，默认 `obs`），归属判断**必须**用 `rtc.MatchesUser(identity, userID)`，禁止手写主体解析。用户名绝不进入判定路径：它可改、改后旧名即释放、且字符集含 `-`——拿它当键会在改名后让归属错位，也会让互为前缀的两个用户名彼此误伤（禁言一个掐掉另一个的推流）。管理接口（踢出/封禁/禁言/移出白名单）一律收 `user_id`；例外只有「加白名单」，那是房主手输名字的一次 `名字 → 用户` 查找（与登录同类），查到后立即换成 user_id。
-- 展示信息统一走参与者元数据 `rtc.Meta{uid,username,kind,tag}`：进房令牌（`lktoken.Sign` 的 `SetMetadata`）与推流发布（`publisher.go`）两条路径都写，ember 经 `welcome.self` / `roster` 下发。前端据此显示名字、按 uid 聚合设备、识别推流设备（`kind=ingest`），**不解析 identity、不按用户名反查**。
+- 展示信息统一走参与者元数据 `rtc.Meta{uid,username,kind,tag}`：进房令牌（`lktoken.Sign` 的 `SetMetadata`）与推流判定（`admitIngest` 挂 ctx、换票时写入）两条路径都写。前端据此显示名字、按 uid 聚合设备、识别推流设备（`kind=ingest`），**不解析 identity、不按用户名反查**。
 - `MuteUserAudio` 契约：禁言 = 禁**全部**媒体发布（音频/摄像头/投屏），不只是音频。
 - 凭证是短时效入场券（10 分钟 TTL），不是会话生命周期授权；断线重连必须回到签发路径重新判定。
 
 ### 入场判定（server/internal/api/admission.go）
 
-一条规则，三个执行点：`admitUser` 是唯一的"谁能进房、能否发布"决策函数（返回 `UID`/`Username`，identity 由调用方经 `rtc.Identity` 组），`joinToken`（凭证签发）、`/providers/ember/voice`（ember 验票入会）、`/providers/{alias}/w` POST（WHIP 推流拦截，统一走 `admitIngest`：令牌反查用户 + URL 取频道，进程内 bellows / 远端 bellows / livekit-ingress / lkembed 反代 LiveKit 自带 WHIP 四条路径共用，definitive 404/403/503 无 fail-open）都调它。远端 `cmd/bellows` 进程没有数据库也不回调：hearth 在反代前做完判定，把结果签成短时效通行证（grant）塞进请求头，远端只本地验签（与 LiveKit join token 同一模型）。新增入口或新增入场约束时**只改这里**，不得在别处散落 `CanJoin`/`IsGagged` 组合。ember 线走一次性入场票（60s、取出即删、防挪用），不做二次判定。
+一条规则，两个执行点：`admitUser` 是唯一的"谁能进房、能否发布"决策函数（返回 `UID`/`Username`，identity 由调用方经 `rtc.Identity` 组），`joinToken`（凭证签发）与 `/providers/{alias}/w` POST（WHIP 推流拦截，统一走 `admitIngest`：令牌反查用户 + URL 取频道，换票反代到该实例自带 WHIP，definitive 404/403/503 无 fail-open）都调它。新增入口或新增入场约束时**只改这里**，不得在别处散落 `CanJoin`/`IsGagged` 组合。
 
 ### 动态配置（server/internal/api/dyncfg.go）
 
-优先级：环境变量（锁定，后台只读）> DB settings（`cfg_` 前缀，保存即生效）> 实现声明的默认值。带 `Options` 的键后端校验枚举值。例外：三个内核选择器（`*_provider`）不读环境变量——env 的职责只是把 provider 实例合成进可选列表，选择一律走管理后台落库；部署侧旧的选择器 env 由迁移 v2 一次性导入后不再读取。
+优先级：环境变量（锁定，后台只读）> DB settings（`cfg_` 前缀，保存即生效）> 实现声明的默认值。带 `Options` 的键后端校验枚举值。例外：两个内核选择器（`voice_provider`/`stage_provider`）不读环境变量——env 的职责只是把 provider 实例合成进可选列表，选择一律走管理后台落库；部署侧旧的选择器 env 由迁移 v2 一次性导入后不再读取。
 
 ### 前端（web/）
 
@@ -49,34 +48,28 @@
 - 设置浮层骨架（`views/settings.tsx`）、频道管理（`views/manage.tsx`）、管理后台（`views/admin.tsx`）也是 Solid；设置的六个个人 pane 暂留命令式渲染（`settings-panes.ts`，由骨架挂进容器、切页调清理函数），逐个迁移即可。一次性渲染的轻页面（shell/lobby/login/join）保持 vanilla TS；vite-plugin-solid 只处理 `.tsx`。
 - 设置的三个维度：个人（跟账号/本机走，即改即存）、频道（房主视角，落库即生效、每次操作 toast）、服务器（管理后台 `#/admin`，浮层里只放跳转）。所有齿轮入口都开同一个浮层，只是落点不同；浮层按 `channel` 上下文自查房主决定是否出「频道」分区，入口不必区分谁是房主。
 - CSS 统一在 `src/style.css`，类名复用既有设计系统（ember 主题、三态明暗），选择器注意特异性（button 重置用零特异性 `:where`）。
-- 引擎抽象 `engine/types.ts`：新内核实现 `AVEngine` 并在 `engine/index.ts` 注册动态导入（保持代码分割）。
+- 引擎抽象 `engine/types.ts`：注册表只剩 `livekit` 一个实现（`engine/index.ts` 动态导入，保持代码分割）；新内核实现 `AVEngine` 即可挂回注册表。
 
 ### 单二进制/单容器（自包含镜像 Dockerfile.aio + server/cmd/aioinit 已退役并删除）
 
-- 舞台内核不再靠「拉外部子进程」自包含：`stage_provider` 选中内建实例 `lkembed`（补丁式 fork 的 LiveKit，进程内跑，见 `rtc/livekitembed`）即在 hearth 自己的进程里热启动/热停止（`API.EnsureStageKernel`），没有第二个进程、没有 redis、没有 ingress。`Dockerfile.release`（CI 装配）与根 `Dockerfile`（本地构建）这一个镜像就是完整形态，不再需要 `-livekit`/`-full` 两档。
+- 舞台内核不再靠「拉外部子进程」自包含：`stage_provider` 选中内建实例 `lkembed`（补丁式 fork 的 LiveKit，进程内跑，见 `rtc/livekitembed`）即在 hearth 自己的进程里热启动/热停止（`API.EnsureStageKernel`），没有第二个进程、没有 redis、没有 ingress。`Dockerfile.release`（CI 装配）与根 `Dockerfile`（本地构建）这一个镜像就是完整形态，不再需要 `-livekit`/`-full` 两档（两个过渡别名 tag 只保留了一个版本，已随内核收敛删掉）。
 - aioinit 因此整体退役：它唯一的职责——按 `EMBED_LIVEKIT`/`EMBED_INGRESS` 拉起外部 livekit-server/redis/ingress、生成 `livekit.yaml`/`ingress.yaml`、把接入地址注入 hearth 环境——随内嵌形态消失而消失，不是「简化保留」，是没有职责剩下；`Dockerfile.aio` 与 `server/cmd/aioinit` 已删除。
-- 残留的 `EMBED_LIVEKIT`/`EMBED_INGRESS`/指向回环地址的 `LIVEKIT_API_URL` 是旧编排的痕迹：hearth 本体从未读取前两者，检测到就打一次启动告警（`warnLegacyConfig`，`server/internal/api/dyncfg.go`），提示改用管理后台把「舞台内核」选 `lkembed`。
-- `/data` 仍是唯一的持久化边界，但只剩数据库：内嵌 LiveKit 的密钥不再走 `/data/aio/keys.env`，改为 `lkembed_api_key`/`lkembed_api_secret` 两个 DB settings 键，留空时首启生成并落库，随数据库一起备份（见上条「rtc 内核插件模型」）。
+- 残留的 `EMBER_*`/`BELLOWS_*`/`INGRESS_UPSTREAM_URL` 是已删内核的痕迹：一律不再读取，检测到就打一次启动告警（`warnLegacyConfig`，`server/internal/api/dyncfg.go`）提示从部署侧删除。告警集只保留一个版本（比照 `pion_*` 先例），下个版本删除。
+- `/data` 仍是唯一的持久化边界，但只剩数据库：内嵌 LiveKit 的密钥不走 `/data/aio/keys.env`，是 `lkembed_api_key`/`lkembed_api_secret` 两个 DB settings 键，留空时首启生成并落库，随数据库一起备份（见上条「rtc 内核插件模型」）。
 - 前端产物经 `server/internal/webui`（`//go:embed all:dist`）编进二进制，单文件分发成立：CI/Dockerfile 在 `go build` 前把 `web/dist` 拷入该目录（gitignore，只留 `.keep`）；目录为空时 `Handler()` 返回 nil，`main.go` 回落 `STATIC_DIR`（开发期 vite dev 不受影响）。裸机单文件的数据目录：`--data`/`HEARTH_DATA` → 可执行文件旁的 `data/`（便携优先）→ 系统用户目录回落；`DB_PATH` 默认 `<data>/hearth.db`，`.env` 先读工作目录再读 `<data>/.env`（后者不覆盖前者）。
-- 旧的 `-livekit`/`-full` 镜像 tag：release.yml 在退役后的第一个版本里把它们发成主镜像的别名（同一次 `docker/build-push-action` 多打两个 tag，不是重新构建），供已有部署把 tag 名切过来；下一个版本发布时随手删掉这两段 metadata 步骤，不长期维护（比照 `pion_*` 只保留一个版本的先例）。
 
 ## 已知的坑（改相关代码前必读）
 
 - `websocket.Accept` hijack 后 `r.Context()` 被 net/http 取消：连接生命周期用 `context.WithoutCancel`。
-- ember（语音内核，`rtc/ember`）的 `vroom.mu` 不可重入：持锁时禁止调用 `snapshot()`/`roster()` 等会再抢锁的方法。
 - `nhooyr.io/websocket` 不允许并发写：所有出站消息必须走参与者的 send channel + writeLoop。
-- 前端引擎重连前必须解绑旧 ws 的 handler（`teardown()`），否则旧连接被判 duplicate 时会误伤新连接。
 - Solid 视图作为路由页时 `render()` 不能直接挂 `#app`：main.ts 的 hashchange 监听 `route()` 先注册先执行、先把下一个视图画进 `#app`，随后视图自己注册的 dispose 才跑，而 dispose 会清空所挂容器——直接挂 `#app` 会把新视图一起擦成白屏。一律挂到自建的宿主 div（见 manage.tsx / admin.tsx）。
-- 客户端向 ICE-Lite 服务端发 offer 不必等 gathering complete（最多等 1s），部分环境 gathering 永不完成。
 - 改挂载进容器的配置文件后 compose 不会自动重启服务，需手动 `docker restart`。
 - livekit `use_external_ip: true` 时默认 STUN 不可达会启动即死（国内必配 `LIVEKIT_STUN_SERVERS`）；`docker cp` 进容器的文件是 root 属主，distroless nonroot（65532）进程会写不动。
-- ingress 的 WHIP 直通（bypass_transcoding）只收 H.264+opus：HEVC/AV1 会 `unsupported codec in SDP offer`（实测于 ingress v1.5.0）；OBS bearer 模式端点是精确 `/w`（`/w/` 会 404，hearth 代理层已做规范化宽容）。
 - store schema 变更只加迁移文件（`server/internal/store/` 包根的 `NNNNN_name.go`，bun/migrate 从文件名解析迁移名，文件名不可改），不改 `00001_baseline.go`；api 语义迁移走 `settings.migration_version` 游标，两者职责不交叉（启动顺序：store.Open 的 Bun schema 迁移 → api 游标数据迁移）。Bun `NewRaw` 的 `?` 参数是按方言安全内联格式化进 SQL（不是改写成驱动占位符再绑定），传参无需顾虑方言。
 
 ## 验证与发布
 
 - 服务端：`cd server && go build ./... && go vet ./...` 必须通过。
 - 前端：`cd web && npx tsc --noEmit && npm run build` 必须通过。
-- 行为改动尽量本地起服务验证：`go run ./cmd/server` 零外部依赖（选择器默认 ember 语音 + 关闭舞台线）。注意 `.env` 里有 `LIVEKIT_*` 时迁移会把选择器落库成 livekit，本地验证要用干净 DB 或先改 settings 里的 `cfg_voice_provider`；ember 的 UDP 端口（默认 47700）被别的 hearth 进程占着时会入会即 bye、客户端死循环重连，换 `EMBER_UDP_PORT` 即可。
-- 验证舞台线（投屏/摄像头）同样零外部依赖：`go run ./cmd/server` 起来后在管理后台把「舞台内核」改选 `lkembed`（保存即热启动进程内 LiveKit，无需重启、无需 redis/ingress），浏览器进房投屏可见即通过。
+- 行为改动尽量本地起服务验证：`go run ./cmd/server` 零外部依赖（选择器默认 voice/stage 均 lkembed，语音 + 投屏开箱可用，浏览器进房说话与投屏可见即通过）。注意 `.env` 里有 `LIVEKIT_*` 时迁移会把选择器落库成 livekit，本地验证要用干净 DB 或先改 settings 里的 `cfg_voice_provider`/`cfg_stage_provider`；lkembed 的媒体端口（默认 47720/udp）被别的 hearth 进程占着时进程内 LiveKit 起不来，管理后台改 `lkembed_udp_port` 即可。
 - 发布：打 `v*` tag 触发 CI（`.github/workflows/release.yml`，原生交叉编译 + 纯装配镜像，无 QEMU）。

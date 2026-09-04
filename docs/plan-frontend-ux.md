@@ -121,7 +121,7 @@
 
 1. 登录页按注册策略显示入口：需要后端公开 `/api/site`（策略 + 站点名），前端按 `open/invite/closed` 三态换文案（轻页面 B1）。
 2. 聚焦布局节点搬家导致黑帧：`gridTiles/railTiles` 两个 `<For>` 合一，用 CSS `order`/定位切换（房间 D1）。
-3. ember 重连音频元素泄漏：`teardown` 经 `onAudioTrackRemoved` 回收 `trackEls`（房间 G4，注意 teardown 顺序坑）。
+3. ~~ember 重连音频元素泄漏：`teardown` 经 `onAudioTrackRemoved` 回收 `trackEls`（房间 G4，注意 teardown 顺序坑）。~~（已作废：`engine/ember.ts` 随 v0.9.0 内核收敛删除）
 4. 键盘快捷键：按住说话、M 切麦、D 静音全部、Ctrl+Enter 发送（房间 C1）。
 5. 触屏可达性：`.tact`/`.volpop` 在 `hover:none` 下常显；设备子行加「更多」按钮；长按 `preventDefault`（房间 C5/C6）。
 6. 聊天：翻历史不被拽回底部 + 「有新消息 ↓」；未读进 `document.title`（房间 E2/C12）。
@@ -131,5 +131,5 @@
 10. PWA：manifest + 图标集 + `apple-touch-icon`；字体自托管。
 11. 多标签页会话同步（`storage` 事件）。
 12. 房主标签按 uid 而非用户名比较（频道接口返回 owner uid）。
-13. 拆分形态（ember 语音 + livekit 舞台）下舞台线单独重连会先弹「X 的 OBS 停止推流」再弹「开始推流」：名册差分只看语音线是否连着，舞台线的抖动应一并静默（房间层给舞台线也加基线重置）。
+13. ~~拆分形态（ember 语音 + livekit 舞台）下舞台线单独重连会先弹「X 的 OBS 停止推流」再弹「开始推流」：名册差分只看语音线是否连着，舞台线的抖动应一并静默（房间层给舞台线也加基线重置）。~~（已作废：ember 引擎随 v0.9.0 内核收敛删除，双线均为 livekit 引擎）
 14. 右键菜单里的操作按钮在确认对话框弹出时菜单已被外部点击关闭，`.loading` 落在已卸载的按钮上：菜单在 `confirmDialog` 期间应暂停「点外部关闭」。

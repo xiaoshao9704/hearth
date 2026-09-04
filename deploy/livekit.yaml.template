@@ -1,5 +1,5 @@
 # LiveKit server 配置（由 init.sh 从 deploy/.env 生成，勿手改 generated/ 产物）
-# 单节点模式（无 redis）：默认部署用；启用 ingress profile 时需改用 livekit-redis.yaml
+# 单节点模式（无 redis）
 port: ${LIVEKIT_PORT}
 rtc:
   udp_port: ${RTC_UDP_PORT}

@@ -1,6 +1,6 @@
 # 计划：自研舞台内核（Ember 补视频能力，LiveKit 退场）
 
-状态：**路线 A 降为备选（2026-09-03 晚），主线改为 `plan-livekit-embed.md` 的路线 B（进程内嵌入补丁式 fork 的 LiveKit）。**
+状态：**已退役（v0.9.0 内核收敛，2026-09-04）**：Ember 随 `rtc/ember` 整体删除，路线 A 的前提（LiveKit 退场）不再成立。原状态：路线 A 降为备选（2026-09-03 晚），主线改为 `plan-livekit-embed.md` 的路线 B（进程内嵌入补丁式 fork 的 LiveKit）。
 本文档保留：路线 B 放弃的「一套前端引擎、控制面完全自有、Bellows 直递」若将来成为硬目标，按此实施，起手 spike 可复用。
 以下为路线 A 原文。前置（Provider 注册制、Bun 迁移、自动端口映射 `plan-portmap.md`）均已合入。
 路线 A = 下文「第 2 段实施路线」的第 1 步（模块方式引用 `pkg/sfu`）+ 第 2 步（写胶水）**提到最前作为起手**，
