@@ -844,6 +844,10 @@ export async function renderRoom(root: HTMLElement, channel: string) {
       if (line && !line.engine?.connected()) {
         clearTimeout(line.timer);
         line.attempts = 0;
+        if (role === 'voice') {
+          setStatusText('正在重新进入语音…');
+          setVoiceState({ phase: 'connecting', attempt: 0 });
+        }
         void connectLines(false, role);
       }
     });
@@ -1657,12 +1661,12 @@ export async function renderRoom(root: HTMLElement, channel: string) {
                 <Show when={voiceState().phase === 'retry'}>
                   <div class="stage-retry">
                     <button class="hit btn btn-sm" onClick={retryNow}>
-                      立即重试
+                      重新进入语音
                     </button>
                   </div>
                 </Show>
               </div>
-              <Show when={audioBlocked()}>
+              <Show when={audioBlocked() && voiceState().phase === 'up'}>
                 <button class="hit audio-blocked" onClick={() => void resumeAllAudio()}>
                   {el(icon('volume', 15, 'currentColor'))}
                   <span>浏览器拦截了自动播放，点击开启声音</span>
@@ -1713,6 +1717,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
                   class="hit ctl-pill"
                   classList={{ on: micOn(), gagged: selfGagged() }}
                   title={selfGagged() ? '已被禁言' : micOn() ? '关闭麦克风' : '打开麦克风'}
+                  aria-label={selfGagged() ? '已被禁言' : micOn() ? '关闭麦克风' : '打开麦克风'}
                   onClick={() => void toggleMic()}
                 >
                   {el(micIcon(17, !micOn(), 'currentColor'))}
@@ -1727,29 +1732,40 @@ export async function renderRoom(root: HTMLElement, channel: string) {
                   class="hit ctl-square"
                   classList={{ danger: deafened() }}
                   title={deafened() ? '已静音全部，点击恢复收听' : '静音全部（只影响自己听到的）'}
+                  aria-label={deafened() ? '恢复收听' : '静音收听'}
                   onClick={toggleDeaf}
                 >
                   {el(slashIcon('speaker', 17, deafened(), deafened() ? 'var(--red)' : 'currentColor'))}
+                  <span class="ctl-mobile-label">{deafened() ? '恢复收听' : '静音收听'}</span>
                 </button>
                 <button
                   class="hit ctl-square"
                   classList={{ on: cameraOn(), disabled: !stageOk() }}
                   title={stageOk() ? '摄像头' : stageHint()}
+                  aria-label={stageOk() ? (cameraOn() ? '关闭摄像头' : '打开摄像头') : stageHint()}
                   onClick={() => void toggleCamera()}
                 >
                   {el(slashIcon('camera', 17, !cameraOn(), 'currentColor'))}
+                  <span class="ctl-mobile-label">{cameraOn() ? '关闭摄像头' : '摄像头'}</span>
                 </button>
                 <button
                   class={'hit ctl-pill' + (canScreenShare ? '' : ' hidden')}
                   classList={{ on: screenOn(), disabled: !stageOk() }}
                   title={stageOk() ? '投屏' : stageHint()}
+                  aria-label={stageOk() ? (screenOn() ? '停止投屏' : '开始投屏') : stageHint()}
                   onClick={() => void toggleScreen()}
                 >
                   {el(icon('screen', 17, 'currentColor'))}
                   <span class="pill-label">{screenOn() ? '投屏中' : '投屏'}</span>
                 </button>
-                <button class="hit ctl-square" title="投屏画质" onClick={() => openSettings('screen', settingsCtx)}>
+                <button
+                  class="hit ctl-square"
+                  title="投屏画质"
+                  aria-label="投屏画质"
+                  onClick={() => openSettings('screen', settingsCtx)}
+                >
                   {el(icon('sliders', 16, 'var(--text-1)', 1.6))}
+                  <span class="ctl-mobile-label">画质</span>
                 </button>
               </div>
               <div class="spacer"></div>
@@ -1758,25 +1774,35 @@ export async function renderRoom(root: HTMLElement, channel: string) {
                   class="hit ctl-square"
                   classList={{ on: panel() === 'members' }}
                   title="成员"
+                  aria-label="成员列表"
                   onClick={() => switchPanel(panel() === 'members' ? '' : 'members')}
                 >
                   {el(icon('users', 17, 'currentColor', 1.6))}
+                  <span class="ctl-mobile-label">成员</span>
                 </button>
                 <button
                   class="hit ctl-square"
                   classList={{ on: panel() === 'chat' }}
                   title="聊天"
+                  aria-label="聊天"
                   onClick={() => switchPanel(panel() === 'chat' ? '' : 'chat')}
                 >
                   {el(icon('chat', 17, 'currentColor'))}
+                  <span class="ctl-mobile-label">聊天</span>
                   <span class="unread-badge" classList={{ hidden: unread() === 0 }}>
                     {unread() > 99 ? '99+' : unread()}
                   </span>
                 </button>
-                <button class="hit ctl-square" title="设置" onClick={() => openSettings('av', settingsCtx)}>
+                <button
+                  class="hit ctl-square"
+                  title="设置"
+                  aria-label="设置"
+                  onClick={() => openSettings('av', settingsCtx)}
+                >
                   {el(icon('gear', 17, 'var(--text-1)'))}
+                  <span class="ctl-mobile-label">设置</span>
                 </button>
-                <button class="hit ctl-pill danger" onClick={() => void leaveRoom()}>
+                <button class="hit ctl-pill danger" aria-label="离开房间" onClick={() => void leaveRoom()}>
                   {el(icon('leave', 17, 'var(--red)'))}
                   <span class="pill-label">离开房间</span>
                 </button>
