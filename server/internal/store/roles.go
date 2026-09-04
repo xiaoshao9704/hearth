@@ -7,6 +7,8 @@ import (
 	"database/sql"
 	"errors"
 	"time"
+
+	"github.com/uptrace/bun"
 )
 
 // Role 系统角色：严格阶梯，高档包含低档能力。
@@ -152,61 +154,100 @@ func (s *Store) TransferSuper(ctx context.Context, userID int64) error {
 	return s.SetUserRole(ctx, userID, RoleSuper)
 }
 
-// MigrateRoleData 角色数据迁移（api 游标 v5 调用，幂等）：
-//  1. is_admin=1 → role=admin，其中 id 最小者 → super（同时保证全站有一个 super）；
+// RoleMigrationResult 是 v5 迁移需要写入启动日志的结果。
+type RoleMigrationResult struct {
+	SuperID        int64
+	SkippedChannel int
+}
+
+// MigrateRoleData 角色数据迁移（api 游标 v5 调用，幂等）。所有数据改动在同一事务内：
+//  1. is_admin=1 → role=admin，其中 id 最小的可用 admin → super；
 //  2. 其余用户中拥有任何频道的 → power（不让现有房主失去建频道能力）；
-//  3. 每个频道按 created_by 写 channel_members(role=owner) 行（已有行则升档）。
-func (s *Store) MigrateRoleData(ctx context.Context) error {
-	if _, err := s.bun.NewRaw(
-		"UPDATE users SET role = 'admin' WHERE is_admin = 1 AND role = 'user'").Exec(ctx); err != nil {
-		return err
-	}
-	var superID int64
-	if err := s.bun.NewRaw(
-		"SELECT COALESCE(MIN(id), 0) FROM users WHERE role = 'super'").Scan(ctx, &superID); err != nil {
-		return err
-	}
-	if superID == 0 {
-		var adminID int64
-		if err := s.bun.NewRaw(
-			"SELECT COALESCE(MIN(id), 0) FROM users WHERE role = 'admin'").Scan(ctx, &adminID); err != nil {
+//  3. 每个创建者仍存在的频道按 created_by 重建唯一 owner 行；
+//  4. 按最终 role 同步一次冻结的 is_admin 兼容列，避免重入时复活已降级账号。
+func (s *Store) MigrateRoleData(ctx context.Context) (RoleMigrationResult, error) {
+	var result RoleMigrationResult
+	err := s.bun.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+		if _, err := tx.NewRaw(
+			"UPDATE users SET role = 'admin' WHERE is_admin = 1 AND role = 'user'").Exec(ctx); err != nil {
 			return err
 		}
-		if adminID != 0 {
-			if err := s.SetUserRole(ctx, adminID, RoleSuper); err != nil {
+
+		var anySuperID int64
+		if err := tx.NewRaw(
+			"SELECT COALESCE(MIN(id), 0) FROM users WHERE role = 'super'").Scan(ctx, &anySuperID); err != nil {
+			return err
+		}
+		if anySuperID == 0 {
+			var adminID int64
+			if err := tx.NewRaw(
+				"SELECT COALESCE(MIN(id), 0) FROM users WHERE role = 'admin' AND disabled = 0").Scan(ctx, &adminID); err != nil {
+				return err
+			}
+			if adminID != 0 {
+				if _, err := tx.NewRaw("UPDATE users SET role = 'super' WHERE id = ?", adminID).Exec(ctx); err != nil {
+					return err
+				}
+			}
+		}
+
+		if _, err := tx.NewRaw(
+			"UPDATE users SET role = 'power' WHERE role = 'user' AND id IN (SELECT created_by FROM channels)").
+			Exec(ctx); err != nil {
+			return err
+		}
+		if err := tx.NewRaw(`
+SELECT COUNT(1) FROM channels c LEFT JOIN users u ON u.id = c.created_by
+WHERE u.id IS NULL`).Scan(ctx, &result.SkippedChannel); err != nil {
+			return err
+		}
+		rows, err := tx.QueryContext(ctx, `
+SELECT c.id, c.created_by FROM channels c JOIN users u ON u.id = c.created_by
+ORDER BY c.id`)
+		if err != nil {
+			return err
+		}
+		type ch struct{ id, owner int64 }
+		var chs []ch
+		for rows.Next() {
+			var c ch
+			if err := rows.Scan(&c.id, &c.owner); err != nil {
+				rows.Close()
+				return err
+			}
+			chs = append(chs, c)
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		for _, c := range chs {
+			if _, err := tx.NewRaw(
+				"UPDATE channel_members SET role = 'member' WHERE channel_id = ? AND role = 'owner'", c.id).
+				Exec(ctx); err != nil {
+				return err
+			}
+			row := &channelMemberRow{ChannelID: c.id, UserID: c.owner, Role: string(ChannelRoleOwner)}
+			q := tx.NewInsert().Model(row).
+				Column("channel_id", "user_id", "role").Value("role", "?", string(ChannelRoleOwner))
+			if s.d.name == "mysql" {
+				q = q.On("DUPLICATE KEY UPDATE").Set("role = VALUES(role)")
+			} else {
+				q = q.On("CONFLICT (channel_id, user_id) DO UPDATE").Set("role = EXCLUDED.role")
+			}
+			if _, err := q.Exec(ctx); err != nil {
 				return err
 			}
 		}
-	}
-	if _, err := s.bun.NewRaw(
-		"UPDATE users SET role = 'power' WHERE role = 'user' AND id IN (SELECT created_by FROM channels)").
-		Exec(ctx); err != nil {
-		return err
-	}
-	rows, err := s.bun.QueryContext(ctx, "SELECT id, created_by FROM channels")
-	if err != nil {
-		return err
-	}
-	type ch struct{ id, owner int64 }
-	var chs []ch
-	for rows.Next() {
-		var c ch
-		if err := rows.Scan(&c.id, &c.owner); err != nil {
-			rows.Close()
+
+		if _, err := tx.NewRaw(`
+UPDATE users SET is_admin = CASE WHEN role IN ('admin', 'super') THEN 1 ELSE 0 END`).Exec(ctx); err != nil {
 			return err
 		}
-		chs = append(chs, c)
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return err
-	}
-	for _, c := range chs {
-		if err := s.SetChannelRole(ctx, c.id, c.owner, ChannelRoleOwner); err != nil {
-			return err
-		}
-	}
-	return nil
+		return tx.NewRaw(
+			"SELECT COALESCE(MIN(id), 0) FROM users WHERE role = 'super' AND disabled = 0").Scan(ctx, &result.SuperID)
+	})
+	return result, err
 }
 
 // CountOwnedChannels 用户名下（owner 行）的频道数：降级提示与删除过户用。

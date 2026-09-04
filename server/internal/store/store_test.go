@@ -725,6 +725,17 @@ func TestLegacyUpgradeRemote(t *testing.T) {
 					t.Fatalf("users 缺 compat 列 %s，实际列: %v", wantCol, cols)
 				}
 			}
+			if tc.name == "postgres" {
+				var dataType string
+				if err := s.bun.DB.QueryRow(`
+SELECT data_type FROM information_schema.columns
+WHERE table_schema = 'public' AND table_name = 'users' AND column_name = 'expires_at'`).Scan(&dataType); err != nil {
+					t.Fatal(err)
+				}
+				if dataType != "timestamp with time zone" {
+					t.Fatalf("PostgreSQL 存量库 expires_at 应为 timestamptz，实际 %q", dataType)
+				}
+			}
 
 			// mysql：索引仍恰有一条（吞错分支执行过且未重复建）
 			if tc.name == "mysql" {

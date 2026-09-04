@@ -9,6 +9,7 @@ import (
 	"context"
 
 	"github.com/uptrace/bun"
+	bundialect "github.com/uptrace/bun/dialect"
 )
 
 func init() {
@@ -16,9 +17,16 @@ func init() {
 }
 
 func rolesUp(ctx context.Context, db *bun.DB) error {
+	expiresAtType := "TIMESTAMP"
+	switch db.Dialect().Name() {
+	case bundialect.PG:
+		expiresAtType = "TIMESTAMPTZ"
+	case bundialect.MySQL:
+		expiresAtType = "DATETIME"
+	}
 	for _, stmt := range []string{
 		`ALTER TABLE users ADD COLUMN role VARCHAR(16) NOT NULL DEFAULT 'user'`,
-		`ALTER TABLE users ADD COLUMN expires_at TIMESTAMP NULL`,
+		`ALTER TABLE users ADD COLUMN expires_at ` + expiresAtType + ` NULL`,
 		`ALTER TABLE users ADD COLUMN invite_id BIGINT NULL`,
 		`ALTER TABLE channel_members ADD COLUMN role VARCHAR(16) NOT NULL DEFAULT 'member'`,
 		`ALTER TABLE sessions ADD COLUMN device_id VARCHAR(32) NOT NULL DEFAULT ''`,
@@ -29,6 +37,14 @@ func rolesUp(ctx context.Context, db *bun.DB) error {
 		`ALTER TABLE invites ADD COLUMN allow_guest INTEGER NOT NULL DEFAULT 0`,
 	} {
 		if _, err := db.ExecContext(ctx, stmt); err != nil && !isDuplicateErr(err) {
+			return err
+		}
+	}
+	// MySQL 不支持带 WHERE 的部分唯一索引，那边由 TransferChannel 的事务约束。
+	// sqlite / PostgreSQL 在数据迁移写 owner 前先把「每频道至多一行」固化到库。
+	if db.Dialect().Name() != bundialect.MySQL {
+		if _, err := db.ExecContext(ctx,
+			`CREATE UNIQUE INDEX ux_channel_members_owner ON channel_members (channel_id) WHERE role = 'owner'`); err != nil && !isDuplicateErr(err) {
 			return err
 		}
 	}
