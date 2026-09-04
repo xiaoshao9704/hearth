@@ -6,6 +6,7 @@ Windows SCM + 防火墙规则）、服务模式日志轮转（`<data>/hearth.log
 （GitHub Releases，可关）。Cloudflare/DNSPod/阿里云无凭证未实测（请求构造与签名有单测）；Windows 服务形态只做了
 交叉编译验证。阶段二已实现——进程内 TLS（off/acme/selfsigned 热切换）、80/443 纳入 PortWants、
 首启向导 `#/setup`、`/api/admin/netcheck` 自检与管理后台「网络」页均已落地；ACME 路径只做到编译与配置生效，未在真实公网域名下实测。
+**阶段二、三的 TLS 与 DDNS 实现将返工**：改用 CertMagic + libdns，并新增 IP 证书能力，见第七节（2026-09-04 决策，实施以该节为准）。
 目标版本与内核收敛（ember/bellows 退场，只留进程内 LiveKit）同批；本文档只写「一个文件、双击能用、朋友能连上」这条线，内核收敛另起文档。
 
 ## 动机与边界
@@ -169,3 +170,87 @@ type Provider interface {
 - **macOS Gatekeeper**：未签名二进制首次运行要右键「打开」，README 写清；不做公证。
 - **端口冲突**：8080/8443 被占用时启动报错并给出 `--addr` 提示，不自动换端口（换了端口邀请链接就对不上映射）。
 - **与内核收敛的耦合**：`PortWants` 里媒体端口随 ember/bellows 退场减少，本计划只增加 80/443 两条 TCP，互不影响。
+
+---
+
+## 七、修订：CertMagic 迁移、libdns 与 IP 证书（2026-09-04 决策）
+
+阶段二、三已按前文实现（`autocert` + 手写四家 DDNS）。本节是对那两段的**返工决定**，实施前以本节为准；
+前文相应段落保留作背景，不再是执行依据。
+
+### 7.1 为什么返工
+
+三件事指向同一个依赖组合：
+
+- **手写签名不可回归**：阿里云那份 HMAC-SHA1 签名（签名串拼接、RFC3986 编码、时间戳与 nonce）只能靠离线复算固定向量验证，
+  我们永远拿不到凭证做真实回归。DNSPod 的记录查找也已发现两个确定的分支缺口。
+- **DNS-01 在 autocert 上做不了**：`autocert` 只支持 HTTP-01 与 TLS-ALPN-01，阶段四要自己写整套 DNS-01 挑战流程。
+- **没有域名的部署只能自签名**：现状要求每台设备装本地 CA，手机上尤其劝退，这是整个「双击就能用」链路里最差的一环。
+
+`CertMagic`（Caddy 的 TLS 自动化内核，ACME 客户端是 `acmez`）+ `libdns`（Go 生态事实标准的 DNS 提供方接口，
+`RecordGetter`/`RecordAppender`/`RecordSetter`/`RecordDeleter`/`ZoneLister`，已发 v1，记录类型化为 `libdns.Address`/`libdns.TXT` 等）
+一次解决三条：DNS-01 与 DDNS 共用同一套 provider 配置（用户只配一次凭证），签名交给上游维护，
+并且具备签发 IP 证书所需的 ACME profile 能力。
+
+### 7.2 IP 证书（新增能力，取代「无域名只能自签名」）
+
+Let's Encrypt 的 **6 天（160 小时）短时效证书与 IP 地址证书已于 2026-01-15 正式可用**，
+经 ACME `shortlived` profile 选用，IPv4 与 IPv6 都支持。对本项目的意义：**有公网 IP 但没有域名的部署不再需要装 CA**，
+手机、别人的电脑直接打开 `https://<公网IP>` 即可，是「把链接发给朋友」这条主线上最大的一块补齐。
+
+约束（写进向导文案，不要让用户自己撞）：
+
+- **IP 标识只能用 HTTP-01 或 TLS-ALPN-01 验证**，DNS-01 按 RFC 8738 对 IP 标识不适用。
+  所以「运营商封 80」的线路仍要靠 443 走 TLS-ALPN-01，两个端口都不通就没有 IP 证书，回落自签名。
+- **必须是公网可直连的地址**，CGNAT 线路不可用。判定复用 `netcheck` 的三档结论，不另起探测。
+- **6 天寿命意味着续期必须可靠**：机器离线超过一周回来就是过期证书，续期失败必须**回落到自签名继续提供 HTTPS**，
+  绝不能让 HTTPS 端口变成握手失败（这正是当前实现的自锁问题之一）。
+- **IP 变了要重签**：触发点已经现成——`Announcer` 的探测刷新与 `Mapper.OnChange` 回调，与 DDNS 同节拍。
+  要给重签加去抖与失败退避，避免 IP 抖动打穿 ACME 速率限制。
+
+### 7.3 TLS 实现改为 CertMagic
+
+- `tlsx` 内部把 `autocert` 换成 `CertMagic`；对外的 `tls_mode`（`off`/`acme`/`selfsigned`）与 `Sync` 热切换语义不变。
+- `acme` 模式下的签发标识：`site_domain` 非空用域名；为空且 `netcheck` 判定公网可直连，用探测到的公网 IP + `shortlived` profile。
+- 新增 `acme_profile` 键（留空 = CA 默认；签 IP 证书时自动用 `shortlived`）。
+- **续期失败一律回落自签名**，`selfsigned` 从「用户选项」升格为「永远在场的兜底」；证书状态里明确显示当前实际在用哪一种。
+- **待确认（实施第一步就验）**：Caddy 侧曾有 IP 证书签发不通的报告（caddyserver/caddy#7399，2025-12 提出、现已关闭，
+  关闭原因未核实）。CertMagic/acmez 对 IP 标识与 `shortlived` profile 的支持要用 Let's Encrypt **staging** 环境实测一次，
+  通过再动 `tlsx`；不通就先只做 libdns 那半，IP 证书延后。
+
+### 7.4 DDNS 改用 libdns（部分）
+
+四家现成模块成熟度不一，按现状分别处置，不做一刀切：
+
+| 提供方 | 现成模块 | 决定 |
+|---|---|---|
+| 阿里云 | `libdns/alidns` v1.0.7（2026-04，已跟上 libdns v1） | **换**。删掉手写签名，收益最大 |
+| Cloudflare | `libdns/cloudflare`（pkg.go.dev 显示 v0.2.2 / 2025-10 非模块最新版） | **换**，顺带解决 zone 列表不翻页；引入前确认其 v1 适配版本 |
+| DNSPod | `libdns/dnspod` v0.0.3（2021-08，未适配 libdns v1，已被 caddy-dns 从构建剔除） | **不换**，自持实现并修掉已知缺陷 |
+| DuckDNS | `libdns/duckdns` v0.3.0（2025-04，未到 v1） | **不换**，它只是一个 GET，不值得加依赖 |
+
+- **zone 由用户显式给出**：libdns 的 provider 一律要求调用方传 zone，不从主机名反查。新增 `ddns_zone` 键（留空时退回逐级拆分猜测）。
+  这条同时消灭「主域拆分循环」这个已知缺陷来源。
+- 我们自己的 `ddns.Provider` 接口保留（`Update(ctx, host, v4, v6)`，零值不动该记录），libdns 模块在适配层里包一下，
+  换实现不动 Runner 的去重、退避、状态落盘。
+- 阶段四的 DNS-01 直接复用同一份 provider 配置，不再另立一套凭证键。
+
+### 7.5 阶段调整
+
+**阶段五（本节内容）**，接在当前所有阻塞项修复之后：
+
+1. staging 实测 CertMagic 的 IP 证书与 `shortlived` profile（决定 7.3 是全做还是只做 libdns 那半）。
+2. `tlsx` 迁到 CertMagic，续期失败回落自签名，证书状态回显实际在用的种类。
+3. 阿里云、Cloudflare 换 libdns；新增 `ddns_zone`；DNSPod 与 DuckDNS 保留并修缺陷。
+4. 向导第三步改为三选一：域名 + ACME / 仅公网 IP + IP 证书 / 自签名；按 `netcheck` 结论给默认值与不可用原因。
+5. 阶段四（DNS-01）降级为 7.4 落地后的小增量。
+
+验收：无域名机器在 staging 上签出 IP 证书、手机不装 CA 直接打开；断网一周后回来能自愈（先自签名再重签）；
+换 IP 后新会话用新证书、在途会话不断。
+
+### 7.6 新增风险
+
+- **多一层依赖**：CertMagic 会带入 `acmez` 与 libdns 系列模块。相对收益（删掉手写签名与自研 ACME 挑战）值得，
+  但要在 `go.mod` 里盯住间接依赖膨胀。
+- **ACME 速率限制**：6 天证书 + IP 抖动 = 签发频率显著高于域名证书。去抖与退避是必须项，不是优化项。
+- **staging 与生产目录切换**：`acme_directory` 已是配置键，实测走 staging，发布默认回生产；不要把 staging 目录写死进默认值。
