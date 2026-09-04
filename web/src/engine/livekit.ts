@@ -35,9 +35,9 @@ export class LiveKitEngine implements AVEngine {
 
   private toPart(p: Participant): EPart {
     const micPub = p.getTrackPublication(Track.Source.Microphone);
-    // 元数据是 hearth 下发的 rtc.Meta JSON（uid/username/kind/tag），进房令牌与推流发布
+    // 元数据是 hearth 下发的 rtc.Meta JSON（uid/username/kind/tag/guest），进房令牌与推流发布
     // 两条路径都写。身份与展示全走它——identity 的主体是 user_id，本就不含用户名
-    let meta: { uid?: number; username?: string; kind?: string; tag?: string } | null = null;
+    let meta: { uid?: number; username?: string; kind?: string; tag?: string; guest?: boolean } | null = null;
     if (p.metadata) {
       try {
         meta = JSON.parse(p.metadata);
@@ -57,6 +57,7 @@ export class LiveKitEngine implements AVEngine {
       sharing: !!p.getTrackPublication(Track.Source.ScreenShare),
       ingest,
       tag: meta?.tag ?? '', // 浏览器参与者也有设备标签，展示设备名要用它
+      guest: meta?.guest === true,
     };
   }
 

@@ -24,6 +24,7 @@ export interface EPart {
   sharing: boolean; // 有投屏轨
   ingest: boolean; // 推流参与者（参与者元数据 kind=ingest，不再解析 identity 后缀）
   tag: string; // 推流设备标签（identity = {username}-{tag}）；非推流参与者为空
+  guest?: boolean; // 访客（内核元数据透传；名册打「访客」标签）
 }
 
 // 引擎 → 房间视图的事件回调。引擎负责把媒体轨变成可挂载的元素；

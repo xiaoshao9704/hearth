@@ -81,6 +81,10 @@ func (a *API) updateUsername(w http.ResponseWriter, r *http.Request) {
 
 func (a *API) updatePassword(w http.ResponseWriter, r *http.Request) {
 	u := userFrom(r)
+	if u.Role == store.RoleGuest {
+		writeErr(w, http.StatusForbidden, "访客没有密码可改")
+		return
+	}
 	var req struct {
 		Current string `json:"current"`
 		New     string `json:"new"`
@@ -142,9 +146,12 @@ func (a *API) inviteInfo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"inviter":    inv.CreatedBy,
-		"expires_at": inv.ExpiresAt,
-		"alive":      inv.Alive(time.Now()),
+		"inviter":       inv.CreatedBy,
+		"expires_at":    inv.ExpiresAt,
+		"alive":         inv.Alive(time.Now()),
+		"kind":          inv.Kind,
+		"channel_name":  inv.ChannelName,
+		"guest_ttl_sec": inv.GuestTTLSec,
 	})
 }
 

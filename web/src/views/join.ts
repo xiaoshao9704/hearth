@@ -1,5 +1,6 @@
-// 凭邀请链接注册：#/join/<code>。倒计时真跑，归零切过期态。
-import { ApiError, getToken, getUser, inviteInfo, register, siteInfo } from '../api';
+// 凭邀请链接进站：#/join/<code>。register 类走注册表单；guest 类只填展示名、直接进目标频道。
+// 倒计时真跑，归零切过期态。
+import { ApiError, getToken, getUser, guestJoin, inviteInfo, register, siteInfo } from '../api';
 import { wireThemeButton } from '../theme';
 import { avatarHtml, esc, flameLogo, icon, pwBarsHtml, pwScore } from '../ui';
 
@@ -43,11 +44,17 @@ async function renderInviteFlow(root: HTMLElement, code: string, alive: () => bo
   let known = true; // 邀请码是否存在（404 = 不存在）
   let connError = false; // 网络/服务器错误，与「不存在」分开提示
   let siteName = 'Hearth'; // 站点名（/api/site），拉不到就用默认名
+  let kind: 'register' | 'guest' = 'register';
+  let channelName = ''; // guest 类：目标频道
+  let guestTtlSec = 0; // guest 类：访客身份寿命（秒）
   try {
     const [info, site] = await Promise.all([inviteInfo(code), siteInfo().catch(() => null)]);
     inviter = info.inviter;
     expiresAt = new Date(info.expires_at).getTime();
     if (!info.alive) expiresAt = 0; // 名额用完/撤销也按失效展示
+    kind = info.kind === 'guest' ? 'guest' : 'register';
+    channelName = info.channel_name ?? '';
+    guestTtlSec = info.guest_ttl_sec ?? 0;
     if (site?.name) siteName = site.name;
   } catch (err) {
     if (err instanceof ApiError && err.status === 404) {
@@ -88,7 +95,11 @@ async function renderInviteFlow(root: HTMLElement, code: string, alive: () => bo
         <div class="card" style="margin-top:26px;display:flex;align-items:center;gap:13px">
           ${avatarHtml(inviter || '?', 'avatar-lg avatar')}
           <div style="flex-grow:1;min-width:0">
-            <div style="font-size:13.5px;line-height:1.5"><span style="font-weight:600">${esc(inviter || '有人')}</span> 邀请你加入 ${esc(siteName)}</div>
+            <div style="font-size:13.5px;line-height:1.5">${
+              kind === 'guest'
+                ? `<span style="font-weight:600">${esc(inviter || '有人')}</span> 邀请你以访客身份进入 <span style="font-weight:600">#${esc(channelName)}</span>`
+                : `<span style="font-weight:600">${esc(inviter || '有人')}</span> 邀请你加入 ${esc(siteName)}`
+            }</div>
             <div class="mono" style="font-size:11px;color:var(--text-2);margin-top:3px">${esc(location.host)}</div>
           </div>
           <div id="ttl-chip"></div>
@@ -98,7 +109,11 @@ async function renderInviteFlow(root: HTMLElement, code: string, alive: () => bo
 
         <div class="auth-note hint-card" style="border-color:var(--line-soft)">
           <span style="flex-shrink:0;margin-top:1px">${icon('shield', 16, 'var(--text-2)', 1.6)}</span>
-          <span>这个账号只在这台服务器上有效，不联通任何第三方。密码存的是哈希，管理员也看不到。</span>
+          <span>${
+            kind === 'guest'
+              ? '访客是临时身份：不需要密码，到期自动失效，只在这台浏览器上有效。'
+              : '这个账号只在这台服务器上有效，不联通任何第三方。密码存的是哈希，管理员也看不到。'
+          }</span>
         </div>
       </div>
     </div>
@@ -238,9 +253,70 @@ async function renderInviteFlow(root: HTMLElement, code: string, alive: () => bo
     });
   }
 
+  // 访客身份寿命的人话（挡位只有 1h/24h/7d，兜底按小时换算）
+  const guestTtlText = () =>
+    guestTtlSec >= 7 * 86400 ? '7 天' : guestTtlSec >= 86400 ? '24 小时' : guestTtlSec >= 3600 ? `${Math.round(guestTtlSec / 3600)} 小时` : `${Math.max(1, Math.round(guestTtlSec / 60))} 分钟`;
+
+  function paintGuestForm() {
+    body.innerHTML = `
+      <form style="margin-top:20px;display:flex;flex-direction:column;gap:13px" id="join-form">
+        <div style="display:flex;flex-direction:column;gap:7px">
+          <div style="display:flex;align-items:baseline;gap:8px">
+            <label class="field-label" for="jn-user" style="flex-grow:1">展示名</label>
+            <div id="hint-user" style="font-size:11px"></div>
+          </div>
+          <div class="field" style="height:46px"><input id="jn-user" placeholder="2–32 位，字母数字 - _" autocapitalize="off" autocomplete="off" enterkeyhint="go" /></div>
+        </div>
+        <div style="font-size:12px;line-height:1.6;color:var(--text-2);text-wrap:pretty">这个名字只在频道里展示，${guestTtlText()}后身份失效；再来要重新拿邀请链接。</div>
+        <p class="error-text" id="jn-error" style="margin:0;min-height:0"></p>
+        <button type="submit" class="hit btn btn-primary btn-lg disabled" id="jn-btn" style="margin-top:4px" disabled>以访客身份进入 #${esc(channelName)}</button>
+      </form>`;
+
+    const userInput = body.querySelector<HTMLInputElement>('#jn-user')!;
+    const btn = body.querySelector<HTMLButtonElement>('#jn-btn')!;
+    const errEl = body.querySelector<HTMLParagraphElement>('#jn-error')!;
+    const hintEl = body.querySelector<HTMLDivElement>('#hint-user')!;
+
+    const userOk = () => USER_RE.test(userInput.value);
+    function sync() {
+      hintEl.textContent = userInput.value ? (userOk() ? '可用' : '2–32 位字母数字 - _') : '';
+      hintEl.style.color = userOk() ? 'var(--sage)' : 'var(--red-text)';
+      const disabled = !userOk() || busy || done;
+      btn.classList.toggle('disabled', disabled);
+      btn.disabled = disabled;
+    }
+    userInput.addEventListener('input', sync);
+
+    body.querySelector('#join-form')!.addEventListener('submit', async (ev) => {
+      ev.preventDefault();
+      if (!userOk() || busy || done) return;
+      busy = true;
+      errEl.textContent = '';
+      btn.textContent = '正在进入…';
+      sync();
+      try {
+        const channel = await guestJoin(code, userInput.value.trim());
+        if (!alive()) return;
+        done = true;
+        // 访客直达房间，不经大厅；replace 不让返回键回到已消耗的邀请页
+        location.replace(`#/room/${encodeURIComponent(channel)}`);
+      } catch (err) {
+        errEl.textContent = (err as Error).message; // 409 重名 / 403 名额用完等，文案直接展示
+        busy = false;
+        btn.textContent = `以访客身份进入 #${channelName}`;
+        sync();
+      }
+    });
+    userInput.focus();
+  }
+
   paintTTL();
   if (inviteAlive()) {
-    paintForm();
+    if (kind === 'guest') {
+      paintGuestForm();
+    } else {
+      paintForm();
+    }
   } else {
     paintExpired();
   }

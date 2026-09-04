@@ -202,6 +202,17 @@ export async function renderRoom(root: HTMLElement, channel: string) {
   const settingsCtx = { backLabel: `返回 ${channel}`, channel }; // 浮层按频道自查管理角色（owner/moderator），决定是否出「频道」分区
   const [ownerName, setOwnerName] = createSignal('');
 
+  // 访客顶栏 chip：身份寿命从 expires_at 算，分钟级走字
+  const myUser = getUser();
+  const guestUntil = myUser?.role === 'guest' && myUser.expires_at ? new Date(myUser.expires_at).getTime() : 0;
+  const [nowTick, setNowTick] = createSignal(Date.now());
+  const guestChipText = () => {
+    const ms = guestUntil - nowTick();
+    if (ms <= 0) return '访客 · 已过期';
+    const min = Math.ceil(ms / 60_000);
+    return min >= 60 ? `访客 · ${Math.ceil(min / 60)} 小时后过期` : `访客 · ${min} 分钟后过期`;
+  };
+
   // DOM ref（引擎产的命令式元素挂载点等）
   let audioBinEl!: HTMLDivElement;
   let chatLogEl!: HTMLDivElement;
@@ -1610,6 +1621,11 @@ export async function renderRoom(root: HTMLElement, channel: string) {
             </span>
           </span>
           <div class="spacer"></div>
+          <Show when={guestUntil > 0}>
+            <span class="tag" style="flex-shrink:0" title="访客是临时身份，到期自动失效">
+              {guestChipText()}
+            </span>
+          </Show>
           <button
             class="hit btn btn-icon"
             classList={{ hidden: !canModerate() }}
@@ -1908,6 +1924,9 @@ export async function renderRoom(root: HTMLElement, channel: string) {
                                 <Show when={isOwner}>
                                   <span class="tag tag-ember">房主</span>
                                 </Show>
+                                <Show when={p.guest}>
+                                  <span class="tag">访客</span>
+                                </Show>
                               </div>
                               <div class="m-status" classList={{ hot: devSpeaking(p) || p.sharing }}>
                                 {devName(p)}
@@ -1940,6 +1959,9 @@ export async function renderRoom(root: HTMLElement, channel: string) {
                               </Show>
                               <Show when={isOwner}>
                                 <span class="tag tag-ember">房主</span>
+                              </Show>
+                              <Show when={first.guest}>
+                                <span class="tag">访客</span>
                               </Show>
                             </div>
                             <div class="m-status">{devices.length} 台设备</div>
@@ -2047,6 +2069,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
 
   // ---- 首次连接与清理 ----
   // 清理监听必须先于首次连接注册：连接期间用户离开时，清理块要能置 leaving 并释放已建好的部分
+  const guestTimer = guestUntil ? window.setInterval(() => setNowTick(Date.now()), 30_000) : 0;
   const myHash = location.hash;
   const onHashChange = () => {
     if (location.hash !== myHash) {
@@ -2065,6 +2088,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
       leaving = true;
       exitFs();
       clearTimeout(volSaveTimer);
+      clearInterval(guestTimer);
       saveVolumes(volumes()); // 去抖的尾触可能还没落盘
       if (gainResume) {
         document.removeEventListener('pointerdown', gainResume);

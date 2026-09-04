@@ -1,4 +1,4 @@
-// 频道管理（房主与频道管理员视角）：在房成员 / 黑名单 / 白名单 / 邀请制；归属类操作（管理员、转让、邀请制开关）仅房主可见。
+// 频道管理（房主与频道管理员视角）：在房成员 / 黑名单 / 白名单 / 访客邀请 / 邀请制；归属类操作（管理员、转让、邀请制开关）仅房主可见。
 // ChannelManage 嵌在设置浮层的「频道」分区；#/manage/<频道名> 保留为直达路由，页面只是给它套个头。
 import { createMemo, createSignal, For, Show } from 'solid-js';
 import { render } from 'solid-js/web';
@@ -6,9 +6,12 @@ import {
   addMember,
   addModerator,
   banUser,
+  createChannelInvite,
+  deleteChannelInvite,
   getUser,
   kickUser,
   listBans,
+  listChannelInvites,
   listChannels,
   listMembers,
   listModerators,
@@ -19,11 +22,12 @@ import {
   transferChannel,
   unbanUser,
 } from '../api';
-import type { ChannelRole, RoomParticipant, UserRef } from '../api';
-import { avatarHtml, confirmDialog, el, esc, icon, menuButtonHtml, timeAgo, toast, wireMenuButton } from '../ui';
+import type { ChannelRole, Invite, RoomParticipant, UserRef } from '../api';
+import { avatarHtml, confirmDialog, copyText, el, esc, icon, menuButtonHtml, timeAgo, toast, wireMenuButton } from '../ui';
 import type { ConfirmOpts } from '../ui';
+import { inviteState } from './settings-panes';
 
-type Tab = 'members' | 'bans' | 'allow' | 'mods' | 'transfer';
+type Tab = 'members' | 'bans' | 'allow' | 'guests' | 'mods' | 'transfer';
 
 export function ChannelManage(p: { channel: string }) {
   const me = getUser();
@@ -35,9 +39,16 @@ export function ChannelManage(p: { channel: string }) {
   const [bans, setBans] = createSignal<UserRef[]>();
   const [allow, setAllow] = createSignal<UserRef[]>();
   const [mods, setMods] = createSignal<UserRef[]>();
+  const [ginvites, setGinvites] = createSignal<Invite[]>();
+  const [gbase, setGbase] = createSignal('');
   const [myRole, setMyRole] = createSignal<ChannelRole>(''); // 服务端下发的我的频道角色；owner 才有归属类操作
   const [denied, setDenied] = createSignal<string | null>(null); // 频道不存在 / 没有管理角色：服务端会拒，前端只提示
   const [busy, setBusy] = createSignal(''); // 正在执行的操作 key，空串=空闲
+  // 访客邀请表单（两挡有效期 + 次数）
+  const [gTtl, setGTtl] = createSignal('24h');
+  const [gGuestTtl, setGGuestTtl] = createSignal('24h');
+  const [gUses, setGUses] = createSignal('1');
+  const [gFresh, setGFresh] = createSignal('');
   let allowInput!: HTMLInputElement;
   let transferSel!: HTMLSelectElement;
 
@@ -61,6 +72,17 @@ export function ChannelManage(p: { channel: string }) {
     }
   }
 
+  // 访客邀请 moderator+ 都能管
+  async function loadGinvites() {
+    try {
+      const r = await listChannelInvites(p.channel);
+      setGinvites(r.invites);
+      setGbase(r.base);
+    } catch {
+      setGinvites([]);
+    }
+  }
+
   async function load() {
     void loadParticipants();
     try {
@@ -72,6 +94,7 @@ export function ChannelManage(p: { channel: string }) {
       setInvite(ch.invite_only);
       setBans(bs);
       setAllow(ms);
+      void loadGinvites();
       if (ch.my_role === 'owner') void loadMods();
     } catch (err) {
       toast((err as Error).message, 'bad');
@@ -190,6 +213,58 @@ export function ChannelManage(p: { channel: string }) {
     }
   };
 
+  const makeGuestInvite = async () => {
+    if (busy()) return;
+    setBusy('ginvite-make');
+    try {
+      const r = await createChannelInvite(p.channel, gTtl(), gGuestTtl(), Number(gUses()));
+      setGFresh(r.url);
+      toast('访客邀请链接已生成', 'ok');
+      await loadGinvites();
+    } catch (err) {
+      toast((err as Error).message, 'bad');
+    } finally {
+      setBusy('');
+    }
+  };
+
+  // 访客邀请的撤销/删除是同一个按钮（失效的直接删）
+  const revokeGuestInvite = async (iv: Invite, dead: boolean) => {
+    if (busy()) return;
+    if (!dead) {
+      const ok = await confirmDialog({ title: '撤销这条访客邀请？', body: '撤销后链接立即失效；已进房的访客不受影响，到期自动消失。', danger: true, confirmText: '撤销' });
+      if (!ok) return;
+    }
+    setBusy(`ginvite-${iv.id}`);
+    try {
+      await deleteChannelInvite(p.channel, iv.id);
+      toast(dead ? '邀请已删除' : '邀请已撤销', 'ok');
+      await loadGinvites();
+    } catch (err) {
+      toast((err as Error).message, 'bad');
+    } finally {
+      setBusy('');
+    }
+  };
+
+  const GSeg = (gp: { val: () => string; set: (v: string) => void }) => (
+    <div class="seg-group" style="background:var(--bg-2)">
+      <For
+        each={[
+          ['1h', '1 小时'],
+          ['24h', '24 小时'],
+          ['7d', '7 天'],
+        ]}
+      >
+        {([v, label]) => (
+          <button type="button" class="hit seg" classList={{ on: gp.val() === v }} onClick={() => gp.set(v)}>
+            {label}
+          </button>
+        )}
+      </For>
+    </div>
+  );
+
   const toggleInvite = async () => {
     if (busy()) return;
     if (inviteOnly()) {
@@ -242,6 +317,7 @@ export function ChannelManage(p: { channel: string }) {
       { id: 'members' as Tab, label: '在房成员', n: () => (participants() ? users().length : undefined) },
       { id: 'bans' as Tab, label: '黑名单', n: () => bans()?.length },
       { id: 'allow' as Tab, label: '白名单', n: () => allow()?.length },
+      { id: 'guests' as Tab, label: '访客邀请', n: () => ginvites()?.length },
     ];
     // 归属类分区仅房主可见：频道管理员只管现场管制与名单
     if (isOwner()) {
@@ -460,6 +536,117 @@ export function ChannelManage(p: { channel: string }) {
               <span>邀请制没开，白名单只是一份草稿——现在所有账号都能进「{p.channel}」。</span>
             </div>
           </Show>
+        </Show>
+
+        <Show when={tab() === 'guests'}>
+          <div style="display:flex;flex-direction:column;gap:8px">
+            <div style="display:flex;align-items:baseline;gap:10px;flex-wrap:wrap">
+              <div style="font-size:13.5px;font-weight:600">访客邀请</div>
+              <div style="font-size:11.5px;color:var(--text-2)">不注册、只进「{p.channel}」的临时身份，到期自动消失</div>
+            </div>
+            <div class="card" style="padding:16px 18px">
+              <form
+                style="display:flex;gap:18px;align-items:flex-end;flex-wrap:wrap"
+                onSubmit={(ev) => {
+                  ev.preventDefault();
+                  void makeGuestInvite();
+                }}
+              >
+                <div>
+                  <div style="font-size:11px;color:var(--text-2);margin-bottom:7px">链接有效期</div>
+                  <GSeg val={gTtl} set={setGTtl} />
+                </div>
+                <div>
+                  <div style="font-size:11px;color:var(--text-2);margin-bottom:7px">访客身份寿命</div>
+                  <GSeg val={gGuestTtl} set={setGGuestTtl} />
+                </div>
+                <div>
+                  <div style="font-size:11px;color:var(--text-2);margin-bottom:7px">可用次数</div>
+                  <div class="seg-group" style="background:var(--bg-2)">
+                    <For
+                      each={[
+                        ['1', '1 次'],
+                        ['5', '5 次'],
+                        ['0', '不限'],
+                      ]}
+                    >
+                      {([v, label]) => (
+                        <button type="button" class="hit seg" classList={{ on: gUses() === v }} onClick={() => setGUses(v)}>
+                          {label}
+                        </button>
+                      )}
+                    </For>
+                  </div>
+                </div>
+                <button type="submit" class="hit btn btn-primary" classList={{ loading: busy() === 'ginvite-make' }} disabled={busy() !== ''}>
+                  生成链接
+                </button>
+              </form>
+              <Show when={gFresh()}>
+                <div style="display:flex;align-items:center;gap:10px;height:42px;margin-top:14px;padding:0 6px 0 14px;border-radius:9px;background:var(--sage-tint);border:1px solid var(--sage-line)">
+                  <span class="mono" style="font-size:12.5px;flex-grow:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">
+                    {gFresh()}
+                  </span>
+                  <button
+                    class="hit btn btn-sm"
+                    onClick={async () => {
+                      if (await copyText(gFresh())) toast('已复制', 'ok', 1400);
+                    }}
+                  >
+                    {el(icon('copy', 13))} 复制
+                  </button>
+                </div>
+              </Show>
+            </div>
+            <div class="list-box" style="background:var(--bg-2)">
+              <Show when={ginvites() === undefined}>
+                <div class="table-empty">加载中…</div>
+              </Show>
+              <Show when={ginvites()}>
+                <Show when={ginvites()!.length > 0} fallback={<div class="table-empty">还没有访客邀请。</div>}>
+                  <For each={ginvites()}>
+                    {(iv) => {
+                      const st = inviteState(iv);
+                      return (
+                        <div class="list-row" classList={{ dim: st.dead }}>
+                          <div style="flex-grow:1;min-width:0">
+                            <div style="display:flex;align-items:center;gap:8px">
+                              <span class="mono" style="font-size:12.5px;color:var(--text-0)">{iv.code}</span>
+                              <span class={`chip ${st.cls}`} style={st.cls ? '' : 'background:var(--bg-4);color:var(--text-2)'}>
+                                {st.label}
+                              </span>
+                            </div>
+                            <div style="font-size:11px;color:var(--text-2);margin-top:3px">
+                              {`${iv.used} / ${iv.max_uses === 0 ? '∞' : iv.max_uses} 次 · 访客寿命 ${iv.guest_ttl_sec >= 86400 ? `${Math.round(iv.guest_ttl_sec / 86400)} 天` : `${Math.round(iv.guest_ttl_sec / 3600)} 小时`}`}
+                            </div>
+                          </div>
+                          <Show when={!st.dead}>
+                            <button
+                              class="hit btn btn-sm"
+                              disabled={busy() !== ''}
+                              onClick={async () => {
+                                if (await copyText(`${gbase()}/#/join/${iv.code}`)) toast('已复制', 'ok', 1400);
+                              }}
+                            >
+                              复制链接
+                            </button>
+                          </Show>
+                          <button
+                            class="hit btn btn-sm"
+                            classList={{ loading: busy() === `ginvite-${iv.id}` }}
+                            disabled={busy() !== ''}
+                            onClick={() => void revokeGuestInvite(iv, st.dead)}
+                          >
+                            {st.dead ? '删除' : '撤销'}
+                          </button>
+                        </div>
+                      );
+                    }}
+                  </For>
+                </Show>
+              </Show>
+            </div>
+          </div>
         </Show>
 
         <Show when={tab() === 'mods'}>

@@ -57,6 +57,7 @@ type peerInfo struct {
 	Username string `json:"username"`       // 归属用户名（纯展示）
 	Kind     string `json:"kind,omitempty"` // 参与者类别（ingest = 推流设备）；ember 是纯语音内核，恒为空
 	Tag      string `json:"tag,omitempty"`  // 设备标签
+	Guest    bool   `json:"guest,omitempty"` // 访客（名册/聊天打标签用，元数据透传）
 	MicOn    bool   `json:"micOn"`
 	Muted    bool   `json:"muted,omitempty"` // 服务端禁言（channel_gags）
 }
@@ -68,6 +69,7 @@ type participant struct {
 	uid      int64  // 归属用户 id（管理操作的目标；identity 的主体就是它）
 	username string // 归属用户名（纯展示）
 	tag      string // 设备标签
+	guest    bool   // 访客（名册透传）
 	name     string
 	joinedAt int64
 
@@ -354,7 +356,7 @@ func (p *Provider) HandleJoin(ctx context.Context, roomName string, meta rtc.Met
 	}
 
 	part := &participant{
-		identity: identity, uid: meta.UID, username: meta.Username, tag: meta.Tag,
+		identity: identity, uid: meta.UID, username: meta.Username, tag: meta.Tag, guest: meta.Guest,
 		name: name, joinedAt: time.Now().Unix(),
 		conn: conn, send: make(chan sigMsg, 32), out: out,
 		closed: make(chan struct{}), senders: make(map[string]*senderEntry),
@@ -374,7 +376,7 @@ func (p *Provider) HandleJoin(ctx context.Context, roomName string, meta rtc.Met
 
 	go part.writeLoop(ctx)
 	self := peerInfo{Identity: identity, UID: meta.UID, Name: name, Username: meta.Username,
-		Tag: meta.Tag, MicOn: false, Muted: muted}
+		Tag: meta.Tag, Guest: meta.Guest, MicOn: false, Muted: muted}
 	// On = 自己是否被禁言
 	part.send <- sigMsg{Type: "welcome", Identity: identity, Self: &self, Peers: r.roster(identity), On: muted}
 	r.broadcastRoster()
@@ -680,7 +682,7 @@ func (r *vroom) roster(exclude string) []peerInfo {
 			continue
 		}
 		out = append(out, peerInfo{Identity: pt.identity, UID: pt.uid, Name: pt.name, Username: pt.username,
-			Tag: pt.tag, MicOn: pt.micOn, Muted: pt.muted.Load()})
+			Tag: pt.tag, Guest: pt.guest, MicOn: pt.micOn, Muted: pt.muted.Load()})
 	}
 	return out
 }

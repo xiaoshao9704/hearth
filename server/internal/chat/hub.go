@@ -49,8 +49,17 @@ func NewHub(st *store.Store, origin string) *Hub {
 
 // ServeHTTP 处理 GET /api/chat?channel=xx&token=xx（浏览器 WS 无法设请求头，token 走 query）。
 func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	u, err := h.st.UserByToken(r.Context(), r.URL.Query().Get("token"))
+	u, devID, err := h.st.UserSessionByToken(r.Context(), r.URL.Query().Get("token"))
 	if err != nil {
+		http.Error(w, "登录已失效", http.StatusUnauthorized)
+		return
+	}
+	// 与 auth 中间件同口径：绑定设备的会话（访客）须设备匹配；过期访客直接拒
+	if devID != "" && devID != r.URL.Query().Get("device_id") {
+		http.Error(w, "登录已失效", http.StatusUnauthorized)
+		return
+	}
+	if u.Role == store.RoleGuest && u.ExpiresAt != nil && time.Now().After(*u.ExpiresAt) {
 		http.Error(w, "登录已失效", http.StatusUnauthorized)
 		return
 	}
@@ -60,8 +69,8 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "频道不存在", http.StatusNotFound)
 		return
 	}
-	// 进入权限：封禁 / 邀请制白名单
-	ok, reason, err := h.st.CanJoin(r.Context(), ch, u.ID)
+	// 进入权限：封禁 / 访客频道范围 / 邀请制白名单
+	ok, reason, err := h.st.CanJoin(r.Context(), ch, u)
 	if err != nil {
 		http.Error(w, "内部错误", http.StatusInternalServerError)
 		return

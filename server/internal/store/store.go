@@ -231,31 +231,44 @@ func (s *Store) UserByName(ctx context.Context, username string) (*User, string,
 const sessionTTL = 7 * 24 * time.Hour // 会话有效期 7 天
 
 func (s *Store) CreateSession(ctx context.Context, userID int64) (string, error) {
+	return s.CreateSessionForDevice(ctx, userID, "")
+}
+
+// CreateSessionForDevice 签发会话；deviceID 非空即绑定设备（访客会话），
+// 之后每个请求须带同一设备 ID（auth 中间件校验）。
+func (s *Store) CreateSessionForDevice(ctx context.Context, userID int64, deviceID string) (string, error) {
 	buf := make([]byte, 32)
 	if _, err := rand.Read(buf); err != nil {
 		return "", err
 	}
 	token := hex.EncodeToString(buf)
 	_, err := s.bun.NewRaw(
-		"INSERT INTO sessions (token, user_id, expires_at) VALUES (?, ?, ?)",
-		token, userID, time.Now().Add(sessionTTL)).Exec(ctx)
+		"INSERT INTO sessions (token, user_id, expires_at, device_id) VALUES (?, ?, ?, ?)",
+		token, userID, time.Now().Add(sessionTTL), deviceID).Exec(ctx)
 	return token, err
 }
 
 // UserByToken 校验会话 token，过期、不存在或账号已停用返回 ErrNotFound。
 func (s *Store) UserByToken(ctx context.Context, token string) (*User, error) {
+	u, _, err := s.UserSessionByToken(ctx, token)
+	return u, err
+}
+
+// UserSessionByToken 同 UserByToken，附带会话绑定的设备 ID（空 = 未绑定）。
+// 访客会话签发时绑定设备，auth 据此比对请求的设备头。
+func (s *Store) UserSessionByToken(ctx context.Context, token string) (*User, string, error) {
 	var u User
-	var role string
+	var role, devID string
 	var expiresAt *time.Time
 	err := s.bun.NewRaw(`
-SELECT u.id, u.username, u.role, u.expires_at FROM sessions s JOIN users u ON u.id = s.user_id
+SELECT u.id, u.username, u.role, u.expires_at, s.device_id FROM sessions s JOIN users u ON u.id = s.user_id
 WHERE s.token = ? AND s.expires_at > ? AND u.disabled = 0`, token, time.Now()).
-		Scan(ctx, &u.ID, &u.Username, &role, &expiresAt)
+		Scan(ctx, &u.ID, &u.Username, &role, &expiresAt, &devID)
 	if errors.Is(err, sql.ErrNoRows) {
-		return nil, ErrNotFound
+		return nil, "", ErrNotFound
 	}
 	scanUserParts(&u, role, expiresAt)
-	return &u, err
+	return &u, devID, err
 }
 
 func (s *Store) DeleteSession(ctx context.Context, token string) error {
@@ -461,17 +474,29 @@ WHERE t.channel_id = ? ORDER BY t.created_at`, channelID)
 	return out, rows.Err()
 }
 
-// CanJoin 进入权限：被封禁拒绝；邀请制频道仅房主与白名单可进（房主天然豁免）。
-func (s *Store) CanJoin(ctx context.Context, c *Channel, userID int64) (bool, string, error) {
-	banned, err := s.IsBanned(ctx, c.ID, userID)
+// CanJoin 进入权限：被封禁拒绝；访客只能进有成员行（被邀请授予）的频道——开放频道
+// 对访客同样不开放，否则「只可以访问指定频道」不成立；邀请制频道仅房主与白名单可进
+// （房主天然豁免）。访客的未过期与设备匹配约束在 admitUser/auth，这里只管频道范围。
+func (s *Store) CanJoin(ctx context.Context, c *Channel, u *User) (bool, string, error) {
+	banned, err := s.IsBanned(ctx, c.ID, u.ID)
 	if err != nil {
 		return false, "", err
 	}
 	if banned {
 		return false, "已被该频道封禁", nil
 	}
-	if c.InviteOnly && userID != c.OwnerID {
-		member, err := s.IsMember(ctx, c.ID, userID)
+	if u.Role == RoleGuest {
+		member, err := s.IsMember(ctx, c.ID, u.ID)
+		if err != nil {
+			return false, "", err
+		}
+		if !member {
+			return false, "该频道未对你开放", nil
+		}
+		return true, "", nil
+	}
+	if c.InviteOnly && u.ID != c.OwnerID {
+		member, err := s.IsMember(ctx, c.ID, u.ID)
 		if err != nil {
 			return false, "", err
 		}
@@ -491,17 +516,18 @@ func (s *Store) AddMessage(ctx context.Context, channelID, userID int64, content
 	}
 	var m Message
 	err := s.bun.NewRaw(`
-SELECT m.id, m.channel_id, m.user_id, u.username, m.content, m.created_at
-FROM messages m JOIN users u ON u.id = m.user_id WHERE m.id = ?`, row.ID).
+SELECT m.id, m.channel_id, m.user_id, COALESCE(u.username, '已离开的访客'), m.content, m.created_at
+FROM messages m LEFT JOIN users u ON u.id = m.user_id WHERE m.id = ?`, row.ID).
 		Scan(ctx, &m.ID, &m.ChannelID, &m.UserID, &m.Username, &m.Content, &m.CreatedAt)
 	return &m, err
 }
 
 // RecentMessages 返回频道最近 limit 条消息（按时间正序）。
 func (s *Store) RecentMessages(ctx context.Context, channelID int64, limit int) ([]Message, error) {
+	// LEFT JOIN：访客过期即删用户行，历史消息保留，发送者显示兜底文案
 	rows, err := s.bun.QueryContext(ctx, `
-SELECT m.id, m.channel_id, m.user_id, u.username, m.content, m.created_at
-FROM messages m JOIN users u ON u.id = m.user_id
+SELECT m.id, m.channel_id, m.user_id, COALESCE(u.username, '已离开的访客'), m.content, m.created_at
+FROM messages m LEFT JOIN users u ON u.id = m.user_id
 WHERE m.channel_id = ? ORDER BY m.id DESC LIMIT ?`, channelID, limit)
 	if err != nil {
 		return nil, err

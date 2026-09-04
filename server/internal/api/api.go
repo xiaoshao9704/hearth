@@ -117,6 +117,7 @@ func (a *API) Router() *chi.Mux {
 	r.Post("/api/register", a.registerWithPolicy)
 	r.Post("/api/login", a.login)
 	r.Get("/api/invites/{code}", a.inviteInfo)
+	r.Post("/api/invites/{code}/guest", a.guestJoin)
 	r.Get("/api/site", a.site)
 
 	// 健康检查：只表示进程活着（宣告探测的刷新由进程内周期任务触发，不挂在这里）
@@ -145,10 +146,10 @@ func (a *API) Router() *chi.Mux {
 		r.Get("/api/account/devices", a.listMyDevices)
 		r.Delete("/api/account/devices/{deviceID}", a.deleteMyDevice)
 
-		// 推流令牌（每用户一把，房间在 WHIP URL 里）
-		r.Get("/api/ingest/token", a.ingestTokenGet)
-		r.Post("/api/ingest/token/reset", a.ingestTokenReset)
-		r.Put("/api/ingest/token", a.ingestTokenTag)
+		// 推流令牌（每用户一把，房间在 WHIP URL 里）；不对访客开放
+		r.With(a.requireRole(store.RoleUser)).Get("/api/ingest/token", a.ingestTokenGet)
+		r.With(a.requireRole(store.RoleUser)).Post("/api/ingest/token/reset", a.ingestTokenReset)
+		r.With(a.requireRole(store.RoleUser)).Put("/api/ingest/token", a.ingestTokenTag)
 
 		// 频道管理：频道解析与权限校验收敛到子路由中间件
 		// （现场管制与白名单 = 频道管理员及以上，归属变更与邀请制开关 = 仅频道主）
@@ -170,6 +171,9 @@ func (a *API) Router() *chi.Mux {
 				r.Post("/members", a.addMember)
 				r.Delete("/members", a.removeMember)
 				r.Get("/participants", a.channelParticipants)
+				r.Get("/invites", a.listChannelGuestInvites)
+				r.Post("/invites", a.createChannelGuestInvite)
+				r.Delete("/invites/{id}", a.revokeChannelGuestInvite)
 			})
 			r.Group(func(r chi.Router) {
 				r.Use(a.requireOwner)
@@ -245,6 +249,8 @@ func channelFrom(r *http.Request) *store.Channel {
 }
 
 // auth 认证中间件：Bearer token → 当前用户注入 context。
+// 访客两条会话级约束在这里：绑定设备的会话须请求头 X-Device-Id 一致（非访客会话留空不校验），
+// 过期访客直接 401（后台清理协程随后删行）；频道范围约束在 admitUser（CanJoin）。
 func (a *API) auth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
@@ -252,9 +258,17 @@ func (a *API) auth(next http.Handler) http.Handler {
 			writeErr(w, http.StatusUnauthorized, "缺少登录凭证")
 			return
 		}
-		u, err := a.st.UserByToken(r.Context(), token)
+		u, devID, err := a.st.UserSessionByToken(r.Context(), token)
 		if err != nil {
 			writeErr(w, http.StatusUnauthorized, "登录已失效")
+			return
+		}
+		if devID != "" && devID != r.Header.Get("X-Device-Id") {
+			writeErr(w, http.StatusUnauthorized, "登录已失效")
+			return
+		}
+		if u.Role == store.RoleGuest && u.ExpiresAt != nil && time.Now().After(*u.ExpiresAt) {
+			writeErr(w, http.StatusUnauthorized, "访客身份已过期，请重新打开邀请链接")
 			return
 		}
 		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), ctxUser, u)))
@@ -278,6 +292,7 @@ func (a *API) channelOf(w http.ResponseWriter, r *http.Request) *store.Channel {
 // requireRole 系统角色门槛中间件：低于该档一律 403（挂在 auth 之后）。
 func (a *API) requireRole(role store.Role) func(http.Handler) http.Handler {
 	label := map[store.Role]string{
+		store.RoleUser:  "该功能不对访客开放",
 		store.RolePower: "需要高级用户权限",
 		store.RoleAdmin: "需要管理员权限",
 	}[role]
@@ -420,6 +435,16 @@ func (a *API) listChannels(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "内部错误")
 		return
 	}
+	// 访客只见被授予的频道（开放频道对访客同样不开放，与 CanJoin 同口径）
+	if u.Role == store.RoleGuest {
+		granted := chs[:0]
+		for _, c := range chs {
+			if roles[c.ID] != "" {
+				granted = append(granted, c)
+			}
+		}
+		chs = granted
+	}
 	// 系统 admin+ 在任何频道隐含频道主（与 perm.ChannelRole 同口径，批量填充免逐频道查询）
 	implicit := ""
 	if perm.SysAtLeast(u, store.RoleAdmin) {
@@ -498,7 +523,7 @@ func (a *API) joinToken(w http.ResponseWriter, r *http.Request) {
 	}
 	// 参与者元数据组一次两线共用：身份判定走 identity 里的 user_id，
 	// 用户名等展示信息随元数据下发（前端不解析 identity）
-	meta := rtc.Meta{UID: adm.UID, Username: adm.Username, Tag: a.deviceTagFor(r, req.DeviceID, u.ID)}
+	meta := rtc.Meta{UID: adm.UID, Username: adm.Username, Tag: a.deviceTagFor(r, req.DeviceID, u.ID), Guest: u.Role == store.RoleGuest}
 	// 频道名即内核房间名，一一映射。语音线必发；舞台线可选；
 	// 两线同一实例时标记 combined，前端用一条连接承担两种角色（即旧单线形态）。
 	voiceAlias, voiceP := a.voiceInstance(r.Context())
@@ -659,10 +684,15 @@ func (a *API) resolveTargetUser(w http.ResponseWriter, r *http.Request, u *store
 // evict 把用户从频道现场移除：identity 为空踢全部设备并断聊天 WS；
 // 非空只踢该设备（归属约束由内核侧按 user_id 保底），聊天不动。
 func (a *API) evict(r *http.Request, c *store.Channel, t *store.User, identity string) (int, error) {
-	_, vp := a.voiceInstance(r.Context())
-	n, err := vp.RemoveParticipantsOf(r.Context(), c.Name, t.ID, identity)
-	if _, sp := a.stageInstance(r.Context()); sp != nil {
-		if m, serr := sp.RemoveParticipantsOf(r.Context(), c.Name, t.ID, identity); serr == nil {
+	return a.evictCtx(r.Context(), c, t, identity)
+}
+
+// evictCtx 同 evict，供没有 http.Request 的调用方（过期访客清理协程）使用。
+func (a *API) evictCtx(ctx context.Context, c *store.Channel, t *store.User, identity string) (int, error) {
+	_, vp := a.voiceInstance(ctx)
+	n, err := vp.RemoveParticipantsOf(ctx, c.Name, t.ID, identity)
+	if _, sp := a.stageInstance(ctx); sp != nil {
+		if m, serr := sp.RemoveParticipantsOf(ctx, c.Name, t.ID, identity); serr == nil {
 			n += m
 		} else if err == nil {
 			err = serr

@@ -106,7 +106,7 @@ func (p *Provider) ListParticipants(ctx context.Context, room string) ([]rtc.Par
 		// 两条路径都写）；非 JSON 或缺字段按无归属信息的参与者处理，展示侧自行兜底
 		var meta rtc.Meta
 		if json.Unmarshal([]byte(x.Metadata), &meta) == nil {
-			pt.UID, pt.Username, pt.Kind, pt.Tag = meta.UID, meta.Username, meta.Kind, meta.Tag
+			pt.UID, pt.Username, pt.Kind, pt.Tag, pt.Guest = meta.UID, meta.Username, meta.Kind, meta.Tag, meta.Guest
 		}
 		out = append(out, pt)
 	}

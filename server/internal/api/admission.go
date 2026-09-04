@@ -22,10 +22,15 @@ type admission struct {
 	CanPublish bool   // 能否发布（未被禁言）
 }
 
-// admitUser 统一入场判定：封禁/邀请制决定能否进入，禁言决定能否发布。
+// admitUser 统一入场判定：封禁/访客频道范围/邀请制决定能否进入，禁言决定能否发布。
+// 访客的另外两条约束：设备绑定在 auth 中间件（会话级），过期在 auth 与这里各查一次
+// （这里是进房凭证签发路径的最后一道，auth 过后到进房之间可能跨过过期点）。
 // 返回 (判定结果, 是否允许进入, 拒绝原因, 内部错误)。
 func (a *API) admitUser(ctx context.Context, c *store.Channel, u *store.User) (admission, bool, string, error) {
-	ok, reason, err := a.st.CanJoin(ctx, c, u.ID)
+	if u.Role == store.RoleGuest && u.ExpiresAt != nil && time.Now().After(*u.ExpiresAt) {
+		return admission{}, false, "访客身份已过期，请重新打开邀请链接", nil
+	}
+	ok, reason, err := a.st.CanJoin(ctx, c, u)
 	if err != nil {
 		return admission{}, false, "", err
 	}

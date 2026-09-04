@@ -1,7 +1,7 @@
 // 聊天 WebSocket 客户端：连接 server 的 /api/chat，收历史与实时消息。
 // 断线自动重连（指数退避，页面回前台/网络恢复立即重试）；重连成功后服务端会重发历史。
 // 被移出频道（1008）/ 频道删除（1001）经关闭码识别为终态，不再重试。
-import { getToken, wsBase } from './api';
+import { deviceId, getToken, wsBase } from './api';
 
 export interface ChatMessage {
   id: number;
@@ -38,7 +38,8 @@ export function connectChat(
 
   const open = () => {
     if (closed || getToken() === null) return;
-    const url = `${wsBase()}/api/chat?channel=${encodeURIComponent(channel)}&token=${getToken()}`;
+    // device_id 随 query 走：访客的会话绑了设备，WS 没有请求头可用
+    const url = `${wsBase()}/api/chat?channel=${encodeURIComponent(channel)}&token=${getToken()}&device_id=${deviceId()}`;
     ws = new WebSocket(url);
     ws.onopen = () => {
       attempts = 0;

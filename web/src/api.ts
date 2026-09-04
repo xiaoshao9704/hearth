@@ -94,6 +94,8 @@ async function req<T>(path: string, options: { method?: string; body?: unknown }
   const headers: Record<string, string> = {};
   const token = getToken();
   if (token) headers['Authorization'] = `Bearer ${token}`;
+  // 访客会话绑定设备：一律带上设备头，非访客会话服务端忽略
+  headers['X-Device-Id'] = deviceId();
   if (options.body !== undefined) headers['Content-Type'] = 'application/json';
   let res: Response;
   try {
@@ -339,6 +341,7 @@ export interface RoomParticipant {
   joined_at: number;
   kind?: string; // 参与者类别（omitempty；ingest = 推流设备）
   tag?: string; // 设备标签
+  guest?: boolean; // 访客（omitempty）
 }
 
 export async function listParticipants(channel: string): Promise<RoomParticipant[]> {
@@ -383,10 +386,23 @@ export interface InviteInfo {
   inviter: string;
   expires_at: string;
   alive: boolean;
+  kind: 'register' | 'guest'; // guest = 频道访客邀请（只填展示名直接进房）
+  channel_name: string; // guest 类授予的频道名
+  guest_ttl_sec: number; // guest 类产出访客的身份寿命（秒）
 }
 
 export function inviteInfo(code: string): Promise<InviteInfo> {
   return req(`/api/invites/${encodeURIComponent(code)}`);
+}
+
+// 访客入场（公开）：凭 guest 类邀请建临时账号，成功即建立会话；返回目标频道名（直接进房，不经大厅）
+export async function guestJoin(code: string, username: string): Promise<string> {
+  const data = await req<{ token: string; user: User; channel: string }>(
+    `/api/invites/${encodeURIComponent(code)}/guest`,
+    { method: 'POST', body: { username, device_id: deviceId() } },
+  );
+  saveSession(data.token, data.user);
+  return data.channel;
 }
 
 // 注册邀请管理（power+）：发链接、列自己发的（admin+ 列全部）、撤销
@@ -420,6 +436,32 @@ export function createInvite(note: string, maxUses: number, ttl: string, role = 
 
 export function deleteInvite(id: number): Promise<void> {
   return req(`/api/invites/${id}`, { method: 'DELETE' });
+}
+
+// ---- 频道访客邀请（频道 moderator+；挂在频道管理路由下）----
+
+export async function listChannelInvites(channel: string): Promise<{ invites: Invite[]; base: string }> {
+  const data = await req<{ invites: Invite[] | null; base: string }>(
+    `/api/channels/${encodeURIComponent(channel)}/invites`,
+  );
+  return { invites: data.invites ?? [], base: data.base };
+}
+
+// ttl = 链接有效期，guestTtl = 访客入场后的身份寿命；同组挡位 1h/24h/7d
+export function createChannelInvite(
+  channel: string,
+  ttl: string,
+  guestTtl: string,
+  maxUses: number,
+): Promise<{ invite: Invite; url: string }> {
+  return req(`/api/channels/${encodeURIComponent(channel)}/invites`, {
+    method: 'POST',
+    body: { ttl, guest_ttl: guestTtl, max_uses: maxUses },
+  });
+}
+
+export function deleteChannelInvite(channel: string, id: number): Promise<void> {
+  return req(`/api/channels/${encodeURIComponent(channel)}/invites/${id}`, { method: 'DELETE' });
 }
 
 // ---- 管理后台 ----

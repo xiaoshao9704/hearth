@@ -46,6 +46,7 @@ type Meta struct {
 	Username string `json:"username"`
 	Kind     string `json:"kind,omitempty"` // ingest = 推流设备；浏览器参与者为空
 	Tag      string `json:"tag,omitempty"`  // 设备标签
+	Guest    bool   `json:"guest,omitempty"` // 访客（前端名册/聊天打「访客」标签）
 }
 
 // ConfigFunc 取动态配置的生效值（环境变量 > 数据库 > 默认），由接入层注入。
@@ -80,6 +81,7 @@ type Participant struct {
 	JoinedAt int64  `json:"joined_at"`      // Unix 秒
 	Kind     string `json:"kind,omitempty"` // 参与者类别（内核元数据透传；ingest = 推流设备）
 	Tag      string `json:"tag,omitempty"`  // 设备标签
+	Guest    bool   `json:"guest,omitempty"` // 访客（元数据透传）
 }
 
 // Provider 语音（房间）内核：签发进房凭证与房间管理。语音槽位与舞台槽位都建立在它之上。

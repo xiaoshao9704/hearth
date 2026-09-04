@@ -68,6 +68,7 @@ export async function renderLobby(root: HTMLElement, alive: () => boolean) {
     <header class="topbar">
       ${menuButtonHtml()}
       <h1 id="greet">${greeting()}，${esc(user?.username ?? '')}</h1>
+      ${user?.role === 'guest' ? '<span class="tag" style="flex-shrink:0">访客</span>' : ''}
       <div class="spacer"></div>
       ${user?.is_admin ? `<a class="hit btn btn-sm" href="#/admin">${icon('shield', 14, 'var(--text-1)', 1.6)} 管理后台</a>` : ''}
       <div class="status-chip mono" id="status-chip"><span style="display:flex;align-items:center;gap:5px"><span class="ok-dot" id="status-dot"></span><span id="status-text">服务器在线</span></span></div>

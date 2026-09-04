@@ -39,6 +39,8 @@
 
 「谁能做什么」收口在 perm 包（角色类型与存取在 store）：handler 与中间件一律调 `perm.SysAtLeast`/`perm.CanActOn`/`perm.ChannelRole`，不得手写 `IsAdmin`/`OwnerID` 比较（grep 只允许命中 perm 与 store）。系统角色是严格阶梯 `guest<user<power<admin<super`（`users.role` 权威，`is_admin` 双写期只读派生、下个版本删列）：只能操作比自己低档的人；super 全站恰好一个，只经 CLI `hearth promote <用户名>` 转移（旧 super 降 admin）。频道角色权威在 `channel_members.role`（owner/moderator/member），`channels.created_by` 只作历史；系统 admin+ 在任何频道隐含 owner。注册产出档由 `reg_default_role`（user/power）或邀请上指定的档决定。前端不推导权限：显隐一律按服务端返回的 `role`/`my_role`/`can_set_roles`。
 
+访客（role=guest）是设备绑定的临时用户：`POST /api/invites/{code}/guest` 凭 guest 类邀请（频道 moderator+ 经 `/api/channels/{ch}/invites` 签发）建号，展示名即 username。三条约束的落点：设备绑定在 `auth` 中间件（sessions.device_id 非空须请求头 `X-Device-Id` 一致，聊天 WS 用 query `device_id`）、过期在 `auth` 与 `admitUser` 各查一次（10 分钟一轮的 `GuestSweepLoop` 删行并踢现场，消息保留、发送者显示「已离开的访客」）、频道范围在 `store.CanJoin`（访客必须有该频道成员行，开放频道对访客同样不开放）。访客无密码、不能建频道/发邀请/持推流令牌/持频道角色。
+
 ### 入场判定（server/internal/api/admission.go）
 
 一条规则，三个执行点：`admitUser` 是唯一的"谁能进房、能否发布"决策函数（返回 `UID`/`Username`，identity 由调用方经 `rtc.Identity` 组），`joinToken`（凭证签发）、`/providers/ember/voice`（ember 验票入会）、`/providers/{alias}/w` POST（WHIP 推流拦截，统一走 `admitIngest`：令牌反查用户 + URL 取频道，进程内 bellows / 远端 bellows / livekit-ingress / lkembed 反代 LiveKit 自带 WHIP 四条路径共用，definitive 404/403/503 无 fail-open）都调它。远端 `cmd/bellows` 进程没有数据库也不回调：hearth 在反代前做完判定，把结果签成短时效通行证（grant）塞进请求头，远端只本地验签（与 LiveKit join token 同一模型）。新增入口或新增入场约束时**只改这里**，不得在别处散落 `CanJoin`/`IsGagged` 组合。ember 线走一次性入场票（60s、取出即删、防挪用），不做二次判定。
@@ -62,6 +64,7 @@
 - 设置的三个维度：个人（跟账号/本机走，即改即存）、频道（房主与频道管理员视角，落库即生效、每次操作 toast）、服务器（管理后台 `#/admin`，浮层里只放跳转）。所有齿轮入口都开同一个浮层，只是落点不同；浮层按 `channel` 上下文自查 `my_role`（owner/moderator）决定是否出「频道」分区，入口不必区分谁是房主。
 - CSS 统一在 `src/style.css`，类名复用既有设计系统（ember 主题、三态明暗），选择器注意特异性（button 重置用零特异性 `:where`）。
 - 引擎抽象 `engine/types.ts`：新内核实现 `AVEngine` 并在 `engine/index.ts` 注册动态导入（保持代码分割）。
+- 访客会话绑定设备（`sessions.device_id`）：`api.ts` 的 `req()` 一律带 `X-Device-Id`（非访客会话服务端忽略），WS 没有请求头——聊天 `/api/chat` 与 ember 信令都在 URL 上拼 `device_id` query。访客的展示/管理标记走内核元数据 `guest`（`EPart.guest` 透传），聊天消息不加访客标签（避免第二真相源）。
 
 ### 单二进制/单容器（自包含镜像 Dockerfile.aio + server/cmd/aioinit 已退役并删除）
 

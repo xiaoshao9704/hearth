@@ -981,7 +981,8 @@ function renderDevices(body: HTMLElement) {
 
 // ---- 邀请（power+；admin+ 可指定产出档、可见全部邀请）----
 
-function inviteState(iv: Invite): { label: string; cls: string; dead: boolean } {
+// 邀请状态徽标：设置浮层的注册邀请与频道管理的访客邀请共用
+export function inviteState(iv: Invite): { label: string; cls: string; dead: boolean } {
   const now = Date.now();
   const exp = new Date(iv.expires_at).getTime();
   if (iv.revoked) return { label: '已撤销', cls: 'tag-red', dead: true };

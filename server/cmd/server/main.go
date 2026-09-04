@@ -119,6 +119,9 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	// 过期访客周期清理（10 分钟一轮，见 api.GuestSweepLoop）
+	go a.GuestSweepLoop(ctx)
+
 	// 进程内 TLS：模式/证书由动态配置决定，Sync 幂等热切换（见 internal/tlsx）。
 	// HTTP listener 不随模式重启——它的 handler 是按当前模式分流的壳
 	// （TLS 开启时只做 ACME 挑战 + 301 到 HTTPS）。

@@ -12,9 +12,9 @@ interface SigMsg {
   sdp?: string;
   mids?: Record<string, string>;
   identity?: string;
-  self?: { identity: string; uid: number; name: string; micOn: boolean; muted?: boolean; username?: string; kind?: string; tag?: string }; // welcome 附带：自己的名册条目
-  // 名册条目：uid 是管理操作的目标，username/kind/tag 用于展示与识别推流参与者
-  peers?: { identity: string; uid: number; name: string; micOn: boolean; muted?: boolean; username?: string; kind?: string; tag?: string }[];
+  self?: { identity: string; uid: number; name: string; micOn: boolean; muted?: boolean; username?: string; kind?: string; tag?: string; guest?: boolean }; // welcome 附带：自己的名册条目
+  // 名册条目：uid 是管理操作的目标，username/kind/tag/guest 用于展示与识别推流参与者、访客
+  peers?: { identity: string; uid: number; name: string; micOn: boolean; muted?: boolean; username?: string; kind?: string; tag?: string; guest?: boolean }[];
   on?: boolean;
   speakers?: string[];
   reason?: string;
@@ -29,6 +29,7 @@ interface RosterEntry {
   username: string; // 归属用户名（纯展示）
   ingest: boolean;
   tag: string;
+  guest: boolean; // 访客（名册打标签用）
 }
 
 export class EmberEngine implements AVEngine {
@@ -89,6 +90,7 @@ export class EmberEngine implements AVEngine {
         sharing: false,
         ingest: false,
         tag: this.self?.tag ?? '',
+        guest: this.self?.guest === true,
       },
     ];
     this.roster.forEach((v, identity) => {
@@ -103,12 +105,13 @@ export class EmberEngine implements AVEngine {
         sharing: false,
         ingest: v.ingest,
         tag: v.tag,
+        guest: v.guest,
       });
     });
     return out;
   }
 
-  // 名册条目落库：uid/username/kind/tag 全由服务端给出，前端不做任何 identity 解析
+  // 名册条目落库：uid/username/kind/tag/guest 全由服务端给出，前端不做任何 identity 解析
   private static peerEntry(p: NonNullable<SigMsg['peers']>[number]): RosterEntry {
     return {
       name: p.name,
@@ -118,6 +121,7 @@ export class EmberEngine implements AVEngine {
       username: p.username ?? p.name,
       ingest: p.kind === 'ingest',
       tag: p.tag ?? '',
+      guest: p.guest === true,
     };
   }
 

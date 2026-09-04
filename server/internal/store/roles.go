@@ -4,6 +4,7 @@ package store
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
 	"errors"
 	"time"
@@ -222,4 +223,91 @@ func scanUserParts(u *User, role string, expiresAt *time.Time) {
 	u.Role = Role(role)
 	u.IsAdmin = u.Role.Rank() >= RoleAdmin.Rank()
 	u.ExpiresAt = expiresAt
+}
+
+// ---- 访客 ----
+
+// CreateGuest 创建访客：role=guest、expires_at=now+ttl、invite_id 记来源邀请。
+// 展示名即 username（全表唯一，冲突由调用方提示换一个）；访客没有密码。
+func (s *Store) CreateGuest(ctx context.Context, username string, inviteID int64, ttl time.Duration) (*User, error) {
+	exp := time.Now().Add(ttl)
+	row := &userRow{Username: username, PasswordHash: "", Role: string(RoleGuest),
+		ExpiresAt: &exp, InviteID: &inviteID}
+	if _, err := s.bun.NewInsert().Model(row).Exec(ctx); err != nil {
+		return nil, err
+	}
+	u := &User{ID: row.ID, Username: username, InviteID: &inviteID}
+	scanUserParts(u, string(RoleGuest), &exp)
+	return u, nil
+}
+
+// ListExpiredGuests 列出已过期的访客（清理协程用）。
+func (s *Store) ListExpiredGuests(ctx context.Context, now time.Time) ([]User, error) {
+	out := []User{}
+	rows, err := s.bun.QueryContext(ctx,
+		"SELECT id, username FROM users WHERE role = 'guest' AND expires_at IS NOT NULL AND expires_at < ?", now)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var u User
+		if err := rows.Scan(&u.ID, &u.Username); err != nil {
+			return nil, err
+		}
+		u.Role = RoleGuest
+		out = append(out, u)
+	}
+	return out, rows.Err()
+}
+
+// ChannelIDsOfUser 用户的 channel_members 行覆盖的频道 id（清理访客时逐频道踢现场用）。
+func (s *Store) ChannelIDsOfUser(ctx context.Context, userID int64) ([]int64, error) {
+	var out []int64
+	rows, err := s.bun.QueryContext(ctx,
+		"SELECT channel_id FROM channel_members WHERE user_id = ?", userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
+}
+
+// CreateGuestInvite 创建访客类邀请：绑定频道，guestTTLSec 是产出访客的寿命。
+func (s *Store) CreateGuestInvite(ctx context.Context, createdBy, channelID int64, maxUses int, ttl, guestTTL time.Duration) (*Invite, error) {
+	buf := make([]byte, 8)
+	if _, err := rand.Read(buf); err != nil {
+		return nil, err
+	}
+	code := make([]byte, 8)
+	for i, b := range buf {
+		code[i] = inviteAlphabet[int(b)%len(inviteAlphabet)]
+	}
+	inv := &Invite{Code: string(code), Kind: "guest", ChannelID: &channelID,
+		GuestTTLSec: int(guestTTL.Seconds()), MaxUses: maxUses, ExpiresAt: time.Now().Add(ttl)}
+	row := &inviteRow{Code: inv.Code, Kind: "guest", ChannelID: &channelID,
+		GuestTTL: inv.GuestTTLSec, MaxUses: maxUses, CreatedBy: createdBy, ExpiresAt: inv.ExpiresAt}
+	_, err := s.bun.NewInsert().Model(row).
+		Column("code", "kind", "channel_id", "guest_ttl_sec", "max_uses", "expires_at", "created_by").
+		Value("max_uses", "?", maxUses).
+		Returning("id").
+		Exec(ctx)
+	if err != nil {
+		return nil, err
+	}
+	inv.ID = row.ID
+	inv.CreatedByID = createdBy
+	return inv, nil
+}
+
+// ListGuestInvites 某频道的访客邀请（频道管理「访客邀请」分区用）。
+func (s *Store) ListGuestInvites(ctx context.Context, channelID int64) ([]Invite, error) {
+	return s.listInvites(ctx, " WHERE i.channel_id = ? AND i.kind = 'guest'", channelID)
 }
