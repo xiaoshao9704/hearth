@@ -135,27 +135,11 @@ export class LiveKitEngine implements AVEngine {
       });
   }
 
-  // SDK 的 connect 在信令挂起时可能永不 settle：加超时并把半连接收干净，
-  // 否则房间层的重连调度永远等不到这条 Promise
+  // SDK 自己分别对 WebSocket 与 PeerConnection 做 15 秒超时，并在失败时关闭 engine。
+  // 这里不能再套同期限的 Promise.race：外层先超时会绕过 SDK 的清理，下一次完整入场
+  // 可能与尚未退出的 participant 重叠，被服务端判成 duplicate identity。
   async connect(url: string, token: string) {
-    let timedOut = false;
-    let timer = 0;
-    try {
-      await Promise.race([
-        this.room.connect(url, token),
-        new Promise<never>((_, reject) => {
-          timer = window.setTimeout(() => {
-            timedOut = true;
-            reject(new Error('舞台线连接超时'));
-          }, 15000);
-        }),
-      ]);
-    } catch (err) {
-      if (timedOut) await this.room.disconnect().catch(() => {});
-      throw err;
-    } finally {
-      clearTimeout(timer);
-    }
+    await this.room.connect(url, token);
   }
 
   async resumeAudio() {
