@@ -227,8 +227,15 @@ func TestOpenUpgradesLegacyDB(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.Name != "general" || c.CreatedBy != "alice" || c.InviteOnly {
-		t.Fatalf("频道数据不符: %+v", c)
+	if c.Name != "general" || c.OwnerID != 0 || c.CreatedBy != "" || c.InviteOnly {
+		t.Fatalf("数据迁移前不得用 created_by 充当 owner: %+v", c)
+	}
+	if _, err := s.MigrateRoleData(ctx); err != nil {
+		t.Fatalf("角色数据迁移失败: %v", err)
+	}
+	c, err = s.ChannelByID(ctx, 1)
+	if err != nil || c.OwnerID != 1 || c.CreatedBy != "alice" {
+		t.Fatalf("数据迁移后 owner 行应成为唯一权威: %+v err=%v", c, err)
 	}
 	msgs, err := s.RecentMessages(ctx, 1, 10)
 	if err != nil {

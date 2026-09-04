@@ -154,7 +154,7 @@ type Channel struct {
 	InviteOnly bool      `json:"invite_only"`
 	MyRole     string    `bun:"-" json:"my_role"` // 对当前请求用户的频道角色（接口层填充，owner/moderator/member/""）
 	Online     int       `bun:"-" json:"online"`  // 当前在房人数（接口层从内核填充）
-	OwnerID    int64     `bun:"-" json:"-"`       // 房主用户 ID（内部用；权威是 channel_members 的 owner 行，查询里 COALESCE 回 created_by 历史列）
+	OwnerID    int64     `bun:"-" json:"-"`       // 房主用户 ID（内部用；权威是 channel_members 的 owner 行）
 }
 
 type Message struct {
@@ -273,12 +273,11 @@ func scanChannel(scanner interface{ Scan(...any) error }, c *Channel) error {
 	return err
 }
 
-// 房主（OwnerID/CreatedBy）的权威是 channel_members 的 owner 行，channels.created_by
-// 只作历史记录兜底（迁移前的库在游标 v5 之后才一致，COALESCE 保证期间读出旧值）。
-const channelCols = `c.id, c.name, COALESCE(ou.username, ''), c.created_at, c.invite_only, COALESCE(om.user_id, c.created_by)`
+// 房主（OwnerID/CreatedBy）只认 channel_members 的 owner 行；channels.created_by 只作历史记录。
+const channelCols = `c.id, c.name, COALESCE(ou.username, ''), c.created_at, c.invite_only, COALESCE(om.user_id, 0)`
 const channelJoins = ` FROM channels c
 LEFT JOIN channel_members om ON om.channel_id = c.id AND om.role = 'owner'
-LEFT JOIN users ou ON ou.id = COALESCE(om.user_id, c.created_by)`
+LEFT JOIN users ou ON ou.id = om.user_id`
 
 func (s *Store) CreateChannel(ctx context.Context, name string, userID int64) (*Channel, error) {
 	row := &channelRow{Name: name, CreatedBy: userID}
@@ -409,7 +408,7 @@ func (s *Store) AddMember(ctx context.Context, channelID, userID int64) error {
 
 func (s *Store) RemoveMember(ctx context.Context, channelID, userID int64) error {
 	_, err := s.bun.NewRaw(
-		"DELETE FROM channel_members WHERE channel_id = ? AND user_id = ?", channelID, userID).Exec(ctx)
+		"DELETE FROM channel_members WHERE channel_id = ? AND user_id = ? AND role = 'member'", channelID, userID).Exec(ctx)
 	return err
 }
 
@@ -461,7 +460,8 @@ WHERE t.channel_id = ? ORDER BY t.created_at`, channelID)
 	return out, rows.Err()
 }
 
-// CanJoin 进入权限：被封禁拒绝；邀请制频道仅房主与白名单可进（房主天然豁免）。
+// CanJoin 进入权限：被封禁拒绝；邀请制频道只认 channel_members 成员行。
+// owner/moderator 本身也是成员行，不再用 channels.created_by 历史列兜底。
 func (s *Store) CanJoin(ctx context.Context, c *Channel, userID int64) (bool, string, error) {
 	banned, err := s.IsBanned(ctx, c.ID, userID)
 	if err != nil {
@@ -470,7 +470,7 @@ func (s *Store) CanJoin(ctx context.Context, c *Channel, userID int64) (bool, st
 	if banned {
 		return false, "已被该频道封禁", nil
 	}
-	if c.InviteOnly && userID != c.OwnerID {
+	if c.InviteOnly {
 		member, err := s.IsMember(ctx, c.ID, userID)
 		if err != nil {
 			return false, "", err

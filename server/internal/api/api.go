@@ -595,17 +595,21 @@ func deviceTag(ua string) string {
 
 // ---- 频道管理（房主操作）----
 
-// resolveTargetUser 解析 body 里的目标 user_id：须存在且不能是自己（封禁/禁言对自己无意义；
-// 踢出有独立 handler，支持踢自己的设备）。目标一律用 user_id——用户名可改、改后旧名即释放，
-// 拿它做操作目标会在改名/重注册后打到别人身上；前端从参与者元数据的 uid 取。
+// resolveTargetUser 解析 body 里的目标 user_id：须存在且不能是自己。
+// 目标一律用 user_id——用户名可改、改后旧名即释放，拿它做操作目标会在
+// 改名或重注册后打到别人身上；前端从参与者元数据的 uid 取。
 func (a *API) resolveTargetUser(w http.ResponseWriter, r *http.Request, u *store.User) *store.User {
+	return a.resolveTargetUserWithSelf(w, r, u, false)
+}
+
+func (a *API) resolveTargetUserWithSelf(w http.ResponseWriter, r *http.Request, u *store.User, allowSelf bool) *store.User {
 	var req struct {
 		UserID int64 `json:"user_id"`
 	}
 	if !decode(w, r, &req) {
 		return nil
 	}
-	if req.UserID == u.ID {
+	if req.UserID == u.ID && !allowSelf {
 		writeErr(w, http.StatusBadRequest, "不能对自己操作")
 		return nil
 	}
@@ -615,6 +619,18 @@ func (a *API) resolveTargetUser(w http.ResponseWriter, r *http.Request, u *store
 		return nil
 	}
 	return t
+}
+
+// canModerateTarget 把频道管制也纳入系统角色阶梯；解除自身状态是唯一例外。
+func canModerateTarget(w http.ResponseWriter, actor, target *store.User, allowSelf bool) bool {
+	if allowSelf && actor.ID == target.ID {
+		return true
+	}
+	if !perm.CanActOn(actor, target) {
+		writeErr(w, http.StatusForbidden, "不能操作系统角色不低于自己的用户")
+		return false
+	}
+	return true
 }
 
 // evict 把用户从频道现场移除：identity 为空踢全部设备并断聊天 WS；
@@ -670,6 +686,9 @@ func (a *API) kick(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, "用户不存在")
 		return
 	}
+	if !canModerateTarget(w, u, t, true) {
+		return
+	}
 	n, err := a.evict(r, c, t, req.Identity)
 	if err != nil {
 		writeErr(w, http.StatusBadGateway, "踢出失败（内核不可达）")
@@ -680,8 +699,12 @@ func (a *API) kick(w http.ResponseWriter, r *http.Request) {
 
 func (a *API) ban(w http.ResponseWriter, r *http.Request) {
 	c := channelFrom(r)
-	t := a.resolveTargetUser(w, r, userFrom(r))
+	u := userFrom(r)
+	t := a.resolveTargetUser(w, r, u)
 	if t == nil {
+		return
+	}
+	if !canModerateTarget(w, u, t, false) {
 		return
 	}
 	if err := a.st.Ban(r.Context(), c.ID, t.ID); err != nil {
@@ -695,8 +718,12 @@ func (a *API) ban(w http.ResponseWriter, r *http.Request) {
 
 func (a *API) unban(w http.ResponseWriter, r *http.Request) {
 	c := channelFrom(r)
-	t := a.resolveTargetUser(w, r, userFrom(r))
+	u := userFrom(r)
+	t := a.resolveTargetUserWithSelf(w, r, u, true)
 	if t == nil {
+		return
+	}
+	if !canModerateTarget(w, u, t, true) {
 		return
 	}
 	if err := a.st.Unban(r.Context(), c.ID, t.ID); err != nil {
@@ -711,8 +738,12 @@ func (a *API) unban(w http.ResponseWriter, r *http.Request) {
 // 内核调用只负责让"当前在房"的设备立即失声，目标不在房（ErrNoParticipant）不算失败。
 func (a *API) setGag(w http.ResponseWriter, r *http.Request, muted bool) {
 	c := channelFrom(r)
-	t := a.resolveTargetUser(w, r, userFrom(r))
+	u := userFrom(r)
+	t := a.resolveTargetUserWithSelf(w, r, u, !muted)
 	if t == nil {
+		return
+	}
+	if !canModerateTarget(w, u, t, !muted) {
 		return
 	}
 	var err error
@@ -833,6 +864,10 @@ func (a *API) resolveRoleTarget(w http.ResponseWriter, r *http.Request) *store.U
 	}
 	if t.Role == store.RoleGuest {
 		writeErr(w, http.StatusBadRequest, "访客不能持有频道角色")
+		return nil
+	}
+	if t.Disabled {
+		writeErr(w, http.StatusBadRequest, "停用账号不能持有频道角色")
 		return nil
 	}
 	return t

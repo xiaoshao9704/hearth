@@ -103,10 +103,14 @@ func (s *Store) ChannelRolesOf(ctx context.Context, userID int64) (map[int64]Cha
 
 // SetChannelRole 写入/变更成员角色（upsert：无行建行，有行改档）。
 func (s *Store) SetChannelRole(ctx context.Context, channelID, userID int64, role ChannelRole) error {
+	return setChannelRole(ctx, s.bun, s.d.name, channelID, userID, role)
+}
+
+func setChannelRole(ctx context.Context, db bun.IDB, dialectName string, channelID, userID int64, role ChannelRole) error {
 	row := &channelMemberRow{ChannelID: channelID, UserID: userID, Role: string(role)}
-	q := s.bun.NewInsert().Model(row).
+	q := db.NewInsert().Model(row).
 		Column("channel_id", "user_id", "role").Value("role", "?", string(role))
-	if s.d.name == "mysql" {
+	if dialectName == "mysql" {
 		q = q.On("DUPLICATE KEY UPDATE").Set("role = VALUES(role)")
 	} else { // sqlite / postgres 同语法
 		q = q.On("CONFLICT (channel_id, user_id) DO UPDATE").Set("role = EXCLUDED.role")
@@ -116,13 +120,16 @@ func (s *Store) SetChannelRole(ctx context.Context, channelID, userID int64, rol
 }
 
 // TransferChannel 频道转让：旧 owner 降为 moderator，新主写 owner 行（其旧行被覆盖升档）。
+// 两步必须在同一事务内；MySQL 没有部分唯一索引，这也是它的唯一 owner 约束。
 func (s *Store) TransferChannel(ctx context.Context, channelID, newOwnerID int64) error {
-	if _, err := s.bun.NewRaw(
-		"UPDATE channel_members SET role = 'moderator' WHERE channel_id = ? AND role = 'owner'",
-		channelID).Exec(ctx); err != nil {
-		return err
-	}
-	return s.SetChannelRole(ctx, channelID, newOwnerID, ChannelRoleOwner)
+	return s.bun.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+		if _, err := tx.NewRaw(
+			"UPDATE channel_members SET role = 'moderator' WHERE channel_id = ? AND role = 'owner'",
+			channelID).Exec(ctx); err != nil {
+			return err
+		}
+		return setChannelRole(ctx, tx, s.d.name, channelID, newOwnerID, ChannelRoleOwner)
+	})
 }
 
 // ListModerators 列出频道管理员（不含房主）。
@@ -227,15 +234,7 @@ ORDER BY c.id`)
 				Exec(ctx); err != nil {
 				return err
 			}
-			row := &channelMemberRow{ChannelID: c.id, UserID: c.owner, Role: string(ChannelRoleOwner)}
-			q := tx.NewInsert().Model(row).
-				Column("channel_id", "user_id", "role").Value("role", "?", string(ChannelRoleOwner))
-			if s.d.name == "mysql" {
-				q = q.On("DUPLICATE KEY UPDATE").Set("role = VALUES(role)")
-			} else {
-				q = q.On("CONFLICT (channel_id, user_id) DO UPDATE").Set("role = EXCLUDED.role")
-			}
-			if _, err := q.Exec(ctx); err != nil {
+			if err := setChannelRole(ctx, tx, s.d.name, c.id, c.owner, ChannelRoleOwner); err != nil {
 				return err
 			}
 		}
