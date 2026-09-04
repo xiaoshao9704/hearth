@@ -1,7 +1,7 @@
 // 管理后台（服务器级，仅管理员）：服务状态 / 服务参数 / 用户 / 房间 / 邀请。
 // Solid 渲染：每个配置组与实例表单各持一份局部输入状态，保存一处或展开表单不再重建整页，
 // 别处未提交的输入不会被清掉；配置组按「当前输入 vs 已保存值」自己算脏，脏时才允许保存并拦截切 tab。
-import { createEffect, createMemo, createSignal, For, Show } from 'solid-js';
+import { createEffect, createMemo, createSignal, For, onCleanup, Show } from 'solid-js';
 import { render } from 'solid-js/web';
 import {
   adminCreateInvite,
@@ -23,8 +23,7 @@ import {
   listChannels,
 } from '../api';
 import type { AdminOverview, AdminUser, Channel, ConfigItem, Invite, ProviderField, ProviderInstance, ProviderType } from '../api';
-import { avatarHtml, copyText, el, icon, timeAgo, toast } from '../ui';
-import { menuButtonHtml, wireMenuButton } from '../shell';
+import { avatarHtml, confirmDialog, copyText, el, icon, menuButtonHtml, timeAgo, toast, wireMenuButton } from '../ui';
 
 type Tab = 'status' | 'config' | 'users' | 'rooms' | 'invites';
 
@@ -62,18 +61,35 @@ export async function renderAdmin(root: HTMLElement, tab: Tab) {
 
   const [dirtyGroups, setDirtyGroups] = createSignal<string[]>([]);
   const [pendingNav, setPendingNav] = createSignal(''); // 待确认的目标路由（有未保存改动时切 tab 先拦一道）
+  // 侧栏徽章数字：只是展示，专门拉一次 overview，不与各 tab 内部的加载状态耦合
+  const [navOv, setNavOv] = createSignal<AdminOverview>();
+  void adminOverview()
+    .then(setNavOv)
+    .catch(() => {});
 
   const closeNav = () => root.querySelector('.app-frame')?.classList.remove('nav-open');
   const guardNav = (ev: MouseEvent, href: string) => {
     if (dirtyGroups().length === 0 || href === location.hash) return;
     ev.preventDefault();
+    closeNav(); // 抽屉开着时先关掉，让拦截条露出来
     setPendingNav(href);
   };
 
-  const App = () => (
+  const App = () => {
+    // 有未保存改动时刷新/关标签页会静默丢改动，拦一下；挂在组件内部才能随 dispose() 正常清理
+    createEffect(() => {
+      if (dirtyGroups().length === 0) return;
+      const onBeforeUnload = (ev: BeforeUnloadEvent) => {
+        ev.preventDefault();
+        ev.returnValue = '';
+      };
+      window.addEventListener('beforeunload', onBeforeUnload);
+      onCleanup(() => window.removeEventListener('beforeunload', onBeforeUnload));
+    });
+    return (
     <div class="app-frame">
       <div class="nav-scrim" onClick={closeNav}></div>
-      <aside class="sidebar" style="width:210px;background-image:none">
+      <aside class="sidebar sidebar-admin">
         <div class="sidebar-head">
           {el(icon('shield', 17, 'var(--ember)'))}
           <div style="display:flex;flex-direction:column;gap:1px">
@@ -88,11 +104,14 @@ export async function renderAdmin(root: HTMLElement, tab: Tab) {
                 class="hit nav-row"
                 classList={{ on: n.id === tab }}
                 href={`#/admin/${n.id}`}
+                aria-current={n.id === tab ? 'page' : undefined}
                 onClick={(ev) => guardNav(ev, `#/admin/${n.id}`)}
               >
                 {el(icon(n.icon, 16, n.id === tab ? 'var(--ember)' : 'var(--text-2)', 1.6))}
                 <span style="flex-grow:1">{n.label}</span>
-                <span class="badge-n mono" data-badge={n.id}></span>
+                <Show when={navOv() && (n.id === 'users' || n.id === 'rooms')}>
+                  <span class="badge-n mono">{n.id === 'users' ? navOv()!.users : navOv()!.channels}</span>
+                </Show>
               </a>
             )}
           </For>
@@ -105,7 +124,7 @@ export async function renderAdmin(root: HTMLElement, tab: Tab) {
         </div>
       </aside>
       <div class="content">
-        <header class="topbar" style="height:62px;padding:0 24px">
+        <header class="topbar topbar-lg">
           {el(menuButtonHtml())}
           <h1 style="font-size:16px">{meta.label}</h1>
           <span class="sub" style="color:var(--text-2)">{meta.sub}</span>
@@ -115,10 +134,7 @@ export async function renderAdmin(root: HTMLElement, tab: Tab) {
             <span style="font-size:12px;color:var(--text-1)">{me.username} · 管理员</span>
           </div>
         </header>
-        <div
-          style="flex-grow:1;padding:22px 24px;overflow-y:auto;display:flex;flex-direction:column;gap:18px"
-          id="admin-body"
-        >
+        <div class="page-body" id="admin-body">
           <Show when={pendingNav() && dirtyGroups().length > 0}>
             <div class="notice-bad">
               <span style="flex-grow:1">有 {dirtyGroups().length} 个配置组还没保存，离开这一页会丢弃这些改动。</span>
@@ -152,16 +168,17 @@ export async function renderAdmin(root: HTMLElement, tab: Tab) {
         </div>
       </div>
     </div>
-  );
+    );
+  };
 
   // 挂在自建容器里而不是 root：dispose() 会清空容器内容，而路由切换时新视图已经写进 root 了，
   // 直接挂 root 会让后到的 dispose 把新视图一起清掉。
   root.innerHTML = '';
   const host = document.createElement('div');
-  host.style.height = '100%';
+  host.className = 'view-host';
   root.appendChild(host);
   const dispose = render(App, host);
-  wireMenuButton(root);
+  const unwireMenu = wireMenuButton(root);
 
   const myHash = location.hash;
   const onHashChange = () => {
@@ -169,6 +186,7 @@ export async function renderAdmin(root: HTMLElement, tab: Tab) {
       window.removeEventListener('hashchange', onHashChange);
       dispose();
       host.remove();
+      unwireMenu();
     }
   };
   window.addEventListener('hashchange', onHashChange);
@@ -179,9 +197,30 @@ export async function renderAdmin(root: HTMLElement, tab: Tab) {
 function StatusTab() {
   const [ov, setOv] = createSignal<AdminOverview>();
   const [err, setErr] = createSignal('');
-  void adminOverview()
-    .then((o) => setOv(o))
-    .catch((e) => setErr((e as Error).message));
+  const [updatedAt, setUpdatedAt] = createSignal(0);
+  const [now, setNow] = createSignal(Date.now());
+
+  const refresh = () => {
+    adminOverview()
+      .then((o) => {
+        setOv(o);
+        setErr('');
+        setUpdatedAt(Date.now());
+      })
+      .catch((e) => setErr((e as Error).message));
+  };
+  refresh();
+
+  // 后台标签页不轮询；每秒 tick 一下只为了让「更新于 N 秒前」走字
+  const poll = setInterval(() => {
+    if (document.visibilityState === 'visible') refresh();
+  }, 10_000);
+  const tick = setInterval(() => setNow(Date.now()), 1000);
+  onCleanup(() => {
+    clearInterval(poll);
+    clearInterval(tick);
+  });
+  const agoText = () => (updatedAt() ? `更新于 ${Math.max(0, Math.round((now() - updatedAt()) / 1000))} 秒前` : '');
 
   const resources = () => {
     const r = ov()!.resources;
@@ -197,7 +236,8 @@ function StatusTab() {
             : '不可用',
         pct: memPct,
       },
-      { label: '温度', value: r.temp_c !== null ? `${r.temp_c.toFixed(0)} °C` : '不可用', pct: r.temp_c },
+      // 温度不是负载/占用率，不画进度条，只显示数值
+      { label: '温度', value: r.temp_c !== null ? `${r.temp_c.toFixed(0)} °C` : '不可用', pct: null },
     ];
   };
 
@@ -267,8 +307,9 @@ function StatusTab() {
       </div>
       <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:16px">
         <div class="list-box">
-          <div style="padding:13px 18px;border-bottom:1px solid var(--line-soft);font-size:13px;font-weight:600">
-            常驻组件
+          <div style="padding:13px 18px;border-bottom:1px solid var(--line-soft);font-size:13px;font-weight:600;display:flex;align-items:baseline;gap:8px">
+            <span>常驻组件</span>
+            <span class="mono" style="font-size:10px;color:var(--text-3);margin-left:auto">{agoText()}</span>
           </div>
           <For each={services()}>
             {(sv) => (
@@ -286,8 +327,9 @@ function StatusTab() {
           </For>
         </div>
         <div class="list-box">
-          <div style="padding:13px 18px;border-bottom:1px solid var(--line-soft);font-size:13px;font-weight:600">
-            宿主资源
+          <div style="padding:13px 18px;border-bottom:1px solid var(--line-soft);font-size:13px;font-weight:600;display:flex;align-items:baseline;gap:8px">
+            <span>宿主资源</span>
+            <span class="mono" style="font-size:10px;color:var(--text-3);margin-left:auto">{agoText()}</span>
           </div>
           <div style="padding:16px 18px;display:flex;flex-direction:column;gap:15px">
             <For each={resources()}>
@@ -347,6 +389,8 @@ const POLICIES = [
   { id: 'invite', label: '邀请制', desc: '管理员发链接，有效期内可自助注册' },
   { id: 'open', label: '开放注册', desc: '任何人都能注册——公网上不建议' },
 ];
+// 与服务端 aliasRe（server/internal/api/providers.go）保持一致
+const ALIAS_RE = /^[a-z0-9][a-z0-9-]{0,31}$/;
 
 function ConfigTab(props: { onDirty: (groups: string[]) => void }) {
   const [ov, setOv] = createSignal<AdminOverview>();
@@ -354,6 +398,7 @@ function ConfigTab(props: { onDirty: (groups: string[]) => void }) {
   const [instances, setInstances] = createSignal<ProviderInstance[]>([]);
   const [types, setTypes] = createSignal<ProviderType[]>([]);
   const [policy, setPolicy] = createSignal('');
+  const [policyBusy, setPolicyBusy] = createSignal(''); // 正在切换的策略 id
   const [err, setErr] = createSignal('');
   // 输入草稿：只存被改过的键，未改的键取 ConfigItem.value（= 已保存值），两者比较即脏标记
   const [draft, setDraft] = createSignal<Record<string, string>>({});
@@ -362,6 +407,10 @@ function ConfigTab(props: { onDirty: (groups: string[]) => void }) {
   const [pAlias, setPAlias] = createSignal('');
   const [pType, setPType] = createSignal('');
   const [pValues, setPValues] = createSignal<Record<string, string>>({});
+  const [saving, setSaving] = createSignal(''); // 正在保存的配置组名，空串=空闲
+  const [provBusy, setProvBusy] = createSignal(false); // 实例表单提交中
+  const [delBusy, setDelBusy] = createSignal(''); // 正在删除的实例 alias
+  let provCard!: HTMLDivElement;
 
   void (async () => {
     try {
@@ -394,9 +443,31 @@ function ConfigTab(props: { onDirty: (groups: string[]) => void }) {
   const setVal = (it: ConfigItem, v: string) => setDraft((d) => ({ ...d, [it.name]: v }));
   const dirtyOf = (g: string) => groupItems(g).some((it) => !it.locked && valOf(it) !== it.value);
   const dirty = createMemo(() => groups().filter(dirtyOf));
-  createEffect(() => props.onDirty(dirty()));
+
+  const resetProviderForm = () => {
+    setPMode('create');
+    setPAlias('');
+    setPType(types()[0]?.type ?? '');
+    setPValues({});
+  };
+
+  const editing = () => (pMode() === 'edit' ? instances().find((i) => i.alias === pAlias()) : undefined);
+
+  // 实例表单是否有未提交的改动：创建态看是否已填过什么，编辑态跟已保存的 params 逐字段比
+  const providerDirty = createMemo(() => {
+    const inst = editing();
+    if (inst) {
+      return fieldsOf(inst.type).some((f) => {
+        const v = pValues()[f.name] ?? '';
+        return f.secret ? v.trim() !== '' : v !== (inst.params[f.name] ?? '');
+      });
+    }
+    return pAlias().trim() !== '' || Object.values(pValues()).some((v) => v.trim() !== '');
+  });
+  createEffect(() => props.onDirty(providerDirty() ? [...dirty(), '__provider'] : dirty()));
 
   const saveGroup = async (g: string) => {
+    if (saving()) return;
     const values: Record<string, string> = {};
     for (const it of groupItems(g)) {
       if (it.locked) continue;
@@ -409,6 +480,7 @@ function ConfigTab(props: { onDirty: (groups: string[]) => void }) {
       if (it.secret && it.set && v.trim() === '') continue;
       values[it.name] = v.trim();
     }
+    setSaving(g);
     try {
       await adminSetConfig(values);
       toast('已保存并生效', 'ok');
@@ -421,22 +493,31 @@ function ConfigTab(props: { onDirty: (groups: string[]) => void }) {
       });
     } catch (e) {
       toast((e as Error).message, 'bad');
+    } finally {
+      setSaving('');
     }
   };
 
-  const resetProviderForm = () => {
-    setPMode('create');
-    setPAlias('');
-    setPType(types()[0]?.type ?? '');
-    setPValues({});
+  // 非 Secret 字段必填（livekit 的 livekit_url 例外，服务端 checkProviderParams 同一豁免）；
+  // Secret 字段创建时必填，编辑时留空 = 保持不变
+  const fieldMissing = (f: ProviderField) => {
+    const v = (pValues()[f.name] ?? '').trim();
+    if (f.secret) return pMode() === 'create' && v === '';
+    if (pType() === 'livekit' && f.name === 'livekit_url') return false;
+    return v === '';
   };
-
-  const editing = () => (pMode() === 'edit' ? instances().find((i) => i.alias === pAlias()) : undefined);
+  const aliasValid = () => ALIAS_RE.test(pAlias().trim());
+  const canSubmit = createMemo(() => {
+    if (pMode() === 'create' && !aliasValid()) return false;
+    return fieldsOf(pType()).every((f) => !fieldMissing(f));
+  });
 
   const submitProvider = async () => {
+    if (!canSubmit() || provBusy()) return;
     // 全量替换语义：该类型全部字段都提交
     const params: Record<string, string> = {};
     for (const f of fieldsOf(pType())) params[f.name] = (pValues()[f.name] ?? '').trim();
+    setProvBusy(true);
     try {
       if (pMode() === 'edit') {
         await adminUpdateProvider(pAlias(), params);
@@ -449,11 +530,21 @@ function ConfigTab(props: { onDirty: (groups: string[]) => void }) {
       await reloadProviders();
     } catch (e) {
       toast((e as Error).message, 'bad');
+    } finally {
+      setProvBusy(false);
     }
   };
 
   const deleteProvider = async (alias: string) => {
-    if (!confirm(`删除实例 ${alias}？选择器仍引用它时服务端会拒绝；删除不可恢复。`)) return;
+    if (delBusy()) return;
+    const ok = await confirmDialog({
+      title: `删除实例 ${alias}？`,
+      body: '选择器仍引用它时服务端会拒绝；删除不可恢复。',
+      danger: true,
+      confirmText: '删除',
+    });
+    if (!ok) return;
+    setDelBusy(alias);
     try {
       await adminDeleteProvider(alias);
       if (pMode() === 'edit' && pAlias() === alias) resetProviderForm();
@@ -461,16 +552,48 @@ function ConfigTab(props: { onDirty: (groups: string[]) => void }) {
       toast('实例已删除', 'ok');
     } catch (e) {
       toast((e as Error).message, 'bad');
+    } finally {
+      setDelBusy('');
     }
+  };
+
+  // 切换实例类型时已填参数作废：已经填了点什么就先确认一次
+  const switchType = async (t: string) => {
+    if (pType() === t) return;
+    const hasValues = Object.values(pValues()).some((v) => v.trim() !== '');
+    if (hasValues) {
+      const ok = await confirmDialog({
+        title: '切换实例类型？',
+        body: '已填写的参数会被清空（alias 保留）。',
+        danger: true,
+        confirmText: '切换并清空',
+      });
+      if (!ok) return;
+    }
+    setPType(t);
+    setPValues({});
+  };
+
+  const startEdit = (inst: ProviderInstance) => {
+    // params 里 Secret 已被服务端掩码为空串，提交时空串 = 保留旧值
+    setPMode('edit');
+    setPAlias(inst.alias);
+    setPType(inst.type);
+    setPValues({ ...inst.params });
+    provCard?.scrollIntoView({ block: 'nearest' });
   };
 
   const fieldInput = (f: ProviderField) => {
     const placeholder = () =>
       f.secret && pMode() === 'edit' && editing()?.params_set[f.name] ? '已设置（留空保持不变）' : f.hint;
+    const bad = () => fieldMissing(f);
     return (
       <div>
-        <div style="font-size:11px;color:var(--text-2);margin-bottom:6px">{f.label}</div>
-        <div class="field" style="height:38px;background:var(--bg-2)">
+        <div style="display:flex;align-items:baseline;gap:8px;margin-bottom:6px">
+          <span style="font-size:11px;color:var(--text-2)">{f.label}</span>
+          <span class="mono" style="font-size:10px;color:var(--text-3)">{f.name}</span>
+        </div>
+        <div class="field" classList={{ bad: bad() }} style="height:38px;background:var(--bg-2)">
           <input
             class="mono"
             style="font-size:12px"
@@ -486,31 +609,34 @@ function ConfigTab(props: { onDirty: (groups: string[]) => void }) {
   };
 
   const ProvidersCard = () => (
-    <div class="card" id="prov-card" style="padding:18px 20px">
+    <div class="card" id="prov-card" ref={provCard} style="padding:18px 20px">
       <div style="display:flex;align-items:baseline;gap:9px;margin-bottom:4px">
         <div style="font-size:13px;font-weight:600">服务实例</div>
         <div style="font-size:11px;color:var(--text-2)">语音 / 舞台 / 推流接入的内核实例；内建与环境变量锁定的只读</div>
       </div>
-      <div class="table-box" style="margin-top:11px">
+      <div
+        class="table-box"
+        style={{ 'margin-top': '11px', '--col-1': '170px', '--col-2': '170px', '--col-4': '90px', '--col-5': '150px' }}
+      >
         <div class="table-head">
-          <div style="width:170px">alias</div>
-          <div style="width:170px">类型</div>
+          <div>alias</div>
+          <div>类型</div>
           <div style="flex-grow:1">能力</div>
-          <div style="width:90px">来源</div>
-          <div style="width:150px;text-align:right">操作</div>
+          <div>来源</div>
+          <div style="text-align:right">操作</div>
         </div>
         <Show when={instances().length > 0} fallback={<div class="table-empty">没有实例。</div>}>
           <For each={instances()}>
             {(inst) => (
               <div class="table-row">
-                <div class="mono" style="width:170px;font-size:12.5px;font-weight:600;color:var(--text-0)">
+                <div class="mono cell-ellipsis" data-label="alias" style="font-size:12.5px;font-weight:600;color:var(--text-0)">
                   {inst.alias}
                 </div>
-                <div style="width:170px;font-size:12px;color:var(--text-1)">{typeLabel(inst.type)}</div>
-                <div style="flex-grow:1;font-size:12px;color:var(--text-1)">
+                <div data-label="类型" style="font-size:12px;color:var(--text-1)">{typeLabel(inst.type)}</div>
+                <div data-label="能力" style="flex-grow:1;font-size:12px;color:var(--text-1)">
                   {inst.caps.map((c) => CAP_LABELS[c] ?? c).join(' / ') || '—'}
                 </div>
-                <div style="width:90px">
+                <div data-label="来源">
                   {inst.builtin ? (
                     <span class="chip tag-ember">内建</span>
                   ) : inst.locked ? (
@@ -525,21 +651,17 @@ function ConfigTab(props: { onDirty: (groups: string[]) => void }) {
                     <span class="chip tag-sage">DB</span>
                   )}
                 </div>
-                <div style="width:150px;display:flex;gap:7px;justify-content:flex-end">
+                <div class="table-actions">
                   <Show when={!inst.builtin && !inst.locked}>
-                    <button
-                      class="hit btn btn-sm"
-                      onClick={() => {
-                        // params 里 Secret 已被服务端掩码为空串，提交时空串 = 保留旧值
-                        setPMode('edit');
-                        setPAlias(inst.alias);
-                        setPType(inst.type);
-                        setPValues({ ...inst.params });
-                      }}
-                    >
+                    <button class="hit btn btn-sm" disabled={delBusy() !== ''} onClick={() => startEdit(inst)}>
                       编辑
                     </button>
-                    <button class="hit btn btn-sm btn-danger" onClick={() => void deleteProvider(inst.alias)}>
+                    <button
+                      class="hit btn btn-sm btn-danger"
+                      classList={{ loading: delBusy() === inst.alias }}
+                      disabled={delBusy() !== ''}
+                      onClick={() => void deleteProvider(inst.alias)}
+                    >
                       删除
                     </button>
                   </Show>
@@ -552,7 +674,13 @@ function ConfigTab(props: { onDirty: (groups: string[]) => void }) {
       <Show
         when={pMode() === 'edit' && editing()}
         fallback={
-          <div style="margin-top:16px;border-top:1px solid var(--line-soft);padding-top:15px">
+          <form
+            style="margin-top:16px;border-top:1px solid var(--line-soft);padding-top:15px"
+            onSubmit={(ev) => {
+              ev.preventDefault();
+              void submitProvider();
+            }}
+          >
             <div style="display:flex;align-items:baseline;gap:9px">
               <div style="font-size:12.5px;font-weight:600">注册新实例</div>
               <div style="font-size:11px;color:var(--text-3)">注册后在「内核选择」里按 alias 选用</div>
@@ -563,14 +691,7 @@ function ConfigTab(props: { onDirty: (groups: string[]) => void }) {
                 <div class="seg-group" style="background:var(--bg-2)">
                   <For each={types()}>
                     {(t) => (
-                      <button
-                        class="hit seg"
-                        classList={{ on: pType() === t.type }}
-                        onClick={() => {
-                          setPType(t.type);
-                          setPValues({}); // 类型不同字段不同，已填值作废
-                        }}
-                      >
+                      <button type="button" class="hit seg" classList={{ on: pType() === t.type }} onClick={() => void switchType(t.type)}>
                         {t.label}
                       </button>
                     )}
@@ -581,7 +702,7 @@ function ConfigTab(props: { onDirty: (groups: string[]) => void }) {
                 <div style="font-size:11px;color:var(--text-2);margin-bottom:7px">
                   alias（小写字母数字与 -，会出现在 /providers/&lt;alias&gt; 连接路径里）
                 </div>
-                <div class="field" style="height:38px;background:var(--bg-2)">
+                <div class="field" classList={{ bad: pAlias().trim() !== '' && !aliasValid() }} style="height:38px;background:var(--bg-2)">
                   <input
                     class="mono"
                     style="font-size:12px"
@@ -597,11 +718,11 @@ function ConfigTab(props: { onDirty: (groups: string[]) => void }) {
               <For each={fieldsOf(pType())}>{(f) => fieldInput(f)}</For>
             </div>
             <div style="display:flex;justify-content:flex-end;margin-top:13px">
-              <button class="hit btn btn-sm btn-primary" onClick={() => void submitProvider()}>
+              <button type="submit" class="hit btn btn-sm btn-primary" classList={{ loading: provBusy() }} disabled={!canSubmit() || provBusy()}>
                 注册实例
               </button>
             </div>
-          </div>
+          </form>
         }
       >
         <div style="margin-top:16px;border-top:1px solid var(--line-soft);padding-top:15px">
@@ -619,7 +740,12 @@ function ConfigTab(props: { onDirty: (groups: string[]) => void }) {
             <For each={fieldsOf(editing()!.type)}>{(f) => fieldInput(f)}</For>
           </div>
           <div style="display:flex;justify-content:flex-end;margin-top:13px">
-            <button class="hit btn btn-sm btn-primary" onClick={() => void submitProvider()}>
+            <button
+              class="hit btn btn-sm btn-primary"
+              classList={{ loading: provBusy() }}
+              disabled={!canSubmit() || provBusy()}
+              onClick={() => void submitProvider()}
+            >
               保存并生效
             </button>
           </div>
@@ -697,11 +823,9 @@ function ConfigTab(props: { onDirty: (groups: string[]) => void }) {
             </span>
             <button
               class="hit btn btn-sm btn-primary"
-              classList={{ disabled: !dirtyOf(gp.group) }}
-              onClick={() => {
-                if (!dirtyOf(gp.group)) return;
-                void saveGroup(gp.group);
-              }}
+              classList={{ loading: saving() === gp.group }}
+              disabled={!dirtyOf(gp.group) || saving() !== ''}
+              onClick={() => void saveGroup(gp.group)}
             >
               保存并生效
             </button>
@@ -719,21 +843,28 @@ function ConfigTab(props: { onDirty: (groups: string[]) => void }) {
         <div class="card">
           <div style="font-size:13px;font-weight:600;margin-bottom:5px">注册策略</div>
           <div style="font-size:11.5px;color:var(--text-2);margin-bottom:13px">决定新账号怎么来，改动立即生效</div>
-          <div style="display:flex;flex-direction:column;gap:8px">
+          <div style="display:flex;flex-direction:column;gap:8px" role="radiogroup">
             <For each={POLICIES}>
               {(p) => {
                 const on = () => policy() === p.id;
                 return (
                   <button
                     class="hit"
+                    role="radio"
+                    aria-checked={on()}
+                    disabled={policyBusy() !== ''}
                     style={`display:flex;align-items:flex-start;gap:11px;padding:11px 12px;border-radius:9px;border:1px solid ${on() ? 'var(--ember-line)' : 'var(--line)'};background:${on() ? 'var(--ember-tint)' : 'var(--bg-2)'};text-align:left;width:100%`}
                     onClick={async () => {
+                      if (on() || policyBusy()) return;
+                      setPolicyBusy(p.id);
                       try {
                         const r = await adminSetPolicy(p.id);
                         setPolicy(r.policy);
                         toast('注册策略已更新', 'ok');
                       } catch (e) {
                         toast((e as Error).message, 'bad');
+                      } finally {
+                        setPolicyBusy('');
                       }
                     }}
                   >
@@ -770,6 +901,7 @@ function UsersTab() {
   const [users, setUsers] = createSignal<AdminUser[]>();
   const [err, setErr] = createSignal('');
   const [query, setQuery] = createSignal('');
+  const [busy, setBusy] = createSignal(''); // 正在操作的用户 key（"toggle-<id>" / "del-<id>"）
   const meId = getUser()?.id;
 
   const load = async () => {
@@ -788,45 +920,65 @@ function UsersTab() {
   };
 
   const toggle = async (u: AdminUser) => {
+    if (busy()) return;
+    if (!u.disabled) {
+      const ok = await confirmDialog({ title: `停用账号 ${u.username}？`, body: '停用后该账号无法登录，可以随时重新启用。', danger: true, confirmText: '停用' });
+      if (!ok) return;
+    }
+    setBusy(`toggle-${u.id}`);
     try {
       await adminSetUserDisabled(u.id, !u.disabled);
       toast(u.disabled ? '已启用该账号' : '已禁用该账号', 'ok');
       await load();
     } catch (e) {
       toast((e as Error).message, 'bad');
+    } finally {
+      setBusy('');
     }
   };
 
   const remove = async (u: AdminUser) => {
-    if (!confirm(`删除用户 ${u.username}？其会话、设备档案和白名单记录一并清除，不可恢复。`)) return;
+    if (busy()) return;
+    const ok = await confirmDialog({
+      title: `删除用户 ${u.username}？`,
+      body: '其会话、设备档案和白名单记录一并清除，不可恢复。',
+      danger: true,
+      confirmText: '删除',
+    });
+    if (!ok) return;
+    setBusy(`del-${u.id}`);
     try {
       await adminDeleteUser(u.id);
       toast('用户已删除', 'ok');
       await load();
     } catch (e) {
       toast((e as Error).message, 'bad');
+    } finally {
+      setBusy('');
     }
   };
 
   return (
     <Show when={users()} fallback={<Placeholder err={err()} />}>
       <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
-        <div class="field" style="width:280px;height:38px">
-          {el(icon('search', 15, 'var(--text-2)'))}
-          <input id="u-query" placeholder="搜用户名" value={query()} onInput={(ev) => setQuery(ev.currentTarget.value)} />
-        </div>
+        <form style="flex-shrink:0" onSubmit={(ev) => ev.preventDefault()}>
+          <div class="field" style="width:280px;height:38px">
+            {el(icon('search', 15, 'var(--text-2)'))}
+            <input id="u-query" placeholder="搜用户名" value={query()} onInput={(ev) => setQuery(ev.currentTarget.value)} />
+          </div>
+        </form>
         <div class="spacer"></div>
         <a class="hit btn btn-primary" href="#/admin/invites">
           {el(icon('plus', 15, 'var(--on-ember)', 1.9))} 邀请新用户
         </a>
       </div>
-      <div class="table-box">
+      <div class="table-box" style={{ '--col-1': '200px', '--col-2': '90px', '--col-3': '80px', '--col-5': '170px' }}>
         <div class="table-head">
-          <div style="width:200px">用户</div>
-          <div style="width:90px">角色</div>
-          <div style="width:80px">设备</div>
+          <div>用户</div>
+          <div>角色</div>
+          <div>设备</div>
           <div style="flex-grow:1">最后活跃</div>
-          <div style="width:170px;text-align:right">操作</div>
+          <div style="text-align:right">操作</div>
         </div>
         <Show when={shown().length > 0} fallback={<div class="table-empty">没有匹配的用户。</div>}>
           <For each={shown()}>
@@ -834,16 +986,16 @@ function UsersTab() {
               const self = u.id === meId;
               return (
                 <div class="table-row" classList={{ dim: u.disabled }}>
-                  <div style="width:200px;display:flex;align-items:center;gap:10px;min-width:0">
+                  <div data-label="用户" style="display:flex;align-items:center;gap:10px;min-width:0">
                     {el(avatarHtml(u.username))}
                     <div style="min-width:0">
-                      <div style="font-size:13px;font-weight:500">{u.username}</div>
+                      <div class="cell-ellipsis" style="font-size:13px;font-weight:500">{u.username}</div>
                       <div class="mono" style="font-size:10px;color:var(--text-2);margin-top:2px">
                         usr_{u.id}
                       </div>
                     </div>
                   </div>
-                  <div style="width:90px">
+                  <div data-label="角色">
                     <span
                       class="chip"
                       classList={{ 'tag-ember': u.is_admin }}
@@ -852,19 +1004,25 @@ function UsersTab() {
                       {u.is_admin ? '管理员' : '成员'}
                     </span>
                   </div>
-                  <div class="mono" style="width:80px;font-size:12px;color:var(--text-1)">
+                  <div class="mono" data-label="设备" style="font-size:12px;color:var(--text-1)">
                     {u.devices}
                   </div>
-                  <div style="flex-grow:1;font-size:12px;color:var(--text-2)">{timeAgo(u.last_seen)}</div>
-                  <div style="width:170px;display:flex;gap:7px;justify-content:flex-end">
-                    <button class="hit btn btn-sm" classList={{ disabled: self }} onClick={() => !self && void toggle(u)}>
+                  <div data-label="最后活跃" style="flex-grow:1;font-size:12px;color:var(--text-2)">{timeAgo(u.last_seen)}</div>
+                  <div class="table-actions">
+                    <button
+                      class="hit btn btn-sm"
+                      classList={{ loading: busy() === `toggle-${u.id}` }}
+                      disabled={self || busy() !== ''}
+                      onClick={() => void toggle(u)}
+                    >
                       {u.disabled ? '启用' : '禁用'}
                     </button>
                     <button
                       class="hit btn btn-sm"
-                      classList={{ disabled: self, 'btn-danger': !self }}
+                      classList={{ 'btn-danger': !self, loading: busy() === `del-${u.id}` }}
                       style="width:28px;padding:0"
-                      onClick={() => !self && void remove(u)}
+                      disabled={self || busy() !== ''}
+                      onClick={() => void remove(u)}
                     >
                       {el(icon('trash', 13, self ? 'var(--text-3)' : 'var(--red)'))}
                     </button>
@@ -894,14 +1052,26 @@ function RoomsTab() {
   };
   void load();
 
+  const [busy, setBusy] = createSignal(0); // 正在删除的频道 id，0=空闲
+
   const remove = async (c: Channel) => {
-    if (!confirm(`删除频道「${c.name}」？聊天记录、黑白名单和推流 key 一并清除，不可恢复。`)) return;
+    if (busy()) return;
+    const ok = await confirmDialog({
+      title: `删除频道「${c.name}」？`,
+      body: '聊天记录、黑白名单和推流 key 一并清除，不可恢复。',
+      danger: true,
+      confirmText: '删除',
+    });
+    if (!ok) return;
+    setBusy(c.id);
     try {
       await adminDeleteChannel(c.id);
       toast('频道已删除', 'ok');
       await load();
     } catch (e) {
       toast((e as Error).message, 'bad');
+    } finally {
+      setBusy(0);
     }
   };
 
@@ -912,27 +1082,27 @@ function RoomsTab() {
           常驻频道进程一直在，人进来就连上——不需要「开房」。建频道在大厅操作。
         </div>
       </div>
-      <div class="table-box">
+      <div class="table-box" style={{ '--col-1': '190px', '--col-2': '90px', '--col-3': '140px', '--col-5': '100px' }}>
         <div class="table-head">
-          <div style="width:190px">频道</div>
-          <div style="width:90px">在线</div>
-          <div style="width:140px">房主</div>
+          <div>频道</div>
+          <div>在线</div>
+          <div>房主</div>
           <div style="flex-grow:1">可见性</div>
-          <div style="width:100px;text-align:right">操作</div>
+          <div style="text-align:right">操作</div>
         </div>
         <Show when={channels()!.length > 0} fallback={<div class="table-empty">还没有频道。</div>}>
           <For each={channels()}>
             {(c) => (
               <div class="table-row">
-                <div style="width:190px;display:flex;align-items:center;gap:9px;min-width:0">
+                <div data-label="频道" style="display:flex;align-items:center;gap:9px;min-width:0">
                   {el(icon('volume', 15, c.online ? 'var(--ember)' : 'var(--text-2)'))}
-                  <span style="font-size:13px;font-weight:500">{c.name}</span>
+                  <span class="cell-ellipsis" style="font-size:13px;font-weight:500">{c.name}</span>
                 </div>
-                <div class="mono" style="width:90px;font-size:12px;color:var(--text-1)">
+                <div class="mono" data-label="在线" style="font-size:12px;color:var(--text-1)">
                   {c.online ? `${c.online} 人` : '—'}
                 </div>
-                <div style="width:140px;font-size:12px;color:var(--text-1)">{c.created_by}</div>
-                <div style="flex-grow:1">
+                <div class="cell-ellipsis" data-label="房主" style="font-size:12px;color:var(--text-1)">{c.created_by}</div>
+                <div data-label="可见性" style="flex-grow:1">
                   <span
                     class="chip"
                     classList={{ 'tag-ember': c.invite_only }}
@@ -941,8 +1111,13 @@ function RoomsTab() {
                     {c.invite_only ? '邀请制' : '公开'}
                   </span>
                 </div>
-                <div style="width:100px;display:flex;justify-content:flex-end">
-                  <button class="hit btn btn-sm btn-danger" onClick={() => void remove(c)}>
+                <div class="table-actions">
+                  <button
+                    class="hit btn btn-sm btn-danger"
+                    classList={{ loading: busy() === c.id }}
+                    disabled={busy() !== 0}
+                    onClick={() => void remove(c)}
+                  >
                     删除
                   </button>
                 </div>
@@ -979,6 +1154,8 @@ function InvitesTab() {
   const [uses, setUses] = createSignal('1');
   const [note, setNote] = createSignal('');
   const [fresh, setFresh] = createSignal('');
+  const [making, setMaking] = createSignal(false);
+  const [revokeBusy, setRevokeBusy] = createSignal(0); // 正在撤销/删除的邀请 id，0=空闲
 
   const load = async () => {
     try {
@@ -992,6 +1169,8 @@ function InvitesTab() {
   void load();
 
   const make = async () => {
+    if (making()) return;
+    setMaking(true);
     try {
       const r = await adminCreateInvite(note(), Number(uses()), ttl());
       setFresh(r.url);
@@ -1000,16 +1179,26 @@ function InvitesTab() {
       await load();
     } catch (e) {
       toast((e as Error).message, 'bad');
+    } finally {
+      setMaking(false);
     }
   };
 
   const revoke = async (iv: Invite, dead: boolean) => {
+    if (revokeBusy()) return;
+    if (!dead) {
+      const ok = await confirmDialog({ title: '撤销这条邀请？', body: '撤销后这条链接立即失效，未使用的次数作废。', danger: true, confirmText: '撤销' });
+      if (!ok) return;
+    }
+    setRevokeBusy(iv.id);
     try {
       await adminDeleteInvite(iv.id);
       toast(dead ? '邀请已删除' : '邀请已撤销', 'ok');
       await load();
     } catch (e) {
       toast((e as Error).message, 'bad');
+    } finally {
+      setRevokeBusy(0);
     }
   };
 
@@ -1017,7 +1206,7 @@ function InvitesTab() {
     <div class="seg-group" style="background:var(--bg-2)">
       <For each={p.opts}>
         {([v, label]) => (
-          <button class="hit seg" classList={{ on: p.val() === v }} onClick={() => p.set(v)}>
+          <button type="button" class="hit seg" classList={{ on: p.val() === v }} onClick={() => p.set(v)}>
             {label}
           </button>
         )}
@@ -1030,7 +1219,13 @@ function InvitesTab() {
       <div class="card" style="padding:18px 20px">
         <div style="font-size:13.5px;font-weight:600">生成邀请链接</div>
         <div style="font-size:11.5px;color:var(--text-2);margin-top:4px">链接在有效期内可用，点开就能自己设账号密码</div>
-        <div style="display:flex;gap:20px;margin-top:16px;align-items:flex-end;flex-wrap:wrap">
+        <form
+          style="display:flex;gap:20px;margin-top:16px;align-items:flex-end;flex-wrap:wrap"
+          onSubmit={(ev) => {
+            ev.preventDefault();
+            void make();
+          }}
+        >
           <div>
             <div style="font-size:11px;color:var(--text-2);margin-bottom:7px">有效期</div>
             <Seg
@@ -1061,10 +1256,10 @@ function InvitesTab() {
               <input id="iv-note" value={note()} onInput={(ev) => setNote(ev.currentTarget.value)} />
             </div>
           </div>
-          <button class="hit btn btn-primary" id="iv-make" onClick={() => void make()}>
+          <button type="submit" class="hit btn btn-primary" id="iv-make" classList={{ loading: making() }} disabled={making()}>
             生成链接
           </button>
-        </div>
+        </form>
         <Show when={fresh()}>
           <div style="display:flex;align-items:center;gap:10px;height:42px;margin-top:14px;padding:0 6px 0 14px;border-radius:9px;background:var(--sage-tint);border:1px solid var(--sage-line)">
             <span class="mono" style="font-size:12.5px;flex-grow:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">
@@ -1082,13 +1277,13 @@ function InvitesTab() {
           </div>
         </Show>
       </div>
-      <div class="table-box">
+      <div class="table-box" style={{ '--col-1': '150px', '--col-2': '150px', '--col-3': '110px', '--col-5': '150px' }}>
         <div class="table-head">
-          <div style="width:150px">邀请码</div>
-          <div style="width:150px">备注</div>
-          <div style="width:110px">可用次数</div>
+          <div>邀请码</div>
+          <div>备注</div>
+          <div>可用次数</div>
           <div style="flex-grow:1">状态</div>
-          <div style="width:150px;text-align:right">操作</div>
+          <div style="text-align:right">操作</div>
         </div>
         <Show when={invites()!.length > 0} fallback={<div class="table-empty">还没有发过邀请。</div>}>
           <For each={invites()}>
@@ -1096,22 +1291,23 @@ function InvitesTab() {
               const st = stateOf(iv);
               return (
                 <div class="table-row" classList={{ dim: st.dead }}>
-                  <div class="mono" style="width:150px;font-size:12px;color:var(--text-1)">
+                  <div class="mono" data-label="邀请码" style="font-size:12px;color:var(--text-1)">
                     {iv.code}
                   </div>
-                  <div style="width:150px;font-size:12.5px;color:var(--text-1)">{iv.note || '（无）'}</div>
-                  <div class="mono" style="width:110px;font-size:12px;color:var(--text-1)">
+                  <div class="cell-ellipsis" data-label="备注" style="font-size:12.5px;color:var(--text-1)">{iv.note || '（无）'}</div>
+                  <div class="mono" data-label="可用次数" style="font-size:12px;color:var(--text-1)">
                     {iv.used} / {iv.max_uses === 0 ? '∞' : iv.max_uses}
                   </div>
-                  <div style="flex-grow:1">
+                  <div data-label="状态" style="flex-grow:1">
                     <span class={`chip ${st.cls}`} style={st.cls ? '' : 'background:var(--bg-4);color:var(--text-2)'}>
                       {st.label}
                     </span>
                   </div>
-                  <div style="width:150px;display:flex;gap:7px;justify-content:flex-end">
+                  <div class="table-actions">
                     <Show when={!st.dead}>
                       <button
                         class="hit btn btn-sm"
+                        disabled={revokeBusy() !== 0}
                         onClick={async () => {
                           if (await copyText(`${base()}/#/join/${iv.code}`)) toast('已复制', 'ok', 1400);
                         }}
@@ -1119,7 +1315,12 @@ function InvitesTab() {
                         复制链接
                       </button>
                     </Show>
-                    <button class="hit btn btn-sm" onClick={() => void revoke(iv, st.dead)}>
+                    <button
+                      class="hit btn btn-sm"
+                      classList={{ loading: revokeBusy() === iv.id }}
+                      disabled={revokeBusy() !== 0}
+                      onClick={() => void revoke(iv, st.dead)}
+                    >
                       {st.dead ? '删除' : '撤销'}
                     </button>
                   </div>
