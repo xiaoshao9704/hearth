@@ -5,8 +5,9 @@ import (
 	"testing"
 )
 
-// TestPortWantsLkembedStage stage_provider 在 none/lkembed 之间切换时，PortWants 应
-// 相应增删舞台媒体端口的 want，且该 want 必须 StrictPort（补丁二的地址改写只换 IP 不换端口）。
+// TestPortWantsLkembedStage lkembed 的媒体端口 want 在语音/舞台选择器切换时相应增删，
+// 且必须 StrictPort（补丁二的地址改写只换 IP 不换端口）。
+// 语音线或舞台线任一选中 lkembed 都需要该端口；两线都切走（voice→ember、stage→none）才消失。
 func TestPortWantsLkembedStage(t *testing.T) {
 	maskProviderEnv(t)
 	a := testAPI(t)
@@ -21,18 +22,10 @@ func TestPortWantsLkembedStage(t *testing.T) {
 		return false, false
 	}
 
-	// 默认 stage_provider=none：不应出现舞台媒体端口的 want。
-	if found, _ := findStage(); found {
-		t.Fatal("stage_provider=none 时 PortWants 不应包含 hearth stage")
-	}
-
-	// 切到 lkembed：应出现 udp want 且 StrictPort=true。
-	if err := a.st.SetSetting(ctx, "cfg_stage_provider", AliasLkembed); err != nil {
-		t.Fatalf("落库 stage_provider 失败: %v", err)
-	}
+	// 默认 voice/stage 同选 lkembed：应出现 udp want 且 StrictPort=true。
 	found, strict := findStage()
 	if !found {
-		t.Fatal("stage_provider=lkembed 时 PortWants 应包含 hearth stage 的 udp want")
+		t.Fatal("默认配置下 PortWants 应包含 lkembed 媒体端口的 udp want")
 	}
 	if !strict {
 		t.Fatal("lkembed 的媒体端口 want 必须 StrictPort=true")
@@ -59,11 +52,20 @@ func TestPortWantsLkembedStage(t *testing.T) {
 		t.Fatalf("打开 lkembed_tcp_port 后应出现 StrictPort 的 tcp want: found=%v strict=%v", tcpFound, tcpStrict)
 	}
 
-	// 切回 none：舞台 want 应随之消失（下一轮 Mapper.Run 读取时即生效，无需重启）。
+	// 只切走舞台（stage=none、语音仍 lkembed）：want 保留——语音线仍需要该端口。
 	if err := a.st.SetSetting(ctx, "cfg_stage_provider", "none"); err != nil {
 		t.Fatalf("落库 stage_provider 失败: %v", err)
 	}
+	if found, _ := findStage(); !found {
+		t.Fatal("stage=none 但 voice=lkembed 时 PortWants 仍应包含 lkembed 媒体端口")
+	}
+
+	// 两线都切走（voice→ember、stage→none）：want 随之消失
+	//（下一轮 Mapper.Run 读取时即生效，无需重启）。
+	if err := a.st.SetSetting(ctx, "cfg_voice_provider", TypeEmber); err != nil {
+		t.Fatalf("落库 voice_provider 失败: %v", err)
+	}
 	if found, _ := findStage(); found {
-		t.Fatal("切回 stage_provider=none 后 PortWants 不应再包含 hearth stage")
+		t.Fatal("voice/stage 都切走 lkembed 后 PortWants 不应再包含 hearth stage")
 	}
 }

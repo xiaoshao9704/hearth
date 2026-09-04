@@ -90,6 +90,21 @@ func (s *Store) SetSetting(ctx context.Context, key, value string) error {
 	return err
 }
 
+// DeleteSetting 删除设置键本身（区别于 SetSetting 置空）；键不存在不算错误。
+func (s *Store) DeleteSetting(ctx context.Context, key string) error {
+	_, err := s.bun.NewRaw("DELETE FROM settings WHERE k = ?", key).Exec(ctx)
+	return err
+}
+
+// DeleteSettingsByPrefix 按前缀批量删除设置键，返回删除行数（游标迁移清退场内核的全局键用）。
+func (s *Store) DeleteSettingsByPrefix(ctx context.Context, prefix string) (int64, error) {
+	res, err := s.bun.NewRaw("DELETE FROM settings WHERE k LIKE ?", prefix+"%").Exec(ctx)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
 // ---- 数据迁移游标（settings 键 migration_version，非配置项，管理后台不展示）----
 
 // MigrationVersion 读迁移游标；缺失或损坏视为 0。

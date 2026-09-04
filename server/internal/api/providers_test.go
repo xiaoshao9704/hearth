@@ -53,12 +53,12 @@ func TestSelectorResolutionAndFallback(t *testing.T) {
 	maskProviderEnv(t)
 	a := testAPI(t)
 	ctx := context.Background()
-	// 未设置选择器：默认 ember / none / bellows（内建优先，默认解析不算回落）
-	if alias, _ := a.voiceInstance(ctx); alias != "ember" {
-		t.Fatalf("voice 默认应为 ember，实际 %q", alias)
+	// 未设置选择器：默认 lkembed / lkembed / bellows（内建优先，默认解析不算回落）
+	if alias, _ := a.voiceInstance(ctx); alias != AliasLkembed {
+		t.Fatalf("voice 默认应为 lkembed，实际 %q", alias)
 	}
-	if _, sp := a.stageInstance(ctx); sp != nil {
-		t.Fatal("stage 默认应为 none")
+	if alias, sp := a.stageInstance(ctx); alias != AliasLkembed || sp == nil {
+		t.Fatalf("stage 默认应为 lkembed，实际 %q", alias)
 	}
 	if alias, _, fellBack := a.ingestInstance(ctx); alias != "bellows" || fellBack {
 		t.Fatalf("ingest 默认应为 bellows 且非回落，实际 %q fellBack=%v", alias, fellBack)
@@ -90,16 +90,18 @@ func TestMigrateImportsLegacyCfg(t *testing.T) {
 	maskProviderEnv(t)
 	a := testAPI(t)
 	ctx := context.Background()
-	// testAPI 的 New 已跑过全部迁移（空库游标 0→4）；重置游标模拟从旧版本升级
+	// testAPI 的 New 已跑过全部迁移（空库游标 0→5）；重置游标并只重跑 v1，
+	// 模拟从旧版本升级到注册制这一步（后续版本步会改写/删除这里断言的中间产物）
 	a.st.SetMigrationVersion(ctx, 0)
 	a.st.SetSetting(ctx, "cfg_livekit_api_url", "http://old:7880")
 	a.st.SetSetting(ctx, "cfg_livekit_api_key", "k")
 	a.st.SetSetting(ctx, "cfg_livekit_api_secret", "s")
 	a.st.SetSetting(ctx, "cfg_ingest_provider", "livekit") // 旧值：livekit 的 ingress 面
 	a.st.SetSetting(ctx, "cfg_ingress_upstream_url", "http://old:58080")
-	a.runMigrations(ctx)
-	if v, _ := a.st.MigrationVersion(ctx); v != 4 {
-		t.Fatalf("迁移成功后游标应为最新版本 4，实际 %d", v)
+	a.runMigrationSteps(ctx, []migrationStep{{1, a.migrateProviders}})
+	a.reloadProviders(ctx)
+	if v, _ := a.st.MigrationVersion(ctx); v != 1 {
+		t.Fatalf("v1 成功后游标应为 1，实际 %d", v)
 	}
 	if a.instance("livekit") == nil || a.instance("livekit").Locked {
 		t.Fatal("旧 cfg_livekit_* 应导入为 DB 实例 livekit")
@@ -153,11 +155,13 @@ func TestMigratePinsLegacySelectors(t *testing.T) {
 	a := testAPI(t)
 	ctx := context.Background()
 	a.st.SetMigrationVersion(ctx, 0)
-	// 旧部署：只配了 livekit 系 cfg_ 键，从未显式设过选择器
+	// 旧部署：只配了 livekit 系 cfg_ 键，从未显式设过选择器。
+	// 只重跑 v1（后续版本步会删除/改写这里的部分产物，见迁移 v5）
 	a.st.SetSetting(ctx, "cfg_livekit_api_key", "k")
 	a.st.SetSetting(ctx, "cfg_livekit_api_secret", "s")
 	a.st.SetSetting(ctx, "cfg_ingress_upstream_url", "http://old:58080")
-	a.runMigrations(ctx)
+	a.runMigrationSteps(ctx, []migrationStep{{1, a.migrateProviders}})
+	a.reloadProviders(ctx)
 	if v, _ := a.st.GetSetting(ctx, "cfg_voice_provider"); v != "livekit" {
 		t.Fatalf("旧部署语音选择器应落库 livekit，实际 %q", v)
 	}
@@ -186,7 +190,9 @@ func TestMigrateRemoteBellowsSelector(t *testing.T) {
 	a.st.SetSetting(ctx, "cfg_ingest_provider", "bellows")
 	a.st.SetSetting(ctx, "cfg_bellows_remote_url", "http://10.0.0.5:8090")
 	a.st.SetSetting(ctx, "cfg_bellows_shared_secret", "sec")
-	a.runMigrations(ctx)
+	// 只重跑 v1（迁移 v5 会删除 bellows-remote 实例与该选择器键，见内核收敛）
+	a.runMigrationSteps(ctx, []migrationStep{{1, a.migrateProviders}})
+	a.reloadProviders(ctx)
 	if v, _ := a.st.GetSetting(ctx, "cfg_ingest_provider"); v != "bellows-remote" {
 		t.Fatalf("老远端形态选择器应改写为 bellows-remote，实际 %q", v)
 	}
@@ -237,7 +243,7 @@ func TestMigrationFailureKeepsCursor(t *testing.T) {
 func TestMigrateFreshDeployKeepsBuiltinDefaults(t *testing.T) {
 	// 屏蔽真实环境里可能存在的内核变量，保证「全新部署」前提
 	maskProviderEnv(t)
-	a := testAPI(t) // New 里已完成全新部署的首次迁移（游标 0→4）
+	a := testAPI(t) // New 里已完成全新部署的首次迁移（游标 0→5）
 	ctx := context.Background()
 	a.runMigrations(ctx) // 重跑幂等
 	for _, k := range []string{"cfg_voice_provider", "cfg_stage_provider", "cfg_ingest_provider"} {
@@ -245,8 +251,11 @@ func TestMigrateFreshDeployKeepsBuiltinDefaults(t *testing.T) {
 			t.Fatalf("全新部署不应落库选择器 %s，实际 %q", k, v)
 		}
 	}
-	if alias, _ := a.voiceInstance(ctx); alias != "ember" {
-		t.Fatalf("全新部署语音应走内建 ember，实际 %q", alias)
+	if alias, vp := a.voiceInstance(ctx); alias != AliasLkembed || vp == nil {
+		t.Fatalf("全新部署语音应走内建 lkembed，实际 %q", alias)
+	}
+	if alias, sp := a.stageInstance(ctx); alias != AliasLkembed || sp == nil {
+		t.Fatalf("全新部署舞台应走内建 lkembed，实际 %q", alias)
 	}
 	if alias, _, _ := a.ingestInstance(ctx); alias != "bellows" {
 		t.Fatalf("全新部署推流应走内建 bellows，实际 %q", alias)
@@ -315,7 +324,7 @@ func TestLivekitAPIURLDefaultOnInstancePaths(t *testing.T) {
 }
 
 // 首次启动 ListProviders 失败（DB 不可用）：注册表保留 New 种下的内建实例，
-// voiceInstance/ingestInstance 的回落路径不 panic、返回可用对象。
+// voiceInstance/ingestInstance 的取值路径不 panic、返回可用对象。
 func TestFallbacksSafeWhenInitialReloadFails(t *testing.T) {
 	maskProviderEnv(t)
 	s, err := store.Open("sqlite://" + t.TempDir() + "/test.db")
@@ -326,8 +335,9 @@ func TestFallbacksSafeWhenInitialReloadFails(t *testing.T) {
 	s.Close() // 模拟启动期 DB 不可用（迁移与首次 ListProviders 都会失败）
 	a := New(s, config.Load(), chat.NewHub(s, ""), nil)
 	ctx := context.Background()
-	if alias, vp := a.voiceInstance(ctx); alias != "ember" || vp == nil {
-		t.Fatalf("启动期加载失败时语音应回落 ember 且非 nil: %q", alias)
+	// 配置读不到 → 落到默认选择器：语音 lkembed（内建对象在 New 已种下，非 nil）
+	if alias, vp := a.voiceInstance(ctx); alias != AliasLkembed || vp == nil {
+		t.Fatalf("启动期加载失败时语音应落默认 lkembed 且非 nil: %q", alias)
 	}
 	alias, ip, _ := a.ingestInstance(ctx)
 	if alias != "bellows" || ip == nil {

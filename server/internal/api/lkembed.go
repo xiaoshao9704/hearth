@@ -54,13 +54,14 @@ func (a *API) stageExternalIPs() []string {
 	return lite.ExternalIPv4s(externals)
 }
 
-// EnsureStageKernel 按当前 stage_provider 启停进程内 LiveKit：选中 lkembed 才起，
-// 切走就停（纯语音部署零额外端口与日志）。幂等，可重复调用；启动失败只记日志，
-// 舞台线起不来不拖垮语音线。
+// EnsureStageKernel 按当前选择器启停进程内 LiveKit：语音线或舞台线任一选中 lkembed
+// 才起（默认两线同选 lkembed，进程内 LiveKit 默认常驻），都切走就停。幂等，可重复调用；
+// 启动失败只记日志，内核起不来不拖垮其余线路。
 func (a *API) EnsureStageKernel(ctx context.Context) {
 	a.embedMu.Lock()
 	defer a.embedMu.Unlock()
-	want := a.dynVal(ctx, "stage_provider") == AliasLkembed
+	want := a.dynVal(ctx, "voice_provider") == AliasLkembed ||
+		a.dynVal(ctx, "stage_provider") == AliasLkembed
 	if want == (a.embedSrv != nil) {
 		return
 	}

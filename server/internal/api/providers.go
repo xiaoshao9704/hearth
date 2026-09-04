@@ -100,14 +100,15 @@ func paramsCfg(params map[string]string, fields []rtc.ConfigKey) rtc.ConfigFunc 
 	}
 }
 
-// builtinInstances 内建实例：ember 语音；bellows 进程内 WHIP 直通（发布出口 = 当前舞台线实例的 Publisher）。
+// builtinInstances 内建实例：ember 语音；bellows 进程内 WHIP 直通（发布出口 = 当前舞台线实例的 Publisher）；
+// lkembed 进程内 LiveKit，语音/舞台/推流三面齐全（语音舞台同选它即 combined 单连接，也是默认形态）。
 func (a *API) builtinInstances() []*ProviderInstance {
 	return []*ProviderInstance{
 		{Alias: TypeEmber, Type: TypeEmber, Builtin: true, Cfg: a.dynVal, Voice: a.ember},
 		{Alias: TypeBellows, Type: TypeBellows, Builtin: true, Cfg: a.dynVal,
 			Ingest: bellows.New(a.dynVal, a.ingressResolver, a.stagePublisherSink, a.mapped)},
 		{Alias: AliasLkembed, Type: TypeLivekitEmbedded, Builtin: true, Cfg: a.embedCfg,
-			Stage: a.lkembed, Ingest: a.lkembedWHIP},
+			Voice: a.lkembed, Stage: a.lkembed, Ingest: a.lkembedWHIP},
 	}
 }
 
@@ -315,7 +316,7 @@ type migrationStep struct {
 // 以后所有跨版本兼容处理都作为新版本步挂在这里。
 func (a *API) runMigrations(ctx context.Context) {
 	a.runMigrationSteps(ctx, []migrationStep{{1, a.migrateProviders}, {2, a.importSelectorEnv},
-		{3, a.migrateIngestTokens}, {4, a.migrateEndpointIdentity}})
+		{3, a.migrateIngestTokens}, {4, a.migrateEndpointIdentity}, {5, a.migrateKernelConsolidation}})
 	a.reloadProviders(ctx)
 }
 
@@ -503,4 +504,73 @@ func (a *API) migrateEndpointIdentity(ctx context.Context) error {
 		}
 	}
 	return a.st.DeleteAllIngestEndpoints(ctx)
+}
+
+// migrateKernelConsolidation v5：内核收敛——Ember/Bellows/livekit-ingress 退场，
+// 进程内 LiveKit（lkembed）成为默认内核。选择器默认值已改为 lkembed，空值由新默认
+// 自然覆盖（不落库，管理员之后清空恢复默认不被撤销）；本步只处理显式落库过的旧值：
+//  1. 选择器改写：voice 为 ember/pion/bellows/任何不存在的 alias → lkembed；
+//     stage 显式 none 保持 none，指向已删类型实例或不存在的 alias → lkembed。
+//     指向 livekit 类型实例（env 锁定或 DB 注册）的选择器保留——旧部署的行为不变。
+//  2. cfg_ingest_provider 键删除（推流不再是独立选择器，一律进舞台实例自带的 WHIP）。
+//  3. providers 表退场类型（livekit-ingress/bellows-remote）的行删除，逐条打日志。
+//  4. cfg_ember_*/cfg_bellows_*/cfg_pion_* 全局键全部删除。
+//  5. ingest_endpoints 表清空（表本身下个版本再删）。
+//
+// 幂等：重复执行各步均为空操作。执行顺序：先删 providers 行再判定 alias 是否存在。
+func (a *API) migrateKernelConsolidation(ctx context.Context) error {
+	recs, err := a.st.ListProviders(ctx)
+	if err != nil {
+		return err
+	}
+	for _, rec := range recs {
+		if rec.Type == TypeLivekitIngress || rec.Type == TypeBellowsRemote {
+			if err := a.st.DeleteProvider(ctx, rec.Alias); err != nil {
+				return err
+			}
+			log.Printf("迁移 v5: 删除退场实例 %s（类型 %s）", rec.Alias, rec.Type)
+		}
+	}
+	// 可留任语音/舞台槽位的 alias：内建 lkembed + livekit 类型实例（env 锁定或 DB 注册）
+	valid := map[string]bool{AliasLkembed: true}
+	if envLockedParams(a.providerTypeFields(TypeLivekit), "livekit_api_url", "livekit_api_key", "livekit_api_secret") != nil {
+		valid[TypeLivekit] = true
+	}
+	for _, rec := range recs {
+		if rec.Type == TypeLivekit {
+			valid[rec.Alias] = true
+		}
+	}
+	v, _ := a.st.GetSetting(ctx, "cfg_voice_provider")
+	if v = strings.TrimSpace(v); v != "" && !valid[v] {
+		if err := a.st.SetSetting(ctx, "cfg_voice_provider", AliasLkembed); err != nil {
+			return err
+		}
+		log.Printf("迁移 v5: 语音内核选择器 %q 已不可用，改写为 lkembed（语音并入进程内 LiveKit）", v)
+	}
+	v, _ = a.st.GetSetting(ctx, "cfg_stage_provider")
+	if v = strings.TrimSpace(v); v != "" && v != "none" && !valid[v] {
+		if err := a.st.SetSetting(ctx, "cfg_stage_provider", AliasLkembed); err != nil {
+			return err
+		}
+		log.Printf("迁移 v5: 舞台内核选择器 %q 已不可用，改写为 lkembed（显式 none 保持不变）", v)
+	}
+	if err := a.st.DeleteSetting(ctx, "cfg_ingest_provider"); err != nil {
+		return err
+	}
+	log.Printf("迁移 v5: 推流入口选择器 cfg_ingest_provider 已删除（推流并入舞台内核自带 WHIP）")
+	for _, prefix := range []string{"cfg_ember_", "cfg_bellows_", "cfg_pion_"} {
+		n, err := a.st.DeleteSettingsByPrefix(ctx, prefix)
+		if err != nil {
+			return err
+		}
+		if n > 0 {
+			log.Printf("迁移 v5: 删除退场内核配置键 %s* 共 %d 个", prefix, n)
+		}
+	}
+	if err := a.st.DeleteAllIngestEndpoints(ctx); err != nil {
+		return err
+	}
+	log.Printf("迁移 v5: ingest_endpoints 表已清空（livekit-ingress 端点映射随实例类型一并作废）")
+	return nil
 }

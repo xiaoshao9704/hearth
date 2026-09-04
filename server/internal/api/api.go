@@ -97,7 +97,7 @@ func New(st *store.Store, cfg config.Config, hub *chat.Hub, mapped lite.MappedFu
 	}
 	ctx := context.Background()
 	a.runMigrations(ctx) // 版本游标迁移，末尾完成首次 reloadProviders
-	a.warnLegacyConfig(ctx)
+	a.warnLegacyConfig()
 	return a
 }
 

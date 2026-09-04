@@ -474,8 +474,8 @@ func TestMigrateIngestTokensV3(t *testing.T) {
 	if legacy, err := s.LegacyIngressTokens(ctx); err != nil || len(legacy) != 0 {
 		t.Fatalf("ingresses 表应已 DROP: %v %v", legacy, err)
 	}
-	if v, _ := s.MigrationVersion(ctx); v != 4 {
-		t.Fatalf("游标应为 4，实际 %d", v)
+	if v, _ := s.MigrationVersion(ctx); v != 5 {
+		t.Fatalf("游标应为最新版本 5，实际 %d", v)
 	}
 	// 幂等：重跑不覆盖用户后续改动（改标签后重跑，令牌与标签都保持）
 	if err := s.UpdateIngestTokenTag(ctx, u1.ID, "cam"); err != nil {
@@ -493,8 +493,8 @@ func TestMigrateV3EmptyDB(t *testing.T) {
 	maskProviderEnv(t)
 	a := testAPI(t)
 	ctx := context.Background()
-	if v, _ := a.st.MigrationVersion(ctx); v != 4 {
-		t.Fatalf("空库游标应为 4，实际 %d", v)
+	if v, _ := a.st.MigrationVersion(ctx); v != 5 {
+		t.Fatalf("空库游标应为最新版本 5，实际 %d", v)
 	}
 	u, err := a.st.CreateUser(ctx, "alice", "x")
 	if err != nil {
@@ -650,7 +650,9 @@ func TestIngestTokenReportsEnabled(t *testing.T) {
 		}
 		return body
 	}
-	// 默认部署：stage=none，进程内 bellows 无发布出口
+	// 舞台线显式关闭（stage=none）：进程内 bellows 无发布出口
+	//（默认部署 stage=lkembed，发布出口恒在，enabled 恒为 true）
+	a.st.SetSetting(ctx, "cfg_stage_provider", "none")
 	if got := get()["enabled"]; got != false {
 		t.Fatalf("舞台线关闭时 enabled 应为 false，实际 %v", got)
 	}
@@ -692,8 +694,8 @@ func TestMigrateEndpointIdentityV4(t *testing.T) {
 	a.st.SetMigrationVersion(ctx, 3) // 回到 v4 之前
 	a.runMigrations(ctx)
 
-	if v, _ := a.st.MigrationVersion(ctx); v != 4 {
-		t.Fatalf("游标应推进到 4，实际 %d", v)
+	if v, _ := a.st.MigrationVersion(ctx); v != 5 {
+		t.Fatalf("游标应推进到最新版本 5，实际 %d", v)
 	}
 	deleted := 0
 	for _, c := range *calls {

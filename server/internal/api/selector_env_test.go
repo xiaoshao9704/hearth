@@ -18,8 +18,10 @@ func TestSelectorEnvImportedOnce(t *testing.T) {
 	a := testAPI(t)                        // New 内跑迁移
 	ctx := context.Background()
 
-	if v := a.dynVal(ctx, "voice_provider"); v != "livekit" {
-		t.Fatalf("旧 env 值应由迁移 v2 落库保持生效，实际 %q", v)
+	// v2 应把 env 值落库；但 livekit 实例不存在（env 已屏蔽），迁移 v5 随即将这个
+	// 悬空选择器改写为 lkembed——落库值为 lkembed 即证明 v2 导入过（否则键为空）。
+	if v, _ := a.st.GetSetting(ctx, "cfg_voice_provider"); v != AliasLkembed {
+		t.Fatalf("旧 env 值应由迁移 v2 落库并被 v5 改写为 lkembed，实际 %q", v)
 	}
 	if v := a.dynVal(ctx, "ingest_provider"); v != TypeBellows {
 		t.Fatalf("INGEST_PROVIDER=pion 应跳过导入并回落内建 bellows，实际 %q", v)
@@ -29,8 +31,8 @@ func TestSelectorEnvImportedOnce(t *testing.T) {
 		t.Fatalf("清选择器失败: %v", err)
 	}
 	a.runMigrations(ctx)
-	if v := a.dynVal(ctx, "voice_provider"); v != TypeEmber {
-		t.Fatalf("v2 已执行过后不得重复落库，应回落默认 ember，实际 %q", v)
+	if v := a.dynVal(ctx, "voice_provider"); v != AliasLkembed {
+		t.Fatalf("v2 已执行过后不得重复落库，应回落默认 lkembed，实际 %q", v)
 	}
 }
 
