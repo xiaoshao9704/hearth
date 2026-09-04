@@ -39,6 +39,7 @@ export interface EngineCallbacks {
   onReconnected(): void;
   // 连接终结。lost = 引擎放弃恢复，房间层负责拿新凭证重连；其余为终态
   onEnded(reason: 'kicked' | 'room-deleted' | 'duplicate' | 'lost'): void;
+  onAudioBlocked?(): void; // 浏览器拦截了自动播放：需要用户手势才能出声
   onLocalTrackEnded(kind: 'mic' | 'camera' | 'screen'): void; // 采集中途终止：设备断开（如连续互通断开）、浏览器原生「停止共享」
 }
 
@@ -65,5 +66,6 @@ export interface AVEngine {
   // 远端视频轨的本端实测接收数据（SVC 下反映本端实际拿到的层）；无该轨或引擎无视频返回 null
   remoteVideoStats(identity: string, source: TrackSource): Promise<VideoStats | null>;
   switchCamera(deviceId: string): Promise<void>;
+  resumeAudio(): Promise<void>; // 用户手势后重放被拦截的音频元素
   dispose(): void; // 离开房间：断开并释放全部采集资源
 }

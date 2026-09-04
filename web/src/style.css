@@ -712,6 +712,50 @@ body {
 .table-head > :nth-child(5), .table-row > :nth-child(5) { width: var(--col-5, auto); }
 .table-head > :nth-child(6), .table-row > :nth-child(6) { width: var(--col-6, auto); }
 
+/* ---- 房间页（WP-A） ---- */
+/* 系统行：进出房间等本地事件，与聊天消息同流但明显更轻 */
+.chat-sys { text-align: center; font-size: 11.5px; color: var(--text-2); padding: 2px 0; }
+/* 麦克风按钮的禁言态：服务端收走发布权限时压过 on/off 配色 */
+.ctl-pill.gagged { border-color: var(--red-line); background: var(--red-tint); color: var(--red-text); }
+/* 静音全部：开启态给出与 .on 同强度的底色（图标本身已是红色） */
+.ctl-square.danger { border-color: var(--red-line); background: var(--red-tint); }
+/* 命令式按钮（右键菜单项、成员行小按钮）的进行中态 */
+.um-item.loading, .m-btn.loading { opacity: 0.5; pointer-events: none; }
+/* 舞台区状态文案整体 pointer-events:none，重试按钮所在容器要收回点击 */
+.stage-retry { pointer-events: auto; }
+/* 自动播放被拦截的横幅：叠在舞台区顶部，不动任何媒体元素的挂载 */
+.audio-blocked {
+  position: absolute; top: 12px; left: 50%; transform: translateX(-50%); z-index: 3;
+  display: flex; align-items: center; gap: 8px; padding: 8px 14px; border-radius: 999px;
+  border: 1px solid var(--ember-line); background: var(--ember-tint); color: var(--ember);
+  font-size: 12.5px; box-shadow: var(--shadow-lg); cursor: pointer;
+}
+
+/* ---- 轻页面与外壳（WP-B） ---- */
+/* 大厅卡片改 <a href> 承载跳转：<a> 与房主齿轮按钮是兄弟节点（交互元素不能嵌套），
+   position: relative 落在外层 wrap 上，齿轮相对 wrap 浮在右上角；wrap 顶替 <a> 成为
+   grid item 撑满行高，.channel-card 用 height: 100% 填满 wrap，卡片外观不变 */
+.channel-card-wrap { position: relative; height: 100%; }
+.channel-card { height: 100%; color: var(--text-0); text-decoration: none; }
+.channel-card-wrap .card-gear { position: absolute; top: 12px; right: 12px; }
+/* 创建频道输入框校验失败：不占用 .field（这里没有该容器），直接标红输入框本身 */
+.input-bad { box-shadow: inset 0 0 0 1.5px var(--red); border-radius: 6px; }
+/* 「服务器在线」chip 的离线态，尺寸对齐既有 .ok-dot */
+.status-chip .bad-dot { width: 5px; height: 5px; border-radius: 50%; background: var(--red); display: inline-block; }
+/* 侧栏用户栏点头像/名字弹出的小菜单：独立命名，不与房间页 .user-menu 耦合 */
+.user-bar { position: relative; }
+.user-bar-trigger { display: flex; align-items: center; gap: 9px; flex-grow: 1; min-width: 0; text-align: left; }
+.acct-menu {
+  position: absolute; left: 8px; right: 8px; bottom: calc(100% + 6px); z-index: 60; padding: 5px;
+  background: var(--bg-1); border: 1px solid var(--line); border-radius: 11px; box-shadow: var(--shadow-lg);
+}
+.acct-menu .am-item {
+  display: flex; align-items: center; gap: 9px; width: 100%; padding: 8px 9px;
+  border-radius: 7px; font-size: 12.5px; color: var(--text-0); text-align: left;
+}
+.acct-menu .am-item:hover { background: var(--bg-2); }
+.acct-menu .am-item.danger { color: var(--red-text); }
+
 /* ---- 移动端 ---- */
 .menu-btn { display: none; }
 @media (max-width: 860px) {

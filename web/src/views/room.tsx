@@ -5,17 +5,18 @@
 // 结构分两层：
 // - 连接层（非 UI）：Line 双线模型、重连调度、引擎回调、聊天连接、离开清理——命令式，逻辑与旧版一致；
 // - 视图层（Solid）：信号驱动，引擎回调只写信号，DOM 由 JSX 派生，消灭手工 refresh* 互相调用。
-import { createEffect, createMemo, createSignal, untrack, For, Show } from 'solid-js';
+import { createEffect, createMemo, createSignal, on, untrack, For, Show } from 'solid-js';
 import { render } from 'solid-js/web';
-import { clearSession, fetchJoinCredentials, getUser, kickUser, listChannels, muteUser } from '../api';
+import { ApiError, fetchJoinCredentials, getUser, kickUser, listChannels, muteUser } from '../api';
 import type { EngineCred } from '../api';
+import { playCue } from '../audio';
 import { connectChat } from '../chat';
 import type { ChatMessage } from '../chat';
 import { createEngine } from '../engine';
 import type { AVEngine, EPart, EngineCallbacks, TrackSource, VideoStats } from '../engine/types';
 import { encoderIsHw, loadPrefs, prefsBus, savePrefs } from '../prefs';
-import { menuButtonHtml, renderShell, wireMenuButton } from '../shell';
-import { avatarHtml, el, esc, fmtClock, icon, licon, micIcon, slashIcon, toast } from '../ui';
+import { renderShell } from '../shell';
+import { avatarHtml, confirmDialog, el, esc, fmtClock, icon, licon, menuButtonHtml, micIcon, slashIcon, toast, wireMenuButton } from '../ui';
 import { openSettings } from './settings';
 
 type SinkMedia = HTMLMediaElement & { setSinkId?: (id: string) => Promise<void>; sinkId?: string };
@@ -58,6 +59,17 @@ interface AudioEntry {
 }
 
 type TileEntry = VideoEntry | AudioEntry;
+
+// 本地事件（进出房间提示）：不是服务端消息，只在本次会话的聊天日志里与消息按时间合流
+interface RoomEvent {
+  sys: true;
+  id: number;
+  at: number;
+  text: string;
+}
+
+// 语音线连接阶段（顶栏 chip 与外壳连接框的唯一来源）；retry 带上第几次，避免再开一个信号
+type VoiceState = { phase: 'connecting' | 'up' | 'retry'; attempt: number };
 
 // ---- 每设备本地音量持久化（0~100，按 identity）----
 const VOLS_KEY = 'hearth_room_volumes';
@@ -177,6 +189,9 @@ export async function renderRoom(root: HTMLElement, channel: string) {
   const [historyLoaded, setHistoryLoaded] = createSignal(false);
   const [chatReady, setChatReady] = createSignal(false); // 输入框非空 → 发送按钮点亮
   const [chatPlaceholder, setChatPlaceholder] = createSignal(`发消息到 #${channel}`);
+  const [roomEvents, setRoomEvents] = createSignal<RoomEvent[]>([]);
+  const [voiceState, setVoiceState] = createSignal<VoiceState>({ phase: 'connecting', attempt: 0 });
+  const [audioBlocked, setAudioBlocked] = createSignal(false);
   const [isOwnerSig, setIsOwnerSig] = createSignal(false);
   const settingsCtx = { backLabel: `返回 ${channel}`, channel }; // 浮层按频道自查房主，决定是否出「频道」分区
   const [ownerName, setOwnerName] = createSignal('');
@@ -297,6 +312,53 @@ export async function renderRoom(root: HTMLElement, channel: string) {
     setMetaText(`${n} 人在房${screens ? ` · ${screens} 路投屏` : ''}`);
   }
 
+  // ---- 进出房间提示（名册差分，引擎中立）----
+
+  // 重连成功前的第一份名册只做基线：断线期间名册会整份重来，逐条比会刷屏
+  let cueBaseline = true;
+  let cueSeq = 0;
+
+  function pushRoomEvent(text: string) {
+    const ev: RoomEvent = { sys: true, id: cueSeq++, at: Date.now(), text };
+    setRoomEvents((list) => [...list, ev].slice(-50));
+    toast(text, '', 2500);
+  }
+
+  // 按 uid 聚合的在场集合：同账号多设备只算一份；ingest（OBS 推流）与真人设备分开两张表，
+  // 否则推流上线会被当成「那个人又进了一次房间」
+  function cueKeys(list: EPart[], ingest: boolean): Map<number | string, string> {
+    const m = new Map<number | string, string>();
+    for (const p of list) {
+      if (p.ingest !== ingest) continue;
+      if (!ingest && (p.isLocal || (p.uid > 0 && p.uid === myUid))) continue; // 自己的进出不提示
+      m.set(groupKey(p), p.uid > 0 && p.uid === myUid ? '你' : p.username || p.display);
+    }
+    return m;
+  }
+
+  // 一次差分里多人同时进/出只响一声，避免提示音叠成噪音
+  function diffRoster(prev: EPart[], cur: EPart[]) {
+    let joined = false;
+    let left = false;
+    for (const ingest of [false, true]) {
+      const before = cueKeys(prev, ingest);
+      const after = cueKeys(cur, ingest);
+      after.forEach((name, k) => {
+        if (before.has(k)) return;
+        joined = true;
+        pushRoomEvent(ingest ? `${name === '你' ? '你的' : `${name} 的`} OBS 开始推流` : `${name} 进入了房间`);
+      });
+      before.forEach((name, k) => {
+        if (after.has(k)) return;
+        left = true;
+        pushRoomEvent(ingest ? `${name === '你' ? '你的' : `${name} 的`} OBS 停止推流` : `${name} 离开了房间`);
+      });
+    }
+    if (!loadPrefs().joinCue) return;
+    if (joined) playCue('join');
+    if (left) playCue('leave');
+  }
+
   // ---- 视频卡片（引擎回调增删条目；渲染交给 JSX）----
 
   function addVideoTile(part: EPart, source: TrackSource, video: HTMLVideoElement) {
@@ -407,6 +469,16 @@ export async function renderRoom(root: HTMLElement, channel: string) {
 
   let longPressTimer = 0; // 触屏长按弹菜单的定时器（tile 触摸事件共用）
 
+  // 命令式按钮的进行中态：await 期间置灰并禁止重复触发
+  function markBusy(btn: HTMLButtonElement): () => void {
+    btn.classList.add('loading');
+    btn.disabled = true;
+    return () => {
+      btn.classList.remove('loading');
+      btn.disabled = false;
+    };
+  }
+
   // identity 非空 = 设备模式（卡片/成员行入口）：菜单只控制这一台设备；
   // 空 = 用户模式（聊天头像入口）：列出该用户全部设备。禁言始终是用户级操作。
   function showUserMenu(x: number, y: number, uid: number, username: string, identity?: string) {
@@ -503,13 +575,28 @@ export async function renderRoom(root: HTMLElement, channel: string) {
     });
     menu.querySelectorAll<HTMLButtonElement>('[data-gag]').forEach((btn) => {
       btn.addEventListener('click', async () => {
-        close();
         const on = btn.dataset.gag === 'true';
+        // 解除禁言不是破坏性操作，不打断
+        if (
+          on &&
+          !(await confirmDialog({
+            title: `确定禁言 ${username}？`,
+            body: '禁言后对方无法开麦、开摄像头或推流，直到你解除。',
+            confirmText: '禁言',
+            danger: true,
+          }))
+        ) {
+          return;
+        }
+        const done = markBusy(btn);
         try {
           await muteUser(channel, uid, on);
           toast(on ? `已禁言 ${username}` : `已解除 ${username} 的禁言`, 'ok');
         } catch (err) {
           toast((err as Error).message, 'bad');
+        } finally {
+          done();
+          close();
         }
       });
     });
@@ -538,22 +625,45 @@ export async function renderRoom(root: HTMLElement, channel: string) {
     });
     menu.querySelectorAll<HTMLButtonElement>('[data-kick-id]').forEach((btn) => {
       btn.addEventListener('click', async () => {
-        close();
+        const id = btn.dataset.kickId!;
+        const target = targets.find((p) => p.identity === id);
+        const ok = await confirmDialog({
+          title: `确定踢出「${target ? devName(target) : id}」？`,
+          body: '这台设备会被移出房间，之后仍可重新进入。',
+          confirmText: '踢出',
+          danger: true,
+        });
+        if (!ok) return;
+        const done = markBusy(btn);
         try {
-          await kickUser(channel, uid, btn.dataset.kickId!);
+          await kickUser(channel, uid, id);
           toast('已踢出该设备', 'ok');
         } catch (err) {
           toast((err as Error).message, 'bad');
+        } finally {
+          done();
+          close();
         }
       });
     });
-    menu.querySelector('[data-act="kick"]')?.addEventListener('click', async () => {
-      close();
+    const kickAllBtn = menu.querySelector<HTMLButtonElement>('[data-act="kick"]');
+    kickAllBtn?.addEventListener('click', async () => {
+      const ok = await confirmDialog({
+        title: isSelf ? '确定踢出你的全部设备？' : `确定把 ${username} 移出房间？`,
+        body: isSelf ? '本机与 OBS 推流都会断开。' : '对方的全部设备（含 OBS 推流）都会被移出，之后仍可重新进入。',
+        confirmText: '踢出',
+        danger: true,
+      });
+      if (!ok) return;
+      const done = markBusy(kickAllBtn);
       try {
         await kickUser(channel, uid);
         toast(isSelf ? '已踢出你的全部设备（含本机与 OBS）' : `已把 ${username} 移出房间`, 'ok');
       } catch (err) {
         toast((err as Error).message, 'bad');
+      } finally {
+        done();
+        close();
       }
     });
   }
@@ -591,7 +701,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
     const wait = delay ?? Math.min(30000, 2000 * 2 ** Math.min(line.attempts, 4)) * (0.7 + Math.random() * 0.6);
     if (role === 'voice' || combined) {
       setStatusText(line.attempts === 0 ? '连接断开，正在重连…' : `连接断开，正在重连…（第 ${line.attempts + 1} 次）`);
-      shell.setConn(false, '正在重连…');
+      setVoiceState({ phase: 'retry', attempt: line.attempts + 1 });
     }
     line.timer = window.setTimeout(() => void connectLines(false, role), wait);
   }
@@ -606,9 +716,11 @@ export async function renderRoom(root: HTMLElement, channel: string) {
       handleCredsError(err, first);
       return;
     }
+    if (leaving || bounced) return;
     combined = creds.combined;
     if (!only || only === 'voice') {
       await connectLine(voiceLine, creds.voice, first, 'voice');
+      if (leaving) return;
     }
     if (combined) {
       stageLine = voiceLine;
@@ -619,6 +731,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
       }
       if (!only || only === 'stage') {
         await connectLine(stageLine, creds.stage, first, 'stage');
+        if (leaving) return;
       }
     } else {
       stageLine = null;
@@ -628,18 +741,22 @@ export async function renderRoom(root: HTMLElement, channel: string) {
     shell.setConn(!!voiceLine.engine?.connected(), connBoxMeta());
   }
 
+  // 按状态码分支：403/404 是服务端的确定拒绝（封禁、邀请制、频道没了），重试没有意义；
+  // 网络失败（status=0）与 5xx 都退避重连。401 已由 api.ts 清会话跳登录
   function handleCredsError(err: unknown, first: boolean) {
     const msg = (err as Error).message ?? '';
     if (first) setStatusText(`连接失败：${msg}`);
-    if (msg.includes('封禁') || msg.includes('邀请制') || msg.includes('不存在')) {
-      bounce(msg);
-    } else if (msg.includes('登录已失效') || msg.includes('登录凭证')) {
-      bounced = true;
-      clearSession(); // 带失效 token 去登录页会被路由守卫弹回，先清掉
-      location.hash = '#/login';
-    } else {
-      scheduleRejoin('voice');
+    if (err instanceof ApiError) {
+      if (err.status === 401) {
+        bounced = true;
+        return;
+      }
+      if (err.status === 403 || err.status === 404) {
+        bounce(msg);
+        return;
+      }
     }
+    scheduleRejoin('voice');
   }
 
   async function connectLine(line: Line, cred: EngineCred, first: boolean, role: Role) {
@@ -651,11 +768,24 @@ export async function renderRoom(root: HTMLElement, channel: string) {
         line.engine?.dispose();
         line.engine = await createEngine(cred.engine, makeCallbacks(role));
         line.engineName = cred.engine;
+        // 建引擎期间用户可能已经离开房间：清理块跑过了就没人再释放这个半成品
+        if (leaving) {
+          line.engine.dispose();
+          line.engine = null;
+          return;
+        }
       }
       await line.engine.connect(cred.url, cred.token);
+      if (leaving) {
+        line.engine.dispose();
+        line.engine = null;
+        return;
+      }
       line.attempts = 0;
       if (role === 'voice') {
         setStatusText('');
+        cueBaseline = true; // 重连成功后的第一份名册只重置基线，不当成一屋子人刚进来
+        setVoiceState({ phase: 'up', attempt: 0 });
         if (!first) toast('语音已重新连接', 'ok', 1800);
         checkSelfGag(); // 持久禁言：重进房时权限初始就是 canPublish=false
         if (micOn()) {
@@ -703,7 +833,8 @@ export async function renderRoom(root: HTMLElement, channel: string) {
     (['voice', 'stage'] as Role[]).forEach((role) => {
       const line = lineFor(role);
       if (role === 'stage' && (combined || !line)) return;
-      if (line && line.engine && !line.engine.connected()) {
+      // 引擎还没建起来（首次连接就失败）也要能重试，否则「立即重试」按钮点了没反应
+      if (line && !line.engine?.connected()) {
         clearTimeout(line.timer);
         line.attempts = 0;
         void connectLines(false, role);
@@ -760,17 +891,19 @@ export async function renderRoom(root: HTMLElement, channel: string) {
       onReconnecting: () => {
         if (role === 'voice' || combined) {
           setStatusText('连接不稳定，正在恢复…');
-          shell.setConn(false, '正在恢复连接…');
+          setVoiceState((s) => ({ phase: 'retry', attempt: s.attempt }));
         }
       },
       onReconnected: () => {
         if (role === 'voice' || combined) {
           setStatusText('');
-          shell.setConn(true, connBoxMeta());
+          cueBaseline = true; // 引擎自愈也会重发整份名册
+          setVoiceState({ phase: 'up', attempt: 0 });
         }
         refreshRoster();
         refreshMeta();
       },
+      onAudioBlocked: () => setAudioBlocked(true),
       onEnded: (reason) => {
         if (leaving) return;
         if (reason === 'kicked') return bounce('你已被移出该频道');
@@ -819,14 +952,15 @@ export async function renderRoom(root: HTMLElement, channel: string) {
     return `${kind}启动失败：${(err as Error)?.message ?? name}`;
   }
 
-  // 自己被禁言（服务端收走发布权限 canPublish=false；持久禁言重进房时权限初始即为 false）
-  let selfGagged = false;
+  // 自己被禁言（服务端收走发布权限 canPublish=false；持久禁言重进房时权限初始即为 false）。
+  // 这个影子变量只用于「状态跳变时弹一次 toast」，按钮的禁言态从 roster() 派生，不看它
+  let gagToasted = false;
   const isSelfGagged = () => voiceLine.engine?.participants().some((p) => p.isLocal && !p.canPublish) === true;
 
   function checkSelfGag() {
     const g = isSelfGagged();
-    if (g === selfGagged) return;
-    selfGagged = g;
+    if (g === gagToasted) return;
+    gagToasted = g;
     if (g) {
       // 服务端会顺带撤下已发布的麦克风轨道，本地 UI 同步收成闭麦
       if (micOn()) setMicOn(false);
@@ -862,6 +996,24 @@ export async function renderRoom(root: HTMLElement, channel: string) {
   function toggleDeaf() {
     setDeafened((d) => !d);
     applyAudioPrefs();
+    toast(deafened() ? '已静音全部（仍可说话）' : '已恢复收听', '', 2000);
+  }
+
+  // 自动播放被拦截：横幅点击是用户手势，两条线的引擎与增益链一起解锁
+  async function resumeAllAudio() {
+    setAudioBlocked(false);
+    void audioCtx?.resume();
+    for (const eng of new Set([voiceLine.engine, stageEngine()])) {
+      if (eng) await eng.resumeAudio().catch(() => {});
+    }
+  }
+
+  // 投屏中离开要先确认：投屏一断观众端就黑，误触代价大
+  async function leaveRoom() {
+    if (screenOn() && !(await confirmDialog({ title: '正在投屏，确定离开？', body: '离开房间会立刻中断投屏。', confirmText: '离开', danger: true }))) {
+      return;
+    }
+    location.hash = '#/lobby';
   }
 
   async function toggleCamera() {
@@ -963,6 +1115,8 @@ export async function renderRoom(root: HTMLElement, channel: string) {
       // 面板刚从 hidden 变可见，等 DOM 更新后再滚底
       queueMicrotask(() => {
         chatLogEl.scrollTop = chatLogEl.scrollHeight;
+        // 触屏聚焦会弹出键盘把面板顶掉一半，只在有指针悬停的设备上抢焦点
+        if (!window.matchMedia('(hover: none)').matches) chatInputEl.focus();
       });
     }
   }
@@ -989,11 +1143,15 @@ export async function renderRoom(root: HTMLElement, channel: string) {
   function sendChat(ev: Event) {
     ev.preventDefault();
     const content = chatInputEl.value.trim();
-    if (content) {
-      chat.send(content);
-      chatInputEl.value = '';
-      setChatReady(false);
+    if (!content) return;
+    // ws 断开时 send 会静默丢消息：保留输入框内容，让用户重连后能再发一次
+    if (!chat.connected()) {
+      toast('聊天未连接，稍后再发', 'bad');
+      return;
     }
+    chat.send(content);
+    chatInputEl.value = '';
+    setChatReady(false);
   }
 
   // ---- 设置页偏好热应用 ----
@@ -1258,11 +1416,40 @@ export async function renderRoom(root: HTMLElement, channel: string) {
       setAudioEntries([...kept, ...added]);
     });
 
-    // 新消息 / 历史到达后滚到底（原实现每次 append 后滚动）
+    // 名册差分 → 进出提示。基线快照就是上一次的 roster()，不另存副本；
+    // 首次进房/重连成功后的第一份只重置基线（cueBaseline），断线期间不比较
+    createEffect(
+      on(roster, (cur, prev) => {
+        if (!prev) return; // 首次运行没有可比的上一份，不消耗基线标志
+        if (cueBaseline) {
+          cueBaseline = false;
+          return;
+        }
+        if (!voiceLine.engine?.connected()) return;
+        diffRoster(prev, cur);
+      }),
+    );
+
+    // 外壳连接框与顶栏 chip 同源（voiceState）；舞台线自己的变化仍走命令式 setConn
     createEffect(() => {
-      msgs();
+      const s = voiceState();
+      shell.setConn(s.phase === 'up', s.phase === 'up' ? connBoxMeta() : s.phase === 'connecting' ? '正在协商…' : '正在重连…');
+    });
+
+    // 聊天日志 = 服务端消息 + 本地事件按时间合流；条目保持原对象引用，For 才不会整段重建
+    const chatItems = createMemo<(ChatMessage | RoomEvent)[]>(() => {
+      const at = (x: ChatMessage | RoomEvent) => ('sys' in x ? x.at : Date.parse(x.created_at) || 0);
+      return [...msgs(), ...roomEvents()].sort((a, b) => at(a) - at(b));
+    });
+
+    // 新消息 / 历史 / 本地事件到达后滚到底（原实现每次 append 后滚动）
+    createEffect(() => {
+      chatItems();
       chatLogEl.scrollTop = chatLogEl.scrollHeight;
     });
+
+    // 被禁言：按钮状态从名册派生（checkSelfGag 的影子变量只管跳变 toast）
+    const selfGagged = createMemo(() => roster().some((p) => p.isLocal && !p.canPublish));
 
     const spotlight = createMemo(() => layoutPref() === 'spotlight');
     // 全部卡片按到达顺序（九宫格排位 = 旧版 DOM 插入顺序）
@@ -1329,6 +1516,21 @@ export async function renderRoom(root: HTMLElement, channel: string) {
           <h1>{channel}</h1>
           <div class="vline"></div>
           <span class="sub">{metaText()}</span>
+          <span
+            class="conn-chip"
+            classList={{ live: voiceState().phase === 'up', retry: voiceState().phase === 'retry' }}
+          >
+            <span class="dot"></span>
+            <span>
+              {voiceState().phase === 'up'
+                ? '已连接'
+                : voiceState().phase === 'connecting'
+                  ? '连接中'
+                  : voiceState().attempt > 0
+                    ? `重连中·第 ${voiceState().attempt} 次`
+                    : '重连中'}
+            </span>
+          </span>
           <div class="spacer"></div>
           <button
             class="hit btn btn-icon"
@@ -1372,7 +1574,22 @@ export async function renderRoom(root: HTMLElement, channel: string) {
         <div style="flex-grow:1;display:flex;min-height:0">
           <div style="flex-grow:1;display:flex;flex-direction:column;min-width:0;min-height:0">
             <div class="stage-area">
-              <div class="stage-status">{statusText()}</div>
+              <div class="stage-status">
+                {statusText()}
+                <Show when={voiceState().phase === 'retry'}>
+                  <div class="stage-retry">
+                    <button class="hit btn btn-sm" onClick={retryNow}>
+                      立即重试
+                    </button>
+                  </div>
+                </Show>
+              </div>
+              <Show when={audioBlocked()}>
+                <button class="hit audio-blocked" onClick={() => void resumeAllAudio()}>
+                  {el(icon('volume', 15, 'currentColor'))}
+                  <span>浏览器拦截了自动播放，点击开启声音</span>
+                </button>
+              </Show>
               <div
                 class="video-grid"
                 classList={{ spotlight: spotlight() }}
@@ -1406,7 +1623,12 @@ export async function renderRoom(root: HTMLElement, channel: string) {
             </div>
             <div class="control-bar">
               <div class="group">
-                <button class="hit ctl-pill" classList={{ on: micOn() }} onClick={() => void toggleMic()}>
+                <button
+                  class="hit ctl-pill"
+                  classList={{ on: micOn(), gagged: selfGagged() }}
+                  title={selfGagged() ? '已被禁言' : micOn() ? '关闭麦克风' : '打开麦克风'}
+                  onClick={() => void toggleMic()}
+                >
                   {el(micIcon(17, !micOn(), 'currentColor'))}
                   <span class="pill-label">{micOn() ? '麦克风' : '麦克风已关'}</span>
                   <Show when={micOn()}>
@@ -1418,7 +1640,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
                 <button
                   class="hit ctl-square"
                   classList={{ danger: deafened() }}
-                  title="静音全部（只影响自己听到的）"
+                  title={deafened() ? '已静音全部，点击恢复收听' : '静音全部（只影响自己听到的）'}
                   onClick={toggleDeaf}
                 >
                   {el(slashIcon('speaker', 17, deafened(), deafened() ? 'var(--red)' : 'currentColor'))}
@@ -1468,12 +1690,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
                 <button class="hit ctl-square" title="设置" onClick={() => openSettings('av', settingsCtx)}>
                   {el(icon('gear', 17, 'var(--text-1)'))}
                 </button>
-                <button
-                  class="hit ctl-pill danger"
-                  onClick={() => {
-                    location.hash = '#/lobby';
-                  }}
-                >
+                <button class="hit ctl-pill danger" onClick={() => void leaveRoom()}>
                   {el(icon('leave', 17, 'var(--red)'))}
                   <span class="pill-label">离开房间</span>
                 </button>
@@ -1550,24 +1767,39 @@ export async function renderRoom(root: HTMLElement, channel: string) {
                         </div>
                       </Show>
                     );
-                    const kickBtn = (p: EPart) => (
-                      <Show when={!p.isLocal && (isMe || canModerate())}>
-                        <button
-                          class="hit m-btn"
-                          title="踢出该设备"
-                          onClick={async () => {
-                            try {
-                              await kickUser(channel, p.uid, p.identity);
-                              toast('已踢出该设备', 'ok');
-                            } catch (err) {
-                              toast((err as Error).message, 'bad');
-                            }
-                          }}
-                        >
-                          {el(icon('leave', 14, 'var(--red)'))}
-                        </button>
-                      </Show>
-                    );
+                    const kickBtn = (p: EPart) => {
+                      const [kicking, setKicking] = createSignal(false);
+                      return (
+                        <Show when={!p.isLocal && (isMe || canModerate())}>
+                          <button
+                            class="hit m-btn"
+                            classList={{ loading: kicking() }}
+                            disabled={kicking()}
+                            title="踢出该设备"
+                            onClick={async () => {
+                              const ok = await confirmDialog({
+                                title: `确定踢出「${devName(p)}」？`,
+                                body: '这台设备会被移出房间，之后仍可重新进入。',
+                                confirmText: '踢出',
+                                danger: true,
+                              });
+                              if (!ok) return;
+                              setKicking(true);
+                              try {
+                                await kickUser(channel, p.uid, p.identity);
+                                toast('已踢出该设备', 'ok');
+                              } catch (err) {
+                                toast((err as Error).message, 'bad');
+                              } finally {
+                                setKicking(false);
+                              }
+                            }}
+                          >
+                            {el(icon('leave', 14, 'var(--red)'))}
+                          </button>
+                        </Show>
+                      );
+                    };
                     // 单设备用户：一行平铺，状态行直接带设备名
                     if (devices.length === 1) {
                       const p = first;
@@ -1682,13 +1914,16 @@ export async function renderRoom(root: HTMLElement, channel: string) {
               <Show when={historyLoaded()}>
                 <div class="chat-day">最近</div>
               </Show>
-              <For each={msgs()}>{(m) => <ChatMsgView m={m} />}</For>
+              <For each={chatItems()}>
+                {(it) => ('sys' in it ? <div class="chat-sys">{it.text}</div> : <ChatMsgView m={it} />)}
+              </For>
             </div>
             <div class="chat-input-wrap">
               <form class="chat-input-box" onSubmit={sendChat}>
                 <input
                   ref={chatInputEl}
                   placeholder={chatPlaceholder()}
+                  maxlength="2000"
                   autocomplete="off"
                   onInput={() => setChatReady(chatInputEl.value.trim().length > 0)}
                 />
@@ -1705,7 +1940,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
   };
 
   const dispose = render(App, shell.content);
-  wireMenuButton(root);
+  const unwireMenu = wireMenuButton(root);
 
   // ---- 房主探测 ----
   void listChannels()
@@ -1717,9 +1952,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
     .catch(() => {});
 
   // ---- 首次连接与清理 ----
-  updateStageButtons();
-  await connectLines(true);
-
+  // 清理监听必须先于首次连接注册：连接期间用户离开时，清理块要能置 leaving 并释放已建好的部分
   const myHash = location.hash;
   const onHashChange = () => {
     if (location.hash !== myHash) {
@@ -1753,7 +1986,11 @@ export async function renderRoom(root: HTMLElement, channel: string) {
       if (stageLine && stageLine !== voiceLine) stageLine.engine?.dispose();
       dispose();
       shell.destroy();
+      unwireMenu();
     }
   };
   window.addEventListener('hashchange', onHashChange);
+
+  updateStageButtons();
+  await connectLines(true);
 }

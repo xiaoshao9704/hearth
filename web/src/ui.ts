@@ -290,3 +290,32 @@ export function el(html: string): Element {
   t.innerHTML = html;
   return t.content.firstElementChild!;
 }
+
+// ---- 移动端抽屉菜单按钮（各视图往 topbar 里塞）----
+export function menuButtonHtml(): string {
+  return `<button class="hit btn btn-icon menu-btn" id="menu-btn" aria-label="菜单">${icon('menu', 16, 'var(--text-1)')}</button>`;
+}
+
+// 返回清理函数：keydown 监听常驻挂在 document 上（只在抽屉确实开着时处理 Esc），
+// 调用方在自己的离开/清理路径里调用返回值摘掉，避免直接跳页导致监听泄漏
+export function wireMenuButton(root: HTMLElement): () => void {
+  const btn = root.querySelector<HTMLButtonElement>('#menu-btn');
+  const frame = root.querySelector<HTMLElement>('.app-frame');
+  const scrim = root.querySelector<HTMLElement>('.nav-scrim');
+  if (!btn || !frame) return () => {};
+  btn.setAttribute('aria-controls', 'app-sidebar');
+  btn.setAttribute('aria-expanded', 'false');
+
+  function setOpen(open: boolean) {
+    frame!.classList.toggle('nav-open', open);
+    btn!.setAttribute('aria-expanded', String(open));
+  }
+  const onKeydown = (ev: KeyboardEvent) => {
+    if (ev.key === 'Escape' && frame!.classList.contains('nav-open')) setOpen(false);
+  };
+  document.addEventListener('keydown', onKeydown);
+  btn.addEventListener('click', () => setOpen(!frame.classList.contains('nav-open')));
+  scrim?.addEventListener('click', () => setOpen(false));
+
+  return () => document.removeEventListener('keydown', onKeydown);
+}

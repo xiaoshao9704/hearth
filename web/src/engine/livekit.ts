@@ -116,6 +116,10 @@ export class LiveKitEngine implements AVEngine {
       .on(RoomEvent.ParticipantDisconnected, () => this.cbs.onRoster())
       // 禁言/解禁（canPublish 变化）：走名册刷新，视图据此更新徽标与自我提示
       .on(RoomEvent.ParticipantPermissionsChanged, () => this.cbs.onRoster())
+      // 自动播放被拦截：SDK 自己不会出提示，交给房间层弹「点击开启声音」
+      .on(RoomEvent.AudioPlaybackStatusChanged, () => {
+        if (!this.room.canPlaybackAudio) this.cbs.onAudioBlocked?.();
+      })
       .on(RoomEvent.Reconnecting, () => this.cbs.onReconnecting())
       .on(RoomEvent.Reconnected, () => this.cbs.onReconnected())
       .on(RoomEvent.Disconnected, (reason) => {
@@ -128,8 +132,31 @@ export class LiveKitEngine implements AVEngine {
       });
   }
 
+  // SDK 的 connect 在信令挂起时可能永不 settle：加超时并把半连接收干净，
+  // 否则房间层的重连调度永远等不到这条 Promise
   async connect(url: string, token: string) {
-    await this.room.connect(url, token);
+    let timedOut = false;
+    let timer = 0;
+    try {
+      await Promise.race([
+        this.room.connect(url, token),
+        new Promise<never>((_, reject) => {
+          timer = window.setTimeout(() => {
+            timedOut = true;
+            reject(new Error('舞台线连接超时'));
+          }, 15000);
+        }),
+      ]);
+    } catch (err) {
+      if (timedOut) await this.room.disconnect().catch(() => {});
+      throw err;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  async resumeAudio() {
+    await this.room.startAudio();
   }
 
   disconnect() {

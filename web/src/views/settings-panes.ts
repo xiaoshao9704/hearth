@@ -299,6 +299,13 @@ function renderAV(body: HTMLElement): () => void {
             <span class="mono" style="font-size:11.5px;color:var(--text-1);width:28px;text-align:right" id="vol-label">${prefs.volume}</span>
           </div>
         </div>
+        <button class="hit switch-row" id="join-cue-row" style="width:100%;text-align:left">
+          <div style="flex-grow:1">
+            <div class="s-title">进出房间提示音</div>
+            <div class="s-desc">有人进出频道时播放一声短提示</div>
+          </div>
+          <div class="switch ${prefs.joinCue ? 'on' : ''}" id="join-cue-switch"><div class="knob"></div></div>
+        </button>
         <div class="opt-list" id="audio-chain"></div>
       </div>
       <div style="display:flex;flex-direction:column;gap:9px">
@@ -583,6 +590,13 @@ function renderAV(body: HTMLElement): () => void {
     prefs.mic = !prefs.mic;
     autoMicSwitch.classList.toggle('on', prefs.mic);
     save('mic-auto');
+  });
+
+  const joinCueSwitch = body.querySelector<HTMLDivElement>('#join-cue-switch')!;
+  body.querySelector('#join-cue-row')!.addEventListener('click', () => {
+    prefs.joinCue = !prefs.joinCue;
+    joinCueSwitch.classList.toggle('on', prefs.joinCue);
+    save('join-cue');
   });
 
   const mirrorSwitch = body.querySelector<HTMLDivElement>('#mirror-switch')!;
