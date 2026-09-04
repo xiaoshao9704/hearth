@@ -150,7 +150,7 @@ func (a *Aliyun) updateOne(ctx context.Context, host, rtype string, addr netip.A
 		return apiErr(a.Name(), "主机名格式不对")
 	}
 	var lastErr error
-	for n := 2; n < len(labels); n++ {
+	for n := 2; n <= len(labels); n++ {
 		domain, sub := splitHost(host, n)
 		err := a.upsert(ctx, domain, sub, rtype, addr)
 		if err == nil {

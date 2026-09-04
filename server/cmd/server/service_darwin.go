@@ -94,6 +94,9 @@ func svcInstall(cfg config.Config, system bool) error {
 }
 
 func svcUninstall(cfg config.Config, system bool) error {
+	if system {
+		return errors.New("macOS 只支持用户级服务，去掉 --system 即可")
+	}
 	_ = exec.Command("launchctl", "bootout", launchdTarget()).Run() // 未装载时失败无害
 	plist, err := plistPath()
 	if err != nil {
@@ -107,6 +110,9 @@ func svcUninstall(cfg config.Config, system bool) error {
 }
 
 func svcStart(system bool) error {
+	if system {
+		return errors.New("macOS 只支持用户级服务，去掉 --system 即可")
+	}
 	plist, err := plistPath()
 	if err != nil {
 		return err
@@ -131,6 +137,9 @@ func svcStart(system bool) error {
 }
 
 func svcStop(system bool) error {
+	if system {
+		return errors.New("macOS 只支持用户级服务，去掉 --system 即可")
+	}
 	if out, err := exec.Command("launchctl", "bootout", launchdTarget()).CombinedOutput(); err != nil {
 		return fmt.Errorf("launchctl bootout: %v (%s)", err, strings.TrimSpace(string(out)))
 	}
@@ -139,6 +148,9 @@ func svcStop(system bool) error {
 }
 
 func svcStatus(system bool) error {
+	if system {
+		return errors.New("macOS 只支持用户级服务，去掉 --system 即可")
+	}
 	plist, err := plistPath()
 	if err != nil {
 		return err

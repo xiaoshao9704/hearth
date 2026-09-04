@@ -75,6 +75,7 @@ func (s *hearthService) Execute(_ []string, reqs <-chan svc.ChangeRequest, chang
 				return false, 0
 			}
 		case <-done:
+			cancel()
 			return false, 0
 		}
 	}

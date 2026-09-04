@@ -36,7 +36,7 @@ func New(path string, maxBytes int64, backups int) (*Writer, error) {
 func (w *Writer) open() error {
 	st, err := os.Stat(w.path)
 	if err == nil && st.Size() >= w.maxBytes {
-		w.rotate() // 上次留下的文件已超限，先轮转
+		w.rotateFiles() // 上次留下的文件已超限，先轮转
 	}
 	f, err := os.OpenFile(w.path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
 	if err != nil {
@@ -63,13 +63,19 @@ func (w *Writer) Write(p []byte) (int, error) {
 
 // rotate 关闭当前文件并顺延备份：.N-1→.N（删最老）… .1→.2、当前→.1，然后重开新文件。
 func (w *Writer) rotate() {
-	w.f.Close()
+	if w.f != nil {
+		w.f.Close()
+	}
+	w.rotateFiles()
+	w.f, _ = os.OpenFile(w.path, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
+	w.size = 0
+}
+
+func (w *Writer) rotateFiles() {
 	for i := w.backups - 1; i >= 1; i-- {
 		os.Rename(w.path+"."+strconv.Itoa(i), w.path+"."+strconv.Itoa(i+1))
 	}
 	os.Rename(w.path, w.path+".1")
-	w.f, _ = os.OpenFile(w.path, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
-	w.size = 0
 }
 
 // Close 关闭底层文件。

@@ -7,6 +7,7 @@ package ddns
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/netip"
@@ -34,6 +35,13 @@ type dpResponse struct {
 	} `json:"records"`
 }
 
+type dpError struct {
+	Code    string
+	Message string
+}
+
+func (e *dpError) Error() string { return "dnspod: " + e.Message }
+
 // call 调 dnsapi.cn 的一个动作；login_token/format 由这里统一补。
 // 返回错误带提供方前缀；status.code != 1 视为 API 拒绝。
 func (d *DNSPod) call(ctx context.Context, action string, params url.Values) (*dpResponse, error) {
@@ -56,8 +64,12 @@ func (d *DNSPod) call(ctx context.Context, action string, params url.Values) (*d
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 		return nil, err
 	}
+	// DNSPod 文档把 Record.List 的 code=10 定义为没有记录；尚未经真实凭证验证。
+	if action == "Record.List" && out.Status.Code == "10" {
+		return &out, nil
+	}
 	if out.Status.Code != "1" {
-		return &out, apiErr(d.Name(), out.Status.Message)
+		return &out, &dpError{Code: out.Status.Code, Message: out.Status.Message}
 	}
 	return &out, nil
 }
@@ -108,7 +120,7 @@ func (d *DNSPod) updateOne(ctx context.Context, host, rtype string, addr netip.A
 		return apiErr(d.Name(), "主机名格式不对")
 	}
 	var lastErr error
-	for n := 2; n < len(labels); n++ {
+	for n := 2; n <= len(labels); n++ {
 		domain, sub := splitHost(host, n)
 		err := d.upsert(ctx, domain, sub, rtype, addr)
 		if err == nil {
@@ -125,16 +137,10 @@ func (d *DNSPod) updateOne(ctx context.Context, host, rtype string, addr netip.A
 	return apiErr(d.Name(), "主机名格式不对")
 }
 
-// isDomainNotFound 判断「域名不存在」类错误（拆分试探的依据）：DNSPod 文案随语言变，
-// 按关键词宽松匹配。
+// isDomainNotFound 按 DNSPod 文档的错误码 6 判断域名不存在，不能按文案吞掉权限等错误。
 func isDomainNotFound(err error) bool {
-	if err == nil {
-		return false
-	}
-	msg := err.Error()
-	return strings.Contains(msg, "域名") ||
-		strings.Contains(strings.ToLower(msg), "domain") ||
-		strings.Contains(msg, "no exist")
+	var dpErr *dpError
+	return errors.As(err, &dpErr) && dpErr.Code == "6"
 }
 
 func (d *DNSPod) Update(ctx context.Context, host string, v4, v6 netip.Addr) error {

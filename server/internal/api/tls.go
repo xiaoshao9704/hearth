@@ -9,7 +9,9 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"net/url"
 	"slices"
+	"strings"
 	"time"
 
 	"hearth/server/internal/ddns"
@@ -135,7 +137,7 @@ func (a *API) adminNetcheck(w http.ResponseWriter, r *http.Request) {
 
 	cfg := a.tlsConfig(ctx)
 	res.Domain = checkDomain(ctx, cfg.Domain, res.Externals)
-	res.External = a.probeExternal(ctx, cfg, res)
+	res.External = a.probeExternal(ctx, cfg, res, a.publicProbeBase(ctx))
 	writeJSON(w, http.StatusOK, res)
 }
 
@@ -195,7 +197,23 @@ func externalIPs(externals []string) []string {
 // 回环探测打不通不等于失败——NAT hairpin 不支持的网关很常见，所以结论分三档：
 // reachable（真的通了）/ unknown（本机打不到但映射/探测看起来正常，提示用手机流量验证）/
 // failed（映射没建立，或按域名探时证书与域名不匹配）。
-func (a *API) probeExternal(ctx context.Context, cfg tlsx.Config, res netcheckResult) externalCheck {
+func (a *API) probeExternal(ctx context.Context, cfg tlsx.Config, res netcheckResult, publicBase string) externalCheck {
+	if cfg.Mode == "off" {
+		if publicBase == "" {
+			return externalCheck{Verdict: "unknown", Detail: "未配置 PUBLIC_URL 或 site_domain，无法安全确定公开回探地址"}
+		}
+		base, err := url.Parse(publicBase)
+		if err != nil || base.Scheme == "" || base.Host == "" {
+			return externalCheck{Verdict: "failed", Detail: "公开地址配置无效，无法回探"}
+		}
+		probeURL := strings.TrimSuffix(base.String(), "/") + "/healthz"
+		reachable, _ := tryHealthz(ctx, probeURL, base.Scheme == "https")
+		if reachable {
+			return externalCheck{URL: probeURL, Verdict: "reachable", Detail: "外部地址回探通过"}
+		}
+		return externalCheck{URL: probeURL, Verdict: "unknown",
+			Detail: "从本机回探不通；反向代理或网关可能不支持回环，请从实际外部网络验证"}
+	}
 	host := cfg.Domain
 	if host == "" {
 		pub := externalIPs(res.Externals)
@@ -209,12 +227,9 @@ func (a *API) probeExternal(ctx context.Context, cfg tlsx.Config, res netcheckRe
 		host = "[" + host + "]"
 	}
 
-	// 探 HTTPS:443（映射把外部 443 指到 https_addr）；TLS 没开时探 HTTP:80。
+	// 进程内 TLS 映射把外部 443 指到 https_addr。
 	scheme, port := "https", "443"
 	verify := cfg.Domain != "" && cfg.Mode == "acme" // 只有 acme 的证书链能过公开验证
-	if cfg.Mode == "off" {
-		scheme, port = "http", "80"
-	}
 	url := scheme + "://" + host + ":" + port + "/healthz"
 
 	reachable, certErr := tryHealthz(ctx, url, verify)

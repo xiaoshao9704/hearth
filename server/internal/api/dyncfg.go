@@ -49,7 +49,7 @@ var siteKeys = []rtc.ConfigKey{
 }
 
 // tlsKeys 进程内 TLS（见 internal/tlsx）：切换立即生效（HTTPS listener 热起停，
-// HTTP 端口转做 ACME 挑战 + 301 重定向），不用重启。
+// HTTP 端口转做 ACME 挑战 + 308 重定向），不用重启。
 var tlsKeys = []rtc.ConfigKey{
 	{Name: "tls_mode", Env: "TLS_MODE", Group: "tls", Default: "off",
 		Options: []string{"off", "acme", "selfsigned"},
@@ -183,7 +183,8 @@ func (a *API) PortWants(ctx context.Context) []portmap.Want {
 	// TLS 开启时公开链接按 80/443 拼（不带端口，ACME 两种挑战也都要这两个口）：
 	// HTTP 与 HTTPS 的映射都指定首选外部端口并要求内外一致，网关改派宁可判失败走
 	// port_conflict 诊断，也不能让邀请链接静默对不上。
-	if a.dynVal(ctx, "tls_mode") != "off" {
+	mode := a.dynVal(ctx, "tls_mode")
+	if mode == "acme" || mode == "selfsigned" {
 		if _, port, err := net.SplitHostPort(a.dynVal(ctx, "https_addr")); err == nil {
 			if p, err := strconv.Atoi(port); err == nil {
 				ws = append(ws, portmap.Want{Proto: "tcp", Port: p, External: 443, StrictPort: true, Desc: "hearth https"})

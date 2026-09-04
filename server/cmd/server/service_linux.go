@@ -57,8 +57,8 @@ Description=Hearth Server
 ` + after + `
 
 [Service]
-ExecStart=` + exe + ` --data ` + cfg.DataDir + ` --service
-WorkingDirectory=` + cfg.DataDir + `
+ExecStart=` + systemdQuote(exe) + ` --data ` + systemdQuote(cfg.DataDir) + ` --service
+WorkingDirectory=` + systemdQuote(cfg.DataDir) + `
 Restart=on-failure
 RestartSec=2
 
@@ -84,7 +84,17 @@ WantedBy=` + wantedBy + `
 	fmt.Println("  配置: " + path)
 	fmt.Println("  启动: hearth service start" + map[bool]string{true: " --system", false: ""}[system])
 	fmt.Println("  日志: " + filepath.Join(cfg.DataDir, "hearth.log"))
+	if !system {
+		fmt.Println("  提示: 若需未登录也自动启动，请执行 loginctl enable-linger $USER")
+	}
 	return nil
+}
+
+func systemdQuote(s string) string {
+	s = strings.ReplaceAll(s, "%", "%%")
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	s = strings.ReplaceAll(s, `"`, `\"`)
+	return `"` + s + `"`
 }
 
 func svcUninstall(cfg config.Config, system bool) error {

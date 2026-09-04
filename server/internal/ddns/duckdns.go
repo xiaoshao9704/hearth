@@ -27,6 +27,9 @@ func (d *DuckDNS) Update(ctx context.Context, host string, v4, v6 netip.Addr) er
 	if sub == host || sub == "" || strings.Contains(sub, ".") {
 		return apiErr(d.Name(), "DuckDNS 只支持 <子域名>.duckdns.org 形式的主机名")
 	}
+	if !v4.IsValid() && v6.IsValid() {
+		return apiErr(d.Name(), "仅探测到 IPv6 时无法安全更新：DuckDNS 缺少 ip 参数会自动改写 A 记录")
+	}
 	q := url.Values{"domains": {sub}, "token": {d.Token}}
 	if v4.IsValid() {
 		q.Set("ip", v4.String())
@@ -43,7 +46,8 @@ func (d *DuckDNS) Update(ctx context.Context, host string, v4, v6 netip.Addr) er
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return err
+		// url.Error 会携带含 token 的完整请求 URL，不能进入服务日志。
+		return apiErr(d.Name(), "请求失败")
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))

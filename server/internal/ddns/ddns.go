@@ -100,6 +100,7 @@ type Runner struct {
 	statePath string
 	prov      Provider // 测试注入用；nil = 按 Config 现构造
 
+	syncMu    sync.Mutex // 覆盖判重与 HTTP 更新，避免并发触发重复创建记录
 	mu        sync.Mutex
 	status    Status
 	pushed    storedState // 上次成功推送的目标（进程内权威，落盘是它的副本）
@@ -132,6 +133,8 @@ func (r *Runner) Status() Status {
 // 地址集合与上次成功推送一致时不动作；否则调提供方 Update，失败按退避计时重试。
 // 幂等，与 RefreshAnnounce 同节拍被调。
 func (r *Runner) Sync(ctx context.Context, cfg Config, externals []string) {
+	r.syncMu.Lock()
+	defer r.syncMu.Unlock()
 	v4, v6 := splitExternals(externals)
 
 	r.mu.Lock()

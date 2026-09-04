@@ -2,6 +2,7 @@
 package api
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"os"
@@ -502,16 +503,35 @@ func (a *API) createInvite(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// publicBase 站点公开地址：PUBLIC_URL（env 锁定）优先，其次 site_domain（固定 443 不带端口），
-// 都没有则按请求推导同源。
+// publicBase 站点公开地址：PUBLIC_URL（env 锁定）优先，其次 site_domain（按 TLS 模式选协议，
+// 不带默认端口），都没有则按请求推导同源。
 func (a *API) publicBase(r *http.Request) string {
 	if a.cfg.PublicURL != "" {
 		return strings.TrimSuffix(a.cfg.PublicURL, "/")
 	}
 	if d := a.dynVal(r.Context(), "site_domain"); d != "" {
-		return "https://" + d
+		if mode := a.dynVal(r.Context(), "tls_mode"); mode == "acme" || mode == "selfsigned" {
+			return "https://" + d
+		}
+		return "http://" + d
 	}
 	return requestScheme(r) + "://" + r.Host
+}
+
+// publicProbeBase 只使用服务端配置，不能把客户端可控的 Host/X-Forwarded-Proto
+// 带进由服务器主动发起的网络请求。
+func (a *API) publicProbeBase(ctx context.Context) string {
+	if a.cfg.PublicURL != "" {
+		return strings.TrimSuffix(a.cfg.PublicURL, "/")
+	}
+	domain := a.dynVal(ctx, "site_domain")
+	if domain == "" {
+		return ""
+	}
+	if mode := a.dynVal(ctx, "tls_mode"); mode == "acme" || mode == "selfsigned" {
+		return "https://" + domain
+	}
+	return "http://" + domain
 }
 
 // listInvites 列邀请：admin+ 看全部，power 只看自己发的。

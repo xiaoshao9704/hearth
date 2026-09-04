@@ -26,14 +26,22 @@ func Load() Config {
 	loadDotEnv(".env")
 	dataDir := resolveDataDir()
 	// 显式指定的 --data/HEARTH_DATA 可能还不存在，先建好（失败由后续 DB 打开报错）
-	os.MkdirAll(dataDir, 0o755)
+	os.MkdirAll(dataDir, 0o700)
+	os.Chmod(dataDir, 0o700)
 	// 数据目录里的 .env 再读一次：单文件分发时工作目录不确定，配置跟数据走。
 	// loadDotEnv 不覆盖已有值，工作目录的 .env 优先。
 	loadDotEnv(filepath.Join(dataDir, ".env"))
+	dbPath := os.Getenv("DB_PATH")
+	if dbPath == "" {
+		dbPath = filepath.Join(dataDir, "hearth.db")
+		if _, err := os.Stat("hearth.db"); err == nil {
+			dbPath = "hearth.db"
+		}
+	}
 	return Config{
 		Addr:        env("ADDR", ":8080"),
 		DataDir:     dataDir,
-		DBPath:      env("DB_PATH", filepath.Join(dataDir, "hearth.db")),
+		DBPath:      dbPath,
 		DatabaseURL: env("DATABASE_URL", ""),
 		CORSOrigin:  env("CORS_ORIGIN", "*"),
 		StaticDir:   env("STATIC_DIR", ""),
@@ -95,10 +103,13 @@ func resolveDataDir() string {
 func dataFlag() string {
 	args := os.Args[1:]
 	for i, a := range args {
-		if a == "--data" && i+1 < len(args) {
+		if (a == "--data" || a == "-data") && i+1 < len(args) {
 			return args[i+1]
 		}
 		if v, ok := strings.CutPrefix(a, "--data="); ok {
+			return v
+		}
+		if v, ok := strings.CutPrefix(a, "-data="); ok {
 			return v
 		}
 	}
@@ -106,9 +117,10 @@ func dataFlag() string {
 }
 
 func writableDir(dir string) bool {
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return false
 	}
+	_ = os.Chmod(dir, 0o700)
 	f, err := os.CreateTemp(dir, ".probe-*")
 	if err != nil {
 		return false

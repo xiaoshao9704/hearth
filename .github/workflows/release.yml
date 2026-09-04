@@ -51,6 +51,15 @@ jobs:
           go-version-file: server/go.mod
           cache-dependency-path: server/go.sum
 
+      - name: 跨平台静态检查（覆盖平台专属服务代码）
+        working-directory: server
+        env:
+          CGO_ENABLED: 0
+        run: |
+          for os in linux windows darwin; do
+            GOOS=$os GOARCH=amd64 go vet ./cmd/server/...
+          done
+
       - name: 原生交叉编译静态二进制（hearth 六目标；stage/bellows 远端形态只发 linux）
         working-directory: server
         env:

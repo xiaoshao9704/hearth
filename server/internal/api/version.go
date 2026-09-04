@@ -5,10 +5,13 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"strings"
 	"sync"
 	"time"
+
+	"golang.org/x/mod/semver"
 )
 
 // releaseRepo 发布仓库（GitHub Releases 的唯一出处；只在这里出现一次）。
@@ -47,14 +50,18 @@ func (a *API) adminVersion(w http.ResponseWriter, r *http.Request) {
 	info.Latest = latest
 	info.Detail = detail
 	if latest != "" && cur != "dev" {
-		// tag 形如 v0.4.0；剥离 v 前缀做字符串相等判断（严格 semver 比较不值得引依赖，
-		// 发布序就是 release 序，不相等即提示）
-		if strings.TrimPrefix(latest, "v") != strings.TrimPrefix(cur, "v") {
+		if newerVersion(latest, cur) {
 			info.Outdated = true
 			info.URL = "https://github.com/" + releaseRepo + "/releases/latest"
 		}
 	}
 	writeJSON(w, http.StatusOK, info)
+}
+
+func newerVersion(latest, current string) bool {
+	latest = "v" + strings.TrimPrefix(latest, "v")
+	current = "v" + strings.TrimPrefix(current, "v")
+	return semver.IsValid(latest) && semver.IsValid(current) && semver.Compare(latest, current) > 0
 }
 
 // latestRelease 查远端最新 release tag，进程内缓存 1 小时；失败静默（detail 记原因）。
@@ -82,7 +89,7 @@ func (a *API) latestRelease(ctx context.Context) (latest, detail string) {
 	var body struct {
 		TagName string `json:"tag_name"`
 	}
-	if resp.StatusCode != http.StatusOK || json.NewDecoder(resp.Body).Decode(&body) != nil || body.TagName == "" {
+	if resp.StatusCode != http.StatusOK || json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&body) != nil || body.TagName == "" {
 		releaseCache = versionInfo{Detail: "查询失败: " + resp.Status}
 		releaseCacheAt = time.Now()
 		return "", releaseCache.Detail
