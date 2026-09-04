@@ -27,12 +27,27 @@ func (a *API) SetPortMapper(m *portmap.Mapper) { a.mapper = m }
 
 // tlsConfig 当前 TLS 相关动态配置快照。
 func (a *API) tlsConfig(ctx context.Context) tlsx.Config {
+	domain := a.dynVal(ctx, "site_domain")
+	ipSubject := ""
+	if domain == "" {
+		ipSubject = a.ipCertificateCandidate().Subject
+	}
+	var dnsProvider ddns.DNSProvider
+	dnsProviderKey := ""
+	if domain != "" {
+		dnsProvider, dnsProviderKey = ddns.NewDNSProvider(a.ddnsConfig(ctx))
+	}
 	return tlsx.Config{
-		Mode:      a.dynVal(ctx, "tls_mode"),
-		Domain:    a.dynVal(ctx, "site_domain"),
-		HTTPSAddr: a.dynVal(ctx, "https_addr"),
-		ACMEDir:   a.dynVal(ctx, "acme_directory"),
-		ACMEEmail: a.dynVal(ctx, "acme_email"),
+		Mode:           a.dynVal(ctx, "tls_mode"),
+		Domain:         domain,
+		IPSubject:      ipSubject,
+		HTTPAddr:       a.cfg.Addr,
+		HTTPSAddr:      a.dynVal(ctx, "https_addr"),
+		ACMEDir:        a.dynVal(ctx, "acme_directory"),
+		ACMEEmail:      a.dynVal(ctx, "acme_email"),
+		ACMEProfile:    a.dynVal(ctx, "acme_profile"),
+		DNSProvider:    dnsProvider,
+		DNSProviderKey: dnsProviderKey,
 	}
 }
 
@@ -103,13 +118,14 @@ func (a *API) adminTLSCA(w http.ResponseWriter, r *http.Request) {
 // netcheckResult GET /api/admin/netcheck 的返回。自检只走管理接口：
 // /healthz 语义不变（只报活、恒 200、无副作用），诊断与回显全在这里。
 type netcheckResult struct {
-	Portmap   portmap.Status `json:"portmap"`   // 映射快照（方法/外部地址/级联跳数/诊断，v6 放行也在其中）
-	Externals []string       `json:"externals"` // 宣告探测快照（STUN/映射/显式配置）
-	ProbedAt  time.Time      `json:"probed_at"`
-	Domain    domainCheck    `json:"domain"`
-	DDNS      ddns.Status    `json:"ddns"` // DDNS 推送状态（off = 未启用）
-	TLS       tlsx.Status    `json:"tls"`
-	External  externalCheck  `json:"external"` // 从本机向公开地址回探 /healthz 的结论
+	Portmap       portmap.Status     `json:"portmap"`   // 映射快照（方法/外部地址/级联跳数/诊断，v6 放行也在其中）
+	Externals     []string           `json:"externals"` // 宣告探测快照（STUN/映射/显式配置）
+	ProbedAt      time.Time          `json:"probed_at"`
+	Domain        domainCheck        `json:"domain"`
+	IPCertificate ipCertificateCheck `json:"ip_certificate"`
+	DDNS          ddns.Status        `json:"ddns"` // DDNS 推送状态（off = 未启用）
+	TLS           tlsx.Status        `json:"tls"`
+	External      externalCheck      `json:"external"` // 从本机向公开地址回探 /healthz 的结论
 }
 
 type domainCheck struct {
@@ -125,6 +141,12 @@ type externalCheck struct {
 	Detail  string `json:"detail"`
 }
 
+type ipCertificateCheck struct {
+	Subject   string `json:"subject,omitempty"`
+	Available bool   `json:"available"`
+	Reason    string `json:"reason"`
+}
+
 func (a *API) adminNetcheck(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	res := netcheckResult{TLS: a.tlsStatus(), DDNS: a.ddnsStatus()}
@@ -134,11 +156,83 @@ func (a *API) adminNetcheck(w http.ResponseWriter, r *http.Request) {
 		res.Portmap = portmap.Status{Diagnosis: portmap.DiagOff, Detail: "端口映射未接入"}
 	}
 	res.Externals, res.ProbedAt = a.AnnounceExternals()
+	res.IPCertificate = a.ipCertificateCandidate()
 
 	cfg := a.tlsConfig(ctx)
 	res.Domain = checkDomain(ctx, cfg.Domain, res.Externals)
 	res.External = a.probeExternal(ctx, cfg, res, a.publicProbeBase(ctx))
 	writeJSON(w, http.StatusOK, res)
+}
+
+// ipCertificateCandidate 复用 portmap/netcheck 的结果判断 IP 证书是否可选。
+// 映射或 IPv6 pinhole 已经建立，或本机网卡直接持有公网地址，才认为无上游 NAT。
+func (a *API) ipCertificateCandidate() ipCertificateCheck {
+	var status portmap.Status
+	if a.mapper != nil {
+		status = a.mapper.Snapshot()
+	} else {
+		status = portmap.Status{Diagnosis: portmap.DiagOff}
+	}
+	externals, _ := a.AnnounceExternals()
+	return chooseIPCertificate(status, externals, interfacePublicIPs())
+}
+
+func chooseIPCertificate(status portmap.Status, externals []string, localPublic []netip.Addr) ipCertificateCheck {
+	if status.Diagnosis == portmap.DiagOK {
+		for _, mapping := range status.Mappings {
+			if strings.EqualFold(mapping.Proto, "tcp") && publicIP(mapping.ExternalIP) {
+				return ipCertificateCheck{Subject: mapping.ExternalIP.String(), Available: true,
+					Reason: "公网 IPv4 端口映射已建立"}
+			}
+		}
+	}
+	// IPv6 pinhole 与 v4 Diagnosis 独立；v4 在上游 NAT 内时仍可能有直连 IPv6。
+	for _, pinhole := range status.Pinholes {
+		if strings.EqualFold(pinhole.Proto, "tcp") && publicIP(pinhole.GUA) {
+			return ipCertificateCheck{Subject: pinhole.GUA.String(), Available: true,
+				Reason: "公网 IPv6 入站放行已建立"}
+		}
+	}
+	for _, addr := range localPublic {
+		if publicIP(addr) {
+			return ipCertificateCheck{Subject: addr.String(), Available: true,
+				Reason: "本机网卡直接持有公网 IP，将用 80/443 完成验证"}
+		}
+	}
+	if status.Diagnosis == portmap.DiagUpstreamNAT {
+		return ipCertificateCheck{Reason: "端口映射的外部地址仍在上游 NAT 内，无法用于 IP 证书公网验证"}
+	}
+	if len(externalIPs(externals)) > 0 {
+		return ipCertificateCheck{Reason: "已探测到外部 IP，但尚未证明 80/443 可从公网直连"}
+	}
+	if status.Detail != "" {
+		return ipCertificateCheck{Reason: status.Detail}
+	}
+	return ipCertificateCheck{Reason: "尚未探测到可从公网直连的 IP"}
+}
+
+func interfacePublicIPs() []netip.Addr {
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return nil
+	}
+	var out []netip.Addr
+	for _, raw := range addrs {
+		prefix, err := netip.ParsePrefix(raw.String())
+		if err == nil && publicIP(prefix.Addr()) {
+			out = append(out, prefix.Addr())
+		}
+	}
+	slices.SortFunc(out, func(a, b netip.Addr) int { return a.Compare(b) })
+	return out
+}
+
+func publicIP(addr netip.Addr) bool {
+	if !addr.IsValid() || !addr.IsGlobalUnicast() || addr.IsPrivate() || addr.IsLoopback() || addr.IsLinkLocalUnicast() {
+		return false
+	}
+	// RFC 6598 shared address space 不属于可公网反向连入的 IPv4。
+	return !netip.MustParsePrefix("100.64.0.0/10").Contains(addr.Unmap())
 }
 
 // checkDomain 比对 site_domain 的解析结果与探测到的公网地址。
@@ -195,7 +289,7 @@ func externalIPs(externals []string) []string {
 
 // probeExternal 从本机向公开地址回探 /healthz。
 // 回环探测打不通不等于失败——NAT hairpin 不支持的网关很常见，所以结论分三档：
-// reachable（真的通了）/ unknown（本机打不到但映射/探测看起来正常，提示用手机流量验证）/
+// reachable（真的通了）/ unknown（本机打不到但映射/探测看起来正常，提示从实际外部网络验证）/
 // failed（映射没建立，或按域名探时证书与域名不匹配）。
 func (a *API) probeExternal(ctx context.Context, cfg tlsx.Config, res netcheckResult, publicBase string) externalCheck {
 	if cfg.Mode == "off" {
@@ -216,12 +310,11 @@ func (a *API) probeExternal(ctx context.Context, cfg tlsx.Config, res netcheckRe
 	}
 	host := cfg.Domain
 	if host == "" {
-		pub := externalIPs(res.Externals)
-		if len(pub) == 0 {
+		host = cfg.IPSubject
+		if host == "" {
 			return externalCheck{Verdict: "failed",
 				Detail: "没有可回探的公开地址：site_domain 未配置且未探测到公网地址（端口映射未建立）"}
 		}
-		host = pub[0]
 	}
 	if ip := net.ParseIP(host); ip != nil && ip.To4() == nil {
 		host = "[" + host + "]"
@@ -229,7 +322,7 @@ func (a *API) probeExternal(ctx context.Context, cfg tlsx.Config, res netcheckRe
 
 	// 进程内 TLS 映射把外部 443 指到 https_addr。
 	scheme, port := "https", "443"
-	verify := cfg.Domain != "" && cfg.Mode == "acme" // 只有 acme 的证书链能过公开验证
+	verify := res.TLS.Active == "acme" // 只有当前实际在用的 ACME 证书链能过公开验证
 	url := scheme + "://" + host + ":" + port + "/healthz"
 
 	reachable, certErr := tryHealthz(ctx, url, verify)
@@ -247,12 +340,16 @@ func (a *API) probeExternal(ctx context.Context, cfg tlsx.Config, res netcheckRe
 		}
 	}
 	if reachable {
+		if cfg.Mode == "acme" && !verify {
+			return externalCheck{URL: url, Verdict: "reachable",
+				Detail: "回探通过；ACME 证书尚未就绪，当前由自签名证书兜底"}
+		}
 		return externalCheck{URL: url, Verdict: "reachable", Detail: "外部地址回探通过"}
 	}
 	// 打不通：映射/探测有结果时大概率是网关不支持 hairpin 回环，不能判死
 	if res.Portmap.Diagnosis == portmap.DiagOK || res.Portmap.Diagnosis == portmap.DiagUpstreamNAT || len(res.Externals) > 0 {
 		return externalCheck{URL: url, Verdict: "unknown",
-			Detail: "从本机回探不通——多数家用网关不支持 hairpin 回环，本机打不到自己的外部地址不等于外网不通；请用手机流量打开站点地址验证"}
+			Detail: "从本机回探不通——网关可能不支持 hairpin 回环，本机打不到自己的外部地址不等于公网不通；请从实际外部网络打开站点地址验证"}
 	}
 	return externalCheck{URL: url, Verdict: "failed",
 		Detail: "回探不通且端口映射未建立（外部 80/443 没有指向本机）"}

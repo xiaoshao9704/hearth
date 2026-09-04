@@ -54,14 +54,16 @@ var tlsKeys = []rtc.ConfigKey{
 	{Name: "tls_mode", Env: "TLS_MODE", Group: "tls", Default: "off",
 		Options: []string{"off", "acme", "selfsigned"},
 		Label:   "证书模式",
-		Hint: "off = 纯 HTTP（反代在前的部署）；acme = 按公开域名自动签发（需外部 80/443 可达）；" +
-			"selfsigned = 本地 CA 自签，局域网/无域名场景用，设备装上 CA 证书后不再提示警告"},
+		Hint: "off = 纯 HTTP（反代在前的部署）；acme = 按公开域名或 netcheck 确认的公网 IP 自动签发；" +
+			"selfsigned = 本地 CA 自签；ACME 未就绪时也会自动以它兜底"},
 	{Name: "https_addr", Env: "HTTPS_ADDR", Group: "tls", Default: ":8443",
 		Label: "HTTPS 监听地址", Hint: "证书模式不为 off 时生效；保存即热切换。端口映射会把外部 443 指到它"},
 	{Name: "acme_directory", Env: "ACME_DIRECTORY", Group: "tls", Default: "https://acme-v02.api.letsencrypt.org/directory",
 		Label: "ACME 目录", Hint: "默认 Let's Encrypt；可换 ZeroSSL 或内网 step-ca"},
 	{Name: "acme_email", Env: "ACME_EMAIL", Group: "tls",
 		Label: "ACME 账户邮箱", Hint: "可空；填了 CA 能在证书快过期时联系到管理员"},
+	{Name: "acme_profile", Env: "ACME_PROFILE", Group: "tls",
+		Label: "ACME Profile", Hint: "留空使用 CA 默认值；IP 证书会自动使用 shortlived"},
 }
 
 // ddnsKeys DDNS（见 internal/ddns）：公网地址变化时自动更新域名解析，
@@ -391,8 +393,11 @@ func (a *API) adminSetConfig(w http.ResponseWriter, r *http.Request) {
 		go a.EnsureStageKernel(context.Background())
 	}
 	// TLS/域名相关键保存即热生效：HTTPS listener 热起停、证书现签（取舍见 internal/tlsx 包注释）
-	for _, name := range []string{"tls_mode", "https_addr", "site_domain", "acme_directory", "acme_email"} {
+	for _, name := range []string{"tls_mode", "https_addr", "site_domain", "acme_directory", "acme_email", "acme_profile"} {
 		if _, ok := req.Values[name]; ok {
+			if a.mapper != nil && (name == "tls_mode" || name == "https_addr") {
+				a.mapper.Refresh() // 80/443 wants 变化要立即建立/撤销，不等下个续租周期
+			}
 			go a.SyncTLS()
 			break
 		}
@@ -414,6 +419,7 @@ func (a *API) adminSetConfig(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 			go a.SyncDDNS()
+			go a.SyncTLS() // libdns provider/zone/凭证同时是 DNS-01 配置
 			break
 		}
 	}

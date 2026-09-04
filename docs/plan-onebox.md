@@ -215,9 +215,8 @@ Let's Encrypt 的 **6 天（160 小时）短时效证书与 IP 地址证书已�
 - `acme` 模式下的签发标识：`site_domain` 非空用域名；为空且 `netcheck` 判定公网可直连，用探测到的公网 IP + `shortlived` profile。
 - 新增 `acme_profile` 键（留空 = CA 默认；签 IP 证书时自动用 `shortlived`）。
 - **续期失败一律回落自签名**，`selfsigned` 从「用户选项」升格为「永远在场的兜底」；证书状态里明确显示当前实际在用哪一种。
-- **待确认（实施第一步就验）**：Caddy 侧曾有 IP 证书签发不通的报告（caddyserver/caddy#7399，2025-12 提出、现已关闭，
-  关闭原因未核实）。CertMagic/acmez 对 IP 标识与 `shortlived` profile 的支持要用 Let's Encrypt **staging** 环境实测一次，
-  通过再动 `tlsx`；不通就先只做 libdns 那半，IP 证书延后。
+- **闸门已通过**：结论与证据见 7.7。该闸门只决定 IP 证书接线，不阻断本节的
+  CertMagic 迁移；即使 IP 证书不可行，域名证书的 DNS-01 仍然有独立价值。
 
 ### 7.4 DDNS 改用 libdns（部分）
 
@@ -226,7 +225,7 @@ Let's Encrypt 的 **6 天（160 小时）短时效证书与 IP 地址证书已�
 | 提供方 | 现成模块 | 决定 |
 |---|---|---|
 | 阿里云 | `libdns/alidns` v1.0.7（2026-04，已跟上 libdns v1） | **换**。删掉手写签名，收益最大 |
-| Cloudflare | `libdns/cloudflare`（pkg.go.dev 显示 v0.2.2 / 2025-10 非模块最新版） | **换**，顺带解决 zone 列表不翻页；引入前确认其 v1 适配版本 |
+| Cloudflare | `libdns/cloudflare` v0.2.2（最新 tag，已适配 libdns v1） | **换**，顺带解决 zone 列表不翻页 |
 | DNSPod | `libdns/dnspod` v0.0.3（2021-08，未适配 libdns v1，已被 caddy-dns 从构建剔除） | **不换**，自持实现并修掉已知缺陷 |
 | DuckDNS | `libdns/duckdns` v0.3.0（2025-04，未到 v1） | **不换**，它只是一个 GET，不值得加依赖 |
 
@@ -240,11 +239,11 @@ Let's Encrypt 的 **6 天（160 小时）短时效证书与 IP 地址证书已�
 
 **阶段五（本节内容）**，接在当前所有阻塞项修复之后：
 
-1. staging 实测 CertMagic 的 IP 证书与 `shortlived` profile（决定 7.3 是全做还是只做 libdns 那半）。
+1. staging 验证 IP order 与 `shortlived` profile（只决定 IP 证书接线是否继续）。
 2. `tlsx` 迁到 CertMagic，续期失败回落自签名，证书状态回显实际在用的种类。
 3. 阿里云、Cloudflare 换 libdns；新增 `ddns_zone`；DNSPod 与 DuckDNS 保留并修缺陷。
 4. 向导第三步改为三选一：域名 + ACME / 仅公网 IP + IP 证书 / 自签名；按 `netcheck` 结论给默认值与不可用原因。
-5. 阶段四（DNS-01）降级为 7.4 落地后的小增量。
+5. DNS-01 直接复用 7.4 的 libdns provider 与凭证。
 
 验收：无域名机器在 staging 上签出 IP 证书、手机不装 CA 直接打开；断网一周后回来能自愈（先自签名再重签）；
 换 IP 后新会话用新证书、在途会话不断。
@@ -258,9 +257,13 @@ Let's Encrypt 的 **6 天（160 小时）短时效证书与 IP 地址证书已�
 
 ### 7.7 staging 闸门实测结论（2026-09-04）
 
-用 `CertMagic v0.25.4`、`acmez v3.1.6` 与 Let's Encrypt staging 目录做了最小实测：IPv6 IP 标识加
-`shortlived` profile 的订单能被 CA 接受并进入 HTTP-01 验证，但当前验证环境的入站连接超时；IPv4 又无法取得可供验证的公网映射。
-因此 IPv4、IPv6 都没有完成实际签发，严格闸门判定为**不通过**。
+闸门判定为**通过**。这里只验证「CA 与客户端能否为 IP 建单」，不把当前运行环境能否接受公网入站连接混进结论：
 
-本轮只落地 7.4 的 libdns/DDNS 部分；`tlsx` 迁 CertMagic、DNS-01、IP 证书接线和向导证书模式调整全部延后。
-后续必须在 IPv4、IPv6 均公网可直连的环境中让 staging 实际签发成功，才重新打开这些工作项。生产默认 ACME 目录保持不变。
+1. Let's Encrypt staging 目录的 `meta.profiles` 明确包含 `shortlived`。
+2. 用 `acmez v3.1.6` 分别为可路由的 IPv4 与 IPv6 占位地址提交 `shortlived` `newOrder`，两笔 order 都被 CA 接受并进入
+   `pending`；authorization 标识类型为 `ip`，challenge 列表均包含 `http-01` 与 `tls-alpn-01`。此时主动停止，不发起验证。
+3. `CertMagic v0.25.4` 上层不会拒绝 IP subject：生成 CSR 时将 IP 放入 `IPAddresses`，再由 acmez 转成 `type=ip` identifier；
+   TLS-ALPN solver 也有 IP identifier 处理。
+
+先前「order 已建立、验证入站超时」的结果是运行环境不可达，不是库或 CA 拒绝 IP 标识。因此继续落地
+CertMagic、DNS-01 与 IP 证书接线；完整签发链路仍需在公网可直连环境做最终验收。生产默认 ACME 目录保持不变。

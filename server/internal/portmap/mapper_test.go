@@ -112,6 +112,35 @@ func staticWants(ws ...Want) func(context.Context) []Want {
 	return func(context.Context) []Want { return ws }
 }
 
+func TestMapperRefreshInterruptsWait(t *testing.T) {
+	m := New()
+	done := make(chan bool, 1)
+	go func() { done <- m.sleepOrRefresh(context.Background(), time.Hour) }()
+	m.Refresh()
+	select {
+	case ok := <-done:
+		if !ok {
+			t.Fatal("Refresh 不应停掉 Mapper")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Refresh 应立即打断续租等待")
+	}
+}
+
+func TestMapperOnChangeIncludesIPv6Pinholes(t *testing.T) {
+	m := New()
+	m.logf = func(string, ...any) {}
+	calls := 0
+	m.OnChange = func(Status) { calls++ }
+	pinhole := Pinhole{Proto: "tcp", Port: 8443, GUA: netip.MustParseAddr("2001:db8::1"), Method: "pcp6"}
+	m.setPinholes([]Pinhole{pinhole}, "已放行")
+	m.setPinholes([]Pinhole{pinhole}, "已放行")
+	m.setPinholes(nil, "")
+	if calls != 2 {
+		t.Fatalf("IPv6 pinhole 建立和撤销应各触发一次 OnChange，实际 %d", calls)
+	}
+}
+
 var (
 	httpWant  = Want{Proto: "tcp", Port: 8080, Desc: "hearth http"}
 	mediaWant = Want{Proto: "udp", Port: 47700, Desc: "hearth media", StrictPort: true}

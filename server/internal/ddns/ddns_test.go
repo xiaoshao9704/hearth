@@ -367,3 +367,45 @@ func TestPrepareAliRecordsPreservesExistingID(t *testing.T) {
 func alidnsRecord(id, name, recordType, value string) alidnslib.DomainRecord {
 	return alidnslib.DomainRecord{ID: id, Name: name, Type: recordType, Value: value, TTL: uint32(ddnsTTL.Seconds())}
 }
+
+type fakeDNSProvider struct{}
+
+func (*fakeDNSProvider) AppendRecords(_ context.Context, _ string, records []libdns.Record) ([]libdns.Record, error) {
+	return records, nil
+}
+
+func (*fakeDNSProvider) DeleteRecords(_ context.Context, _ string, records []libdns.Record) ([]libdns.Record, error) {
+	return records, nil
+}
+
+type failingDNSProvider struct{ fakeDNSProvider }
+
+func (*failingDNSProvider) AppendRecords(context.Context, string, []libdns.Record) ([]libdns.Record, error) {
+	return nil, &url.Error{Op: "Get", URL: "https://example.com/?AccessKeyId=change-me", Err: errors.New("模拟网络错误")}
+}
+
+func TestConfiguredZoneProvider(t *testing.T) {
+	p := &configuredZoneProvider{upstream: &fakeDNSProvider{}, zone: "example.com"}
+	if _, err := p.AppendRecords(context.Background(), "example.com.", nil); err != nil {
+		t.Fatalf("同一 zone 应允许尾点差异: %v", err)
+	}
+	if _, err := p.AppendRecords(context.Background(), "other.example", nil); err == nil {
+		t.Fatal("显式 ddns_zone 与权威 zone 不一致时必须拒绝")
+	}
+}
+
+func TestConfiguredZoneProviderRedactsURLError(t *testing.T) {
+	p := &configuredZoneProvider{upstream: &failingDNSProvider{}, zone: "example.com"}
+	_, err := p.AppendRecords(context.Background(), "example.com", nil)
+	if err == nil || err.Error() != "模拟网络错误" {
+		t.Fatalf("DNS-01 provider 错误不得携带凭证 URL: %v", err)
+	}
+}
+
+func TestDNSProviderFingerprintChangesWithCredentials(t *testing.T) {
+	_, first := NewDNSProvider(Config{Provider: "cloudflare", Zone: "example.com", CFToken: "change-me-a"})
+	_, second := NewDNSProvider(Config{Provider: "cloudflare", Zone: "example.com", CFToken: "change-me-b"})
+	if first == "" || first == second || strings.Contains(first, "change-me") {
+		t.Fatalf("fingerprint 应能识别凭证变化且不暴露原文: first=%q second=%q", first, second)
+	}
+}

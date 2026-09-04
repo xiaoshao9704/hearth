@@ -45,6 +45,7 @@ type Mapper struct {
 	st      Status
 	backoff time.Duration
 	closed  bool
+	refresh chan struct{} // 配置变化时打断续租等待，立即重读 wants
 
 	// v6 pinhole 的锁定客户端与在放行、退避——与 v4 各记各的，发现失败不互相干扰。
 	phcl      pinholeClient
@@ -58,7 +59,7 @@ type mapKey struct {
 }
 
 func New() *Mapper {
-	return &Mapper{
+	m := &Mapper{
 		gateway:  defaultGateway,
 		newPCP:   newPCPClient,
 		upnp:     discoverUPnP,
@@ -68,13 +69,15 @@ func New() *Mapper {
 		newPCP6:  newPCPPinhole,
 		upnp6:    discoverUPnP6,
 		gua6:     globalUnicastV6,
-		sleep:    sleepCtx,
 		now:      time.Now,
 		logf:     log.Printf,
 		active:   make(map[mapKey]Mapping),
 		pinholes: make(map[pinKey]pinhole),
 		st:       Status{Diagnosis: DiagOff},
+		refresh:  make(chan struct{}, 1),
 	}
+	m.sleep = m.sleepOrRefresh
+	return m
 }
 
 // Run 阻塞到 ctx 结束。wants 是 getter，每轮读一次：端口来自动态配置，
@@ -85,6 +88,27 @@ func (m *Mapper) Run(ctx context.Context, wants func(context.Context) []Want) {
 		if !m.sleep(ctx, delay) {
 			return
 		}
+	}
+}
+
+// Refresh 让 Run 立即重读动态 wants；多次触发合并为一轮。
+func (m *Mapper) Refresh() {
+	select {
+	case m.refresh <- struct{}{}:
+	default:
+	}
+}
+
+func (m *Mapper) sleepOrRefresh(ctx context.Context, d time.Duration) bool {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	case <-m.refresh:
+		return true
 	}
 }
 
@@ -416,20 +440,26 @@ func (m *Mapper) setPinholes(list []Pinhole, detail string) {
 	old := m.st.Pinholes
 	m.st.Pinholes = list
 	m.st.V6Detail = detail
-	logf := m.logf
+	logf, cb, st := m.logf, m.OnChange, m.st.clone()
 	m.mu.Unlock()
 
 	oldSet := pinholeSet(old)
 	curSet := pinholeSet(list)
+	changed := len(oldSet) != len(curSet)
 	for _, p := range list {
 		if _, ok := oldSet[pinKey{p.Proto, p.Port, p.GUA}]; !ok {
+			changed = true
 			logf("portmap: v6 放行 %s/%d @ %s（%s）", p.Proto, p.Port, p.GUA, p.Method)
 		}
 	}
 	for _, p := range old {
 		if _, ok := curSet[pinKey{p.Proto, p.Port, p.GUA}]; !ok {
+			changed = true
 			logf("portmap: v6 放行已撤销 %s/%d @ %s", p.Proto, p.Port, p.GUA)
 		}
+	}
+	if changed && cb != nil {
+		cb(st)
 	}
 }
 
@@ -839,18 +869,4 @@ func detailOK(mappings []Mapping, hops []Hop) string {
 		detail += fmt.Sprintf("（经 %d 层网关：%s）", len(hops), strings.Join(gws, " → "))
 	}
 	return detail
-}
-
-func sleepCtx(ctx context.Context, d time.Duration) bool {
-	if d <= 0 {
-		return ctx.Err() == nil
-	}
-	t := time.NewTimer(d)
-	defer t.Stop()
-	select {
-	case <-ctx.Done():
-		return false
-	case <-t.C:
-		return true
-	}
 }

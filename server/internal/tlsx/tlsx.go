@@ -1,11 +1,11 @@
 // Package tlsx 进程内 TLS：三种模式（off / acme / selfsigned）由动态配置 tls_mode 决定。
 //
 //   - off：现状，HTTPS 不监听，HTTP 正常服务（反代在前的部署形态）。
-//   - acme：golang.org/x/crypto/acme/autocert 按 site_domain 自动签发（HTTP-01 与
-//     TLS-ALPN-01 都开），证书缓存落 <data>/certs。
+//   - acme：CertMagic 按 site_domain 或探测到的公网 IP 自动签发，证书与
+//     ACME 账户落 <data>/certs；签发前及任何 ACME 失败期间始终用本地自签名证书兜底。
 //   - selfsigned：本地 CA（<data>/certs/ca.{crt,key}，10 年）+ 叶子证书（1 年，到期自动
 //     续签）；SAN 覆盖 localhost、回环、本机 LAN 地址、探测到的公网地址与 site_domain，
-//     地址集合变化即重签。这是局域网/无域名场景的正解，不是 ACME 的降级。
+//     地址集合变化即重签。它既可独立选用，也是 ACME 路径永远在场的兜底。
 //
 // 热切换取舍：tls_mode 切模式时 HTTP listener 不重启——主机的 HTTP handler 是一个按当前
 // 模式分流的壳（off 时透传业务 handler，否则只做 ACME 挑战 + 308）；HTTPS listener 由
@@ -31,12 +31,13 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
-	"golang.org/x/crypto/acme"
-	"golang.org/x/crypto/acme/autocert"
+	"github.com/caddyserver/certmagic"
+	"go.uber.org/zap"
 )
 
 // 证书参数写死，不开配置项。
@@ -45,27 +46,39 @@ const (
 	leafValidity = 365 * 24 * time.Hour
 	// leafRenewBefore 叶子证书距到期不足这个时长就重签（进程常年开着也要能自己续）。
 	leafRenewBefore = 30 * 24 * time.Hour
+	acmeIPDebounce  = 30 * time.Second
+	acmeRetryMin    = time.Minute
+	acmeRetryMax    = 10 * time.Minute
 )
 
 // Config 一次 Sync 看到的 TLS 相关动态配置快照。
 type Config struct {
-	Mode      string // off / acme / selfsigned
-	Domain    string // site_domain
-	HTTPSAddr string // HTTPS 监听地址
-	ACMEDir   string // ACME 目录，空 = autocert 默认（Let's Encrypt）
-	ACMEEmail string // 账户邮箱，可空
+	Mode           string // off / acme / selfsigned
+	Domain         string // site_domain
+	IPSubject      string // netcheck 确认公网可直连的 IP，仅 Domain 空时使用
+	HTTPAddr       string // HTTP 监听地址，供 HTTP-01 复用现有 listener
+	HTTPSAddr      string // HTTPS 监听地址，供 TLS-ALPN-01 复用现有 listener
+	ACMEDir        string // ACME 目录，空 = CertMagic 默认（Let's Encrypt 生产）
+	ACMEEmail      string // 账户邮箱，可空
+	ACMEProfile    string // 空 = CA 默认；IP 标识会强制 shortlived
+	DNSProvider    certmagic.DNSProvider
+	DNSProviderKey string // provider/zone/凭证指纹，只用于判断配置变化
 }
 
 // Status 证书与监听状态，进管理后台与自检回显。
 type Status struct {
 	Mode        string    `json:"mode"`
+	Active      string    `json:"active"` // 当前实际握手使用：off / selfsigned / acme
 	Domain      string    `json:"domain"`
+	Subject     string    `json:"subject"` // ACME 签发标识（域名或 IP）
+	Profile     string    `json:"profile"` // 当前 ACME profile
 	HTTPSAddr   string    `json:"https_addr"`
 	Listening   bool      `json:"listening"`    // HTTPS listener 在跑
-	SANs        []string  `json:"sans"`         // 当前叶子证书的 SAN（acme 签发前为空）
+	SANs        []string  `json:"sans"`         // 当前实际叶子证书的 SAN
 	NotAfter    time.Time `json:"not_after"`    // 叶子证书到期时间（未知为零值）
 	CAAvailable bool      `json:"ca_available"` // 本地 CA 已生成（可下载）
 	LastError   string    `json:"last_error"`   // 上次签发/续签/监听错误
+	NextRetry   time.Time `json:"next_retry"`   // ACME 失败后的下次尝试时间
 }
 
 // Manager 持有模式状态、证书材料与 HTTPS listener。全部导出方法并发安全。
@@ -78,11 +91,19 @@ type Manager struct {
 	syncMu sync.Mutex // 串行化多个触发源的完整 reconcile，避免重复监听同一地址
 	mu     sync.Mutex
 	cfg    Config
-	acme   *autocert.Manager // acme 模式时在
-	leaf   *tls.Certificate  // selfsigned 当前叶子证书
-	sans   []string          // 当前叶子证书覆盖的 SAN 集合（重签判据）
-	srv    *http.Server      // HTTPS listener（off 时为 nil）
-	status Status
+	cache  *certmagic.Cache
+	magic  *certmagic.Config
+	// httpChallenge 指向当前 issuer 的 HTTP-01 处理器，也作为不走公网的分流单测注入点。
+	httpChallenge func(http.ResponseWriter, *http.Request) bool
+	// manageSync 是单测注入点；nil 时调 CertMagic ManageSync。
+	manageSync     func(context.Context, *certmagic.Config, []string) error
+	acmeCancel     context.CancelFunc
+	acmeGeneration uint64
+	acmeWG         sync.WaitGroup
+	leaf           *tls.Certificate // selfsigned 当前叶子证书
+	sans           []string         // 当前叶子证书覆盖的 SAN 集合（重签判据）
+	srv            *http.Server     // HTTPS listener（off 时为 nil）
+	status         Status
 }
 
 // New dir 是证书目录（<data>/certs）；handler 与 externals 取值函数随后续调用现取，
@@ -92,7 +113,8 @@ func New(dir string, handler func() http.Handler, externals func() []string) *Ma
 }
 
 // Sync 按当前配置 reconcile：模式切换起/停 HTTPS listener，selfsigned 下生成/重签
-// 证书，acme 下重建 autocert 管理器。幂等；任何一步失败只落 LastError，不影响其余部分。
+// 证书，acme 下异步交给 CertMagic 签发。幂等；任何 ACME 失败都只落状态，
+// HTTPS 始终由本地自签名叶子证书兜底。
 func (m *Manager) Sync(cfg Config) {
 	m.syncMu.Lock()
 	defer m.syncMu.Unlock()
@@ -100,50 +122,57 @@ func (m *Manager) Sync(cfg Config) {
 		cfg.Mode = "off"
 	}
 	m.mu.Lock()
-	sameCfg := m.cfg == cfg // Config 全是字符串，直接可比
+	previousCfg, previousStatus := m.cfg, m.status
+	sameCfg := sameConfig(previousCfg, cfg)
 	m.cfg = cfg
 	m.mu.Unlock()
 
-	st := Status{Mode: cfg.Mode, Domain: cfg.Domain, HTTPSAddr: cfg.HTTPSAddr}
+	st := Status{Mode: cfg.Mode, Domain: cfg.Domain, HTTPSAddr: cfg.HTTPSAddr, Active: "off"}
 
 	switch cfg.Mode {
 	case "off":
+		m.stopACME()
 		m.stopHTTPS()
 		m.setStatus(st)
 	case "acme":
-		if cfg.Domain == "" {
-			st.LastError = "acme 模式需要先在 site_domain 填公开域名"
-			m.stopHTTPS()
-			m.setStatus(st)
-			return
+		if err := m.ensureLeaf(); err != nil {
+			st.LastError = "自签名兜底证书生成失败: " + err.Error()
 		}
-		// HostPolicy 绑死 site_domain：只对配置的域名发起签发，别人的域名指过来不烧额度
-		if !sameCfg {
-			am := &autocert.Manager{
-				Prompt:     autocert.AcceptTOS,
-				Cache:      autocert.DirCache(m.dir),
-				HostPolicy: autocert.HostWhitelist(cfg.Domain),
-				Email:      cfg.ACMEEmail,
+		m.mu.Lock()
+		leaf := m.leaf
+		m.mu.Unlock()
+		if leaf != nil {
+			st.Active = "selfsigned"
+			st.SANs = leafSANs(leaf)
+			st.NotAfter = leaf.Leaf.NotAfter
+		}
+		st.Subject = acmeSubject(cfg)
+		st.Profile = acmeProfile(cfg, st.Subject)
+		if sameCfg && previousStatus.Subject == st.Subject {
+			st.LastError = previousStatus.LastError
+			st.NextRetry = previousStatus.NextRetry
+			if previousStatus.Active == "acme" {
+				st.Active = previousStatus.Active
+				st.SANs = slices.Clone(previousStatus.SANs)
+				st.NotAfter = previousStatus.NotAfter
 			}
-			if cfg.ACMEDir != "" {
-				am.Client = &acme.Client{DirectoryURL: cfg.ACMEDir}
-			}
-			m.mu.Lock()
-			m.acme = am
-			m.mu.Unlock()
 		}
 		st.Listening = m.ensureHTTPS()
 		if st.LastError == "" && !st.Listening {
 			st.LastError = m.lastErr()
 		}
-		if sameCfg {
-			m.mu.Lock()
-			st.SANs = slices.Clone(m.status.SANs)
-			st.NotAfter = m.status.NotAfter
-			m.mu.Unlock()
+		if st.Subject == "" {
+			m.stopACME()
+			if st.LastError == "" {
+				st.LastError = "没有可签发的标识：请填 site_domain，或等待 netcheck 确认公网 IP 可直连"
+			}
 		}
 		m.setStatus(st)
+		if st.Subject != "" && (!sameCfg || m.acmeConfig() == nil) {
+			m.configureACME(cfg, st.Subject)
+		}
 	case "selfsigned":
+		m.stopACME()
 		if err := m.ensureLeaf(); err != nil {
 			st.LastError = err.Error()
 		}
@@ -151,6 +180,7 @@ func (m *Manager) Sync(cfg Config) {
 		leaf := m.leaf
 		m.mu.Unlock()
 		if leaf != nil {
+			st.Active = "selfsigned"
 			st.SANs = leafSANs(leaf)
 			st.NotAfter = leaf.Leaf.NotAfter
 		}
@@ -160,10 +190,35 @@ func (m *Manager) Sync(cfg Config) {
 		}
 		m.setStatus(st)
 	default:
+		m.stopACME()
 		m.stopHTTPS()
 		st.LastError = "未知 tls_mode: " + cfg.Mode
 		m.setStatus(st)
 	}
+}
+
+func sameConfig(a, b Config) bool {
+	return a.Mode == b.Mode && a.Domain == b.Domain && a.IPSubject == b.IPSubject &&
+		a.HTTPAddr == b.HTTPAddr && a.HTTPSAddr == b.HTTPSAddr && a.ACMEDir == b.ACMEDir &&
+		a.ACMEEmail == b.ACMEEmail && a.ACMEProfile == b.ACMEProfile &&
+		a.DNSProviderKey == b.DNSProviderKey
+}
+
+func acmeSubject(cfg Config) string {
+	if domain := strings.TrimSpace(cfg.Domain); domain != "" {
+		return domain
+	}
+	if ip := net.ParseIP(strings.TrimSpace(cfg.IPSubject)); ip != nil {
+		return ip.String()
+	}
+	return ""
+}
+
+func acmeProfile(cfg Config, subject string) string {
+	if net.ParseIP(subject) != nil {
+		return "shortlived"
+	}
+	return strings.TrimSpace(cfg.ACMEProfile)
 }
 
 // Status 当前状态快照。
@@ -188,6 +243,174 @@ func (m *Manager) lastErr() string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.status.LastError
+}
+
+// ---- CertMagic ----
+
+func (m *Manager) acmeConfig() *certmagic.Config {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.magic
+}
+
+func (m *Manager) ensureCache() *certmagic.Cache {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.cache == nil {
+		m.cache = certmagic.NewCache(certmagic.CacheOptions{
+			GetConfigForCert: func(certmagic.Certificate) (*certmagic.Config, error) {
+				m.mu.Lock()
+				defer m.mu.Unlock()
+				if m.magic == nil {
+					return nil, errors.New("ACME 配置已停用")
+				}
+				return m.magic, nil
+			},
+			Logger: zap.NewNop(),
+		})
+	}
+	return m.cache
+}
+
+// configureACME 更换 CertMagic 配置并启动可取消的签发循环。旧标识从内存缓存
+// 卸载，避免 IP 变动后继续续签旧证书；磁盘材料保留，便于切回时复用。
+func (m *Manager) configureACME(cfg Config, subject string) {
+	cache := m.ensureCache()
+	storage := &certmagic.FileStorage{Path: m.dir}
+	magic := certmagic.New(cache, certmagic.Config{
+		Storage:           storage,
+		DefaultServerName: subject,
+		Logger:            zap.NewNop(),
+	})
+	if net.ParseIP(subject) != nil {
+		// shortlived 证书有效期很短，提前一半生命周期进入续签窗口。
+		magic.RenewalWindowRatio = 0.5
+	}
+	issuerTemplate := certmagic.ACMEIssuer{
+		CA:             cfg.ACMEDir,
+		Email:          cfg.ACMEEmail,
+		Agreed:         true,
+		Profile:        acmeProfile(cfg, subject),
+		AltHTTPPort:    addrPort(cfg.HTTPAddr),
+		AltTLSALPNPort: addrPort(cfg.HTTPSAddr),
+		Logger:         magic.Logger,
+	}
+	if cfg.Domain != "" && cfg.DNSProvider != nil {
+		issuerTemplate.DNS01Solver = &certmagic.DNS01Solver{DNSManager: certmagic.DNSManager{
+			DNSProvider: cfg.DNSProvider,
+			Logger:      magic.Logger,
+		}}
+	}
+	issuer := certmagic.NewACMEIssuer(magic, issuerTemplate)
+	magic.Issuers = []certmagic.Issuer{issuer}
+
+	m.mu.Lock()
+	oldSubject := ""
+	if m.magic != nil {
+		oldSubject = m.magic.DefaultServerName
+	}
+	if m.acmeCancel != nil {
+		m.acmeCancel()
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	m.acmeCancel = cancel
+	m.acmeGeneration++
+	generation := m.acmeGeneration
+	m.magic = magic
+	m.httpChallenge = issuer.HandleHTTPChallenge
+	m.mu.Unlock()
+
+	if oldSubject != "" && oldSubject != subject {
+		cache.RemoveManaged([]certmagic.SubjectIssuer{{Subject: oldSubject}})
+	}
+	m.acmeWG.Add(1)
+	go func() {
+		defer m.acmeWG.Done()
+		m.obtainLoop(ctx, generation, magic, subject, issuerTemplate.Profile)
+	}()
+}
+
+func (m *Manager) stopACME() {
+	m.mu.Lock()
+	if m.acmeCancel != nil {
+		m.acmeCancel()
+		m.acmeCancel = nil
+	}
+	m.acmeGeneration++
+	subject, cache := m.status.Subject, m.cache
+	m.magic, m.httpChallenge = nil, nil
+	m.mu.Unlock()
+	if cache != nil && subject != "" {
+		cache.RemoveManaged([]certmagic.SubjectIssuer{{Subject: subject}})
+	}
+}
+
+func (m *Manager) obtainLoop(ctx context.Context, generation uint64, magic *certmagic.Config, subject, profile string) {
+	if net.ParseIP(subject) != nil && !waitContext(ctx, acmeIPDebounce) {
+		return
+	}
+	backoff := acmeRetryMin
+	for {
+		manage := m.manageSync
+		var err error
+		if manage != nil {
+			err = manage(ctx, magic, []string{subject})
+		} else {
+			err = magic.ManageSync(ctx, []string{subject})
+		}
+		if ctx.Err() != nil {
+			return
+		}
+		if err == nil {
+			cert, getErr := magic.GetCertificate(&tls.ClientHelloInfo{ServerName: subject})
+			if getErr == nil {
+				m.recordCertificate(generation, cert, subject, profile)
+				log.Printf("ACME 证书已就绪（标识: %s）", subject)
+				return
+			}
+			err = getErr
+		}
+		next := time.Now().Add(backoff)
+		m.recordACMEError(generation, subject, err, next)
+		log.Printf("ACME 证书签发失败（标识: %s，%s 后重试）: %v", subject, backoff, err)
+		if !waitContext(ctx, backoff) {
+			return
+		}
+		backoff = min(backoff*2, acmeRetryMax)
+	}
+}
+
+func (m *Manager) recordACMEError(generation uint64, subject string, err error, next time.Time) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if generation != m.acmeGeneration || m.cfg.Mode != "acme" || m.status.Subject != subject {
+		return
+	}
+	m.status.LastError = "ACME 签发失败: " + err.Error()
+	m.status.NextRetry = next
+}
+
+func waitContext(ctx context.Context, d time.Duration) bool {
+	if d <= 0 {
+		return true
+	}
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+func addrPort(addr string) int {
+	_, raw, err := net.SplitHostPort(addr)
+	if err != nil {
+		return 0
+	}
+	port, _ := strconv.Atoi(raw)
+	return port
 }
 
 // ---- HTTPS listener ----
@@ -254,20 +477,42 @@ func (m *Manager) stopHTTPS() {
 	}
 }
 
-// Close 进程退出时停掉 HTTPS listener（HTTP 由调用方自己的 server 管）。
-func (m *Manager) Close() { m.stopHTTPS() }
+// Close 进程退出时停掉 HTTPS listener 与 CertMagic 续签协程。
+func (m *Manager) Close() {
+	m.syncMu.Lock()
+	defer m.syncMu.Unlock()
+	m.stopACME()
+	m.stopHTTPS()
+	m.acmeWG.Wait()
+	m.mu.Lock()
+	cache := m.cache
+	m.cache = nil
+	m.mu.Unlock()
+	if cache != nil {
+		cache.Stop()
+	}
+}
 
-// getCertificate 每次握手现取：selfsigned 重签、acme 续签都不需要动 listener。
+// getCertificate 每次握手先取 CertMagic 证书；尚未签发或续签出错时立即回落
+// 本地自签名叶子证书，不让 HTTPS 握手失败。
 func (m *Manager) getCertificate(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
 	m.mu.Lock()
-	cfg, acme, leaf := m.cfg, m.acme, m.leaf
+	cfg, magic, leaf := m.cfg, m.magic, m.leaf
+	generation := m.acmeGeneration
 	m.mu.Unlock()
-	if cfg.Mode == "acme" && acme != nil {
-		cert, err := acme.GetCertificate(hello)
+	if cfg.Mode == "acme" && magic != nil {
+		cert, err := magic.GetCertificate(hello)
 		if err == nil {
-			m.recordCertificate(cert)
+			if !slices.Contains(hello.SupportedProtos, "acme-tls/1") {
+				subject := acmeSubject(cfg)
+				m.recordCertificate(generation, cert, subject, acmeProfile(cfg, subject))
+			}
+			return cert, nil
 		}
-		return cert, err
+		subject := acmeSubject(cfg)
+		if hello == nil || hello.ServerName == "" || strings.EqualFold(hello.ServerName, subject) {
+			m.recordFallback(generation, subject, leaf, err)
+		}
 	}
 	if leaf != nil {
 		return leaf, nil
@@ -275,7 +520,24 @@ func (m *Manager) getCertificate(hello *tls.ClientHelloInfo) (*tls.Certificate, 
 	return nil, errors.New("证书尚未就绪")
 }
 
-func (m *Manager) recordCertificate(cert *tls.Certificate) {
+func (m *Manager) recordFallback(generation uint64, subject string, leaf *tls.Certificate, cause error) {
+	if leaf == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if generation != m.acmeGeneration || m.cfg.Mode != "acme" || m.status.Subject != subject {
+		return
+	}
+	m.status.Active = "selfsigned"
+	m.status.SANs = leafSANs(leaf)
+	m.status.NotAfter = leaf.Leaf.NotAfter
+	if cause != nil && m.status.LastError == "" {
+		m.status.LastError = "ACME 证书尚不可用: " + cause.Error()
+	}
+}
+
+func (m *Manager) recordCertificate(generation uint64, cert *tls.Certificate, subject, profile string) {
 	if cert == nil {
 		return
 	}
@@ -287,9 +549,16 @@ func (m *Manager) recordCertificate(cert *tls.Certificate) {
 		return
 	}
 	m.mu.Lock()
-	m.status.SANs = slices.Clone(leaf.DNSNames)
+	defer m.mu.Unlock()
+	if generation != m.acmeGeneration || m.cfg.Mode != "acme" || m.status.Subject != subject {
+		return
+	}
+	m.status.Active = "acme"
+	m.status.Profile = profile
+	m.status.SANs = certificateSANs(leaf)
 	m.status.NotAfter = leaf.NotAfter
-	m.mu.Unlock()
+	m.status.LastError = ""
+	m.status.NextRetry = time.Time{}
 }
 
 // ---- HTTP 分流 ----
@@ -308,7 +577,7 @@ func (m *Manager) HTTPHandler(fallback http.Handler) http.Handler {
 		m.mu.Lock()
 		cfg := m.cfg
 		m.mu.Unlock()
-		host := cfg.Domain
+		host := acmeSubject(cfg)
 		if host == "" {
 			// 映射对外固定为 443，不能把进程内 HTTPS 监听端口泄漏进公开链接。
 			h, _, err := net.SplitHostPort(r.Host)
@@ -316,18 +585,17 @@ func (m *Manager) HTTPHandler(fallback http.Handler) http.Handler {
 				h = r.Host
 			}
 			host = h
-			if strings.Contains(host, ":") && !strings.HasPrefix(host, "[") {
-				host = "[" + host + "]"
-			}
+		}
+		if strings.Contains(host, ":") && !strings.HasPrefix(host, "[") {
+			host = "[" + host + "]"
 		}
 		http.Redirect(w, r, "https://"+host+r.URL.RequestURI(), http.StatusPermanentRedirect)
 	})
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		m.mu.Lock()
-		acme := m.acme
+		handleChallenge := m.httpChallenge
 		m.mu.Unlock()
-		if acme != nil {
-			acme.HTTPHandler(redirect).ServeHTTP(w, r)
+		if handleChallenge != nil && handleChallenge(w, r) {
 			return
 		}
 		redirect.ServeHTTP(w, r)
@@ -553,9 +821,16 @@ func signLeaf(ca *x509.Certificate, caKey *ecdsa.PrivateKey, dnsNames []string, 
 }
 
 func leafSANs(c *tls.Certificate) []string {
+	return certificateSANs(c.Leaf)
+}
+
+func certificateSANs(leaf *x509.Certificate) []string {
+	if leaf == nil {
+		return nil
+	}
 	var out []string
-	out = append(out, c.Leaf.DNSNames...)
-	for _, ip := range c.Leaf.IPAddresses {
+	out = append(out, leaf.DNSNames...)
+	for _, ip := range leaf.IPAddresses {
 		out = append(out, ip.String())
 	}
 	slices.Sort(out)

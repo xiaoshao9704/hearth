@@ -4,6 +4,7 @@ package api
 import (
 	"context"
 	"errors"
+	"net"
 	"net/http"
 	"os"
 	"runtime"
@@ -509,11 +510,17 @@ func (a *API) publicBase(r *http.Request) string {
 	if a.cfg.PublicURL != "" {
 		return strings.TrimSuffix(a.cfg.PublicURL, "/")
 	}
-	if d := a.dynVal(r.Context(), "site_domain"); d != "" {
-		if mode := a.dynVal(r.Context(), "tls_mode"); mode == "acme" || mode == "selfsigned" {
+	ctx := r.Context()
+	if d := a.dynVal(ctx, "site_domain"); d != "" {
+		if mode := a.dynVal(ctx, "tls_mode"); mode == "acme" || mode == "selfsigned" {
 			return "https://" + d
 		}
 		return "http://" + d
+	}
+	if a.dynVal(ctx, "tls_mode") == "acme" {
+		if subject := a.ipCertificateCandidate().Subject; subject != "" {
+			return "https://" + publicURLHost(subject)
+		}
 	}
 	return requestScheme(r) + "://" + r.Host
 }
@@ -525,13 +532,26 @@ func (a *API) publicProbeBase(ctx context.Context) string {
 		return strings.TrimSuffix(a.cfg.PublicURL, "/")
 	}
 	domain := a.dynVal(ctx, "site_domain")
-	if domain == "" {
-		return ""
-	}
-	if mode := a.dynVal(ctx, "tls_mode"); mode == "acme" || mode == "selfsigned" {
+	mode := a.dynVal(ctx, "tls_mode")
+	if domain != "" && (mode == "acme" || mode == "selfsigned") {
 		return "https://" + domain
 	}
-	return "http://" + domain
+	if domain != "" {
+		return "http://" + domain
+	}
+	if mode == "acme" {
+		if subject := a.ipCertificateCandidate().Subject; subject != "" {
+			return "https://" + publicURLHost(subject)
+		}
+	}
+	return ""
+}
+
+func publicURLHost(host string) string {
+	if ip := net.ParseIP(host); ip != nil && ip.To4() == nil {
+		return "[" + host + "]"
+	}
+	return host
 }
 
 // listInvites 列邀请：admin+ 看全部，power 只看自己发的。

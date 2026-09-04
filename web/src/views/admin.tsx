@@ -383,6 +383,11 @@ const TLS_MODE_LABELS: Record<string, string> = {
   acme: '自动证书（ACME）',
   selfsigned: '自签名（本地 CA）',
 };
+const TLS_ACTIVE_LABELS: Record<string, string> = {
+  off: '未使用',
+  acme: 'ACME 公开证书',
+  selfsigned: '自签名兜底证书',
+};
 const VERDICT_META: Record<string, [string, string]> = {
   reachable: ['外部可达', 'var(--sage)'],
   unknown: ['本机无法确认', 'var(--text-2)'],
@@ -493,6 +498,9 @@ function NetworkTab() {
                     {kv('比对', DOMAIN_MATCH_LABELS[n().domain.match] ?? n().domain.match, false)}
                     <Show when={n().domain.detail}>{kv('说明', n().domain.detail!, false)}</Show>
                   </Show>
+                  <Show when={n().domain.configured === ''}>
+                    {kv('IP 证书', n().ip_certificate.available ? `${n().ip_certificate.subject}（可用）` : n().ip_certificate.reason, false)}
+                  </Show>
                   <Show when={n().ddns.provider !== 'off' && n().ddns.provider !== ''}>
                     {kv('DDNS', `${KERNEL_LABELS[n().ddns.provider] ?? n().ddns.provider} → ${n().ddns.host || '（未填主机名）'}`, false)}
                     <Show when={n().ddns.v4 || n().ddns.v6}>
@@ -518,15 +526,21 @@ function NetworkTab() {
                 <div style="padding:4px 4px">
                   {kv('模式', TLS_MODE_LABELS[n().tls.mode] ?? n().tls.mode, false)}
                   <Show when={n().tls.mode !== 'off'}>
+                    {kv('当前证书', TLS_ACTIVE_LABELS[n().tls.active] ?? n().tls.active, false)}
                     {kv('HTTPS 监听', `${n().tls.https_addr}（${n().tls.listening ? '在跑' : '未监听'}）`)}
                   </Show>
+                  <Show when={n().tls.subject}>{kv('ACME 标识', n().tls.subject)}</Show>
+                  <Show when={n().tls.profile}>{kv('ACME Profile', n().tls.profile)}</Show>
                   <Show when={(n().tls.sans ?? []).length > 0}>{kv('证书覆盖', (n().tls.sans ?? []).join('，'))}</Show>
                   <Show when={n().tls.not_after && !n().tls.not_after.startsWith('0001')}>
                     {kv('到期', fmtClock(n().tls.not_after))}
                   </Show>
+                  <Show when={n().tls.next_retry && !n().tls.next_retry.startsWith('0001')}>
+                    {kv('下次重试', fmtClock(n().tls.next_retry))}
+                  </Show>
                   <Show when={n().tls.last_error}>{kv('最近错误', n().tls.last_error, false)}</Show>
                 </div>
-                <Show when={n().tls.mode === 'selfsigned'}>
+                <Show when={n().tls.active === 'selfsigned'}>
                   <div style="padding:12px 18px;border-top:1px solid var(--line-soft);font-size:11.5px;line-height:1.7;color:var(--text-2)">
                     不装 CA 也能用——每台设备首次访问点一次「继续访问」即可。装上 CA 后浏览器完全信任本机证书：
                     <br />
@@ -1420,4 +1434,3 @@ function RoomsTab() {
     </Show>
   );
 }
-

@@ -21,7 +21,7 @@ interface WizardState {
   ddnsHost: string;
   ddnsZone: string;
   ddnsProvider: 'off' | 'duckdns' | 'cloudflare' | 'dnspod' | 'aliyun';
-  tlsMode: 'acme' | 'selfsigned' | 'off';
+  tlsChoice: 'domain' | 'ip' | 'selfsigned';
 }
 
 // DDNS 提供方各自的凭证字段（键名即服务端 dyncfg 键）
@@ -51,7 +51,7 @@ export function renderSetup(root: HTMLElement, alive: () => boolean) {
     ddnsHost: '',
     ddnsZone: '',
     ddnsProvider: 'off',
-    tlsMode: 'selfsigned',
+    tlsChoice: 'selfsigned',
   };
   let tlsChosen = false;
 
@@ -248,7 +248,7 @@ export function renderSetup(root: HTMLElement, alive: () => boolean) {
           return false;
         }
       }
-      if (!tlsChosen) state.tlsMode = state.domain ? 'acme' : 'selfsigned';
+      if (!tlsChosen) state.tlsChoice = state.domain ? 'domain' : 'selfsigned';
       return true;
     };
     el.querySelector('#wz-next')!.addEventListener('click', async () => {
@@ -263,33 +263,49 @@ export function renderSetup(root: HTMLElement, alive: () => boolean) {
       state.ddnsHost = '';
       state.ddnsZone = '';
       state.ddnsProvider = 'off';
-      state.tlsMode = 'selfsigned';
+      state.tlsChoice = 'selfsigned';
       stepTLS();
     });
   }
 
   // ---- 第 3 步：证书方式 ----
-  function stepTLS() {
+  async function stepTLS() {
+    paint(`${stepChip(3, '证书方式')}<div class="muted">正在读取公网可达性…</div>`);
+    let ipCertificate: NetcheckResult['ip_certificate'] = {
+      available: false,
+      reason: '网络自检失败，暂时无法选择 IP 证书',
+    };
+    try {
+      ipCertificate = (await adminNetcheck()).ip_certificate;
+    } catch {
+      // 自检失败不阻塞自签名路径。
+    }
+    if (!alive()) return;
     const hasDomain = state.domain !== '';
+    if (!tlsChosen) state.tlsChoice = hasDomain ? 'domain' : ipCertificate.available ? 'ip' : 'selfsigned';
     const options = [
       {
-        id: 'acme',
-        label: '自动证书（ACME）',
+        id: 'domain',
+        label: '域名 + ACME 证书',
         desc: hasDomain
-          ? `按 ${state.domain} 向 Let's Encrypt 自动签发与续期。需要外部 80/443 能映射到这台机器（端口映射会自动申请）。`
+          ? `按 ${state.domain} 自动签发与续期；配置了 Cloudflare 或阿里云时优先用 DNS-01。`
           : '需要第 2 步填了域名才能用。',
         disabled: !hasDomain,
       },
       {
-        id: 'selfsigned',
-        label: '自签名证书（本地 CA）',
-        desc: '服务器自己签证书，麦克风/投屏立即可用。每台设备首次访问要点一次「继续访问」；装上 CA 证书（管理后台可下载）就不再提示。局域网与无域名场景选这个。',
-        disabled: false,
+        id: 'ip',
+        label: '仅公网 IP + 短期证书',
+        desc: hasDomain
+          ? '已配置公开域名，将优先使用域名证书；清空域名后才能选 IP 证书。'
+          : ipCertificate.available
+            ? `按 ${ipCertificate.subject} 自动签发 shortlived 证书；${ipCertificate.reason}`
+            : ipCertificate.reason,
+        disabled: hasDomain || !ipCertificate.available,
       },
       {
-        id: 'off',
-        label: '不要 HTTPS',
-        desc: '保持纯 HTTP：只有本机（localhost）能用麦克风。前面有 Caddy/Nginx 反代出证书时才选。',
+        id: 'selfsigned',
+        label: '自签名证书（本地 CA）',
+        desc: '立即可用，不依赖公网验证。设备需信任管理后台可下载的本地 CA 才能去掉证书警告。',
         disabled: false,
       },
     ];
@@ -303,8 +319,8 @@ export function renderSetup(root: HTMLElement, alive: () => boolean) {
             style="display:flex;align-items:flex-start;gap:11px;padding:11px 12px;border-radius:9px;border:1px solid var(--line);background:var(--bg-2);text-align:left;width:100%;${o.disabled ? 'opacity:0.5' : ''}">
             <div class="radio" style="margin-top:1px"><div class="dot"></div></div>
             <div style="flex-grow:1">
-              <div style="font-size:13px;font-weight:500;color:var(--text-0)">${o.label}</div>
-              <div style="font-size:11px;color:var(--text-2);margin-top:2px;line-height:1.6">${o.desc}</div>
+              <div style="font-size:13px;font-weight:500;color:var(--text-0)">${esc(o.label)}</div>
+              <div style="font-size:11px;color:var(--text-2);margin-top:2px;line-height:1.6">${esc(o.desc)}</div>
             </div>
           </button>`,
           )
@@ -316,7 +332,7 @@ export function renderSetup(root: HTMLElement, alive: () => boolean) {
         <button type="button" class="hit btn btn-primary" id="wz-next" style="flex:1">保存并继续</button>
       </div>`);
 
-    let picked: WizardState['tlsMode'] = state.tlsMode;
+    let picked: WizardState['tlsChoice'] = state.tlsChoice;
     const syncRadios = () => {
       el.querySelectorAll<HTMLButtonElement>('.wz-tls-opt').forEach((b) => {
         const on = b.dataset.id === picked;
@@ -328,8 +344,8 @@ export function renderSetup(root: HTMLElement, alive: () => boolean) {
     };
     el.querySelectorAll<HTMLButtonElement>('.wz-tls-opt').forEach((b) => {
       b.addEventListener('click', () => {
-        picked = b.dataset.id as WizardState['tlsMode'];
-        state.tlsMode = picked;
+        picked = b.dataset.id as WizardState['tlsChoice'];
+        state.tlsChoice = picked;
         tlsChosen = true;
         syncRadios();
       });
@@ -338,10 +354,10 @@ export function renderSetup(root: HTMLElement, alive: () => boolean) {
 
     el.querySelector('#wz-back')!.addEventListener('click', stepDomain);
     el.querySelector('#wz-next')!.addEventListener('click', async () => {
-      state.tlsMode = picked;
+      state.tlsChoice = picked;
       try {
         // 热生效：保存后服务端立刻起/换 HTTPS listener，不用重启
-        await adminSetConfig({ tls_mode: picked });
+        await adminSetConfig({ tls_mode: picked === 'selfsigned' ? 'selfsigned' : 'acme' });
       } catch (e) {
         showErr(e);
         return;
@@ -383,8 +399,11 @@ export function renderSetup(root: HTMLElement, alive: () => boolean) {
       }
       if (!alive()) return;
       const [vLabel, vColor] = VERDICT[nc.external.verdict] ?? VERDICT.unknown;
+      const activeCertificate =
+        nc.tls.active === 'acme' ? 'ACME 公开证书' : nc.tls.active === 'selfsigned' ? '自签名兜底证书' : '未使用';
       const rows: [string, string][] = [
-        ['证书模式', nc.tls.mode === 'off' ? '关闭（纯 HTTP）' : nc.tls.mode === 'acme' ? '自动证书（ACME）' : '自签名（本地 CA）'],
+        ['配置模式', nc.tls.mode === 'off' ? '关闭（纯 HTTP）' : nc.tls.mode === 'acme' ? '自动证书（ACME）' : '自签名（本地 CA）'],
+        ['当前证书', activeCertificate],
         ['端口映射', nc.portmap.Detail || nc.portmap.Diagnosis],
         ['域名解析', nc.domain.configured === '' ? '未配置' : nc.domain.match === 'ok' ? '一致' : (nc.domain.detail ?? nc.domain.match)],
         ['外部可达', nc.external.detail],
@@ -406,8 +425,12 @@ export function renderSetup(root: HTMLElement, alive: () => boolean) {
           </div>
         </div>
         ${
-          nc.tls.mode === 'selfsigned'
-            ? `<div style="margin-top:10px;font-size:11.5px;line-height:1.7;color:var(--text-2)">自签名模式下每台设备首次访问要点一次「继续访问」。想彻底去掉警告：管理后台 → 网络 → 下载 CA 证书，装进设备（macOS 双击后钥匙串设为始终信任；Windows 双击导入到「受信任的根证书颁发机构」；iOS 设置里安装描述文件后在「关于本机 → 证书信任设置」打开）。</div>`
+          nc.tls.active === 'selfsigned'
+            ? `<div style="margin-top:10px;font-size:11.5px;line-height:1.7;color:var(--text-2)">${
+                nc.tls.mode === 'acme'
+                  ? `ACME 正在签发或重试，期间 HTTPS 已由自签名证书兜底。${nc.tls.last_error ? `最近错误：${esc(nc.tls.last_error)}` : ''}`
+                  : '自签名模式已启用。'
+              } 想去掉警告：管理后台 → 网络 → 下载 CA 证书并在设备上信任。</div>`
             : ''
         }`;
     }

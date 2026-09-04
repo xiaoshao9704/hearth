@@ -574,16 +574,21 @@ export interface NetcheckResult {
   externals: string[] | null;
   probed_at: string;
   domain: { configured: string; resolved: string[] | null; match: string; detail?: string };
+  ip_certificate: { subject?: string; available: boolean; reason: string };
   ddns: DDNSStatus;
   tls: {
     mode: string;
+    active: string;
     domain: string;
+    subject: string;
+    profile: string;
     https_addr: string;
     listening: boolean;
     sans: string[] | null;
     not_after: string;
     ca_available: boolean;
     last_error: string;
+    next_retry: string;
   };
   external: { url?: string; verdict: string; detail: string };
 }
