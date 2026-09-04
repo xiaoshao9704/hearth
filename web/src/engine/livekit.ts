@@ -19,7 +19,10 @@ const toSource = (s: Track.Source): TrackSource | null =>
   s === Track.Source.Camera ? 'camera' : s === Track.Source.ScreenShare ? 'screen' : null;
 
 export class LiveKitEngine implements AVEngine {
-  private room = new Room();
+  // 凭证是短时效入场券，断线后必须回房间层重新签发并重做入场判定。禁用 SDK 内部
+  // resume 也避免无 Redis 的 stage 重启后，客户端拿已消失的 participant 状态反复
+  // reconnect=1，卡在 STATE_MISMATCH 而永远不发起完整 join。
+  private room = new Room({ reconnectPolicy: { nextRetryDelayInMs: () => null } });
   private cbs: EngineCallbacks;
   private rnnoise = new RnnoisePipeline();
   private rnnoiseBroken = false;
