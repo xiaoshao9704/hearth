@@ -20,11 +20,12 @@ import {
   adminSetPolicy,
   adminSetUserDisabled,
   adminUpdateProvider,
+  adminVersion,
   downloadCACert,
   getUser,
   listChannels,
 } from '../api';
-import type { AdminOverview, AdminUser, Channel, ConfigItem, Invite, NetcheckResult, ProviderField, ProviderInstance, ProviderType } from '../api';
+import type { AdminOverview, AdminUser, Channel, ConfigItem, Invite, NetcheckResult, ProviderField, ProviderInstance, ProviderType, VersionInfo } from '../api';
 import { avatarHtml, confirmDialog, copyText, el, fmtClock, icon, menuButtonHtml, timeAgo, toast, wireMenuButton } from '../ui';
 
 type Tab = 'status' | 'config' | 'network' | 'users' | 'rooms' | 'invites';
@@ -201,6 +202,7 @@ export async function renderAdmin(root: HTMLElement, tab: Tab) {
 
 function StatusTab() {
   const [ov, setOv] = createSignal<AdminOverview>();
+  const [ver, setVer] = createSignal<VersionInfo>();
   const [err, setErr] = createSignal('');
   const [updatedAt, setUpdatedAt] = createSignal(0);
   const [now, setNow] = createSignal(Date.now());
@@ -215,6 +217,10 @@ function StatusTab() {
       .catch((e) => setErr((e as Error).message));
   };
   refresh();
+  // 版本检查服务端缓存 1 小时，这里跟着概览拉一次即可，不轮询
+  adminVersion()
+    .then(setVer)
+    .catch(() => {});
 
   // 后台标签页不轮询；每秒 tick 一下只为了让「更新于 N 秒前」走字
   const poll = setInterval(() => {
@@ -251,7 +257,7 @@ function StatusTab() {
     return [
       {
         name: 'hearth-server',
-        meta: `Go 单体 · ${o.go_version} · 已运行 ${fmtUptime(o.uptime_seconds)}`,
+        meta: `Go 单体 · ${o.go_version} · 已运行 ${fmtUptime(o.uptime_seconds)}${o.version ? ` · ${o.version}` : ''}`,
         ok: true,
         state: 'running',
       },
@@ -279,6 +285,17 @@ function StatusTab() {
 
   return (
     <Show when={ov()} fallback={<Placeholder err={err()} />}>
+      <Show when={ver()?.outdated}>
+        <div class="card" style="padding:11px 16px;margin-bottom:16px;display:flex;gap:10px;align-items:baseline;font-size:12.5px">
+          <span style="color:var(--ember);font-weight:600">新版本可用：{ver()!.latest}</span>
+          <span style="color:var(--text-2);flex-grow:1">当前 {ver()!.version}</span>
+          <Show when={ver()!.url}>
+            <a class="hit" style="color:var(--text-1)" href={ver()!.url} target="_blank" rel="noreferrer">
+              去下载
+            </a>
+          </Show>
+        </div>
+      </Show>
       <div class="stat-cards">
         <div class="stat-card">
           <div class="s-label">注册用户</div>
@@ -479,6 +496,16 @@ function NetworkTab() {
                     {kv('比对', DOMAIN_MATCH_LABELS[n().domain.match] ?? n().domain.match, false)}
                     <Show when={n().domain.detail}>{kv('说明', n().domain.detail!, false)}</Show>
                   </Show>
+                  <Show when={n().ddns.provider !== 'off' && n().ddns.provider !== ''}>
+                    {kv('DDNS', `${KERNEL_LABELS[n().ddns.provider] ?? n().ddns.provider} → ${n().ddns.host || '（未填主机名）'}`, false)}
+                    <Show when={n().ddns.v4 || n().ddns.v6}>
+                      {kv('已推送', [n().ddns.v4 ? `A=${n().ddns.v4}` : '', n().ddns.v6 ? `AAAA=${n().ddns.v6}` : ''].filter(Boolean).join('，'))}
+                    </Show>
+                    <Show when={n().ddns.updated_at && !n().ddns.updated_at.startsWith('0001')}>
+                      {kv('更新时间', fmtClock(n().ddns.updated_at))}
+                    </Show>
+                    <Show when={n().ddns.last_error}>{kv('最近错误', n().ddns.last_error, false)}</Show>
+                  </Show>
                 </div>
               </div>
 
@@ -540,8 +567,13 @@ const KERNEL_LABELS: Record<string, string> = {
   none: '关闭',
   auto: '自动',
   off: '关闭',
+  on: '开启',
   acme: '自动证书（ACME）',
   selfsigned: '自签名（本地 CA）',
+  duckdns: 'DuckDNS',
+  cloudflare: 'Cloudflare',
+  dnspod: 'DNSPod（腾讯云）',
+  aliyun: '阿里云',
 };
 const GROUP_META: Record<string, [string, string]> = {
   core: ['内核选择', '语音 / 舞台（投屏）/ 推流入口分别选服务实例'],
@@ -552,6 +584,8 @@ const GROUP_META: Record<string, [string, string]> = {
   network: ['网络', '向默认网关申请端口映射，仅 host 网络或裸机可用'],
   site: ['站点', '公开域名：邀请链接与证书签发都按它'],
   tls: ['HTTPS 证书', '保存即热生效；外部 80/443 由端口映射指到本机'],
+  ddns: ['DDNS', '公网 IP 变化时自动更新域名解析；地址没变不会打提供方 API'],
+  system: ['服务', '服务级杂项'],
 };
 const POLICIES = [
   { id: 'closed', label: '关闭注册', desc: '只能用 CLI 在服务器上开通' },

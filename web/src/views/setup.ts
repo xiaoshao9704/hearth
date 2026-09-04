@@ -1,5 +1,5 @@
 // 首启向导 #/setup：仅 users 表为空时可用（main.ts 路由层已挡）。
-// 四步：管理员账号 → 域名（可跳过）→ 证书方式 → 自检与邀请链接。
+// 四步：管理员账号 → 域名与 DDNS（可跳过）→ 证书方式 → 自检与邀请链接。
 // 一次性轻页面，vanilla TS 渲染（与 login/join 同类，不进 Solid）。
 import {
   adminCreateInvite,
@@ -17,11 +17,32 @@ const DOMAIN_RE = /^(?=.{1,253}$)([a-z0-9](-?[a-z0-9])*\.)+[a-z]{2,}$/i;
 
 interface WizardState {
   domain: string;
+  ddnsProvider: 'off' | 'duckdns' | 'cloudflare' | 'dnspod' | 'aliyun';
   tlsMode: 'acme' | 'selfsigned' | 'off';
 }
 
+// DDNS 提供方各自的凭证字段（键名即服务端 dyncfg 键）
+const DDNS_CREDS: Record<string, { key: string; label: string; hint: string }[]> = {
+  duckdns: [{ key: 'ddns_duckdns_token', label: 'Token', hint: 'duckdns.org 账户页的 token' }],
+  cloudflare: [{ key: 'ddns_cf_token', label: 'API Token', hint: '需 Zone.DNS 编辑权限' }],
+  dnspod: [
+    { key: 'ddns_dnspod_id', label: 'ID', hint: 'DNSPod 控制台「密钥管理」创建' },
+    { key: 'ddns_dnspod_token', label: 'Token', hint: '' },
+  ],
+  aliyun: [
+    { key: 'ddns_aliyun_id', label: 'AccessKey ID', hint: '建议 RAM 子账户，只授 AliyunDNSFullAccess' },
+    { key: 'ddns_aliyun_secret', label: 'AccessKey Secret', hint: '' },
+  ],
+};
+const DDNS_LABELS: Record<string, string> = {
+  duckdns: 'DuckDNS',
+  cloudflare: 'Cloudflare',
+  dnspod: 'DNSPod',
+  aliyun: '阿里云',
+};
+
 export function renderSetup(root: HTMLElement, alive: () => boolean) {
-  const state: WizardState = { domain: '', tlsMode: 'selfsigned' };
+  const state: WizardState = { domain: '', ddnsProvider: 'off', tlsMode: 'selfsigned' };
 
   const paint = (inner: string) => {
     root.innerHTML = `
@@ -93,24 +114,61 @@ export function renderSetup(root: HTMLElement, alive: () => boolean) {
     });
   }
 
-  // ---- 第 2 步：域名（可跳过；DDNS 是阶段三内容，这里只收 site_domain）----
+  // ---- 第 2 步：域名与 DDNS（都可跳过）----
   function stepDomain() {
     const el = paint(`
       ${stepChip(2, '公开域名（可跳过）')}
       <div style="display:flex;flex-direction:column;gap:7px">
         <label class="field-label" for="wz-domain">站点域名</label>
         <div class="field" style="height:44px"><input id="wz-domain" class="mono" placeholder="如 voice.example.com" autocapitalize="off" spellcheck="false" /></div>
-        <div style="font-size:11.5px;line-height:1.6;color:var(--text-2)">把域名解析到这台机器的公网地址后填在这里。没有域名就跳过，走自签名证书，只能局域网 + 手动信任。</div>
+        <div style="font-size:11.5px;line-height:1.6;color:var(--text-2)">把域名解析到这台机器的公网地址后填在这里；选了下面的 DDNS 且这里留空，会自动用 DDNS 主机名。没有域名就跳过，走自签名证书，只能局域网 + 手动信任。</div>
       </div>
-      <div style="display:flex;flex-direction:column;gap:7px;margin-top:13px">
-        <label class="field-label">DDNS 自动更新</label>
-        <div class="field" style="height:44px;opacity:0.55"><input disabled value="暂未开放（后续版本提供）" /></div>
+      <div style="display:flex;flex-direction:column;gap:7px;margin-top:15px">
+        <label class="field-label">DDNS 自动更新（公网 IP 变了自动改解析）</label>
+        <div class="seg-group" style="background:var(--bg-2)" id="wz-ddns">
+          ${['off', 'duckdns', 'cloudflare', 'dnspod', 'aliyun']
+            .map((p) => `<button type="button" class="hit seg" data-id="${p}">${p === 'off' ? '不用' : DDNS_LABELS[p]}</button>`)
+            .join('')}
+        </div>
+        <div style="font-size:11.5px;line-height:1.6;color:var(--text-2)">DuckDNS 最适合没有域名的人：注册即得免费子域名，只要一个 token。其余三家按自己域名所在的 DNS 服务商选。</div>
+      </div>
+      <div id="wz-ddns-fields" style="display:none;flex-direction:column;gap:11px;margin-top:13px">
+        <div style="display:flex;flex-direction:column;gap:7px">
+          <label class="field-label" for="wz-ddns-host">DDNS 主机名</label>
+          <div class="field" style="height:44px"><input id="wz-ddns-host" class="mono" placeholder="如 voice.duckdns.org" autocapitalize="off" spellcheck="false" /></div>
+        </div>
+        <div id="wz-ddns-creds" style="display:flex;flex-direction:column;gap:11px"></div>
       </div>
       ${errLine}
       <div style="display:flex;gap:10px;margin-top:14px">
         <button type="button" class="hit btn" id="wz-skip" style="flex:1">跳过</button>
         <button type="button" class="hit btn btn-primary" id="wz-next" style="flex:1">下一步</button>
       </div>`);
+
+    const fieldsBox = el.querySelector<HTMLDivElement>('#wz-ddns-fields')!;
+    const credsBox = el.querySelector<HTMLDivElement>('#wz-ddns-creds')!;
+    let provider: WizardState['ddnsProvider'] = 'off';
+    const syncDdns = () => {
+      el.querySelectorAll<HTMLButtonElement>('#wz-ddns .seg').forEach((b) => b.classList.toggle('on', b.dataset.id === provider));
+      fieldsBox.style.display = provider === 'off' ? 'none' : 'flex';
+      credsBox.innerHTML = (DDNS_CREDS[provider] ?? [])
+        .map(
+          (c) => `
+        <div style="display:flex;flex-direction:column;gap:7px">
+          <label class="field-label" for="wz-cred-${c.key}">${DDNS_LABELS[provider]} ${c.label}</label>
+          <div class="field" style="height:44px"><input id="wz-cred-${c.key}" data-key="${c.key}" type="password" placeholder="${esc(c.hint)}" autocomplete="off" /></div>
+        </div>`,
+        )
+        .join('');
+    };
+    el.querySelectorAll<HTMLButtonElement>('#wz-ddns .seg').forEach((b) => {
+      b.addEventListener('click', () => {
+        provider = b.dataset.id as WizardState['ddnsProvider'];
+        syncDdns();
+      });
+    });
+    syncDdns();
+
     const input = el.querySelector<HTMLInputElement>('#wz-domain')!;
     const save = async () => {
       const domain = input.value.trim().toLowerCase();
@@ -118,16 +176,39 @@ export function renderSetup(root: HTMLElement, alive: () => boolean) {
         showErr(new Error('域名格式不对，如 voice.example.com'));
         return false;
       }
-      state.domain = domain;
-      if (domain) {
+      const values: Record<string, string> = {};
+      if (domain) values.site_domain = domain;
+      state.ddnsProvider = provider;
+      if (provider !== 'off') {
+        const host = el.querySelector<HTMLInputElement>('#wz-ddns-host')!.value.trim().toLowerCase();
+        if (!DOMAIN_RE.test(host)) {
+          showErr(new Error('DDNS 主机名格式不对，如 voice.duckdns.org'));
+          return false;
+        }
+        values.ddns_provider = provider;
+        values.ddns_host = host;
+        for (const c of DDNS_CREDS[provider] ?? []) {
+          const v = credsBox.querySelector<HTMLInputElement>(`#wz-cred-${c.key}`)!.value.trim();
+          if (!v) {
+            showErr(new Error(`请填 ${DDNS_LABELS[provider]} 的 ${c.label}`));
+            return false;
+          }
+          values[c.key] = v;
+        }
+        // 域名留空时服务端会把 ddns_host 回填进 site_domain，前端同步这个结论
+        if (!domain) state.domain = host;
+      } else {
+        state.domain = domain;
+      }
+      if (Object.keys(values).length > 0) {
         try {
-          await adminSetConfig({ site_domain: domain });
+          await adminSetConfig(values);
         } catch (e) {
           showErr(e);
           return false;
         }
       }
-      state.tlsMode = domain ? 'acme' : 'selfsigned';
+      state.tlsMode = state.domain ? 'acme' : 'selfsigned';
       return true;
     };
     el.querySelector('#wz-next')!.addEventListener('click', async () => {
@@ -135,7 +216,12 @@ export function renderSetup(root: HTMLElement, alive: () => boolean) {
     });
     el.querySelector('#wz-skip')!.addEventListener('click', async () => {
       input.value = '';
-      if (await save()) stepTLS();
+      provider = 'off';
+      syncDdns();
+      state.domain = '';
+      state.ddnsProvider = 'off';
+      state.tlsMode = 'selfsigned';
+      stepTLS();
     });
   }
 

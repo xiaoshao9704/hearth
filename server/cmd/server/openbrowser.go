@@ -3,20 +3,12 @@
 package main
 
 import (
-	"os"
 	"os/exec"
 	"runtime"
 )
 
 // noBrowserFlag 手扫 --no-browser：与 --data 同理，flag 包解析之前就要知道。
-func noBrowserFlag() bool {
-	for _, a := range os.Args[1:] {
-		if a == "--no-browser" {
-			return true
-		}
-	}
-	return false
-}
+func noBrowserFlag() bool { return hasFlag("--no-browser") }
 
 func openBrowser(url string) {
 	var cmd *exec.Cmd

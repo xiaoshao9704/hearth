@@ -14,6 +14,7 @@ import (
 
 	"hearth/server/internal/chat"
 	"hearth/server/internal/config"
+	"hearth/server/internal/ddns"
 	"hearth/server/internal/portmap"
 	"hearth/server/internal/rtc"
 	"hearth/server/internal/rtc/bellows"
@@ -77,6 +78,10 @@ type API struct {
 	tls *tlsx.Manager
 	// mapper 端口映射器（自检回显用，main 经 SetPortMapper 注入；nil = 未接入）
 	mapper *portmap.Mapper
+	// ddns DDNS 运行器（main 经 SetDDNS 注入；nil = 未接入，回显按 off 报）
+	ddns *ddns.Runner
+	// version 当前版本号（main 经 SetVersion 注入，ldflags -X main.version 决定）
+	version string
 }
 
 func New(st *store.Store, cfg config.Config, hub *chat.Hub, mapped lite.MappedFunc) *API {
@@ -190,6 +195,7 @@ func (a *API) Router() *chi.Mux {
 			r.Delete("/providers/{alias}", a.adminDeleteProvider)
 			r.Get("/netcheck", a.adminNetcheck)
 			r.Get("/tls/ca.crt", a.adminTLSCA)
+			r.Get("/version", a.adminVersion)
 		})
 	})
 	return r

@@ -61,7 +61,7 @@ jobs:
             os="${target%/*}"; arch="${target#*/}"
             bin="hearth-$os-$arch"
             [ "$os" = windows ] && bin="$bin.exe"
-            GOOS=$os GOARCH=$arch go build -ldflags "-s -w" -o "$GITHUB_WORKSPACE/out/$bin" ./cmd/server
+            GOOS=$os GOARCH=$arch go build -ldflags "-s -w -X main.version=${VERSION}" -o "$GITHUB_WORKSPACE/out/$bin" ./cmd/server
           done
           for arch in amd64 arm64; do
             # 远端舞台内核：单文件，跑在另一台机器上替代 livekit + bellows 两个容器

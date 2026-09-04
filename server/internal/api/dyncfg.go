@@ -64,6 +64,37 @@ var tlsKeys = []rtc.ConfigKey{
 		Label: "ACME 账户邮箱", Hint: "可空；填了 CA 能在证书快过期时联系到管理员"},
 }
 
+// ddnsKeys DDNS（见 internal/ddns）：公网地址变化时自动更新域名解析，
+// 触发与宣告探测同节拍，地址没变不打提供方 API。
+var ddnsKeys = []rtc.ConfigKey{
+	{Name: "ddns_provider", Env: "DDNS_PROVIDER", Group: "ddns", Default: "off",
+		Options: []string{"off", "duckdns", "cloudflare", "dnspod", "aliyun"},
+		Label:   "DDNS 提供方",
+		Hint:    "DuckDNS 最适合没有域名的人（免费子域名，只要 token）；其余三家按自己域名所在的 DNS 服务商选"},
+	{Name: "ddns_host", Env: "DDNS_HOST", Group: "ddns",
+		Label: "DDNS 主机名", Hint: "如 voice.duckdns.org 或 voice.example.com；公开域名为空时会自动回填为它"},
+	{Name: "ddns_duckdns_token", Env: "DDNS_DUCKDNS_TOKEN", Group: "ddns", Secret: true,
+		Label: "DuckDNS Token", Hint: "duckdns.org 账户页的 token"},
+	{Name: "ddns_cf_token", Env: "DDNS_CF_TOKEN", Group: "ddns", Secret: true,
+		Label: "Cloudflare API Token", Hint: "需 Zone.DNS 编辑权限；zone 按主机名后缀自动匹配"},
+	{Name: "ddns_dnspod_id", Env: "DDNS_DNSPOD_ID", Group: "ddns", Secret: true,
+		Label: "DNSPod ID", Hint: "DNSPod 控制台「密钥管理」创建"},
+	{Name: "ddns_dnspod_token", Env: "DDNS_DNSPOD_TOKEN", Group: "ddns", Secret: true,
+		Label: "DNSPod Token"},
+	{Name: "ddns_aliyun_id", Env: "DDNS_ALIYUN_ID", Group: "ddns", Secret: true,
+		Label: "阿里云 AccessKey ID", Hint: "建议用 RAM 子账户，只授 AliyunDNSFullAccess"},
+	{Name: "ddns_aliyun_secret", Env: "DDNS_ALIYUN_SECRET", Group: "ddns", Secret: true,
+		Label: "阿里云 AccessKey Secret"},
+}
+
+// systemKeys 服务级杂项。
+var systemKeys = []rtc.ConfigKey{
+	{Name: "update_check", Env: "UPDATE_CHECK", Group: "system", Default: "on",
+		Options: []string{"on", "off"},
+		Label:   "检查新版本",
+		Hint:    "on = 管理后台概览按 GitHub Releases 提示有新版本（每小时最多查一次，失败静默）；off = 关闭"},
+}
+
 // selectorEnv 选择器对应的旧环境变量名：只供迁移 v2 一次性导入与启动告警，不参与取值。
 var selectorEnv = map[string]string{
 	"voice_provider":  "VOICE_PROVIDER",
@@ -127,7 +158,9 @@ func (a *API) allConfigKeys() []rtc.ConfigKey {
 	keys := append(append([]rtc.ConfigKey{}, selectorKeys...), a.kernelKeys...)
 	keys = append(keys, portmapKeys...)
 	keys = append(keys, siteKeys...)
-	return append(keys, tlsKeys...)
+	keys = append(keys, tlsKeys...)
+	keys = append(keys, ddnsKeys...)
+	return append(keys, systemKeys...)
 }
 
 // PortWants 当前要向网关申请的映射：HTTP 端口 + 当前选中内核里跑在本进程的媒体端口
@@ -358,6 +391,26 @@ func (a *API) adminSetConfig(w http.ResponseWriter, r *http.Request) {
 	for _, name := range []string{"tls_mode", "https_addr", "site_domain", "acme_directory", "acme_email"} {
 		if _, ok := req.Values[name]; ok {
 			go a.SyncTLS()
+			break
+		}
+	}
+	// DDNS 键保存即热生效：推一次（地址没变 Runner 内部会去重）；选了 DDNS 且公开域名
+	// 为空时自动把 ddns_host 回填进 site_domain（落库，邀请链接与证书签发随即按它走）
+	for name := range req.Values {
+		if strings.HasPrefix(name, "ddns_") {
+			ctx := context.Background()
+			if _, touched := req.Values["site_domain"]; !touched &&
+				a.dynVal(ctx, "site_domain") == "" &&
+				a.dynVal(ctx, "ddns_provider") != "off" {
+				if host := a.dynVal(ctx, "ddns_host"); host != "" {
+					if err := a.st.SetSetting(ctx, "cfg_site_domain", host); err != nil {
+						log.Printf("DDNS 主机名回填 site_domain 失败: %v", err)
+					} else {
+						go a.SyncTLS() // 域名变了，证书要按新域名签
+					}
+				}
+			}
+			go a.SyncDDNS()
 			break
 		}
 	}

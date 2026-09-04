@@ -12,6 +12,7 @@ import (
 	"slices"
 	"time"
 
+	"hearth/server/internal/ddns"
 	"hearth/server/internal/portmap"
 	"hearth/server/internal/tlsx"
 )
@@ -104,14 +105,15 @@ type netcheckResult struct {
 	Externals []string       `json:"externals"` // 宣告探测快照（STUN/映射/显式配置）
 	ProbedAt  time.Time      `json:"probed_at"`
 	Domain    domainCheck    `json:"domain"`
+	DDNS      ddns.Status    `json:"ddns"` // DDNS 推送状态（off = 未启用）
 	TLS       tlsx.Status    `json:"tls"`
 	External  externalCheck  `json:"external"` // 从本机向公开地址回探 /healthz 的结论
 }
 
 type domainCheck struct {
-	Configured string   `json:"configured"`          // site_domain（空 = 未配置）
-	Resolved   []string `json:"resolved"`            // 系统 resolver 查到的 A/AAAA
-	Match      string   `json:"match"`               // ok / mismatch / unconfigured / error
+	Configured string   `json:"configured"` // site_domain（空 = 未配置）
+	Resolved   []string `json:"resolved"`   // 系统 resolver 查到的 A/AAAA
+	Match      string   `json:"match"`      // ok / mismatch / unconfigured / error
 	Detail     string   `json:"detail,omitempty"`
 }
 
@@ -123,7 +125,7 @@ type externalCheck struct {
 
 func (a *API) adminNetcheck(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	res := netcheckResult{TLS: a.tlsStatus()}
+	res := netcheckResult{TLS: a.tlsStatus(), DDNS: a.ddnsStatus()}
 	if a.mapper != nil {
 		res.Portmap = a.mapper.Snapshot()
 	} else {

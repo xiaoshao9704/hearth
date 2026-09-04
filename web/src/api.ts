@@ -348,6 +348,17 @@ export function inviteInfo(code: string): Promise<InviteInfo> {
 
 // ---- 管理后台 ----
 
+// DDNS 状态（server/internal/ddns Status）
+export interface DDNSStatus {
+  provider: string; // off = 未启用
+  host: string;
+  v4?: string;
+  v6?: string;
+  updated_at: string;
+  last_error: string;
+  next_retry?: string;
+}
+
 export interface AdminOverview {
   users: number;
   channels: number;
@@ -355,6 +366,8 @@ export interface AdminOverview {
   uptime_seconds: number;
   go_version: string;
   policy: string;
+  version?: string;
+  ddns?: DDNSStatus;
   services: Record<string, { name?: string; ok: boolean; url: string }>;
   resources: {
     load: number | null;
@@ -367,6 +380,19 @@ export interface AdminOverview {
 
 export function adminOverview(): Promise<AdminOverview> {
   return req('/api/admin/overview');
+}
+
+// 版本与新版本提示（update_check=off 或查询失败时 latest 为空、detail 记原因）
+export interface VersionInfo {
+  version: string; // dev = 未走发布流水线
+  latest?: string;
+  outdated: boolean;
+  url?: string; // 发布页地址（有新版本时给）
+  detail?: string;
+}
+
+export function adminVersion(): Promise<VersionInfo> {
+  return req('/api/admin/version');
 }
 
 export interface AdminUser {
@@ -491,6 +517,7 @@ export interface NetcheckResult {
   externals: string[] | null;
   probed_at: string;
   domain: { configured: string; resolved: string[] | null; match: string; detail?: string };
+  ddns: DDNSStatus;
   tls: {
     mode: string;
     domain: string;

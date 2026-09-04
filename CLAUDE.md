@@ -46,6 +46,8 @@
 - `tls_mode != off` 时 PortWants 把 HTTP/HTTPS 映射为外部 80/443 且 StrictPort（公开链接不带端口，网关改派宁可 port_conflict 也不能静默错位）；`publicBase` 优先 PUBLIC_URL，其次 `https://<site_domain>`。
 - 自检全走 `GET /api/admin/netcheck`（管理员）：映射快照、公网地址、域名解析比对、证书状态、本机回探三档结论（reachable/unknown/failed，hairpin 不判死）。`/healthz` 语义不变。
 - 首启向导：`GET /api/site` 公开 `needs_setup`（users 表为空）；此时注册接口放行首个账号（CreateUser 自动置管理员），前端路由层把一切 hash 让位给 `#/setup`。acme 模式下证书未签出前 HTTPS 握手失败、HTTP 全 301——域名/映射没配好时这是预期状态，回 off 即可恢复。
+- DDNS（`server/internal/ddns`）：`ddns_provider`（off/duckdns/cloudflare/dnspod/aliyun）+ `ddns_host` + 各家凭证键（全 Secret）。`ddns.Runner.Sync` 与 RefreshAnnounce 同节拍（映射变化回调 + 5 分钟周期 + 配置保存），公网地址变了才打提供方 API，上次成功推送落 `<data>/ddns-state.json`（重启不重复打），失败 1min 起步翻倍退避封顶 10min；状态进 adminOverview 与 netcheck。选了 DDNS 且 `site_domain` 为空时自动把 `ddns_host` 回填进 site_domain（落库）。
+- 服务化：`hearth service install|uninstall|start|stop|status`（macOS 用户级 LaunchAgent，Linux systemd 用户级 / `--system` 系统级，Windows SCM + netsh 防火墙规则）。安装单元都带 `--service` 参数：服务模式不开浏览器、日志落 `<data>/hearth.log`（`internal/logrot` 自研轮转 10MB×5）。CLI 子命令分派手扫位置参数（`positionals()`），`--data` 可放在子命令前。版本：`main.version`（ldflags `-X` 注入，默认 dev），`GET /api/admin/version` 按 GitHub Releases 提示新版本（`update_check=off` 关闭，缓存 1 小时，仓库名只有 `releaseRepo` 一处）。
 
 ### 动态配置（server/internal/api/dyncfg.go）
 

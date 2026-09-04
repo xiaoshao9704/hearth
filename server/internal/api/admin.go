@@ -257,6 +257,8 @@ func (a *API) adminOverview(w http.ResponseWriter, r *http.Request) {
 		}(),
 		"resources": hostResources(),
 		"tls":       a.tlsStatus(),
+		"ddns":      a.ddnsStatus(),
+		"version":   a.version,
 	})
 }
 

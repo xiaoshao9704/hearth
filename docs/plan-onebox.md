@@ -1,7 +1,11 @@
 # 计划：单文件开箱即用（三系统原生启动、内置 TLS、DDNS、自签名、自检）
 
-状态：**阶段二已实现（2026-09-04）**——进程内 TLS（off/acme/selfsigned 热切换）、80/443 纳入 PortWants、
-首启向导 `#/setup`、`/api/admin/netcheck` 自检与管理后台「网络」页均已落地；ACME 路径只做到编译与配置生效，未在真实公网域名下实测。阶段三（DDNS、服务化）未开工。
+状态：**阶段三已实现（2026-09-04）**——DDNS 四个提供方（DuckDNS/Cloudflare/DNSPod/阿里云，去重+退避+状态落盘）、
+`service install|uninstall|start|stop|status` 三系统服务化（macOS LaunchAgent / Linux systemd 用户级与 --system /
+Windows SCM + 防火墙规则）、服务模式日志轮转（`<data>/hearth.log` 10MB×5）、`hearth version` 与管理后台新版本提示
+（GitHub Releases，可关）。Cloudflare/DNSPod/阿里云无凭证未实测（请求构造与签名有单测）；Windows 服务形态只做了
+交叉编译验证。阶段二已实现——进程内 TLS（off/acme/selfsigned 热切换）、80/443 纳入 PortWants、
+首启向导 `#/setup`、`/api/admin/netcheck` 自检与管理后台「网络」页均已落地；ACME 路径只做到编译与配置生效，未在真实公网域名下实测。
 目标版本与内核收敛（ember/bellows 退场，只留进程内 LiveKit）同批；本文档只写「一个文件、双击能用、朋友能连上」这条线，内核收敛另起文档。
 
 ## 动机与边界
