@@ -999,6 +999,42 @@ export async function renderRoom(root: HTMLElement, channel: string) {
     toast(deafened() ? '已静音全部（仍可说话）' : '已恢复收听', '', 2000);
   }
 
+  // ---- 键盘快捷键：M 切麦、D 静音全部、按住 Space 说话（Ctrl+Enter 发送在聊天输入框自己的 keydown 上）----
+  const inTypingTarget = (ev: KeyboardEvent) => {
+    const t = ev.target as HTMLElement | null;
+    return !!t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable);
+  };
+  // 按住说话只在本轮按下期间开麦：失焦/松开都要能复位，否则麦克风会一直开着
+  let pttHeld = false;
+  const onHotkeyDown = (ev: KeyboardEvent) => {
+    if (ev.repeat || ev.ctrlKey || ev.metaKey || ev.altKey) return; // repeat 防抖；带修饰键让位浏览器快捷键
+    if (inTypingTarget(ev)) return;
+    const key = ev.key.toLowerCase();
+    if (key === 'm') {
+      void toggleMic();
+    } else if (key === 'd') {
+      toggleDeaf();
+    } else if (ev.key === ' ') {
+      ev.preventDefault(); // 阻止页面滚动与聚焦按钮被激活
+      if (pttHeld || micOn()) return; // 已开麦时按住 Space 不做多余翻转
+      pttHeld = true;
+      void toggleMic();
+    }
+  };
+  const pttRelease = () => {
+    if (!pttHeld) return;
+    pttHeld = false;
+    if (micOn()) void toggleMic();
+  };
+  const onHotkeyUp = (ev: KeyboardEvent) => {
+    if (ev.key !== ' ') return;
+    if (pttHeld) ev.preventDefault(); // 按住期间吞掉 keyup，避免触发聚焦按钮的 click
+    pttRelease();
+  };
+  document.addEventListener('keydown', onHotkeyDown);
+  document.addEventListener('keyup', onHotkeyUp);
+  window.addEventListener('blur', pttRelease);
+
   // 自动播放被拦截：横幅点击是用户手势，两条线的引擎与增益链一起解锁
   async function resumeAllAudio() {
     setAudioBlocked(false);
@@ -1926,6 +1962,9 @@ export async function renderRoom(root: HTMLElement, channel: string) {
                   maxlength="2000"
                   autocomplete="off"
                   onInput={() => setChatReady(chatInputEl.value.trim().length > 0)}
+                  onKeyDown={(ev) => {
+                    if ((ev.ctrlKey || ev.metaKey) && ev.key === 'Enter') sendChat(ev);
+                  }}
                 />
                 <button type="submit" class="hit send-btn" classList={{ ready: chatReady() }}>
                   {el(icon('back', 15, 'currentColor', 1.8))}
@@ -1962,6 +2001,9 @@ export async function renderRoom(root: HTMLElement, channel: string) {
       document.removeEventListener('visibilitychange', onVisible);
       document.removeEventListener('fullscreenchange', onFsChange);
       document.removeEventListener('keydown', onFsKey);
+      document.removeEventListener('keydown', onHotkeyDown);
+      document.removeEventListener('keyup', onHotkeyUp);
+      window.removeEventListener('blur', pttRelease);
       window.removeEventListener('online', retryNow);
       leaving = true;
       exitFs();
