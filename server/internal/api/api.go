@@ -15,7 +15,6 @@ import (
 	"hearth/server/internal/chat"
 	"hearth/server/internal/config"
 	"hearth/server/internal/rtc"
-	"hearth/server/internal/rtc/bellows"
 	"hearth/server/internal/rtc/lite"
 	"hearth/server/internal/rtc/livekitembed"
 	"hearth/server/internal/rtc/livekitrtc"
@@ -40,11 +39,9 @@ type API struct {
 	providers     map[string]*ProviderInstance
 	providerOrder []string        // listInstances 顺序：内建 → env 锁定 → DB
 	kernelKeys    []rtc.ConfigKey // 内建实例的全局配置键汇总
-	// ingressResolver 进程内推流网关的归属反查闭包：判定已在 serveWHIP 的 admitIngest
+	// whipResolver 推流面的归属反查闭包：判定已在 serveWHIP 的 admitIngest
 	// 做完并挂到请求 ctx（ingestCtxKey），这里原样取回四元组；无判定结果按未知令牌处理。
-	// 写成无名函数类型是为了同时喂给 bellows.ResolveFunc 与 livekitrtc.ResolveFunc
-	//（两个具名类型之间不能直接赋值，无名类型对两者都可赋）。
-	ingressResolver func(ctx context.Context, token string) (room, identity string, meta rtc.Meta, err error)
+	whipResolver livekitrtc.ResolveFunc
 
 	// 在房人数缓存（大厅频道列表用，避免每次列表都打内核）
 	countsMu sync.Mutex
@@ -70,22 +67,21 @@ type API struct {
 func New(st *store.Store, cfg config.Config, hub *chat.Hub, mapped lite.MappedFunc) *API {
 	a := &API{st: st, cfg: cfg, hub: hub, mapped: mapped,
 		providers: map[string]*ProviderInstance{}}
-	// 内建实例：bellows 是进程内 WHIP 直通推流网关（OBS HEVC/AV1 的接入路径），
-	// 其余形态由 env/DB 注册成实例（见 providers.go）
+	// 内建实例只有 lkembed（进程内 LiveKit，语音/舞台/推流三面齐全，见 providers.go）
 	a.announcer = lite.NewAnnouncer(
 		func(ctx context.Context) string { return a.dynVal(ctx, "lkembed_public_ip") },
 		func(ctx context.Context) string { return a.dynVal(ctx, "lkembed_stun_servers") },
 		a.mapped)
-	a.ingressResolver = func(ctx context.Context, _ string) (string, string, rtc.Meta, error) {
+	a.whipResolver = func(ctx context.Context, _ string) (string, string, rtc.Meta, error) {
 		adm, ok := ctx.Value(ingestCtxKey{}).(ingestAdmission)
 		if !ok {
-			return "", "", rtc.Meta{}, bellows.ErrUnknownKey
+			return "", "", rtc.Meta{}, errors.New("未知推流令牌")
 		}
 		return adm.Room, adm.Identity, adm.Meta, nil
 	}
 	a.lkembed = livekitrtc.New(a.embedCfg)
-	a.lkembedWHIP = livekitrtc.NewWHIP(a.embedCfg, a.ingressResolver, a.stageKernelRunning)
-	a.kernelKeys = append(bellows.ConfigKeys(), livekitembed.ConfigKeys()...)
+	a.lkembedWHIP = livekitrtc.NewWHIP(a.embedCfg, a.whipResolver, a.stageKernelRunning)
+	a.kernelKeys = livekitembed.ConfigKeys()
 	// 注册表先种内建实例：启动期迁移或 ListProviders 失败（保留旧表）时，
 	// 各选择器的默认/回落路径仍有内建对象可用
 	for _, inst := range a.builtinInstances() {

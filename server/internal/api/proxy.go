@@ -101,7 +101,7 @@ func (a *API) serveWHIP(w http.ResponseWriter, req *http.Request, inst *Provider
 // rewriteWHIPLocation 把 WHIP 应答的会话资源地址改写回同源代理路径，
 // 使客户端的 PATCH/DELETE 能打回 hearth 而不是上游。三种形态：
 //
-//	绝对 URL   http://ingress:8080/w/abc → {prefix}/w/abc（上游主机对客户端不可达，只取路径）
+//	绝对 URL   http://upstream:8080/w/abc → {prefix}/w/abc（上游主机对客户端不可达，只取路径）
 //	根相对     /w/sessions/rid           → {prefix}/w/sessions/rid
 //	纯相对     sessions/rid              → 原样（客户端按请求路径解析，本就落在代理路径下）
 //

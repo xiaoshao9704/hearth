@@ -76,7 +76,7 @@ func TestSelectorWritableWithEnvSet(t *testing.T) {
 }
 
 // 注册新 provider 实例后应立即出现在选择器的可选列表里；推流选择器已删除，
-// 只剩 voice/stage 两个槽位（无对应能力的实例不进列表）。
+// 只剩 voice/stage 两个槽位。
 func TestRegisteredProviderJoinsSelectorOptions(t *testing.T) {
 	maskProviderEnv(t)
 	a := testAPI(t)
@@ -84,20 +84,10 @@ func TestRegisteredProviderJoinsSelectorOptions(t *testing.T) {
 	if err := a.st.CreateProvider(ctx, &store.ProviderRecord{Alias: "lk-remote", Type: TypeLivekit, Params: lkParams}); err != nil {
 		t.Fatalf("注册实例失败: %v", err)
 	}
-	if err := a.st.CreateProvider(ctx, &store.ProviderRecord{Alias: "bk-remote", Type: TypeBellowsRemote,
-		Params: map[string]string{"bellows_remote_url": "http://10.0.0.5:8090", "bellows_shared_secret": "sec"}}); err != nil {
-		t.Fatalf("注册实例失败: %v", err)
-	}
 	a.reloadProviders(ctx)
 	for _, sel := range []string{"voice_provider", "stage_provider"} {
 		if opts := a.selectorOptions(ctx, sel); !slices.Contains(opts, "lk-remote") {
 			t.Fatalf("livekit 实例应进入 %s 可选列表，实际 %v", sel, opts)
-		}
-	}
-	// 无语音/舞台能力的不应混入任何选择器列表
-	for _, sel := range []string{"voice_provider", "stage_provider"} {
-		if slices.Contains(a.selectorOptions(ctx, sel), "bk-remote") {
-			t.Fatalf("bellows-remote 无 %s 槽位能力，不应进入可选列表", sel)
 		}
 	}
 }

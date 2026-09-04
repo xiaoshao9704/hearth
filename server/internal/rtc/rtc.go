@@ -12,8 +12,6 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
-
-	"github.com/pion/webrtc/v4"
 )
 
 // ErrNoParticipant 目标用户在指定房间内没有参与者（服务端静音等操作的前置条件不满足）。
@@ -113,67 +111,17 @@ type StageProvider interface {
 	Provider
 }
 
-// IngestProvider 推流入口（如 WHIP 协议的硬编推流），可整体停用。
+// IngestProvider 推流入口（WHIP 协议的硬编推流），可整体停用。
 // 令牌是用户维度凭证（每用户一把，与实例、房间无关），房间在 WHIP URL 里；
-// 端点方法按（identity, 标签）语义管理「用户令牌 → 实例凭证」的上游映射。
+// 入场判定在接入层做完（admitIngest），实例只认接入层出示的凭证。
 type IngestProvider interface {
 	Name() string
 	// Enabled 推流入口是否可用；false 时推流相关接口整体停用。
 	Enabled(ctx context.Context) bool
-	// ProxyUpstream 同源推流代理的上游地址；空 = 该实现不需要推流代理。
+	// ProxyUpstream 同源推流代理的上游地址；空 = 该实现不需要推流代理（自己终结 /w 请求，见 WHIPServer）。
 	ProxyUpstream(ctx context.Context) string
 	// RevokeToken 掐断该令牌名下的全部进行会话（令牌重置时调用；幂等尽力）。
 	RevokeToken(ctx context.Context, token string) error
-	// EnsureEndpoint 确保该发布身份在本实例有上游端点，返回端点 id 与上游凭证
-	// （反代前改写 Bearer 用）。无上游凭证概念的实现（Bellows）返回空串。
-	EnsureEndpoint(ctx context.Context, identity, name string, meta Meta) (id, upstreamKey string, err error)
-	// BindRoom 把端点的目标房间改为 room（livekit-ingress 的 UpdateIngress.room_name）。
-	BindRoom(ctx context.Context, id, room string) error
-	// DeleteEndpoint 删除端点（令牌重置/改标签时清空该令牌名下全部端点）。
-	DeleteEndpoint(ctx context.Context, id string) error
-}
-
-// Publisher 是「从这里把轨发布进某个舞台内核」的**客户端**能力，由各内核的接入适配器实现：
-// LiveKit 用 lksdk 走网络，进程内 Ember 直接写房间，将来的远端 Ember 走它自己的发布协议。
-// 它挂在注册表的实例对象上（实例对象本来就是内核的客户端适配器），进程内只是网络距离为零的特例；
-// 远端 cmd/bellows 编译进同一批实现，由 BELLOWS_SINK 选用。
-// meta 会作为参与者元数据下发给观众端（见 Meta）。
-type Publisher interface {
-	PublishRemote(ctx context.Context, room, identity, name string, meta Meta,
-		tr *webrtc.TrackRemote) (unpublish func(), err error)
-}
-
-// keyframeRelayKey WHIP 关键帧回执通道的 context 键：TrackRemote 不暴露所属连接，
-// 「观众关键帧请求 → 推流端」的回执无法经 Publisher 接口参数传递，由 bellows 注入、Publisher 消费。
-type keyframeRelayKey struct{}
-
-// WithKeyframeRelay 把「请求推流端为指定 SSRC 发关键帧」的函数挂到 ctx
-// （bellows 在调 PublishRemote 前注入；ssrc 取 TrackRemote.SSRC()）。
-func WithKeyframeRelay(ctx context.Context, request func(ssrc uint32)) context.Context {
-	return context.WithValue(ctx, keyframeRelayKey{}, request)
-}
-
-// KeyframeRelay 取 ctx 上的关键帧回执通道；无则返回 nil（Publisher 丢弃关键帧请求）。
-func KeyframeRelay(ctx context.Context) func(ssrc uint32) {
-	f, _ := ctx.Value(keyframeRelayKey{}).(func(ssrc uint32))
-	return f
-}
-
-// publishLostKey 发布中断回执的 context 键（与 keyframeRelayKey 同因走 ctx：
-// Publisher 接口只描述「发布一条轨」，容纳不下会话级事件）。
-type publishLostKey struct{}
-
-// WithPublishLost 把「发布出口已不可用」的回执挂到 ctx：Publisher 与舞台内核的连接断开后
-// 无法自愈——已建立的推流会话不会再产生新轨去触发重连，轨会一直写进死连接。
-// 发布方（bellows）据此拆掉推流会话，让推流端重推走完整的建会话流程。
-func WithPublishLost(ctx context.Context, lost func()) context.Context {
-	return context.WithValue(ctx, publishLostKey{}, lost)
-}
-
-// PublishLost 取 ctx 上的发布中断回执；无则返回 nil（Publisher 静默丢弃该事件）。
-func PublishLost(ctx context.Context) func() {
-	f, _ := ctx.Value(publishLostKey{}).(func())
-	return f
 }
 
 // WHIPToken 解析 WHIP POST 的频道与令牌：路径 /w/{channel}（令牌在 Authorization: Bearer，
@@ -193,19 +141,6 @@ func WHIPSessionRID(r *http.Request) string {
 	return strings.TrimPrefix(r.URL.Path, "/w/sessions/")
 }
 
-// WHIPGrantIssuer 可选能力：远端 WHIP 网关的通行证签发。接入层在反代前做完入场判定，
-// 把结果签成短时效通行证塞进请求头，网关本地验签即可（与进房凭证同一模型：
-// 接入层签、内核验）。实现该接口且 ProxyUpstream 非空时，/w POST 的判定是
-// definitive（令牌不存在 404、不许推 403、查询出错 503），不再 fail-open。
-type WHIPGrantIssuer interface {
-	// IssueWHIPGrant 为一次 WHIP POST 签发通行证，返回请求头名与值；
-	// offer 是完整请求体（通行证应与其绑定，防重放挪用）。
-	// identity 与 meta 由接入层组好，网关只透传。
-	IssueWHIPGrant(ctx context.Context, token, room, identity string, meta Meta, offer []byte) (header, value string, err error)
-	// RevokeRemoteSessions 通知远端网关掐断该令牌名下的全部会话（尽力）。
-	RevokeRemoteSessions(ctx context.Context, token string) error
-}
-
 // WHIPServer 可选能力：进程内处理 WHIP 推流的 IngestProvider（ProxyUpstream 为空时
 // 接入层把 /w 请求直接交给它；ProxyUpstream 非空则照常反代，实现可据配置在两者间切换）。
 type WHIPServer interface {
@@ -213,7 +148,7 @@ type WHIPServer interface {
 	// token 由接入层解析（POST 另支持 Bearer 头）：POST 时是推流令牌（频道由实现自 URL 取），
 	// PATCH/DELETE 时是 POST 应答 Location 里的会话资源 id（/w/sessions/{rid}）。
 	ServeWHIP(w http.ResponseWriter, r *http.Request, token string)
-	// HasSession 该会话资源 id 是否归本实现。推流中途切换 ingest_provider 时，
-	// 接入层据此把收尾请求路由给会话归属方而不是当前选中实现。
+	// HasSession 该会话资源 id 是否归本实现。推流中途切换舞台实例时，
+	// 接入层据此把收尾请求路由给会话归属方而不是当前选中实例。
 	HasSession(rid string) bool
 }

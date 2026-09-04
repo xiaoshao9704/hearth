@@ -340,61 +340,6 @@ func TestDialectIngestTokenLifecycle(t *testing.T) {
 	})
 }
 
-func TestDialectIngestEndpoints(t *testing.T) {
-	forEachStore(t, func(t *testing.T, s *Store, _ string) {
-		ctx := context.Background()
-		u, err := s.CreateUser(ctx, "alice", "h")
-		if err != nil {
-			t.Fatal(err)
-		}
-		tk, err := s.CreateIngestToken(ctx, u.ID, "obs")
-		if err != nil {
-			t.Fatal(err)
-		}
-
-		if _, err := s.IngestEndpoint(ctx, tk.ID, "lk"); !errors.Is(err, ErrNotFound) {
-			t.Fatalf("无端点时应 ErrNotFound，实际 %v", err)
-		}
-		// upsert 插入
-		ep := &IngestEndpoint{TokenID: tk.ID, Alias: "lk", IngressID: "in1", UpstreamKey: "uk1"}
-		if err := s.UpsertIngestEndpoint(ctx, ep); err != nil {
-			t.Fatal(err)
-		}
-		got, err := s.IngestEndpoint(ctx, tk.ID, "lk")
-		if err != nil || got.IngressID != "in1" || got.UpstreamKey != "uk1" || got.BoundRoom != "" {
-			t.Fatalf("端点回读异常: %+v err=%v", got, err)
-		}
-		// upsert 更新（含 BoundRoom 绑定）
-		ep.BoundRoom = "chan1"
-		if err := s.UpsertIngestEndpoint(ctx, ep); err != nil {
-			t.Fatal(err)
-		}
-		got, err = s.IngestEndpoint(ctx, tk.ID, "lk")
-		if err != nil || got.BoundRoom != "chan1" {
-			t.Fatalf("upsert 应更新 bound_room: %+v err=%v", got, err)
-		}
-		// 另一实例 alias 独立成行
-		if err := s.UpsertIngestEndpoint(ctx,
-			&IngestEndpoint{TokenID: tk.ID, Alias: "r2", IngressID: "in2", UpstreamKey: "uk2"}); err != nil {
-			t.Fatal(err)
-		}
-
-		// 按令牌清空全部实例端点（重置/改标签路径）
-		if err := s.DeleteIngestEndpointsByToken(ctx, tk.ID); err != nil {
-			t.Fatal(err)
-		}
-		for _, alias := range []string{"lk", "r2"} {
-			if _, err := s.IngestEndpoint(ctx, tk.ID, alias); !errors.Is(err, ErrNotFound) {
-				t.Fatalf("端点 %s 应已删除，实际 %v", alias, err)
-			}
-		}
-		// 删除幂等
-		if err := s.DeleteIngestEndpointsByToken(ctx, tk.ID); err != nil {
-			t.Fatal(err)
-		}
-	})
-}
-
 // ---- 时间字段往返非零 ----
 
 func TestDialectTimeRoundTrip(t *testing.T) {

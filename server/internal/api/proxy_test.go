@@ -40,9 +40,8 @@ func TestProviderDispatch(t *testing.T) {
 	}
 }
 
-// WHIP 按 alias：推流只进当前舞台实例，bellows-remote 等退场形态的实例即使仍在
-// 注册表里（类型表第 4 步才删），POST 也被 admitIngest 的门禁 definitive 404，
-// 请求不到达其上游。
+// WHIP 按 alias：推流只进当前舞台实例，注册表里不是当前舞台的实例即使存在，
+// POST 也被 admitIngest 的门禁 definitive 404，请求不到达其上游。
 func TestWhipPerAlias(t *testing.T) {
 	a := testAPI(t)
 	ctx := context.Background()
@@ -64,8 +63,8 @@ func TestWhipPerAlias(t *testing.T) {
 		w.WriteHeader(201)
 	}))
 	defer upstream.Close()
-	a.st.CreateProvider(ctx, &store.ProviderRecord{Alias: "r1", Type: TypeBellowsRemote, Params: map[string]string{
-		"bellows_remote_url": upstream.URL, "bellows_shared_secret": "sec"}})
+	a.st.CreateProvider(ctx, &store.ProviderRecord{Alias: "r1", Type: TypeLivekit, Params: map[string]string{
+		"livekit_api_url": upstream.URL, "livekit_api_key": "k", "livekit_api_secret": "s"}})
 	a.reloadProviders(ctx)
 	r := a.Router()
 	a.RegisterProxies(r)
@@ -118,11 +117,11 @@ func TestRewriteWHIPLocation(t *testing.T) {
 		name, in, want string
 	}{
 		{"根相对", "/w/sessions/rid9", "/providers/ing1/w/sessions/rid9"},
-		{"绝对 URL 只取路径", "http://ingress:8080/w/abc", "/providers/ing1/w/abc"},
+		{"绝对 URL 只取路径", "http://upstream:8080/w/abc", "/providers/ing1/w/abc"},
 		{"绝对 URL 带 query", "https://up.example.com/w/abc?k=1", "/providers/ing1/w/abc?k=1"},
 		{"纯相对不动", "sessions/rid9", "sessions/rid9"},
 		{"非 /w/ 路径不动", "/other/abc", "/other/abc"},
-		{"绝对 URL 非 /w/ 不动", "http://ingress:8080/other/abc", "http://ingress:8080/other/abc"},
+		{"绝对 URL 非 /w/ 不动", "http://upstream:8080/other/abc", "http://upstream:8080/other/abc"},
 		{"空值不动", "", ""},
 	}
 	for _, c := range cases {

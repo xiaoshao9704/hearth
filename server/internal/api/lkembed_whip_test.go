@@ -261,7 +261,7 @@ func TestLkembedWhipEndToEnd(t *testing.T) {
 
 	sub := subscribeStage(t, a, lkPort, "chan1")
 
-	// 内建 bellows 仍在注册表（类型表后续步骤才删），但它不是当前舞台实例：definitive 404
+	// bellows 是已退场的历史 alias（实例不存在）：definitive 404
 	resp0, err := http.Post(base+"/providers/bellows/w/chan1/"+it.Token, "application/sdp", strings.NewReader("sdp"))
 	if err != nil {
 		t.Fatalf("POST bellows: %v", err)

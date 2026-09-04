@@ -110,7 +110,7 @@ var lkParams = map[string]string{
 	"livekit_api_url": "http://10.0.0.2:7880", "livekit_api_key": "k", "livekit_api_secret": "s3",
 }
 
-// 列表与类型模式：内建实例可见、可注册类型只报 3 个、Secret 字段掩码；
+// 列表与类型模式：内建实例只剩 lkembed、可注册类型只报 1 个、Secret 字段掩码；
 // 非管理员 403、未登录 401。
 func TestAdminProvidersList(t *testing.T) {
 	maskProviderEnv(t)
@@ -119,15 +119,14 @@ func TestAdminProvidersList(t *testing.T) {
 	r := a.Router()
 
 	resp := getProviders(t, r, token)
-	if len(resp.Instances) != 2 || resp.Instances[0].Alias != "bellows" ||
-		resp.Instances[1].Alias != AliasLkembed {
-		t.Fatalf("全新部署应只有内建实例: %+v", resp.Instances)
+	if len(resp.Instances) != 1 || resp.Instances[0].Alias != AliasLkembed {
+		t.Fatalf("全新部署应只有内建 lkembed: %+v", resp.Instances)
 	}
-	if !resp.Instances[1].Builtin || resp.Instances[1].Caps[0] != "voice" {
-		t.Fatalf("lkembed 应为内建语音实例: %+v", resp.Instances[1])
+	if !resp.Instances[0].Builtin || resp.Instances[0].Caps[0] != "voice" {
+		t.Fatalf("lkembed 应为内建语音实例: %+v", resp.Instances[0])
 	}
-	if len(resp.Types) != 3 {
-		t.Fatalf("可注册类型应为 3 个: %+v", resp.Types)
+	if len(resp.Types) != 1 {
+		t.Fatalf("可注册类型应只剩 livekit 一个: %+v", resp.Types)
 	}
 	for _, typ := range resp.Types {
 		if typ.Label == "" || len(typ.Fields) == 0 {
@@ -234,8 +233,8 @@ func TestAdminProviderValidation(t *testing.T) {
 		{"未知类型", map[string]any{"type": "nope", "alias": "x1", "params": lkParams}, 400},
 		{"缺 secret", map[string]any{"type": "livekit", "alias": "x1", "params": map[string]string{
 			"livekit_api_url": "http://x", "livekit_api_key": "k"}}, 400},
-		{"缺非 secret 字段", map[string]any{"type": "bellows-remote", "alias": "x1", "params": map[string]string{
-			"bellows_shared_secret": "s"}}, 400},
+		{"缺非 secret 字段", map[string]any{"type": "livekit", "alias": "x1", "params": map[string]string{
+			"livekit_api_url": "http://x", "livekit_api_secret": "s"}}, 400},
 	}
 	for _, tc := range cases {
 		if rec := doReq(t, r, "POST", "/api/admin/providers", token, tc.body); rec.Code != tc.want {
@@ -278,7 +277,7 @@ func TestAdminProviderReadOnly(t *testing.T) {
 		t.Fatalf("env 应合成锁定的 livekit 实例: %+v", inst)
 	}
 	putBody := map[string]any{"params": lkParams}
-	for _, alias := range []string{"bellows", "livekit", AliasLkembed} {
+	for _, alias := range []string{"livekit", AliasLkembed} {
 		if rec := doReq(t, r, "PUT", "/api/admin/providers/"+alias, token, putBody); rec.Code != 409 {
 			t.Fatalf("PUT %s 只读实例应 409，实际 %d: %s", alias, rec.Code, rec.Body.String())
 		}

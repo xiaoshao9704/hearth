@@ -13,12 +13,20 @@ import (
 
 func testAPI(t *testing.T) *API {
 	t.Helper()
-	s, err := store.Open("sqlite://" + t.TempDir() + "/test.db")
+	a, _ := testAPIWithDB(t)
+	return a
+}
+
+// testAPIWithDB 同 testAPI，另返回数据库文件路径（需要原始 SQL 造数/断言的迁移测试用）。
+func testAPIWithDB(t *testing.T) (*API, string) {
+	t.Helper()
+	path := t.TempDir() + "/test.db"
+	s, err := store.Open("sqlite://" + path)
 	if err != nil {
 		t.Fatalf("打开测试库失败: %v", err)
 	}
 	t.Cleanup(func() { s.Close() })
-	return New(s, config.Load(), chat.NewHub(s, ""), nil)
+	return New(s, config.Load(), chat.NewHub(s, ""), nil), path
 }
 
 func TestBuiltinInstancesFirst(t *testing.T) {
@@ -26,11 +34,11 @@ func TestBuiltinInstancesFirst(t *testing.T) {
 	ctx := context.Background()
 	a.reloadProviders(ctx)
 	list := a.listInstances(ctx)
-	if len(list) < 2 || list[0].Alias != "bellows" || list[1].Alias != AliasLkembed {
-		t.Fatalf("内建实例应排最前: %+v", list)
+	if len(list) != 1 || list[0].Alias != AliasLkembed {
+		t.Fatalf("内建实例应只有 lkembed: %+v", list)
 	}
-	if !list[0].Builtin || list[0].Ingest == nil || list[1].Voice == nil {
-		t.Fatal("bellows 应有推流能力，lkembed 应有语音能力")
+	if !list[0].Builtin || list[0].Voice == nil || list[0].Stage == nil || list[0].Ingest == nil {
+		t.Fatal("lkembed 应为内建实例且语音/舞台/推流三面齐全")
 	}
 }
 
@@ -82,13 +90,10 @@ func TestSelectorResolutionAndFallback(t *testing.T) {
 	if alias, ip := a.ingestInstance(ctx); alias != "" || ip != nil {
 		t.Fatalf("stage=none 时 ingest 应为空，实际 %q ip=%v", alias, ip)
 	}
-	// 选了无对应槽位能力的实例 → 回落（livekit-ingress 只有推流面）
-	a.st.CreateProvider(ctx, &store.ProviderRecord{Alias: "ing2", Type: TypeLivekitIngress,
-		Params: map[string]string{"ingress_upstream_url": "http://x:58080"}})
-	a.reloadProviders(ctx)
-	a.st.SetSetting(ctx, "cfg_voice_provider", "ing2")
+	// 选了不存在的 alias → 回落内建默认
+	a.st.SetSetting(ctx, "cfg_voice_provider", "nope")
 	if alias, _ := a.voiceInstance(ctx); alias != AliasLkembed {
-		t.Fatalf("无语音能力的实例应回落 lkembed，实际 %q", alias)
+		t.Fatalf("未知 alias 应回落 lkembed，实际 %q", alias)
 	}
 }
 
@@ -102,7 +107,6 @@ func TestMigrateImportsLegacyCfg(t *testing.T) {
 	a.st.SetSetting(ctx, "cfg_livekit_api_url", "http://old:7880")
 	a.st.SetSetting(ctx, "cfg_livekit_api_key", "k")
 	a.st.SetSetting(ctx, "cfg_livekit_api_secret", "s")
-	a.st.SetSetting(ctx, "cfg_ingest_provider", "livekit") // 旧值：livekit 的 ingress 面
 	a.st.SetSetting(ctx, "cfg_ingress_upstream_url", "http://old:58080")
 	a.runMigrationSteps(ctx, []migrationStep{{1, a.migrateProviders}})
 	a.reloadProviders(ctx)
@@ -112,46 +116,47 @@ func TestMigrateImportsLegacyCfg(t *testing.T) {
 	if a.instance("livekit") == nil || a.instance("livekit").Locked {
 		t.Fatal("旧 cfg_livekit_* 应导入为 DB 实例 livekit")
 	}
-	ing := a.instance("livekit-ingress")
-	if ing == nil || ing.Params["ingress_upstream_url"] != "http://old:58080" {
-		t.Fatalf("ingress 旧键应导入 livekit-ingress 实例: %+v", ing)
-	}
 	if v, _ := a.st.GetSetting(ctx, "cfg_livekit_api_url"); v != "" {
 		t.Fatal("导入后旧 cfg_ 键应删除")
 	}
-	if v, _ := a.st.GetSetting(ctx, "cfg_ingest_provider"); v != "livekit-ingress" {
-		t.Fatalf("旧选择器值应改写为 livekit-ingress，实际 %q", v)
+	// 退场类型的旧键 v1 不再导入为实例（livekit-ingress/bellows-remote 已删类型），
+	// 留着由迁移 v5 清理
+	if a.instance("livekit-ingress") != nil {
+		t.Fatal("cfg_ingress_upstream_url 不应再导入为实例")
+	}
+	if v, _ := a.st.GetSetting(ctx, "cfg_ingress_upstream_url"); v != "http://old:58080" {
+		t.Fatalf("cfg_ingress_upstream_url 应原样留给 v5 清理，实际 %q", v)
 	}
 }
 
 func TestReloadReusesUnchangedInstances(t *testing.T) {
 	a := testAPI(t)
 	ctx := context.Background()
-	builtin := a.instance(TypeBellows)
+	builtin := a.instance(AliasLkembed)
 	if builtin == nil {
-		t.Fatal("内建 bellows 实例应存在")
+		t.Fatal("内建 lkembed 实例应存在")
 	}
-	a.st.CreateProvider(ctx, &store.ProviderRecord{Alias: "br1", Type: TypeBellowsRemote,
-		Params: map[string]string{"bellows_remote_url": "http://r1"}})
+	a.st.CreateProvider(ctx, &store.ProviderRecord{Alias: "lk1", Type: TypeLivekit,
+		Params: map[string]string{"livekit_api_url": "http://r1", "livekit_api_key": "k", "livekit_api_secret": "s"}})
 	a.reloadProviders(ctx)
-	if a.instance(TypeBellows) != builtin {
+	if a.instance(AliasLkembed) != builtin {
 		t.Fatal("未变化的内建实例应复用旧对象（活动会话不被 reload 打断）")
 	}
-	br1 := a.instance("br1")
-	if br1 == nil {
-		t.Fatal("br1 应已注册")
+	lk1 := a.instance("lk1")
+	if lk1 == nil {
+		t.Fatal("lk1 应已注册")
 	}
-	a.st.UpdateProviderParams(ctx, "br1", map[string]string{"bellows_remote_url": "http://r2"})
+	a.st.UpdateProviderParams(ctx, "lk1", map[string]string{
+		"livekit_api_url": "http://r2", "livekit_api_key": "k", "livekit_api_secret": "s"})
 	a.reloadProviders(ctx)
-	if a.instance("br1") == br1 {
+	if a.instance("lk1") == lk1 {
 		t.Fatal("参数变化的实例应重建")
 	}
-	if a.instance(TypeBellows) != builtin {
+	if a.instance(AliasLkembed) != builtin {
 		t.Fatal("其余未变化实例仍应复用旧对象")
 	}
 	list := a.listInstances(ctx)
-	if len(list) < 3 || list[0].Alias != "bellows" || list[1].Alias != AliasLkembed ||
-		list[2].Alias != "br1" {
+	if len(list) != 2 || list[0].Alias != AliasLkembed || list[1].Alias != "lk1" {
 		t.Fatalf("实例顺序应保持 内建→DB: %+v", list)
 	}
 }
@@ -165,7 +170,6 @@ func TestMigratePinsLegacySelectors(t *testing.T) {
 	// 只重跑 v1（后续版本步会删除/改写这里的部分产物，见迁移 v5）
 	a.st.SetSetting(ctx, "cfg_livekit_api_key", "k")
 	a.st.SetSetting(ctx, "cfg_livekit_api_secret", "s")
-	a.st.SetSetting(ctx, "cfg_ingress_upstream_url", "http://old:58080")
 	a.runMigrationSteps(ctx, []migrationStep{{1, a.migrateProviders}})
 	a.reloadProviders(ctx)
 	if v, _ := a.st.GetSetting(ctx, "cfg_voice_provider"); v != "livekit" {
@@ -174,37 +178,11 @@ func TestMigratePinsLegacySelectors(t *testing.T) {
 	if v, _ := a.st.GetSetting(ctx, "cfg_stage_provider"); v != "livekit" {
 		t.Fatalf("旧部署舞台选择器应落库 livekit，实际 %q", v)
 	}
-	if v, _ := a.st.GetSetting(ctx, "cfg_ingest_provider"); v != "livekit-ingress" {
-		t.Fatalf("旧部署推流选择器应落库 livekit-ingress，实际 %q", v)
-	}
 	// 选择器落库只随 v1 跑一次：管理员清空恢复默认后，重启（重跑迁移）不得再落库
 	a.st.SetSetting(ctx, "cfg_voice_provider", "")
 	a.runMigrations(ctx)
 	if v, _ := a.st.GetSetting(ctx, "cfg_voice_provider"); v != "" {
 		t.Fatalf("v1 已执行过后不得重复落库，实际 %q", v)
-	}
-}
-
-// 老远端形态（ingest_provider=bellows + bellows_remote_url）：v1 改写选择器与
-// 存量 ingress 记录归属到 bellows-remote。部署侧用 INGEST_PROVIDER env 固定的旧组合
-// 由迁移 v2 把 env 值一次性落库（此后选择器不再读 env）。
-func TestMigrateRemoteBellowsSelector(t *testing.T) {
-	maskProviderEnv(t)
-	a := testAPI(t)
-	ctx := context.Background()
-	a.st.SetMigrationVersion(ctx, 0)
-	a.st.SetSetting(ctx, "cfg_ingest_provider", "bellows")
-	a.st.SetSetting(ctx, "cfg_bellows_remote_url", "http://10.0.0.5:8090")
-	a.st.SetSetting(ctx, "cfg_bellows_shared_secret", "sec")
-	// 只重跑 v1（迁移 v5 会删除 bellows-remote 实例与该选择器键，见内核收敛）
-	a.runMigrationSteps(ctx, []migrationStep{{1, a.migrateProviders}})
-	a.reloadProviders(ctx)
-	if v, _ := a.st.GetSetting(ctx, "cfg_ingest_provider"); v != "bellows-remote" {
-		t.Fatalf("老远端形态选择器应改写为 bellows-remote，实际 %q", v)
-	}
-	inst := a.instance("bellows-remote")
-	if inst == nil || inst.Params["bellows_remote_url"] != "http://10.0.0.5:8090" {
-		t.Fatalf("远端配置应导入 bellows-remote 实例: %+v", inst)
 	}
 }
 
@@ -300,29 +278,22 @@ func TestReloadKeepsRegistryOnListFailure(t *testing.T) {
 	}
 }
 
-// env 只设 LIVEKIT_URL+KEY+SECRET（不设 LIVEKIT_API_URL）时，livekit-ingress 实例读到的
-// livekit_api_url 应回落字段模式声明的 Default（apiURLDefault 推导值）；
-// 内建 bellows 的发布出口应解析到该 env 锁定 livekit 实例的 Publisher。
+// env 只设 LIVEKIT_URL+KEY+SECRET（不设 LIVEKIT_API_URL）时，env 锁定 livekit 实例读到的
+// livekit_api_url 应回落字段模式声明的 Default（apiURLDefault 推导值）。
 func TestLivekitAPIURLDefaultOnInstancePaths(t *testing.T) {
 	maskProviderEnv(t)
 	t.Setenv("LIVEKIT_URL", "wss://lk.example.com")
 	t.Setenv("LIVEKIT_API_KEY", "k")
 	t.Setenv("LIVEKIT_API_SECRET", "s")
-	t.Setenv("INGRESS_UPSTREAM_URL", "http://10.0.0.9:58080")
 	a := testAPI(t)
 	ctx := context.Background()
 	const want = "https://lk.example.com"
-	ing := a.instance("livekit-ingress")
-	if ing == nil {
-		t.Fatal("INGRESS_UPSTREAM_URL 应合成 env 锁定 livekit-ingress 实例")
+	inst := a.instance("livekit")
+	if inst == nil {
+		t.Fatal("LIVEKIT_API_KEY/SECRET 应合成 env 锁定 livekit 实例")
 	}
-	if got := ing.Cfg(ctx, "livekit_api_url"); got != want {
-		t.Fatalf("livekit-ingress 的 api_url 应取 Default 推导值 %q，实际 %q", want, got)
-	}
-	// v1 已把 stage 选择器落库 livekit（env 探测到凭证），内建 bellows 的发布出口
-	// 即该舞台线实例的 Publisher（livekit Provider 实现 rtc.Publisher）
-	if pub := a.stagePublisherSink(ctx); pub == nil {
-		t.Fatal("舞台线为 livekit 时 bellows 发布出口应非 nil")
+	if got := inst.Cfg(ctx, "livekit_api_url"); got != want {
+		t.Fatalf("livekit 实例的 api_url 应取 Default 推导值 %q，实际 %q", want, got)
 	}
 }
 

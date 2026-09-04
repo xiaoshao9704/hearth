@@ -494,7 +494,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
     );
     const muted = targets.some((p) => volumeFor(p.identity) === 0);
     const devName = (p: EPart) => (p.ingest ? `OBS 推流${p.tag ? ` · ${p.tag}` : ''}` : p.tag || p.identity);
-    // 禁言判定只看真人设备：推流参与者（ingress 自带发布权限）会污染 every() 推断
+    // 禁言判定只看真人设备：推流参与者（推流凭证自带发布权限）会污染 every() 推断
     const voiceTargets = targets.filter((p) => !p.ingest);
     const gagged = voiceTargets.length > 0 && voiceTargets.every((p) => !p.canPublish);
     const gagBtn = (on: boolean, label: string) =>

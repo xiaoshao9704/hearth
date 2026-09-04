@@ -13,14 +13,12 @@ import (
 	"github.com/go-chi/chi/v5"
 )
 
-// 可注册类型（内建 bellows/lkembed 不在列）；Label 供管理后台渲染。
+// 可注册类型（内建 lkembed 不在列）；Label 供管理后台渲染。
 var registrableTypes = []struct {
 	Type  string
 	Label string
 }{
 	{TypeLivekit, "LiveKit"},
-	{TypeLivekitIngress, "LiveKit Ingress"},
-	{TypeBellowsRemote, "远端 Bellows"},
 }
 
 // providerView 实例的管理后台视图：Secret 字段值掩码为空串，params_set 报告是否已设置。

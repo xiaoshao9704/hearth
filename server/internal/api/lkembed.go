@@ -1,6 +1,6 @@
 // 进程内 LiveKit（内建实例 lkembed）的接线：配置映射、密钥生成、按舞台选择器启停。
-// 实例对象本身复用 livekitrtc.New——舞台槽位、令牌签发、/providers/lkembed/rtc 反代、
-// Bellows 的 Publisher 全部零改动，只是把 livekit_api_url 指向回环。
+// 实例对象本身复用 livekitrtc.New——舞台槽位、令牌签发、/providers/lkembed/rtc 反代
+// 零改动，只是把 livekit_api_url 指向回环。
 package api
 
 import (

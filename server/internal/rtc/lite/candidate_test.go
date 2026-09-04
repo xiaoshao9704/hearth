@@ -95,20 +95,13 @@ func TestAppendMappedCandidateFoundationNoConflict(t *testing.T) {
 
 // 实测：BUNDLE 下 pion 只把候选放进第一个 m= 段；且候选要等 GatheringCompletePromise 之后
 // 才出现在 LocalDescription 里（SetLocalDescription 返回时 SDP 里一条候选都没有）。
-// bellows 的 SDP 出口已在 <-done 之后取 LocalDescription，Announce 因此拿得到候选。
+// Announce 的调用方因此都应在 gathering 完成后再取 LocalDescription。
 func TestBundleCandidatesOnlyInFirstSection(t *testing.T) {
 	m := &webrtc.MediaEngine{}
 	if err := m.RegisterDefaultCodecs(); err != nil {
 		t.Fatalf("RegisterDefaultCodecs: %v", err)
 	}
-	tr, err := NewTransport(0, m)
-	if err != nil {
-		t.Fatalf("NewTransport: %v", err)
-	}
-	api, err := tr.NewAPI(nil)
-	if err != nil {
-		t.Fatalf("NewAPI: %v", err)
-	}
+	api := webrtc.NewAPI(webrtc.WithMediaEngine(m))
 	pc, err := api.NewPeerConnection(webrtc.Configuration{})
 	if err != nil {
 		t.Fatalf("NewPeerConnection: %v", err)
@@ -156,15 +149,7 @@ func TestBundleCandidatesOnlyInFirstSection(t *testing.T) {
 // 那条候选不通（TEST-NET 地址）也要正常回落到 host 候选完成 ICE。
 // SDP 出口插纯文本是绕开「pion 改写规则改不了端口」的手段，代价不能是把 SDP 弄坏。
 func TestAppendedCandidateDoesNotBreakPeer(t *testing.T) {
-	tr, err := NewTransport(0, &webrtc.MediaEngine{})
-	if err != nil {
-		t.Fatalf("NewTransport: %v", err)
-	}
-	api, err := tr.NewAPI(nil)
-	if err != nil {
-		t.Fatalf("NewAPI: %v", err)
-	}
-	server, err := api.NewPeerConnection(webrtc.Configuration{})
+	server, err := webrtc.NewAPI().NewPeerConnection(webrtc.Configuration{})
 	if err != nil {
 		t.Fatalf("服务端 PC: %v", err)
 	}

@@ -30,7 +30,7 @@ var selectorKeys = []rtc.ConfigKey{
 		Label: "舞台内核", Hint: "实例 alias；none = 纯语音部署，禁用投屏与摄像头；OBS 推流也进这个实例自带的 WHIP 入口"},
 }
 
-// portmapKeys 自动端口映射：进程内网络基建，与 bellows_udp_port 同类的全局键（不进实例 params）。
+// portmapKeys 自动端口映射：进程内网络基建的全局键（不进实例 params）。
 var portmapKeys = []rtc.ConfigKey{
 	{Name: "portmap_mode", Env: "PORTMAP_MODE", Group: "network", Default: "auto",
 		Options: []string{"auto", "off"},

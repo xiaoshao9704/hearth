@@ -8,8 +8,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
-	"io"
-	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -84,7 +82,7 @@ func TestAdmitIngestBranches(t *testing.T) {
 }
 
 // 「推流进当前舞台实例」门禁：alias 段不是 stage_provider 选中的实例一律 definitive 404
-//（内建 bellows、非舞台的 livekit 实例、未知 alias 同规则），stage=none 时任何推流 404。
+//（退场的 bellows 等历史 alias、非舞台的 livekit 实例、未知 alias 同规则），stage=none 时任何推流 404。
 // 真令牌也照 404——判定不看令牌有效性，门禁先于令牌反查。
 func TestAdmitIngestStageGate(t *testing.T) {
 	maskProviderEnv(t)
@@ -105,8 +103,8 @@ func TestAdmitIngestStageGate(t *testing.T) {
 		return rec.Code
 	}
 
-	// 默认舞台 lkembed：bellows（内建但不再是推流入口）、lk2（非当前舞台）、未知 alias 全 404
-	for _, alias := range []string{TypeBellows, "lk2", "nope"} {
+	// 默认舞台 lkembed：bellows（已退场的历史 alias）、lk2（非当前舞台）、未知 alias 全 404
+	for _, alias := range []string{"bellows", "lk2", "nope"} {
 		if code := post(alias); code != 404 {
 			t.Fatalf("alias %s 应 404，实际 %d", alias, code)
 		}
@@ -187,55 +185,6 @@ func TestIngestTokenAPI(t *testing.T) {
 	if _, ok := a.admitIngest(ctx, wrec, AliasLkembed, "chan1", body["token"]); ok || wrec.Code != 404 {
 		t.Fatalf("旧令牌应立即 404，实际 %d ok=%v", wrec.Code, ok)
 	}
-}
-
-// ---- livekit-ingress 假上游（供游标 v4 迁移测试用）----
-
-// twirpCall 假 LiveKit Twirp API 记录的一次调用。
-type twirpCall struct {
-	op   string
-	body map[string]any
-}
-
-// newFakeLivekit 起两个 httptest：Twirp API（CreateIngress/UpdateIngress/DeleteIngress）
-// 与 WHIP 上游（记录 Bearer 与路径）。
-func newFakeLivekit(t *testing.T) (twirpURL, whipURL string, calls *([]twirpCall), whipReqs *([][2]string)) {
-	t.Helper()
-	calls = &[]twirpCall{}
-	twirp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		b, _ := io.ReadAll(r.Body)
-		var body map[string]any
-		json.Unmarshal(b, &body)
-		var op string
-		switch {
-		case strings.HasSuffix(r.URL.Path, "/CreateIngress"):
-			op = "create"
-			w.Header().Set("Content-Type", "application/json")
-			w.Write([]byte(`{"ingressId":"in1","streamKey":"sk1"}`))
-		case strings.HasSuffix(r.URL.Path, "/UpdateIngress"):
-			op = "update"
-			w.Header().Set("Content-Type", "application/json")
-			w.Write([]byte(`{"ingressId":"in1"}`))
-		case strings.HasSuffix(r.URL.Path, "/DeleteIngress"):
-			op = "delete"
-			w.Header().Set("Content-Type", "application/json")
-			w.Write([]byte(`{}`))
-		default:
-			t.Errorf("未知 Twirp 路径: %s", r.URL.Path)
-			w.WriteHeader(404)
-			return
-		}
-		*calls = append(*calls, twirpCall{op, body})
-	}))
-	t.Cleanup(twirp.Close)
-	whipReqs = &[][2]string{}
-	whip := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		*whipReqs = append(*whipReqs, [2]string{r.Header.Get("Authorization"), r.URL.Path})
-		w.Header().Set("Location", "http://"+r.Host+"/w/sessions/upstream-rid")
-		w.WriteHeader(201)
-	}))
-	t.Cleanup(whip.Close)
-	return twirp.URL, whip.URL, calls, whipReqs
 }
 
 // ---- 游标 v3 数据迁移 ----
@@ -383,28 +332,28 @@ func TestIngestTokenReportsEnabled(t *testing.T) {
 }
 
 // 迁移 v4：identity 主体由用户名改成 user_id 后，存量上游端点里固化的身份全部过期——
-// 逐实例 DeleteEndpoint 后清空 ingest_endpoints，下次推流按新 identity 重建。
+// 清空 ingest_endpoints，下次推流按新 identity 重建。持端点的 livekit-ingress 类型
+// 已随内核收敛退场，不再逐实例调内核侧删除（上游残留由管理员自行清理）。
 func TestMigrateEndpointIdentityV4(t *testing.T) {
 	maskProviderEnv(t)
-	a := testAPI(t)
+	a, path := testAPIWithDB(t)
 	ctx := context.Background()
 	_, it := seedIngestUser(t, a, "alice", "chan1")
-	twirpURL, whipURL, calls, _ := newFakeLivekit(t)
-	a.st.CreateProvider(ctx, &store.ProviderRecord{Alias: "ing1", Type: TypeLivekitIngress, Params: map[string]string{
-		"livekit_api_url": twirpURL, "livekit_api_key": "k", "livekit_api_secret": "s",
-		"ingress_upstream_url": whipURL}})
-	a.reloadProviders(ctx)
 
-	// 造一条「旧 identity」的存量端点
-	if err := a.st.UpsertIngestEndpoint(ctx, &store.IngestEndpoint{
-		TokenID: it.ID, Alias: "ing1", IngressID: "old-in", UpstreamKey: "old-sk", BoundRoom: "chan1"}); err != nil {
-		t.Fatalf("造端点失败: %v", err)
+	// 造两条存量端点（读写方法已随类型一并删除，直接写表）：
+	// 一条归属在册实例、一条归属已注销实例，两种都要被清掉
+	raw, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("打开原始连接失败: %v", err)
 	}
-	// 归属实例已注销的端点：内核侧删不了，但记录同样要清（不能挡住迁移）
-	if err := a.st.UpsertIngestEndpoint(ctx, &store.IngestEndpoint{
-		TokenID: it.ID, Alias: "gone", IngressID: "orphan", UpstreamKey: "k2"}); err != nil {
-		t.Fatalf("造孤儿端点失败: %v", err)
+	for _, alias := range []string{"ing1", "gone"} {
+		if _, err := raw.Exec(
+			"INSERT INTO ingest_endpoints (token_id, alias, ingress_id, upstream_key, bound_room) VALUES (?, ?, ?, ?, ?)",
+			it.ID, alias, "old-in", "old-sk", "chan1"); err != nil {
+			t.Fatalf("造端点失败: %v", err)
+		}
 	}
+	raw.Close()
 
 	a.st.SetMigrationVersion(ctx, 3) // 回到 v4 之前
 	a.runMigrations(ctx)
@@ -412,26 +361,20 @@ func TestMigrateEndpointIdentityV4(t *testing.T) {
 	if v, _ := a.st.MigrationVersion(ctx); v != 5 {
 		t.Fatalf("游标应推进到最新版本 5，实际 %d", v)
 	}
-	deleted := 0
-	for _, c := range *calls {
-		if c.op == "delete" && c.body["ingress_id"] == "old-in" {
-			deleted++
-		}
+	raw, err = sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("打开原始连接失败: %v", err)
 	}
-	if deleted != 1 {
-		t.Fatalf("应对在册实例的旧端点调一次 DeleteIngress: %+v", *calls)
+	defer raw.Close()
+	var n int
+	if err := raw.QueryRow("SELECT COUNT(*) FROM ingest_endpoints").Scan(&n); err != nil || n != 0 {
+		t.Fatalf("ingest_endpoints 应已清空: n=%d err=%v", n, err)
 	}
-	for _, alias := range []string{"ing1", "gone"} {
-		if ep, err := a.st.IngestEndpoint(ctx, it.ID, alias); !errors.Is(err, store.ErrNotFound) {
-			t.Fatalf("端点 %s 应已清空: %+v %v", alias, ep, err)
-		}
-	}
-	// 幂等：空表重跑不报错、不再发删除
-	before := len(*calls)
+	// 幂等：空表重跑不报错
 	a.st.SetMigrationVersion(ctx, 3)
 	a.runMigrations(ctx)
-	if len(*calls) != before {
-		t.Fatalf("空表重跑不应再调控制面: %+v", *calls)
+	if err := raw.QueryRow("SELECT COUNT(*) FROM ingest_endpoints").Scan(&n); err != nil || n != 0 {
+		t.Fatalf("重跑后表仍应为空: n=%d err=%v", n, err)
 	}
 }
 
@@ -494,49 +437,5 @@ func TestModerationTargetsUserID(t *testing.T) {
 		map[string]any{"user_id": target.ID, "identity": rtc.Identity(owner.ID, "mac")})
 	if rec.Code != 400 {
 		t.Fatalf("设备不属于目标用户应 400，实际 %d: %s", rec.Code, rec.Body.String())
-	}
-}
-
-// v4 必须在生产启动顺序下也真的删掉上游端点：runMigrationSteps 跑在 New() 的
-// reloadProviders 之前，注册表此刻只有内建实例——迁移不自己重建的话，
-// livekit-ingress 类实例一个都取不到，端点连同有效 stream key 全部残留在上游。
-func TestMigrateEndpointIdentityV4ProductionOrdering(t *testing.T) {
-	maskProviderEnv(t)
-	a := testAPI(t)
-	ctx := context.Background()
-	_, it := seedIngestUser(t, a, "alice", "chan1")
-	twirpURL, whipURL, calls, _ := newFakeLivekit(t)
-	a.st.CreateProvider(ctx, &store.ProviderRecord{Alias: "ing1", Type: TypeLivekitIngress, Params: map[string]string{
-		"livekit_api_url": twirpURL, "livekit_api_key": "k", "livekit_api_secret": "s",
-		"ingress_upstream_url": whipURL}})
-	if err := a.st.UpsertIngestEndpoint(ctx, &store.IngestEndpoint{
-		TokenID: it.ID, Alias: "ing1", IngressID: "old-in", UpstreamKey: "old-sk", BoundRoom: "chan1"}); err != nil {
-		t.Fatalf("造端点失败: %v", err)
-	}
-
-	// 把注册表退回「只有内建实例」的启动态：不预先 reload，复现 New() 的真实顺序
-	a.providersMu.Lock()
-	a.providers = map[string]*ProviderInstance{}
-	a.providerOrder = nil
-	for _, inst := range a.builtinInstances() {
-		a.providers[inst.Alias] = inst
-		a.providerOrder = append(a.providerOrder, inst.Alias)
-	}
-	a.providersMu.Unlock()
-
-	a.st.SetMigrationVersion(ctx, 3)
-	a.runMigrations(ctx)
-
-	deleted := 0
-	for _, c := range *calls {
-		if c.op == "delete" && c.body["ingress_id"] == "old-in" {
-			deleted++
-		}
-	}
-	if deleted != 1 {
-		t.Fatalf("生产启动顺序下 v4 应删掉上游端点，实际 delete 次数 = %d（记录清空但上游残留）", deleted)
-	}
-	if ep, err := a.st.IngestEndpoint(ctx, it.ID, "ing1"); !errors.Is(err, store.ErrNotFound) {
-		t.Fatalf("端点记录应清空: %+v %v", ep, err)
 	}
 }

@@ -1,5 +1,5 @@
 // LiveKit RoomService 管理：走 LiveKit server 的 Twirp HTTP API 移除房间参与者。
-// 鉴权：每个请求注入带 RoomAdmin grant 的短时效 JWT（模式同 internal/lkingress）。
+// 鉴权：每个请求注入带 RoomAdmin grant 的短时效 JWT。
 package lkroom
 
 import (
@@ -29,7 +29,7 @@ func withRoom(ctx context.Context, room string) context.Context {
 	return context.WithValue(ctx, roomCtxKey{}, room)
 }
 
-// NewClient apiURL 是 LiveKit server 的 Twirp 地址（与 Ingress 管理同一个）。
+// NewClient apiURL 是 LiveKit server 的 Twirp 地址。
 func NewClient(apiURL, key, secret string) *Client {
 	c := &Client{key: key, secret: secret}
 	c.api = livekit.NewRoomServiceJSONClient(apiURL, &http.Client{
@@ -119,7 +119,7 @@ func (c *Client) RemoveParticipantsOf(ctx context.Context, room string, userID i
 // 权限是整体替换语义（见 auth.VideoGrant.UpdateFromPermission），故从参与者当前权限
 // （ParticipantInfo.Permission）出发只翻转 CanPublish，避免误清 CanSubscribe/CanPublishData 等。
 //
-// 推流设备（元数据 kind=ingest，WHIP 直推与 Bellows 转发都带这个标记）走另一条路：禁言
+// 推流设备（元数据 kind=ingest）走另一条路：禁言
 // 直接把它移出房间。推流端没有信令通道，收走 CanPublish 会让 LiveKit 下架它已发布的全部
 // 轨道，而解禁时它不会、也无从重新发布——推流端一路显示正常，观众永久黑屏。移出则会立刻
 // 关掉推流端的 PeerConnection，推流软件按自己的重连策略重推；被禁言期间入场判定

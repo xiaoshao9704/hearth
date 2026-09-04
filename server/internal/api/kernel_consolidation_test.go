@@ -5,6 +5,7 @@ package api
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"errors"
 	"log"
 	"os"
@@ -58,7 +59,8 @@ func TestMigrateV5SelectorRewrite(t *testing.T) {
 				a.st.SetSetting(ctx, "cfg_stage_provider", tc.stage)
 			}
 			if tc.ingress {
-				if err := a.st.CreateProvider(ctx, &store.ProviderRecord{Alias: "ing1", Type: TypeLivekitIngress,
+				// 类型名按历史字面量写：对应常量已随实现一并删除，v5 按字面量匹配删行
+				if err := a.st.CreateProvider(ctx, &store.ProviderRecord{Alias: "ing1", Type: "livekit-ingress",
 					Params: map[string]string{"ingress_upstream_url": "http://x:58080"}}); err != nil {
 					t.Fatalf("造 ingress 实例失败: %v", err)
 				}
@@ -95,21 +97,22 @@ func TestMigrateV5KeepsLivekitSelectors(t *testing.T) {
 }
 
 // 清理动作：cfg_ingest_provider 键删除；providers 表退场类型的行删除（逐条日志）；
-// cfg_ember_*/cfg_bellows_*/cfg_pion_* 删除；ingest_endpoints 清空；其余键不动。
+// cfg_ember_*/cfg_bellows_*/cfg_pion_* 与 cfg_ingress_upstream_url 删除；ingest_endpoints 清空；其余键不动。
 func TestMigrateV5Cleanup(t *testing.T) {
 	maskProviderEnv(t)
-	a := testAPI(t)
+	a, dbPath := testAPIWithDB(t)
 	ctx := context.Background()
 
 	a.st.SetSetting(ctx, "cfg_ingest_provider", "bellows")
 	for _, k := range []string{"cfg_ember_udp_port", "cfg_ember_public_ip",
-		"cfg_bellows_udp_port", "cfg_pion_udp_port"} {
+		"cfg_bellows_udp_port", "cfg_pion_udp_port", "cfg_ingress_upstream_url"} {
 		a.st.SetSetting(ctx, k, "1")
 	}
 	a.st.SetSetting(ctx, "cfg_portmap_mode", "off") // 非退场内核的键：应保留
 	for _, rec := range []*store.ProviderRecord{
-		{Alias: "ing1", Type: TypeLivekitIngress, Params: map[string]string{"ingress_upstream_url": "http://x:58080"}},
-		{Alias: "br1", Type: TypeBellowsRemote, Params: map[string]string{"bellows_remote_url": "http://r1"}},
+		// 退场类型名按历史字面量写（常量已随实现删除）
+		{Alias: "ing1", Type: "livekit-ingress", Params: map[string]string{"ingress_upstream_url": "http://x:58080"}},
+		{Alias: "br1", Type: "bellows-remote", Params: map[string]string{"bellows_remote_url": "http://r1"}},
 		{Alias: "lk1", Type: TypeLivekit, Params: lkParams},
 	} {
 		if err := a.st.CreateProvider(ctx, rec); err != nil {
@@ -124,10 +127,17 @@ func TestMigrateV5Cleanup(t *testing.T) {
 	if err != nil {
 		t.Fatalf("建令牌失败: %v", err)
 	}
-	if err := a.st.UpsertIngestEndpoint(ctx, &store.IngestEndpoint{
-		TokenID: tok.ID, Alias: "ing1", IngressID: "ing_x", UpstreamKey: "k", BoundRoom: "chan1"}); err != nil {
+	// 造一条存量端点（表读写方法已随类型删除，直接写表）
+	raw, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("打开原始连接失败: %v", err)
+	}
+	if _, err := raw.Exec(
+		"INSERT INTO ingest_endpoints (token_id, alias, ingress_id, upstream_key, bound_room) VALUES (?, ?, ?, ?, ?)",
+		tok.ID, "ing1", "ing_x", "k", "chan1"); err != nil {
 		t.Fatalf("造端点失败: %v", err)
 	}
+	raw.Close()
 
 	var logBuf bytes.Buffer
 	log.SetOutput(&logBuf)
@@ -139,7 +149,7 @@ func TestMigrateV5Cleanup(t *testing.T) {
 		t.Fatalf("cfg_ingest_provider 键应被删除，err=%v", err)
 	}
 	for _, k := range []string{"cfg_ember_udp_port", "cfg_ember_public_ip",
-		"cfg_bellows_udp_port", "cfg_pion_udp_port"} {
+		"cfg_bellows_udp_port", "cfg_pion_udp_port", "cfg_ingress_upstream_url"} {
 		if _, err := a.st.GetSetting(ctx, k); !errors.Is(err, store.ErrNotFound) {
 			t.Fatalf("%s 应被删除，err=%v", k, err)
 		}
@@ -160,9 +170,14 @@ func TestMigrateV5Cleanup(t *testing.T) {
 		!bytes.Contains([]byte(out), []byte("ing1")) || !bytes.Contains([]byte(out), []byte("br1")) {
 		t.Fatalf("迁移日志应逐条记录删除的实例: %q", out)
 	}
-	eps, err := a.st.AllIngestEndpoints(ctx)
-	if err != nil || len(eps) != 0 {
-		t.Fatalf("ingest_endpoints 应清空: %v %+v", err, eps)
+	raw, err = sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("打开原始连接失败: %v", err)
+	}
+	defer raw.Close()
+	var epCount int
+	if err := raw.QueryRow("SELECT COUNT(*) FROM ingest_endpoints").Scan(&epCount); err != nil || epCount != 0 {
+		t.Fatalf("ingest_endpoints 应清空: n=%d err=%v", epCount, err)
 	}
 	// 迁移后注册表重建：退场实例消失，livekit 实例仍在
 	if a.instance("ing1") != nil || a.instance("br1") != nil {

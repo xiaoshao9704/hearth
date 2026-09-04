@@ -1,5 +1,5 @@
 // 内核实例注册表：实例即对象，每条注册构造独立的 rtc 接口对象，api 持 map[alias]实例。
-// 实例来源三类：内建（bellows 进程内推流、lkembed 进程内 LiveKit）、env 锁定（环境变量合成，只读）、
+// 实例来源三类：内建（lkembed 进程内 LiveKit）、env 锁定（环境变量合成，只读）、
 // DB 注册（providers 表，params 即旧命名空间键名，rtc 实现零改动）。
 // 选择器（voice_provider/stage_provider）的值是实例 alias；推流无选择器，一律随舞台实例。
 package api
@@ -13,20 +13,16 @@ import (
 	"strings"
 
 	"hearth/server/internal/rtc"
-	"hearth/server/internal/rtc/bellows"
 	"hearth/server/internal/rtc/livekitrtc"
 	"hearth/server/internal/store"
 )
 
-// 实例类型（内建两类 + 可注册三类）
+// 实例类型（内建一类 + 可注册一类）
 const (
 	// TypeLivekit 一个 LiveKit 服务端：语音/舞台/推流三面齐全——推流面就是它自带的
 	// WHIP 入口（/whip/v1，见 livekitrtc/whip.go），远端 cmd/stage 与外部 LiveKit
-	// 都按这条接线，不再需要 Bellows 转发一道。
-	TypeLivekit        = "livekit"
-	TypeLivekitIngress = "livekit-ingress"
-	TypeBellowsRemote  = "bellows-remote"
-	TypeBellows        = "bellows" // 内建（进程内 WHIP 直通）
+	// 都按这条接线。
+	TypeLivekit = "livekit"
 	// TypeLivekitEmbedded 内建：补丁式 fork 的 LiveKit 跑在本进程内，只监听回环，
 	// 浏览器经 /providers/lkembed/rtc 同源反代访问（见 lkembed.go）
 	TypeLivekitEmbedded = "livekit-embedded"
@@ -38,9 +34,8 @@ const AliasLkembed = "lkembed"
 // alias 规则：单段小写，出现在 URL 路径里；类型同名的 alias 保留给 env 锁定实例
 var aliasRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,31}$`)
 var reservedAliases = map[string]bool{
-	// "ember" 是退场内建语音内核的 alias：不再放出注册，免得与历史部署的认知冲突
-	"ember": true, TypeBellows: true, TypeLivekit: true,
-	TypeLivekitIngress: true, TypeBellowsRemote: true, AliasLkembed: true,
+	// "ember"/"bellows" 是退场内建内核的 alias：不再放出注册，免得与历史部署的认知冲突
+	"ember": true, "bellows": true, TypeLivekit: true, AliasLkembed: true,
 }
 
 // ProviderInstance 一个注册的内核实例：alias 唯一标识，能力按槽位接口非空判定。
@@ -52,8 +47,8 @@ type ProviderInstance struct {
 	Locked  bool           // env 锁定，只读
 	Builtin bool
 	Voice   rtc.Provider       // livekit/lkembed 非空
-	Stage   rtc.StageProvider  // livekit 非空
-	Ingest  rtc.IngestProvider // livekit-ingress/bellows/bellows-remote 非空
+	Stage   rtc.StageProvider  // livekit/lkembed 非空
+	Ingest  rtc.IngestProvider // livekit/lkembed 非空（实例自带 WHIP 入口的适配）
 }
 
 // Caps 实例具备的槽位能力，如 ["voice","stage"] / ["ingest"]。
@@ -76,10 +71,6 @@ func (a *API) providerTypeFields(typ string) []rtc.ConfigKey {
 	switch typ {
 	case TypeLivekit:
 		return livekitrtc.ConfigKeys()
-	case TypeLivekitIngress:
-		return livekitrtc.IngressKeys()
-	case TypeBellowsRemote:
-		return bellows.RemoteKeys()
 	}
 	return nil
 }
@@ -100,12 +91,10 @@ func paramsCfg(params map[string]string, fields []rtc.ConfigKey) rtc.ConfigFunc 
 	}
 }
 
-// builtinInstances 内建实例：bellows 进程内 WHIP 直通（发布出口 = 当前舞台线实例的 Publisher）；
-// lkembed 进程内 LiveKit，语音/舞台/推流三面齐全（语音舞台同选它即 combined 单连接，也是默认形态）。
+// builtinInstances 内建实例：lkembed 进程内 LiveKit，语音/舞台/推流三面齐全
+// （语音舞台同选它即 combined 单连接，也是默认形态）。
 func (a *API) builtinInstances() []*ProviderInstance {
 	return []*ProviderInstance{
-		{Alias: TypeBellows, Type: TypeBellows, Builtin: true, Cfg: a.dynVal,
-			Ingest: bellows.New(a.dynVal, a.ingressResolver, a.stagePublisherSink, a.mapped)},
 		{Alias: AliasLkembed, Type: TypeLivekitEmbedded, Builtin: true, Cfg: a.embedCfg,
 			Voice: a.lkembed, Stage: a.lkembed, Ingest: a.lkembedWHIP},
 	}
@@ -120,7 +109,7 @@ func (a *API) reloadProviders(ctx context.Context) {
 
 // reloadProvidersLocked 须持 reloadMu 调用。顺序即 listInstances 顺序：内建 → env 锁定 →
 // DB（按创建序）；DB 与 env 同名时 env 优先。未变化的实例（Type+Params 相等）复用旧对象：
-// 内建 bellows 的活动会话不被 reload 打断。ListProviders 失败时保留旧注册表，
+// 进行中的 WHIP 会话不被 reload 打断。ListProviders 失败时保留旧注册表，
 // 不用只含内建+env 的表覆盖（否则 DB 实例全部消失直到下次管理操作）。
 func (a *API) reloadProvidersLocked(ctx context.Context) {
 	a.providersMu.RLock()
@@ -151,17 +140,7 @@ func (a *API) reloadProvidersLocked(ctx context.Context) {
 		cfg := paramsCfg(params, a.providerTypeFields(TypeLivekit))
 		lk := livekitrtc.New(cfg)
 		add(&ProviderInstance{Alias: TypeLivekit, Type: TypeLivekit, Params: params, Cfg: cfg, Locked: true,
-			Voice: lk, Stage: lk, Ingest: livekitrtc.NewWHIP(cfg, a.ingressResolver, nil)})
-	}
-	if params := envLockedParams(a.providerTypeFields(TypeLivekitIngress), "ingress_upstream_url"); params != nil {
-		cfg := paramsCfg(params, a.providerTypeFields(TypeLivekitIngress))
-		add(&ProviderInstance{Alias: TypeLivekitIngress, Type: TypeLivekitIngress, Params: params, Cfg: cfg, Locked: true,
-			Ingest: livekitrtc.NewIngress(cfg)})
-	}
-	if params := envLockedParams(a.providerTypeFields(TypeBellowsRemote), "bellows_remote_url"); params != nil {
-		cfg := paramsCfg(params, a.providerTypeFields(TypeBellowsRemote))
-		add(&ProviderInstance{Alias: TypeBellowsRemote, Type: TypeBellowsRemote, Params: params, Cfg: cfg, Locked: true,
-			Ingest: bellows.New(cfg, nil, nil, nil)})
+			Voice: lk, Stage: lk, Ingest: livekitrtc.NewWHIP(cfg, a.whipResolver, nil)})
 	}
 
 	// DB 注册
@@ -239,27 +218,12 @@ func (a *API) instantiateProvider(rec *store.ProviderRecord) *ProviderInstance {
 	case TypeLivekit:
 		lk := livekitrtc.New(cfg)
 		inst.Voice, inst.Stage = lk, lk
-		inst.Ingest = livekitrtc.NewWHIP(cfg, a.ingressResolver, nil)
-	case TypeLivekitIngress:
-		inst.Ingest = livekitrtc.NewIngress(cfg)
-	case TypeBellowsRemote:
-		inst.Ingest = bellows.New(cfg, nil, nil, nil)
+		inst.Ingest = livekitrtc.NewWHIP(cfg, a.whipResolver, nil)
 	default:
 		log.Printf("providers 表实例 %s 类型未知（%s），跳过", rec.Alias, rec.Type)
 		return nil
 	}
 	return inst
-}
-
-// stagePublisherSink 进程内 bellows 的发布出口：当前舞台线实例的 rtc.Publisher
-// （每次发布时取，注册表/选择器切换即生效）；舞台线为 none 或实例不实现 Publisher 时返回 nil
-// （bellows 据此 Enabled=false）。
-func (a *API) stagePublisherSink(ctx context.Context) rtc.Publisher {
-	_, sp := a.stageInstance(ctx)
-	if pub, ok := sp.(rtc.Publisher); ok {
-		return pub
-	}
-	return nil
 }
 
 // instance 按 alias 取实例，不存在返回 nil。
@@ -382,47 +346,11 @@ func (a *API) migrateProviders(ctx context.Context) error {
 			return err
 		}
 	}
-	if v, _ := a.st.GetSetting(ctx, "cfg_ingress_upstream_url"); strings.TrimSpace(v) != "" {
-		params := map[string]string{}
-		for k, val := range lkParams {
-			params[k] = val
-		}
-		params["ingress_upstream_url"] = strings.TrimSpace(v)
-		backfillEnv(params, a.providerTypeFields(TypeLivekitIngress))
-		if _, err := importLegacy(TypeLivekitIngress, params,
-			[]string{"ingress_upstream_url"}, "ingress_upstream_url"); err != nil {
-			return err
-		}
-	}
-	remoteReady := os.Getenv("BELLOWS_REMOTE_URL") != ""
-	if v, _ := a.st.GetSetting(ctx, "cfg_bellows_remote_url"); strings.TrimSpace(v) != "" {
-		params := map[string]string{"bellows_remote_url": strings.TrimSpace(v)}
-		if s, _ := a.st.GetSetting(ctx, "cfg_bellows_shared_secret"); strings.TrimSpace(s) != "" {
-			params["bellows_shared_secret"] = strings.TrimSpace(s)
-		}
-		backfillEnv(params, a.providerTypeFields(TypeBellowsRemote))
-		ok, err := importLegacy(TypeBellowsRemote, params,
-			[]string{"bellows_remote_url"}, "bellows_remote_url", "bellows_shared_secret")
-		if err != nil {
-			return err
-		}
-		remoteReady = remoteReady || ok
-	}
-
-	// 选择器改写：livekit 的 ingress 面已拆成独立类型
-	if v, _ := a.st.GetSetting(ctx, "cfg_ingest_provider"); v == "livekit" {
-		a.st.SetSetting(ctx, "cfg_ingest_provider", TypeLivekitIngress)
-	}
-	// 老远端形态（ingest_provider=bellows + bellows_remote_url）：内建 bellows 不再读远端键，
-	// 选择器改写指向 bellows-remote 实例，存量 ingress 记录归属一并改写
-	if remoteReady {
-		if v, _ := a.st.GetSetting(ctx, "cfg_ingest_provider"); v == TypeBellows {
-			a.st.SetSetting(ctx, "cfg_ingest_provider", TypeBellowsRemote)
-		}
-	}
+	// livekit-ingress / bellows-remote 两类旧全局键不再导入为实例：这两个类型已退场，
+	// 即使建行也会被迁移 v5 删除；旧 cfg_ingress_upstream_url / cfg_bellows_* 键由 v5 清理。
 
 	// 选择器默认落库：老部署（后台未选过）原来默认跑 livekit，注册表默认是内建
-	// ember/bellows，这里把旧默认写死，保证升级后行为不变。
+	// lkembed，这里把旧默认写死，保证升级后行为不变。
 	// 只随 v1 跑一次：管理员之后清空选择器恢复默认不会被重启撤销。
 	hasProvider := func(alias, envProbe string) bool {
 		if _, err := a.st.ProviderByAlias(ctx, alias); err == nil {
@@ -435,9 +363,6 @@ func (a *API) migrateProviders(ctx context.Context) error {
 	}
 	if v, _ := a.st.GetSetting(ctx, "cfg_stage_provider"); strings.TrimSpace(v) == "" && hasProvider(TypeLivekit, "LIVEKIT_API_KEY") {
 		a.st.SetSetting(ctx, "cfg_stage_provider", TypeLivekit)
-	}
-	if v, _ := a.st.GetSetting(ctx, "cfg_ingest_provider"); strings.TrimSpace(v) == "" && hasProvider(TypeLivekitIngress, "INGRESS_UPSTREAM_URL") {
-		a.st.SetSetting(ctx, "cfg_ingest_provider", TypeLivekitIngress)
 	}
 	return nil
 }
@@ -484,29 +409,11 @@ func (a *API) migrateIngestTokens(ctx context.Context) error {
 }
 
 // migrateEndpointIdentity v4：identity 主体由用户名改为 user_id（rtc.Identity），
-// 存量上游端点里固化的 identity/name/metadata 全部过期——逐实例尽力 DeleteEndpoint
-// 后清空 ingest_endpoints，下次推流按新 identity 惰性重建。
-// 幂等：表已空时两步都是空操作。
+// 存量上游端点里固化的 identity/name/metadata 全部过期——清空 ingest_endpoints，
+// 下次推流按新 identity 惰性重建。幂等：表已空时为空操作。
+// 历史上本步还会逐实例调内核侧 DeleteEndpoint 清上游端点；持端点的 livekit-ingress
+// 类型已随内核收敛退场（实例行由 v5 删除），上游残留端点由管理员自行清理。
 func (a *API) migrateEndpointIdentity(ctx context.Context) error {
-	// 必须先重建注册表：runMigrationSteps 跑在 New() 的 reloadProviders 之前，
-	// 此刻注册表里只有内建实例，而持有上游端点的 livekit-ingress 是 env/DB 注册的——
-	// 不重建就每条都取不到实例，一次 DeleteEndpoint 也不发，端点连同有效 stream key
-	// 全部残留在上游且此后再也删不到。v1 建的 provider 行也要靠这次重建才可见。
-	a.reloadProviders(ctx)
-	eps, err := a.st.AllIngestEndpoints(ctx)
-	if err != nil {
-		return err
-	}
-	for _, ep := range eps {
-		inst := a.instance(ep.Alias)
-		if inst == nil || inst.Ingest == nil {
-			continue // 实例已注销，内核侧删除无从下手
-		}
-		if derr := inst.Ingest.DeleteEndpoint(ctx, ep.IngressID); derr != nil {
-			// 删不掉不阻塞迁移：记录清掉后下次推流会重建，残留端点由管理员在上游自行清理
-			log.Printf("迁移 v4 删除旧 ingress 端点 %s（实例 %s）失败: %v", ep.IngressID, ep.Alias, derr)
-		}
-	}
 	return a.st.DeleteAllIngestEndpoints(ctx)
 }
 
@@ -518,7 +425,7 @@ func (a *API) migrateEndpointIdentity(ctx context.Context) error {
 //     指向 livekit 类型实例（env 锁定或 DB 注册）的选择器保留——旧部署的行为不变。
 //  2. cfg_ingest_provider 键删除（推流不再是独立选择器，一律进舞台实例自带的 WHIP）。
 //  3. providers 表退场类型（livekit-ingress/bellows-remote）的行删除，逐条打日志。
-//  4. cfg_ember_*/cfg_bellows_*/cfg_pion_* 全局键全部删除。
+//  4. cfg_ember_*/cfg_bellows_*/cfg_pion_* 全局键与 cfg_ingress_upstream_url 全部删除。
 //  5. ingest_endpoints 表清空（表本身下个版本再删）。
 //
 // 幂等：重复执行各步均为空操作。执行顺序：先删 providers 行再判定 alias 是否存在。
@@ -528,7 +435,8 @@ func (a *API) migrateKernelConsolidation(ctx context.Context) error {
 		return err
 	}
 	for _, rec := range recs {
-		if rec.Type == TypeLivekitIngress || rec.Type == TypeBellowsRemote {
+		// 退场类型名按历史字面量匹配：对应常量已随实现一并删除
+		if rec.Type == "livekit-ingress" || rec.Type == "bellows-remote" {
 			if err := a.st.DeleteProvider(ctx, rec.Alias); err != nil {
 				return err
 			}
@@ -563,6 +471,9 @@ func (a *API) migrateKernelConsolidation(ctx context.Context) error {
 		return err
 	}
 	log.Printf("迁移 v5: 推流入口选择器 cfg_ingest_provider 已删除（推流并入舞台内核自带 WHIP）")
+	if err := a.st.DeleteSetting(ctx, "cfg_ingress_upstream_url"); err != nil {
+		return err
+	}
 	for _, prefix := range []string{"cfg_ember_", "cfg_bellows_", "cfg_pion_"} {
 		n, err := a.st.DeleteSettingsByPrefix(ctx, prefix)
 		if err != nil {

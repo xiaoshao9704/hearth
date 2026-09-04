@@ -1,4 +1,5 @@
-// Package livekitrtc 是 rtc.Provider 的 LiveKit 实现（推流入口拆为独立的 Ingress 类型）。
+// Package livekitrtc 是 rtc.Provider / rtc.StageProvider 的 LiveKit 实现
+// （推流面 = LiveKit 自带 WHIP 入口的适配，见 whip.go）。
 // 配置逐请求动态解析（环境变量 / 后台设置），客户端随配置变化重建。
 package livekitrtc
 
@@ -33,11 +34,11 @@ func apiURLDefault() string {
 	return scheme + "://" + u
 }
 
-// ConfigKeys 本实现声明的配置键（命名空间 livekit_*；推流入口的键在 ingress.go）。
+// ConfigKeys 本实现声明的配置键（命名空间 livekit_*；推流面复用同一组键，见 whip.go）。
 func ConfigKeys() []rtc.ConfigKey {
 	return []rtc.ConfigKey{
 		{Name: "livekit_api_url", Env: "LIVEKIT_API_URL", Group: "livekit", Default: apiURLDefault(),
-			Label: "Twirp API 地址", Hint: "服务端调 LiveKit 的地址，也是信令代理的上游"},
+			Label: "Twirp API 地址", Hint: "服务端调 LiveKit 的地址，也是信令代理的上游；ws(s):// 写法会归一成 http(s)://"},
 		{Name: "livekit_api_key", Env: "LIVEKIT_API_KEY", Group: "livekit",
 			Label: "API Key", Hint: "与 livekit.yaml 的 keys 一致"},
 		{Name: "livekit_api_secret", Env: "LIVEKIT_API_SECRET", Group: "livekit", Secret: true,
@@ -47,26 +48,28 @@ func ConfigKeys() []rtc.ConfigKey {
 	}
 }
 
-// Provider 是房间/舞台内核（推流入口由 Ingress 独立承担），兼作 rtc.Publisher
-// （WHIP 直通的 LiveKit 出口，见 publisher.go）。
+// Provider 是房间/舞台内核（推流面由 WHIP 类型承担，见 whip.go）。
 type Provider struct {
 	cfg rtc.ConfigFunc
 
 	mu               sync.Mutex
 	url, key, secret string
 	rooms            *lkroom.Client
-
-	pubMu    sync.Mutex
-	pubRooms map[string]*pubRoom // WHIP 直通发布：同（房间, identity）共享一次房间连接
 }
 
 func New(cfg rtc.ConfigFunc) *Provider {
-	return &Provider{cfg: cfg, pubRooms: map[string]*pubRoom{}}
+	return &Provider{cfg: cfg}
+}
+
+// apiURL 生效的 Twirp API 地址：ws(s):// 写法（照抄浏览器信令地址的常见填法）归一成
+// http(s)://——Twirp 客户端与信令反代都认不得 ws scheme（WHIP 面的归一见 whip.go）。
+func (p *Provider) apiURL(ctx context.Context) string {
+	return httpScheme(strings.TrimSpace(p.cfg(ctx, "livekit_api_url")))
 }
 
 // client 按当前生效配置取房间客户端；配置变了就重建。
 func (p *Provider) client(ctx context.Context) *lkroom.Client {
-	url := p.cfg(ctx, "livekit_api_url")
+	url := p.apiURL(ctx)
 	key := p.cfg(ctx, "livekit_api_key")
 	secret := p.cfg(ctx, "livekit_api_secret")
 	p.mu.Lock()
@@ -102,7 +105,7 @@ func (p *Provider) ListParticipants(ctx context.Context, room string) ([]rtc.Par
 	out := make([]rtc.Participant, 0, len(ps))
 	for _, x := range ps {
 		pt := rtc.Participant{Identity: x.Identity, Name: x.Name, JoinedAt: x.JoinedAt}
-		// 元数据是 hearth 组好的 rtc.Meta JSON（进房令牌 lktoken.Sign 与推流发布 publisher.go
+		// 元数据是 hearth 组好的 rtc.Meta JSON（进房令牌 lktoken.Sign 与推流换票 whip.go
 		// 两条路径都写）；非 JSON 或缺字段按无归属信息的参与者处理，展示侧自行兜底
 		var meta rtc.Meta
 		if json.Unmarshal([]byte(x.Metadata), &meta) == nil {
@@ -122,5 +125,5 @@ func (p *Provider) MuteUserAudio(ctx context.Context, room string, userID int64,
 }
 
 func (p *Provider) SignalProxyUpstream(ctx context.Context) string {
-	return p.cfg(ctx, "livekit_api_url")
+	return p.apiURL(ctx)
 }

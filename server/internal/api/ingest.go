@@ -10,11 +10,10 @@ import (
 	neturl "net/url"
 	"regexp"
 
-	"hearth/server/internal/rtc"
 	"hearth/server/internal/store"
 )
 
-// 推流设备标签规则（identity = {用户名}-{标签}，出现在内核参与者列表里）
+// 推流设备标签规则（identity 组成见 rtc.Identity，出现在内核参与者列表里）
 var ingestTagRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,31}$`)
 
 // writeIngestToken 回令牌、设备标签与同源 WHIP 基地址（/providers/{alias}/w/ 绝对地址，
@@ -96,20 +95,13 @@ func (a *API) ingestTokenTag(w http.ResponseWriter, r *http.Request) {
 	a.writeIngestToken(w, r, t)
 }
 
-// revokeIngestSessions 掐断该令牌名下的全部进行会话（尽力，逐实例忽略错误）：
-// 进程内实例直接 RevokeToken，远端 bellows 经 revoke 通行证（RevokeRemoteSessions）。
+// revokeIngestSessions 掐断该令牌名下的全部进行会话（尽力，逐实例忽略错误）。
 func (a *API) revokeIngestSessions(ctx context.Context, token string) {
 	for _, inst := range a.listInstances(ctx) {
 		if inst.Ingest == nil {
 			continue
 		}
-		var err error
-		if gi, ok := inst.Ingest.(rtc.WHIPGrantIssuer); ok && inst.Ingest.ProxyUpstream(ctx) != "" {
-			err = gi.RevokeRemoteSessions(ctx, token)
-		} else {
-			err = inst.Ingest.RevokeToken(ctx, token)
-		}
-		if err != nil {
+		if err := inst.Ingest.RevokeToken(ctx, token); err != nil {
 			log.Printf("撤销推流会话失败（实例 %s）: %v", inst.Alias, err)
 		}
 	}

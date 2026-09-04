@@ -1,5 +1,6 @@
-// 推流令牌与实例端点：每用户一把令牌（ingest_tokens，不分频道/设备，频道在 WHIP URL 里）；
-// livekit-ingress 实例按（令牌, alias）持有上游端点凭证（ingest_endpoints）。
+// 推流令牌：每用户一把（ingest_tokens，不分频道/设备，频道在 WHIP URL 里）。
+// ingest_endpoints 表（旧 livekit-ingress 实例的上游端点凭证）已随内核收敛停用：
+// 内容被游标迁移清空，读写代码删除，表本身留到下个版本再出迁移删表。
 package store
 
 import (
@@ -99,79 +100,9 @@ func (s *Store) UpdateIngestTokenTag(ctx context.Context, userID int64, tag stri
 	return err
 }
 
-// ---- 实例端点 ----
+// ---- 实例端点（已停用，仅供游标迁移清表）----
 
-// IngestEndpoint livekit-ingress 实例按（令牌, alias）持有的上游端点凭证：
-// hearth 反代前把用户令牌改写为 UpstreamKey，BoundRoom 记录该端点当前绑定的房间（空 = 未绑定/已解绑）。
-type IngestEndpoint struct {
-	TokenID     int64
-	Alias       string
-	IngressID   string
-	UpstreamKey string
-	BoundRoom   string
-}
-
-// IngestEndpoint 查（令牌, alias）的端点记录，无记录返回 ErrNotFound。
-func (s *Store) IngestEndpoint(ctx context.Context, tokenID int64, alias string) (*IngestEndpoint, error) {
-	var ep IngestEndpoint
-	err := s.bun.NewRaw(`
-SELECT token_id, alias, ingress_id, upstream_key, bound_room FROM ingest_endpoints
-WHERE token_id = ? AND alias = ?`, tokenID, alias).
-		Scan(ctx, &ep.TokenID, &ep.Alias, &ep.IngressID, &ep.UpstreamKey, &ep.BoundRoom)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, ErrNotFound
-	}
-	return &ep, err
-}
-
-// UpsertIngestEndpoint 有则更新（含 BoundRoom），无则插入。
-// upsert 方言分叉与 RecordDevice 同因：mysql 无 ON CONFLICT。
-func (s *Store) UpsertIngestEndpoint(ctx context.Context, ep *IngestEndpoint) error {
-	row := &ingestEndpointRow{
-		TokenID: ep.TokenID, Alias: ep.Alias,
-		IngressID: ep.IngressID, UpstreamKey: ep.UpstreamKey, BoundRoom: ep.BoundRoom,
-	}
-	q := s.bun.NewInsert().Model(row).
-		Column("token_id", "alias", "ingress_id", "upstream_key", "bound_room")
-	if s.d.name == "mysql" {
-		q = q.On("DUPLICATE KEY UPDATE").Set(
-			"ingress_id = VALUES(ingress_id), upstream_key = VALUES(upstream_key), bound_room = VALUES(bound_room)")
-	} else { // sqlite / postgres 同语法
-		q = q.On("CONFLICT (token_id, alias) DO UPDATE").Set(
-			"ingress_id = EXCLUDED.ingress_id, upstream_key = EXCLUDED.upstream_key, bound_room = EXCLUDED.bound_room")
-	}
-	_, err := q.Exec(ctx)
-	return err
-}
-
-// DeleteIngestEndpointsByToken 清空该令牌名下的全部实例端点（令牌重置/改标签时调用，
-// 内核侧的 DeleteIngress 由调用方逐条处理，下次推流重建）。
-func (s *Store) DeleteIngestEndpointsByToken(ctx context.Context, tokenID int64) error {
-	_, err := s.bun.NewRaw(
-		"DELETE FROM ingest_endpoints WHERE token_id = ?", tokenID).Exec(ctx)
-	return err
-}
-
-// AllIngestEndpoints 全表端点（游标 v4 迁移用：identity 换 user_id 后存量端点全部过期）。
-func (s *Store) AllIngestEndpoints(ctx context.Context) ([]IngestEndpoint, error) {
-	out := []IngestEndpoint{}
-	rows, err := s.bun.QueryContext(ctx,
-		"SELECT token_id, alias, ingress_id, upstream_key, bound_room FROM ingest_endpoints")
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var ep IngestEndpoint
-		if err := rows.Scan(&ep.TokenID, &ep.Alias, &ep.IngressID, &ep.UpstreamKey, &ep.BoundRoom); err != nil {
-			return nil, err
-		}
-		out = append(out, ep)
-	}
-	return out, rows.Err()
-}
-
-// DeleteAllIngestEndpoints 清空端点表（游标 v4 迁移用）。
+// DeleteAllIngestEndpoints 清空端点表（游标 v4/v5 迁移用；表本身下个版本再删）。
 func (s *Store) DeleteAllIngestEndpoints(ctx context.Context) error {
 	_, err := s.bun.NewRaw("DELETE FROM ingest_endpoints").Exec(ctx)
 	return err

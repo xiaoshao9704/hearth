@@ -1,10 +1,10 @@
-// LiveKit 自带 WHIP 入口（/whip/v1）的推流适配器。与 livekit-ingress 形态的区别在于
-// 没有「令牌 → 上游 stream key」的持久端点：房间与身份都写在每次 POST 现签的短时效
-// LiveKit JWT 里，hearth 终结用户令牌、向上游出示自己签的凭证，端点三方法因此是空实现。
+// LiveKit 自带 WHIP 入口（/whip/v1）的推流适配器：没有「令牌 → 上游凭证」的持久端点，
+// 房间与身份都写在每次 POST 现签的短时效 LiveKit JWT 里，hearth 终结用户令牌、
+// 向上游出示自己签的凭证。
 //
 // 上游是哪一个 LiveKit 由实例的 livekit_api_url 决定，三种形态同一份代码：进程内
-// lkembed（回环）、远端 cmd/stage（私网地址）、外部 LiveKit 实例。远端形态因此不再需要
-// Bellows 转发——OBS 的媒体与浏览器观众走同一条打洞路径。
+// lkembed（回环）、远端 cmd/stage（私网地址）、外部 LiveKit 实例——OBS 的媒体与浏览器
+// 观众走同一条打洞路径。
 //
 // 反代由本类型自己做（ProxyUpstream 返回空，接入层把 /w 请求整个交过来）：会话资源地址
 // 要换成不透明会话 id、PATCH/DELETE 要按会话现签新票，这两件事都在 rtc 的通用反代里
@@ -93,15 +93,16 @@ func (h *WHIP) client(ctx context.Context) *lkroom.Client {
 	return h.rooms
 }
 
+// apiURL 生效的上游地址：ws(s):// 写法（照抄浏览器信令地址的常见填法）归一成
+// http(s)://，否则 http.Client 与 Twirp 客户端都认不得这个 scheme。
 func (h *WHIP) apiURL(ctx context.Context) string {
-	return strings.TrimSuffix(strings.TrimSpace(h.cfg(ctx, "livekit_api_url")), "/")
+	return httpScheme(strings.TrimSuffix(strings.TrimSpace(h.cfg(ctx, "livekit_api_url")), "/"))
 }
 
 // whipBase 上游 WHIP 入口的基地址。LiveKit 把 /whip/v1 与 Twirp API 挂在同一个 HTTP
-// 端口上，所以直接由 livekit_api_url 推导，不另开配置键；ws(s):// 写法（照抄浏览器信令
-// 地址的常见填法）归一成 http(s)://，否则 http.Client 认不得这个 scheme。
+// 端口上，所以直接由 livekit_api_url 推导，不另开配置键。
 func (h *WHIP) whipBase(ctx context.Context) string {
-	return httpScheme(h.apiURL(ctx))
+	return h.apiURL(ctx)
 }
 
 // httpScheme ws→http、wss→https；其余原样返回（含解析不了与没有 host 的填法）。
@@ -142,17 +143,6 @@ func (h *WHIP) RevokeToken(ctx context.Context, token string) error {
 	}
 	return nil
 }
-
-// EnsureEndpoint 无持久端点：凭证是每次 POST 现签的短时效 JWT（见包注释）。
-func (h *WHIP) EnsureEndpoint(context.Context, string, string, rtc.Meta) (id, upstreamKey string, err error) {
-	return "", "", nil
-}
-
-// BindRoom 无持久端点，空操作：房间写在每次现签的票里。
-func (h *WHIP) BindRoom(context.Context, string, string) error { return nil }
-
-// DeleteEndpoint 无持久端点，空操作（进行会话的掐断走 RevokeToken）。
-func (h *WHIP) DeleteEndpoint(context.Context, string) error { return nil }
 
 // ---- rtc.WHIPServer ----
 
@@ -238,7 +228,7 @@ func (h *WHIP) handlePost(w http.ResponseWriter, r *http.Request, token string) 
 	w.Header().Set("Location", "/w/sessions/"+rid)
 	// ffmpeg 的 WHIP muxer 读不了 chunked 响应，必须显式 Content-Length
 	w.Header().Set("Content-Length", strconv.Itoa(len(body)))
-	// 上游的 Link: rel="ice-server" 不透传（与 Bellows 一致）：那是 LiveKit 内置的默认
+	// 上游的 Link: rel="ice-server" 不透传：那是 LiveKit 内置的默认
 	// STUN 列表，不一定可达，推流端照着 gather 只会拖慢建连
 	w.WriteHeader(http.StatusCreated)
 	w.Write(body)
