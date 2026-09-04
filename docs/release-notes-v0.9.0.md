@@ -28,6 +28,7 @@ CertMagic、libdns、DNS-01 与 IP 证书不在 v0.9.0 发布线上，留待真�
 - 发布产物覆盖 Linux、macOS、Windows 的 amd64/arm64 六个目标，均为 `CGO_ENABLED=0` 的单文件二进制。
 - 前端构建产物经 `go:embed` 编进服务端；开发环境仍可用 `STATIC_DIR` 回落。
 - 裸机数据目录优先级为 `--data` / `HEARTH_DATA`、可执行文件旁的 `data/`、系统用户目录；`DB_PATH` 默认落在所选数据目录。
+- `hearth service install|uninstall|start|stop|status` 提供 macOS LaunchAgent、Linux systemd 与 Windows SCM 后台常驻；服务日志写入数据目录并自动轮转。
 
 ## 分层权限
 

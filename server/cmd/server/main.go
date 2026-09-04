@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"regexp"
+	"strings"
 	"syscall"
 	"time"
 
@@ -27,16 +28,58 @@ import (
 
 var usernameRe = regexp.MustCompile(`^[a-zA-Z0-9_-]{2,32}$`)
 
+// positionals 返回非 flag 参数，并跳过 --data/-data 的值；子命令在 config.Load 前分派，
+// 不能依赖 flag 包事后解析。
+func positionals() []string {
+	var out []string
+	args := os.Args[1:]
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if a == "--data" || a == "-data" {
+			i++
+			continue
+		}
+		if strings.HasPrefix(a, "-") {
+			continue
+		}
+		out = append(out, a)
+	}
+	return out
+}
+
+func hasFlag(name string) bool {
+	for _, a := range os.Args[1:] {
+		if a == name {
+			return true
+		}
+	}
+	return false
+}
+
 func main() {
+	pos := positionals()
+	cmd := ""
+	if len(pos) > 0 {
+		cmd = pos[0]
+	}
+
+	// Windows 服务由 SCM 接管生命周期；其余平台恒为 false。
+	if runAsWindowsService() {
+		return
+	}
+
 	cfg := config.Load()
 
 	// CLI 子命令: healthcheck —— 容器健康检查（镜像无 shell/curl）：探活本机 /healthz。不开数据库。
-	if len(os.Args) > 1 && os.Args[1] == "healthcheck" {
+	if cmd == "healthcheck" {
 		if err := selfcheck.Run(selfcheck.URL(cfg.Addr)); err != nil {
 			log.Printf("健康检查失败: %v", err)
 			os.Exit(1)
 		}
 		return
+	}
+	if cmd == "service" {
+		os.Exit(runServiceCmd(pos[1:], hasFlag("--system"), cfg))
 	}
 
 	st, err := store.Open(cfg.DatabaseDSN())
@@ -46,12 +89,12 @@ func main() {
 	defer st.Close()
 
 	// CLI 子命令: adduser <用户名> <密码> —— 注册接口默认关闭时由管理员开通账号
-	if len(os.Args) > 1 && os.Args[1] == "adduser" {
-		if len(os.Args) != 4 {
+	if cmd == "adduser" {
+		if len(pos) != 3 {
 			fmt.Fprintln(os.Stderr, "用法: hearth adduser <用户名> <密码>")
 			os.Exit(2)
 		}
-		username, password := os.Args[2], os.Args[3]
+		username, password := pos[1], pos[2]
 		if !usernameRe.MatchString(username) || len(password) < 6 {
 			log.Fatal("用户名需 2-32 位字母数字，密码至少 6 位")
 		}
@@ -68,12 +111,12 @@ func main() {
 	}
 
 	// CLI 子命令: promote <用户名> —— 转移超级管理员（旧 super 降为 admin，全站恰好一个 super）
-	if len(os.Args) > 1 && os.Args[1] == "promote" {
-		if len(os.Args) != 3 {
+	if cmd == "promote" {
+		if len(pos) != 2 {
 			fmt.Fprintln(os.Stderr, "用法: hearth promote <用户名>")
 			os.Exit(2)
 		}
-		u, _, err := st.UserByName(context.Background(), os.Args[2])
+		u, _, err := st.UserByName(context.Background(), pos[1])
 		if err != nil {
 			log.Fatalf("用户不存在: %v", err)
 		}
@@ -87,6 +130,16 @@ func main() {
 		return
 	}
 
+	if serviceModeActive() {
+		redirectServiceLog(cfg.DataDir)
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	runServer(ctx, cfg, st)
+}
+
+func runServer(ctx context.Context, cfg config.Config, st *store.Store) {
 	hub := chat.NewHub(st, cfg.CORSOrigin)
 	// 端口映射先建好：它是内核宣告外部地址的来源之一（lite.MappedFunc），要在内核构造前交出去。
 	// Run 之前查不到任何映射，返回 false 即可，内核那边只是暂时少一条 srflx 候选。
@@ -111,10 +164,6 @@ func main() {
 		r.Get("/*", fs.ServeHTTP)
 		r.Head("/*", fs.ServeHTTP)
 	}
-
-	// 优雅退出：Windows 没有 SIGTERM（常量仍在），os.Interrupt 是那边的兜底
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 
 	// 映射建立/变化后立刻刷新宣告，让新会话拿到映射出的外部地址。
 	// 回调不得阻塞 Mapper 的申请轮次（RefreshAnnounce 里是最长 2s 的 STUN 探测），另起协程。

@@ -61,6 +61,7 @@
 - 残留的 `EMBER_*`/`BELLOWS_*`/`INGRESS_UPSTREAM_URL` 是已删内核的痕迹：一律不再读取，检测到就打一次启动告警（`warnLegacyConfig`，`server/internal/api/dyncfg.go`）提示从部署侧删除。告警集只保留一个版本（比照 `pion_*` 先例），下个版本删除。
 - `/data` 仍是唯一的持久化边界，但只剩数据库：内嵌 LiveKit 的密钥不走 `/data/aio/keys.env`，是 `lkembed_api_key`/`lkembed_api_secret` 两个 DB settings 键，留空时首启生成并落库，随数据库一起备份（见上条「rtc 内核插件模型」）。
 - 前端产物经 `server/internal/webui`（`//go:embed all:dist`）编进二进制，单文件分发成立：CI/Dockerfile 在 `go build` 前把 `web/dist` 拷入该目录（gitignore，只留 `.keep`）；目录为空时 `Handler()` 返回 nil，`main.go` 回落 `STATIC_DIR`（开发期 vite dev 不受影响）。裸机单文件的数据目录：`--data`/`HEARTH_DATA` → 可执行文件旁的 `data/`（便携优先）→ 系统用户目录回落；`DB_PATH` 默认 `<data>/hearth.db`，`.env` 先读工作目录再读 `<data>/.env`（后者不覆盖前者）。
+- 服务化属于单文件三系统的部署能力：`hearth service install|uninstall|start|stop|status`（macOS 用户级 LaunchAgent、Linux systemd 用户级或 `--system` 系统级、Windows SCM）。安装单元固定带 `--data <当前数据目录> --service`；服务日志落 `<data>/hearth.log`，由 `internal/logrot` 按 10MB、5 份备份轮转。Windows 安装时只放行 HTTP 与当前 `lkembed` 媒体端口，不引入 HTTPS/TLS 配置。
 
 ## 已知的坑（改相关代码前必读）
 
