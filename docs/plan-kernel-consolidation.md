@@ -1,6 +1,6 @@
 # 计划：内核收敛（Ember / Bellows / livekit-ingress 退场，进程内 LiveKit 成为唯一内核）
 
-状态：**实施中（2026-09-04）：第五节六步中第 1–5 步已完成**（默认值与迁移、删 ingest 分支、删 ember、删 bellows/ingress/lite.Transport、CI/Docker/文档），剩第 6 步（发布说明 + 打 tag）。下一个大版本（v0.9.0）的第一步；`plan-onebox.md` 与 `plan-roles-guests.md` 在它之后。
+状态：**六步全部实施完成（2026-09-04）**，发布说明在 `docs/release-notes-v0.9.0.md`；待办：第六节两项实测（弱网语音 A/B、常驻内存）回填发布说明、`v0.9.0` tag（由维护者打）。下一个大版本（v0.9.0）的第一步；`plan-onebox.md` 与 `plan-roles-guests.md` 在它之后。
 取代 `plan-stage-kernel.md`（路线 A，Ember 补视频）与 `plan-pionwhip.md`/`plan-bellows-grant.md` 的后续；三份文档保留作历史，状态行改为「已退役」。
 
 ## 动机与边界
