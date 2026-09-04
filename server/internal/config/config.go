@@ -34,8 +34,12 @@ func Load() Config {
 	dbPath := os.Getenv("DB_PATH")
 	if dbPath == "" {
 		dbPath = filepath.Join(dataDir, "hearth.db")
-		if _, err := os.Stat("hearth.db"); err == nil {
-			dbPath = "hearth.db"
+		// 只在没有显式数据目录时兼容旧版工作目录数据库；否则会悄悄绕过
+		// --data / HEARTH_DATA 指定的持久化边界。
+		if dataFlag() == "" && os.Getenv("HEARTH_DATA") == "" {
+			if _, err := os.Stat("hearth.db"); err == nil {
+				dbPath = "hearth.db"
+			}
 		}
 	}
 	return Config{

@@ -58,7 +58,7 @@ Description=Hearth Server
 
 [Service]
 ExecStart=` + systemdQuote(exe) + ` --data ` + systemdQuote(cfg.DataDir) + ` --service
-WorkingDirectory=` + systemdQuote(cfg.DataDir) + `
+WorkingDirectory=` + cfg.DataDir + `
 Restart=on-failure
 RestartSec=2
 

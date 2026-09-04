@@ -29,9 +29,7 @@ async function route() {
 
   closeSettings(); // 换路由时收掉设置浮层
 
-  if (!app.firstElementChild) {
-    app.innerHTML = '<div class="auth-page"><div class="auth-card" aria-live="polite">正在连接服务器…</div></div>';
-  }
+  app.innerHTML = '<div class="auth-page"><div class="auth-card" aria-live="polite">正在连接服务器…</div></div>';
 
   // 首启向导：users 表为空时一切路由都让位给 #/setup；走完（needs_setup 变 false）后向导页本身即失效
   let needsSetup = false;
