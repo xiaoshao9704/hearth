@@ -28,18 +28,22 @@ import (
 
 var usernameRe = regexp.MustCompile(`^[a-zA-Z0-9_-]{2,32}$`)
 
-// positionals 返回非 flag 参数，并跳过 --data/-data 的值；子命令在 config.Load 前分派，
-// 不能依赖 flag 包事后解析。
+// positionals 返回子命令及其位置参数，只跳过程序自己识别的全局 flag。
+// 子命令在 config.Load 前分派，不能依赖 flag 包事后解析。
 func positionals() []string {
 	var out []string
 	args := os.Args[1:]
 	for i := 0; i < len(args); i++ {
 		a := args[i]
+		if a == "--" {
+			out = append(out, args[i+1:]...)
+			break
+		}
 		if a == "--data" || a == "-data" {
 			i++
 			continue
 		}
-		if strings.HasPrefix(a, "-") {
+		if strings.HasPrefix(a, "--data=") || strings.HasPrefix(a, "-data=") || a == "--system" || a == "--service" {
 			continue
 		}
 		out = append(out, a)
