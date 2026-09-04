@@ -24,3 +24,10 @@ func TestSystemdQuote(t *testing.T) {
 		t.Fatalf("systemd 参数转义错误: %s", got)
 	}
 }
+
+func TestSystemdWorkingDirectoryEscapesSpecifier(t *testing.T) {
+	got := systemdWorkingDirectory(`/srv/hearth data/100%h`)
+	if got != `/srv/hearth data/100%%h` {
+		t.Fatalf("WorkingDirectory 的 systemd specifier 转义错误: %s", got)
+	}
+}

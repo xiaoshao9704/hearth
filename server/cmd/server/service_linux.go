@@ -58,7 +58,7 @@ Description=Hearth Server
 
 [Service]
 ExecStart=` + systemdQuote(exe) + ` --data ` + systemdQuote(cfg.DataDir) + ` --service
-WorkingDirectory=` + cfg.DataDir + `
+WorkingDirectory=` + systemdWorkingDirectory(cfg.DataDir) + `
 Restart=on-failure
 RestartSec=2
 
@@ -95,6 +95,11 @@ func systemdQuote(s string) string {
 	s = strings.ReplaceAll(s, `\`, `\\`)
 	s = strings.ReplaceAll(s, `"`, `\"`)
 	return `"` + s + `"`
+}
+
+// WorkingDirectory 的值允许空格，但其中的 % 会被 systemd 当作 specifier 展开。
+func systemdWorkingDirectory(path string) string {
+	return strings.ReplaceAll(path, "%", "%%")
 }
 
 func svcUninstall(cfg config.Config, system bool) error {

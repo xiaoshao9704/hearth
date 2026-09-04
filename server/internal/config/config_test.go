@@ -54,9 +54,37 @@ func TestLoadUsesExistingWorkingDirectoryDatabaseWithoutExplicitDataDir(t *testi
 	old := os.Args
 	os.Args = []string{"hearth"}
 	t.Cleanup(func() { os.Args = old })
+	want, err := filepath.Abs("hearth.db")
+	if err != nil {
+		t.Fatal(err)
+	}
 
-	if cfg := Load(); cfg.DBPath != "hearth.db" {
-		t.Fatalf("未显式指定数据目录时应沿用工作目录数据库，实际 %q", cfg.DBPath)
+	if cfg := Load(); cfg.DBPath != want {
+		t.Fatalf("未显式指定数据目录时应沿用工作目录数据库的绝对路径，实际 %q", cfg.DBPath)
+	}
+}
+
+func TestLoadIgnoresWorkingDirectoryNamedLikeDatabase(t *testing.T) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(cwd) })
+	dir := t.TempDir()
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir("hearth.db", 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("DB_PATH", "")
+	t.Setenv("HEARTH_DATA", "")
+	old := os.Args
+	os.Args = []string{"hearth"}
+	t.Cleanup(func() { os.Args = old })
+
+	if cfg := Load(); cfg.DBPath == filepath.Join(dir, "hearth.db") {
+		t.Fatalf("同名目录不得被当成 sqlite 文件: %q", cfg.DBPath)
 	}
 }
 

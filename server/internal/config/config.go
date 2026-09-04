@@ -37,8 +37,10 @@ func Load() Config {
 		// 只在没有显式数据目录时兼容旧版工作目录数据库；否则会悄悄绕过
 		// --data / HEARTH_DATA 指定的持久化边界。
 		if dataFlag() == "" && os.Getenv("HEARTH_DATA") == "" {
-			if _, err := os.Stat("hearth.db"); err == nil {
-				dbPath = "hearth.db"
+			if info, err := os.Stat("hearth.db"); err == nil && info.Mode().IsRegular() {
+				if abs, err := filepath.Abs("hearth.db"); err == nil {
+					dbPath = abs
+				}
 			}
 		}
 	}
