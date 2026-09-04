@@ -135,10 +135,13 @@ func isMissingTableErr(err error) bool {
 type User struct {
 	bun.BaseModel `bun:"table:users,alias:u"`
 
-	ID       int64  `bun:",pk,autoincrement" json:"id"`
-	Username string `json:"username"`
-	IsAdmin  bool   `json:"is_admin"`
-	Disabled bool   `json:"-"` // 停用账号（管理后台用，登录/会话校验时拦截）
+	ID        int64      `json:"id"`
+	Username  string     `json:"username"`
+	Role      Role       `json:"role"`       // 系统角色（权威）
+	IsAdmin   bool       `json:"is_admin"`   // 派生只读（role ≥ admin），供前端过渡一个版本
+	Disabled  bool       `json:"-"`          // 停用账号（管理后台用，登录/会话校验时拦截）
+	ExpiresAt *time.Time `json:"expires_at"` // 仅访客有值；普通用户为 null
+	InviteID  *int64     `json:"-"`          // 访客来源邀请（审计用，不外发）
 }
 
 type Channel struct {
@@ -146,12 +149,12 @@ type Channel struct {
 
 	ID         int64     `bun:",pk,autoincrement" json:"id"`
 	Name       string    `json:"name"`
-	CreatedBy  string    `bun:"-" json:"created_by"` // 房主用户名（JOIN 填充，列见 OwnerID）
+	CreatedBy  string    `bun:"-" json:"created_by"` // 房主用户名（JOIN 填充，房主归属见 OwnerID 注释）
 	CreatedAt  time.Time `json:"created_at"`
 	InviteOnly bool      `json:"invite_only"`
-	IsOwner    bool      `bun:"-" json:"is_owner"`   // 对当前请求用户是否房主（接口层填充）
-	Online     int       `bun:"-" json:"online"`     // 当前在房人数（接口层从 LiveKit 填充）
-	OwnerID    int64     `bun:"created_by" json:"-"` // 房主用户 ID（内部用）
+	MyRole     string    `bun:"-" json:"my_role"` // 对当前请求用户的频道角色（接口层填充，owner/moderator/member/""）
+	Online     int       `bun:"-" json:"online"`  // 当前在房人数（接口层从内核填充）
+	OwnerID    int64     `bun:"-" json:"-"`       // 房主用户 ID（内部用；权威是 channel_members 的 owner 行，查询里 COALESCE 回 created_by 历史列）
 }
 
 type Message struct {
@@ -183,34 +186,42 @@ func (s *Store) RecordDevice(ctx context.Context, userID int64, deviceID, tag st
 
 // ---- 用户 ----
 
-// CreateUser 创建用户；服务器上的第一个账号自动成为管理员。
+// CreateUser 创建用户（普通角色 user）；服务器上的第一个账号自动成为超级管理员。
+// 注册产出其他档走 CreateUserWithRole。
 func (s *Store) CreateUser(ctx context.Context, username, passwordHash string) (*User, error) {
+	return s.CreateUserWithRole(ctx, username, passwordHash, RoleUser)
+}
+
+// CreateUserWithRole 按指定系统角色创建用户；首个账号无条件成为 super（全站恰好一个的保底）。
+func (s *Store) CreateUserWithRole(ctx context.Context, username, passwordHash string, role Role) (*User, error) {
 	var n int
 	if err := s.bun.NewRaw("SELECT COUNT(1) FROM users").Scan(ctx, &n); err != nil {
 		return nil, err
 	}
-	isAdmin := 0
 	if n == 0 {
-		isAdmin = 1
+		role = RoleSuper
 	}
-	row := &userRow{Username: username, PasswordHash: passwordHash, IsAdmin: int64(isAdmin)}
+	row := &userRow{Username: username, PasswordHash: passwordHash, Role: string(role)}
 	if _, err := s.bun.NewInsert().Model(row).Exec(ctx); err != nil {
 		return nil, err
 	}
-	return &User{ID: row.ID, Username: username, IsAdmin: isAdmin == 1}, nil
+	u := &User{ID: row.ID, Username: username}
+	scanUserParts(u, string(role), nil)
+	return u, nil
 }
 
 func (s *Store) UserByName(ctx context.Context, username string) (*User, string, error) {
 	var u User
-	var hash string
-	var isAdmin, disabled int64
+	var hash, role string
+	var disabled int64
+	var expiresAt *time.Time
 	err := s.bun.NewRaw(
-		"SELECT id, username, password_hash, is_admin, disabled FROM users WHERE username = ?", username).
-		Scan(ctx, &u.ID, &u.Username, &hash, &isAdmin, &disabled)
+		"SELECT id, username, password_hash, role, disabled, expires_at FROM users WHERE username = ?", username).
+		Scan(ctx, &u.ID, &u.Username, &hash, &role, &disabled, &expiresAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, "", ErrNotFound
 	}
-	u.IsAdmin = isAdmin != 0
+	scanUserParts(&u, role, expiresAt)
 	u.Disabled = disabled != 0
 	return &u, hash, err
 }
@@ -234,15 +245,16 @@ func (s *Store) CreateSession(ctx context.Context, userID int64) (string, error)
 // UserByToken 校验会话 token，过期、不存在或账号已停用返回 ErrNotFound。
 func (s *Store) UserByToken(ctx context.Context, token string) (*User, error) {
 	var u User
-	var isAdmin int64
+	var role string
+	var expiresAt *time.Time
 	err := s.bun.NewRaw(`
-SELECT u.id, u.username, u.is_admin FROM sessions s JOIN users u ON u.id = s.user_id
+SELECT u.id, u.username, u.role, u.expires_at FROM sessions s JOIN users u ON u.id = s.user_id
 WHERE s.token = ? AND s.expires_at > ? AND u.disabled = 0`, token, time.Now()).
-		Scan(ctx, &u.ID, &u.Username, &isAdmin)
+		Scan(ctx, &u.ID, &u.Username, &role, &expiresAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
-	u.IsAdmin = isAdmin != 0
+	scanUserParts(&u, role, expiresAt)
 	return &u, err
 }
 
@@ -261,11 +273,20 @@ func scanChannel(scanner interface{ Scan(...any) error }, c *Channel) error {
 	return err
 }
 
-const channelCols = `c.id, c.name, u.username, c.created_at, c.invite_only, c.created_by`
+// 房主（OwnerID/CreatedBy）的权威是 channel_members 的 owner 行，channels.created_by
+// 只作历史记录兜底（迁移前的库在游标 v5 之后才一致，COALESCE 保证期间读出旧值）。
+const channelCols = `c.id, c.name, COALESCE(ou.username, ''), c.created_at, c.invite_only, COALESCE(om.user_id, c.created_by)`
+const channelJoins = ` FROM channels c
+LEFT JOIN channel_members om ON om.channel_id = c.id AND om.role = 'owner'
+LEFT JOIN users ou ON ou.id = COALESCE(om.user_id, c.created_by)`
 
 func (s *Store) CreateChannel(ctx context.Context, name string, userID int64) (*Channel, error) {
 	row := &channelRow{Name: name, CreatedBy: userID}
 	if _, err := s.bun.NewInsert().Model(row).Exec(ctx); err != nil {
+		return nil, err
+	}
+	// 归属的权威行：建频道即写 owner 成员行
+	if err := s.SetChannelRole(ctx, row.ID, userID, ChannelRoleOwner); err != nil {
 		return nil, err
 	}
 	return s.ChannelByID(ctx, row.ID)
@@ -274,9 +295,8 @@ func (s *Store) CreateChannel(ctx context.Context, name string, userID int64) (*
 // ChannelByID 按 ID 取频道完整信息（含房主与邀请制标记）。
 func (s *Store) ChannelByID(ctx context.Context, id int64) (*Channel, error) {
 	var c Channel
-	err := scanChannel(s.bun.QueryRowContext(ctx, `
-SELECT `+channelCols+` FROM channels c
-JOIN users u ON u.id = c.created_by WHERE c.id = ?`, id), &c)
+	err := scanChannel(s.bun.QueryRowContext(ctx,
+		`SELECT `+channelCols+channelJoins+` WHERE c.id = ?`, id), &c)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -284,9 +304,8 @@ JOIN users u ON u.id = c.created_by WHERE c.id = ?`, id), &c)
 }
 
 func (s *Store) ListChannels(ctx context.Context) ([]Channel, error) {
-	rows, err := s.bun.QueryContext(ctx, `
-SELECT `+channelCols+` FROM channels c
-JOIN users u ON u.id = c.created_by ORDER BY c.id`)
+	rows, err := s.bun.QueryContext(ctx,
+		`SELECT `+channelCols+channelJoins+` ORDER BY c.id`)
 	if err != nil {
 		return nil, err
 	}
@@ -304,9 +323,8 @@ JOIN users u ON u.id = c.created_by ORDER BY c.id`)
 
 func (s *Store) ChannelByName(ctx context.Context, name string) (*Channel, error) {
 	var c Channel
-	err := scanChannel(s.bun.QueryRowContext(ctx, `
-SELECT `+channelCols+` FROM channels c
-JOIN users u ON u.id = c.created_by WHERE c.name = ?`, name), &c)
+	err := scanChannel(s.bun.QueryRowContext(ctx,
+		`SELECT `+channelCols+channelJoins+` WHERE c.name = ?`, name), &c)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -395,15 +413,32 @@ func (s *Store) RemoveMember(ctx context.Context, channelID, userID int64) error
 	return err
 }
 
-// ListMembers 返回该频道白名单用户名列表。
+// ListMembers 返回该频道全部成员行（owner/moderator/member 都带角色）。
 func (s *Store) ListMembers(ctx context.Context, channelID int64) ([]UserRef, error) {
-	return s.listUserRefs(ctx, "channel_members", channelID)
+	out := []UserRef{}
+	rows, err := s.bun.QueryContext(ctx, `
+SELECT u.id, u.username, t.role FROM channel_members t JOIN users u ON u.id = t.user_id
+WHERE t.channel_id = ? ORDER BY t.created_at`, channelID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var ref UserRef
+		if err := rows.Scan(&ref.ID, &ref.Username, &ref.Role); err != nil {
+			return nil, err
+		}
+		out = append(out, ref)
+	}
+	return out, rows.Err()
 }
 
-// UserRef 名单条目：id 是操作目标（解禁/移出白名单按它发），username 只用于展示。
+// UserRef 名单条目：id 是操作目标（解禁/移出白名单按它发），username 只用于展示；
+// Role 仅 ListMembers 填充（channel_members 的角色列），其余名单为空。
 type UserRef struct {
-	ID       int64  `json:"id"`
-	Username string `json:"username"`
+	ID       int64       `json:"id"`
+	Username string      `json:"username"`
+	Role     ChannelRole `json:"role,omitempty"`
 }
 
 // listUserRefs 取 channel_bans/channel_gags/channel_members 的名单（三表结构相同）。

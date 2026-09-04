@@ -1,4 +1,4 @@
-// 迁移 v5（内核收敛）的测试：选择器改写、退场实例行删除、旧全局键删除、
+// 迁移 v6（内核收敛）的测试：选择器改写、退场实例行删除、旧全局键删除、
 // ingest_endpoints 清空、幂等重入。
 package api
 
@@ -14,22 +14,22 @@ import (
 	"hearth/server/internal/store"
 )
 
-// rerunV5 把游标拨回 4 并重跑迁移（New 已在空库上跑完全部迁移，这里模拟旧库升级）。
-func rerunV5(t *testing.T, a *API) {
+// rerunV6 把游标拨回 5 并重跑迁移（New 已在空库上跑完全部迁移，这里模拟旧库升级）。
+func rerunV6(t *testing.T, a *API) {
 	t.Helper()
-	if err := a.st.SetMigrationVersion(context.Background(), 4); err != nil {
+	if err := a.st.SetMigrationVersion(context.Background(), 5); err != nil {
 		t.Fatalf("拨游标失败: %v", err)
 	}
 	a.runMigrations(context.Background())
-	if v, _ := a.st.MigrationVersion(context.Background()); v != 5 {
-		t.Fatalf("迁移成功后游标应为 5，实际 %d", v)
+	if v, _ := a.st.MigrationVersion(context.Background()); v != 6 {
+		t.Fatalf("迁移成功后游标应为 6，实际 %d", v)
 	}
 }
 
 // 选择器改写：voice 为 ember/pion/bellows/不存在的 alias → lkembed；
 // stage 显式 none 保持 none，指向已删类型实例或不存在的 alias → lkembed；
 // 指向 livekit 类型实例的选择器保留。
-func TestMigrateV5SelectorRewrite(t *testing.T) {
+func TestMigrateV6SelectorRewrite(t *testing.T) {
 	maskProviderEnv(t)
 	for _, tc := range []struct {
 		name      string
@@ -59,14 +59,14 @@ func TestMigrateV5SelectorRewrite(t *testing.T) {
 				a.st.SetSetting(ctx, "cfg_stage_provider", tc.stage)
 			}
 			if tc.ingress {
-				// 类型名按历史字面量写：对应常量已随实现一并删除，v5 按字面量匹配删行
+				// 类型名按历史字面量写：对应常量已随实现一并删除，v6 按字面量匹配删行
 				if err := a.st.CreateProvider(ctx, &store.ProviderRecord{Alias: "ing1", Type: "livekit-ingress",
 					Params: map[string]string{"ingress_upstream_url": "http://x:58080"}}); err != nil {
 					t.Fatalf("造 ingress 实例失败: %v", err)
 				}
 				a.st.SetSetting(ctx, "cfg_stage_provider", "ing1")
 			}
-			rerunV5(t, a)
+			rerunV6(t, a)
 			if v, _ := a.st.GetSetting(ctx, "cfg_voice_provider"); v != tc.wantVoice {
 				t.Fatalf("voice 选择器应为 %q，实际 %q", tc.wantVoice, v)
 			}
@@ -78,7 +78,7 @@ func TestMigrateV5SelectorRewrite(t *testing.T) {
 }
 
 // 选择器指向 livekit 类型实例（DB 注册）时保留——旧部署行为不变。
-func TestMigrateV5KeepsLivekitSelectors(t *testing.T) {
+func TestMigrateV6KeepsLivekitSelectors(t *testing.T) {
 	maskProviderEnv(t)
 	a := testAPI(t)
 	ctx := context.Background()
@@ -87,7 +87,7 @@ func TestMigrateV5KeepsLivekitSelectors(t *testing.T) {
 	}
 	a.st.SetSetting(ctx, "cfg_voice_provider", "lk1")
 	a.st.SetSetting(ctx, "cfg_stage_provider", "lk1")
-	rerunV5(t, a)
+	rerunV6(t, a)
 	if v, _ := a.st.GetSetting(ctx, "cfg_voice_provider"); v != "lk1" {
 		t.Fatalf("指向 livekit 实例的 voice 选择器应保留，实际 %q", v)
 	}
@@ -98,7 +98,7 @@ func TestMigrateV5KeepsLivekitSelectors(t *testing.T) {
 
 // 清理动作：cfg_ingest_provider 键删除；providers 表退场类型的行删除（逐条日志）；
 // cfg_ember_*/cfg_bellows_*/cfg_pion_* 与 cfg_ingress_upstream_url 删除；ingest_endpoints 清空；其余键不动。
-func TestMigrateV5Cleanup(t *testing.T) {
+func TestMigrateV6Cleanup(t *testing.T) {
 	maskProviderEnv(t)
 	a, dbPath := testAPIWithDB(t)
 	ctx := context.Background()
@@ -143,7 +143,7 @@ func TestMigrateV5Cleanup(t *testing.T) {
 	log.SetOutput(&logBuf)
 	defer log.SetOutput(os.Stderr)
 
-	rerunV5(t, a)
+	rerunV6(t, a)
 
 	if _, err := a.st.GetSetting(ctx, "cfg_ingest_provider"); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("cfg_ingest_provider 键应被删除，err=%v", err)
@@ -166,7 +166,7 @@ func TestMigrateV5Cleanup(t *testing.T) {
 	if _, err := a.st.ProviderByAlias(ctx, "lk1"); err != nil {
 		t.Fatalf("livekit 实例行应保留，err=%v", err)
 	}
-	if out := logBuf.String(); !bytes.Contains(logBuf.Bytes(), []byte("迁移 v5")) ||
+	if out := logBuf.String(); !bytes.Contains(logBuf.Bytes(), []byte("迁移 v6")) ||
 		!bytes.Contains([]byte(out), []byte("ing1")) || !bytes.Contains([]byte(out), []byte("br1")) {
 		t.Fatalf("迁移日志应逐条记录删除的实例: %q", out)
 	}
@@ -188,8 +188,8 @@ func TestMigrateV5Cleanup(t *testing.T) {
 	}
 }
 
-// 幂等：重复执行 v5 不出错、结果不变（游标失败重入/手工重跑场景）。
-func TestMigrateV5Idempotent(t *testing.T) {
+// 幂等：重复执行 v6 不出错、结果不变（游标失败重入/手工重跑场景）。
+func TestMigrateV6Idempotent(t *testing.T) {
 	maskProviderEnv(t)
 	a := testAPI(t)
 	ctx := context.Background()

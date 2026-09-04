@@ -284,7 +284,8 @@ type migrationStep struct {
 // 以后所有跨版本兼容处理都作为新版本步挂在这里。
 func (a *API) runMigrations(ctx context.Context) {
 	a.runMigrationSteps(ctx, []migrationStep{{1, a.migrateProviders}, {2, a.importSelectorEnv},
-		{3, a.migrateIngestTokens}, {4, a.migrateEndpointIdentity}, {5, a.migrateKernelConsolidation}})
+		{3, a.migrateIngestTokens}, {4, a.migrateEndpointIdentity}, {5, a.migrateRoles},
+		{6, a.migrateKernelConsolidation}})
 	a.reloadProviders(ctx)
 }
 
@@ -347,7 +348,7 @@ func (a *API) migrateProviders(ctx context.Context) error {
 		}
 	}
 	// livekit-ingress / bellows-remote 两类旧全局键不再导入为实例：这两个类型已退场，
-	// 即使建行也会被迁移 v5 删除；旧 cfg_ingress_upstream_url / cfg_bellows_* 键由 v5 清理。
+	// 即使建行也会被迁移 v6 删除；旧 cfg_ingress_upstream_url / cfg_bellows_* 键由 v6 清理。
 
 	// 选择器默认落库：老部署（后台未选过）原来默认跑 livekit，注册表默认是内建
 	// lkembed，这里把旧默认写死，保证升级后行为不变。
@@ -412,12 +413,12 @@ func (a *API) migrateIngestTokens(ctx context.Context) error {
 // 存量上游端点里固化的 identity/name/metadata 全部过期——清空 ingest_endpoints，
 // 下次推流按新 identity 惰性重建。幂等：表已空时为空操作。
 // 历史上本步还会逐实例调内核侧 DeleteEndpoint 清上游端点；持端点的 livekit-ingress
-// 类型已随内核收敛退场（实例行由 v5 删除），上游残留端点由管理员自行清理。
+// 类型已随内核收敛退场（实例行由 v6 删除），上游残留端点由管理员自行清理。
 func (a *API) migrateEndpointIdentity(ctx context.Context) error {
 	return a.st.DeleteAllIngestEndpoints(ctx)
 }
 
-// migrateKernelConsolidation v5：内核收敛——Ember/Bellows/livekit-ingress 退场，
+// migrateKernelConsolidation v6：内核收敛——Ember/Bellows/livekit-ingress 退场，
 // 进程内 LiveKit（lkembed）成为默认内核。选择器默认值已改为 lkembed，空值由新默认
 // 自然覆盖（不落库，管理员之后清空恢复默认不被撤销）；本步只处理显式落库过的旧值：
 //  1. 选择器改写：voice 为 ember/pion/bellows/任何不存在的 alias → lkembed；
@@ -440,7 +441,7 @@ func (a *API) migrateKernelConsolidation(ctx context.Context) error {
 			if err := a.st.DeleteProvider(ctx, rec.Alias); err != nil {
 				return err
 			}
-			log.Printf("迁移 v5: 删除退场实例 %s（类型 %s）", rec.Alias, rec.Type)
+			log.Printf("迁移 v6: 删除退场实例 %s（类型 %s）", rec.Alias, rec.Type)
 		}
 	}
 	// 可留任语音/舞台槽位的 alias：内建 lkembed + livekit 类型实例（env 锁定或 DB 注册）
@@ -458,19 +459,19 @@ func (a *API) migrateKernelConsolidation(ctx context.Context) error {
 		if err := a.st.SetSetting(ctx, "cfg_voice_provider", AliasLkembed); err != nil {
 			return err
 		}
-		log.Printf("迁移 v5: 语音内核选择器 %q 已不可用，改写为 lkembed（语音并入进程内 LiveKit）", v)
+		log.Printf("迁移 v6: 语音内核选择器 %q 已不可用，改写为 lkembed（语音并入进程内 LiveKit）", v)
 	}
 	v, _ = a.st.GetSetting(ctx, "cfg_stage_provider")
 	if v = strings.TrimSpace(v); v != "" && v != "none" && !valid[v] {
 		if err := a.st.SetSetting(ctx, "cfg_stage_provider", AliasLkembed); err != nil {
 			return err
 		}
-		log.Printf("迁移 v5: 舞台内核选择器 %q 已不可用，改写为 lkembed（显式 none 保持不变）", v)
+		log.Printf("迁移 v6: 舞台内核选择器 %q 已不可用，改写为 lkembed（显式 none 保持不变）", v)
 	}
 	if err := a.st.DeleteSetting(ctx, "cfg_ingest_provider"); err != nil {
 		return err
 	}
-	log.Printf("迁移 v5: 推流入口选择器 cfg_ingest_provider 已删除（推流并入舞台内核自带 WHIP）")
+	log.Printf("迁移 v6: 推流入口选择器 cfg_ingest_provider 已删除（推流并入舞台内核自带 WHIP）")
 	if err := a.st.DeleteSetting(ctx, "cfg_ingress_upstream_url"); err != nil {
 		return err
 	}
@@ -480,12 +481,12 @@ func (a *API) migrateKernelConsolidation(ctx context.Context) error {
 			return err
 		}
 		if n > 0 {
-			log.Printf("迁移 v5: 删除退场内核配置键 %s* 共 %d 个", prefix, n)
+			log.Printf("迁移 v6: 删除退场内核配置键 %s* 共 %d 个", prefix, n)
 		}
 	}
 	if err := a.st.DeleteAllIngestEndpoints(ctx); err != nil {
 		return err
 	}
-	log.Printf("迁移 v5: ingest_endpoints 表已清空（livekit-ingress 端点映射随实例类型一并作废）")
+	log.Printf("迁移 v6: ingest_endpoints 表已清空（livekit-ingress 端点映射随实例类型一并作废）")
 	return nil
 }

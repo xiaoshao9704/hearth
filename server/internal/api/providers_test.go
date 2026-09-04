@@ -101,7 +101,7 @@ func TestMigrateImportsLegacyCfg(t *testing.T) {
 	maskProviderEnv(t)
 	a := testAPI(t)
 	ctx := context.Background()
-	// testAPI 的 New 已跑过全部迁移（空库游标 0→5）；重置游标并只重跑 v1，
+	// testAPI 的 New 已跑过全部迁移（空库游标 0→6）；重置游标并只重跑 v1，
 	// 模拟从旧版本升级到注册制这一步（后续版本步会改写/删除这里断言的中间产物）
 	a.st.SetMigrationVersion(ctx, 0)
 	a.st.SetSetting(ctx, "cfg_livekit_api_url", "http://old:7880")
@@ -120,12 +120,12 @@ func TestMigrateImportsLegacyCfg(t *testing.T) {
 		t.Fatal("导入后旧 cfg_ 键应删除")
 	}
 	// 退场类型的旧键 v1 不再导入为实例（livekit-ingress/bellows-remote 已删类型），
-	// 留着由迁移 v5 清理
+	// 留着由迁移 v6 清理
 	if a.instance("livekit-ingress") != nil {
 		t.Fatal("cfg_ingress_upstream_url 不应再导入为实例")
 	}
 	if v, _ := a.st.GetSetting(ctx, "cfg_ingress_upstream_url"); v != "http://old:58080" {
-		t.Fatalf("cfg_ingress_upstream_url 应原样留给 v5 清理，实际 %q", v)
+		t.Fatalf("cfg_ingress_upstream_url 应原样留给 v6 清理，实际 %q", v)
 	}
 }
 
@@ -167,7 +167,7 @@ func TestMigratePinsLegacySelectors(t *testing.T) {
 	ctx := context.Background()
 	a.st.SetMigrationVersion(ctx, 0)
 	// 旧部署：只配了 livekit 系 cfg_ 键，从未显式设过选择器。
-	// 只重跑 v1（后续版本步会删除/改写这里的部分产物，见迁移 v5）
+	// 只重跑 v1（后续版本步会删除/改写这里的部分产物，见迁移 v6）
 	a.st.SetSetting(ctx, "cfg_livekit_api_key", "k")
 	a.st.SetSetting(ctx, "cfg_livekit_api_secret", "s")
 	a.runMigrationSteps(ctx, []migrationStep{{1, a.migrateProviders}})
@@ -227,7 +227,7 @@ func TestMigrationFailureKeepsCursor(t *testing.T) {
 func TestMigrateFreshDeployKeepsBuiltinDefaults(t *testing.T) {
 	// 屏蔽真实环境里可能存在的内核变量，保证「全新部署」前提
 	maskProviderEnv(t)
-	a := testAPI(t) // New 里已完成全新部署的首次迁移（游标 0→5）
+	a := testAPI(t) // New 里已完成全新部署的首次迁移（游标 0→6）
 	ctx := context.Background()
 	a.runMigrations(ctx) // 重跑幂等
 	for _, k := range []string{"cfg_voice_provider", "cfg_stage_provider", "cfg_ingest_provider"} {

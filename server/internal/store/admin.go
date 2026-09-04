@@ -132,15 +132,22 @@ func (s *Store) SetMigrationVersion(ctx context.Context, v int) error {
 type Invite struct {
 	bun.BaseModel `bun:"table:invites,alias:i"`
 
-	ID        int64     `bun:",pk,autoincrement" json:"id"`
-	Code      string    `json:"code"`
-	Note      string    `json:"note"`
-	MaxUses   int       `json:"max_uses"` // 0 = 不限
-	Used      int       `json:"used"`
-	Revoked   bool      `json:"revoked"`
-	CreatedBy string    `bun:"-" json:"created_by"` // 创建者用户名（JOIN 填充）
-	CreatedAt time.Time `json:"created_at"`
-	ExpiresAt time.Time `json:"expires_at"`
+	ID          int64     `bun:",pk,autoincrement" json:"id"`
+	Code        string    `json:"code"`
+	Kind        string    `json:"kind"`                 // register/guest
+	ChannelID   *int64    `json:"channel_id"`           // guest 类授予的频道
+	ChannelName string    `bun:"-" json:"channel_name"` // guest 类授予的频道名（JOIN 填充）
+	Role        string    `json:"role"`                 // register 类产出的系统角色
+	GuestTTLSec int       `json:"guest_ttl_sec"`        // guest 类产出访客的寿命（秒）
+	AllowGuest  bool      `json:"allow_guest"`          // register 类是否允许「先以访客进入」（阶段三）
+	Note        string    `json:"note"`
+	MaxUses     int       `json:"max_uses"` // 0 = 不限
+	Used        int       `json:"used"`
+	Revoked     bool      `json:"revoked"`
+	CreatedBy   string    `bun:"-" json:"created_by"` // 创建者用户名（JOIN 填充）
+	CreatedByID int64     `json:"-"`                  // 创建者 user_id（归属判断用，不外发）
+	CreatedAt   time.Time `json:"created_at"`
+	ExpiresAt   time.Time `json:"expires_at"`
 }
 
 // Alive 邀请当前是否可用。
@@ -153,7 +160,8 @@ func (i *Invite) Alive(now time.Time) bool {
 
 const inviteAlphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789" // 去掉易混淆字符
 
-func (s *Store) CreateInvite(ctx context.Context, createdBy int64, note string, maxUses int, ttl time.Duration) (*Invite, error) {
+// CreateInvite 创建注册类邀请；role 为空表示跟随注册默认档（消费时按 cfg_reg_default_role 解析）。
+func (s *Store) CreateInvite(ctx context.Context, createdBy int64, note string, maxUses int, ttl time.Duration, role Role) (*Invite, error) {
 	buf := make([]byte, 8)
 	if _, err := rand.Read(buf); err != nil {
 		return nil, err
@@ -162,35 +170,55 @@ func (s *Store) CreateInvite(ctx context.Context, createdBy int64, note string, 
 	for i, b := range buf {
 		code[i] = inviteAlphabet[int(b)%len(inviteAlphabet)]
 	}
-	inv := &Invite{Code: string(code), Note: note, MaxUses: maxUses, ExpiresAt: time.Now().Add(ttl)}
-	row := &inviteRow{Code: inv.Code, Note: note, MaxUses: maxUses, CreatedBy: createdBy, ExpiresAt: inv.ExpiresAt}
+	inv := &Invite{Code: string(code), Kind: "register", Role: string(role),
+		Note: note, MaxUses: maxUses, ExpiresAt: time.Now().Add(ttl)}
+	row := &inviteRow{Code: inv.Code, Note: note, MaxUses: maxUses, CreatedBy: createdBy,
+		ExpiresAt: inv.ExpiresAt, Role: string(role)}
 	// max_uses = 0 是合法值（不限次数），而模型带 default:1 时零值会被写成 DEFAULT，
 	// 用 Column + Value 强制按实参写入；显式 Column 后自增 id 不进自动 RETURNING 列表，
 	// 需显式 Returning("id") 才能回填主键（mysql 不支持 RETURNING，自动回落 LastInsertId）。
 	_, err := s.bun.NewInsert().Model(row).
-		Column("code", "note", "max_uses", "expires_at", "created_by").
+		Column("code", "note", "max_uses", "expires_at", "created_by", "role").
 		Value("max_uses", "?", maxUses).
+		Value("role", "?", string(role)).
 		Returning("id").
 		Exec(ctx)
 	if err != nil {
 		return nil, err
 	}
 	inv.ID = row.ID
+	inv.CreatedByID = createdBy
 	return inv, nil
 }
 
 func scanInvite(scanner interface{ Scan(...any) error }, i *Invite) error {
-	var revoked int64
-	err := scanner.Scan(&i.ID, &i.Code, &i.Note, &i.MaxUses, &i.Used, &revoked, &i.CreatedBy, &i.CreatedAt, &i.ExpiresAt)
+	var revoked, allowGuest int64
+	err := scanner.Scan(&i.ID, &i.Code, &i.Kind, &i.ChannelID, &i.Role, &i.GuestTTLSec, &allowGuest,
+		&i.Note, &i.MaxUses, &i.Used, &revoked, &i.CreatedByID, &i.CreatedBy, &i.ChannelName, &i.CreatedAt, &i.ExpiresAt)
 	i.Revoked = revoked != 0
+	i.AllowGuest = allowGuest != 0
 	return err
 }
 
-const inviteCols = `i.id, i.code, i.note, i.max_uses, i.used, i.revoked, u.username, i.created_at, i.expires_at`
+const inviteCols = `i.id, i.code, i.kind, i.channel_id, i.role, i.guest_ttl_sec, i.allow_guest,
+	i.note, i.max_uses, i.used, i.revoked, i.created_by, u.username, COALESCE(ic.name, ''), i.created_at, i.expires_at`
+const inviteJoins = ` FROM invites i
+JOIN users u ON u.id = i.created_by
+LEFT JOIN channels ic ON ic.id = i.channel_id`
 
+// ListInvites 全部邀请（管理员视角）。
 func (s *Store) ListInvites(ctx context.Context) ([]Invite, error) {
-	rows, err := s.bun.QueryContext(ctx, `
-SELECT `+inviteCols+` FROM invites i JOIN users u ON u.id = i.created_by ORDER BY i.id DESC`)
+	return s.listInvites(ctx, "")
+}
+
+// ListInvitesByCreator 某个用户发的邀请。
+func (s *Store) ListInvitesByCreator(ctx context.Context, createdBy int64) ([]Invite, error) {
+	return s.listInvites(ctx, " WHERE i.created_by = ?", createdBy)
+}
+
+func (s *Store) listInvites(ctx context.Context, where string, args ...any) ([]Invite, error) {
+	rows, err := s.bun.QueryContext(ctx,
+		`SELECT `+inviteCols+inviteJoins+where+` ORDER BY i.id DESC`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -208,8 +236,18 @@ SELECT `+inviteCols+` FROM invites i JOIN users u ON u.id = i.created_by ORDER B
 
 func (s *Store) InviteByCode(ctx context.Context, code string) (*Invite, error) {
 	var i Invite
-	err := scanInvite(s.bun.QueryRowContext(ctx, `
-SELECT `+inviteCols+` FROM invites i JOIN users u ON u.id = i.created_by WHERE i.code = ?`, code), &i)
+	err := scanInvite(s.bun.QueryRowContext(ctx,
+		`SELECT `+inviteCols+inviteJoins+` WHERE i.code = ?`, code), &i)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	return &i, err
+}
+
+func (s *Store) InviteByID(ctx context.Context, id int64) (*Invite, error) {
+	var i Invite
+	err := scanInvite(s.bun.QueryRowContext(ctx,
+		`SELECT `+inviteCols+inviteJoins+` WHERE i.id = ?`, id), &i)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -247,19 +285,26 @@ func (s *Store) DeleteInvite(ctx context.Context, id int64) error {
 type AdminUser struct {
 	ID        int64      `json:"id"`
 	Username  string     `json:"username"`
-	IsAdmin   bool       `json:"is_admin"`
+	Role      Role       `json:"role"`
+	IsAdmin   bool       `json:"is_admin"` // 派生只读（role ≥ admin），前端过渡用
 	Disabled  bool       `json:"disabled"`
+	ExpiresAt *time.Time `json:"expires_at"` // 访客行：过期时间
+	Invite    string     `json:"invite"`     // 访客行：来源邀请码（无则空）
 	CreatedAt time.Time  `json:"created_at"`
 	Devices   int        `json:"devices"`
 	LastSeen  *time.Time `json:"last_seen"` // 任一设备最近活跃；无设备档案为 null
+	// CanSetRoles 当前请求的管理员可给该用户授予的角色候选（接口层按 perm 规则填充，前端不推导阶梯）
+	CanSetRoles []Role `json:"can_set_roles"`
 }
 
 func (s *Store) ListUsersAdmin(ctx context.Context) ([]AdminUser, error) {
 	rows, err := s.bun.QueryContext(ctx, `
-SELECT u.id, u.username, u.is_admin, u.disabled, u.created_at,
+SELECT u.id, u.username, u.role, u.disabled, u.created_at, u.expires_at, COALESCE(iv.code, ''),
        COUNT(d.id), MAX(d.last_seen)
-FROM users u LEFT JOIN devices d ON d.user_id = u.id
-GROUP BY u.id, u.username, u.is_admin, u.disabled, u.created_at
+FROM users u
+LEFT JOIN devices d ON d.user_id = u.id
+LEFT JOIN invites iv ON iv.id = u.invite_id
+GROUP BY u.id, u.username, u.role, u.disabled, u.created_at, u.expires_at, iv.code
 ORDER BY u.id`)
 	if err != nil {
 		return nil, err
@@ -268,14 +313,20 @@ ORDER BY u.id`)
 	out := []AdminUser{}
 	for rows.Next() {
 		var u AdminUser
-		var isAdmin, disabled int64
+		var role, invite string
+		var disabled int64
+		var expiresAt *time.Time
 		// MAX() 聚合没有列声明类型:sqlite 驱动返回字符串,MySQL/PG 返回 time.Time
 		var last any
-		if err := rows.Scan(&u.ID, &u.Username, &isAdmin, &disabled, &u.CreatedAt, &u.Devices, &last); err != nil {
+		if err := rows.Scan(&u.ID, &u.Username, &role, &disabled, &u.CreatedAt, &expiresAt, &invite,
+			&u.Devices, &last); err != nil {
 			return nil, err
 		}
-		u.IsAdmin = isAdmin != 0
+		u.Role = Role(role)
+		u.IsAdmin = u.Role.Rank() >= RoleAdmin.Rank()
 		u.Disabled = disabled != 0
+		u.ExpiresAt = expiresAt
+		u.Invite = invite
 		u.LastSeen = aggTime(last)
 		out = append(out, u)
 	}
@@ -305,14 +356,16 @@ func aggTime(v any) *time.Time {
 
 func (s *Store) UserByID(ctx context.Context, id int64) (*User, error) {
 	var u User
-	var isAdmin, disabled int64
+	var role string
+	var disabled int64
+	var expiresAt *time.Time
 	err := s.bun.NewRaw(
-		"SELECT id, username, is_admin, disabled FROM users WHERE id = ?", id).
-		Scan(ctx, &u.ID, &u.Username, &isAdmin, &disabled)
+		"SELECT id, username, role, disabled, expires_at FROM users WHERE id = ?", id).
+		Scan(ctx, &u.ID, &u.Username, &role, &disabled, &expiresAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
-	u.IsAdmin = isAdmin != 0
+	scanUserParts(&u, role, expiresAt)
 	u.Disabled = disabled != 0
 	return &u, err
 }
@@ -333,18 +386,38 @@ func (s *Store) SetUserDisabled(ctx context.Context, id int64, disabled bool) er
 	return nil
 }
 
-var ErrOwnsChannels = errors.New("用户仍是频道房主")
-
-// DeleteUser 删除用户及其会话/设备/白名单/封禁/推流令牌与端点记录；
-// 名下还有频道时拒绝（避免频道悬空），历史消息保留。
-func (s *Store) DeleteUser(ctx context.Context, id int64) error {
-	var n int
-	if err := s.bun.NewRaw(
-		"SELECT COUNT(1) FROM channels WHERE created_by = ?", id).Scan(ctx, &n); err != nil {
-		return err
+// DeleteUser 删除用户及其会话/设备/成员行/封禁/推流令牌与端点记录；其名下的 owner 频道
+// 过户给 adoptTo（执行删除的管理员，避免误伤活跃频道），历史消息保留。返回过户的频道数。
+func (s *Store) DeleteUser(ctx context.Context, id, adoptTo int64) (int, error) {
+	// owner 频道过户：旧 owner 行改到接收人名下（接收人在该频道的旧行先删，避免唯一冲突）
+	rows, err := s.bun.QueryContext(ctx,
+		"SELECT channel_id FROM channel_members WHERE user_id = ? AND role = 'owner'", id)
+	if err != nil {
+		return 0, err
 	}
-	if n > 0 {
-		return ErrOwnsChannels
+	var chans []int64
+	for rows.Next() {
+		var cid int64
+		if err := rows.Scan(&cid); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		chans = append(chans, cid)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	for _, cid := range chans {
+		if _, err := s.bun.NewRaw(
+			"DELETE FROM channel_members WHERE channel_id = ? AND user_id = ?", cid, adoptTo).Exec(ctx); err != nil {
+			return 0, err
+		}
+		if _, err := s.bun.NewRaw(
+			"UPDATE channel_members SET user_id = ? WHERE channel_id = ? AND user_id = ? AND role = 'owner'",
+			adoptTo, cid, id).Exec(ctx); err != nil {
+			return 0, err
+		}
 	}
 	for _, q := range []string{
 		"DELETE FROM sessions WHERE user_id = ?",
@@ -353,13 +426,14 @@ func (s *Store) DeleteUser(ctx context.Context, id int64) error {
 		"DELETE FROM ingest_tokens WHERE user_id = ?",
 		"DELETE FROM channel_members WHERE user_id = ?",
 		"DELETE FROM channel_bans WHERE user_id = ?",
+		"DELETE FROM channel_gags WHERE user_id = ?",
 		"DELETE FROM users WHERE id = ?",
 	} {
 		if _, err := s.bun.NewRaw(q, id).Exec(ctx); err != nil {
-			return err
+			return 0, err
 		}
 	}
-	return nil
+	return len(chans), nil
 }
 
 // ---- 管理后台：频道 ----

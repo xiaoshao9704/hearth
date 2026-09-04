@@ -1,6 +1,12 @@
 # Hearth v0.9.0 发布说明
 
-本版本的主题是**内核收敛**：自研的 Ember（语音）、Bellows（推流网关）与 livekit-ingress 适配整体退场，进程内补丁版 LiveKit（`lkembed`）成为唯一内核类型。两种形态：进程内（默认、零配置）与远端 `cmd/stage`；官方 LiveKit 仍可注册为外部实例。语音、投屏、摄像头、OBS 推流（HEVC/AV1 直通）全部走同一个内核。
+本版本的发布范围固定为三项：**内核收敛、单文件三系统、分层权限**。
+
+- 自研的 Ember（语音）、Bellows（推流网关）与 livekit-ingress 适配整体退场，进程内补丁版 LiveKit（`lkembed`）成为唯一内核类型。两种形态：进程内（默认、零配置）与远端 `cmd/stage`；官方 LiveKit 仍可注册为外部实例。语音、投屏、摄像头、OBS 推流（HEVC/AV1 直通）全部走同一个内核。
+- 前端资源编进服务端二进制，Linux、macOS、Windows 六个目标均提供可直接运行的单文件产物；数据目录按显式参数、便携目录、系统目录的顺序选择。
+- 系统权限改为 `guest < user < power < admin < super` 的严格阶梯，频道权限改为 `member < moderator < owner`，所有判定统一收口到 `perm` 包。
+
+CertMagic、libdns、DNS-01 与 IP 证书不在 v0.9.0 发布线上，留待真实环境验收后单独发布。
 
 ## ⚠️ 升级必读：默认语音端口变化
 
@@ -17,14 +23,30 @@
 - **HEVC/AV1 继续直通**：LiveKit 自带 WHIP 对 offer 编码原样保留，行为与上一版一致。
 - **远端 Bellows 用户**：远端机器改为跑单个 `cmd/stage` 容器（替代原来的 livekit + bellows 两个容器，部署说明见 README「远端舞台机器」），hearth 侧把 `stage_provider` 指向该实例即可。
 
-## 升级自动迁移（启动时一次性执行，只保留一个版本）
+## 单文件三系统
 
-启动日志会出现 `迁移 v5:` 系列行，自动完成：
+- 发布产物覆盖 Linux、macOS、Windows 的 amd64/arm64 六个目标，均为 `CGO_ENABLED=0` 的单文件二进制。
+- 前端构建产物经 `go:embed` 编进服务端；开发环境仍可用 `STATIC_DIR` 回落。
+- 裸机数据目录优先级为 `--data` / `HEARTH_DATA`、可执行文件旁的 `data/`、系统用户目录；`DB_PATH` 默认落在所选数据目录。
 
-- 选择器改写：`voice_provider` 为 `ember`/`pion`/`bellows`/失效 alias 的改为 `lkembed`；`stage_provider` 指向已删类型实例的改为 `lkembed`（显式 `none` 保持不变）。
-- 删除 `ingest_provider` 选择器与全部 `cfg_ember_*`/`cfg_bellows_*`/`cfg_pion_*` 配置键。
-- 删除 `livekit-ingress`、`bellows-remote` 类型的已注册实例（逐条打日志）。
-- 清空 `ingest_endpoints` 表（表结构保留，下个版本删除）。
+## 分层权限
+
+- 系统角色以 `users.role` 为权威；只有更高档角色可以管理更低档角色，`super` 全站恰好一个，只能用 `hearth promote <用户名>` 转移。
+- `power` 及以上可创建频道和发注册邀请；管理员可以配置注册默认档并管理角色。
+- 频道归属以 `channel_members.role` 为权威，支持频道主、频道管理员、成员三档；系统 `admin+` 在所有频道隐含频道主权限。
+- 旧 `is_admin` 与 `channels.created_by` 在本版只作兼容读取，下个版本再删列。
+
+## 升级自动迁移（启动时一次性执行）
+
+schema 迁移 `00003_roles` 先补齐角色字段，随后按不可复用的语义游标依次执行：
+
+- **v5 分层权限**：旧管理员映射为 `admin`，其中最早一位提升为 `super`；已有频道主提升为 `power`，并写入频道 `owner` 角色行。
+- **v6 内核收敛**：启动日志会出现 `迁移 v6:` 系列行，自动完成以下清理：
+
+  - 选择器改写：`voice_provider` 为 `ember`/`pion`/`bellows`/失效 alias 的改为 `lkembed`；`stage_provider` 指向已删类型实例的改为 `lkembed`（显式 `none` 保持不变）。
+  - 删除 `ingest_provider` 选择器与全部 `cfg_ember_*`/`cfg_bellows_*`/`cfg_pion_*` 配置键。
+  - 删除 `livekit-ingress`、`bellows-remote` 类型的已注册实例（逐条打日志）。
+  - 清空 `ingest_endpoints` 表（表结构保留，下个版本删除）。
 
 ## 部署侧需要手动清理的
 

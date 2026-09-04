@@ -14,6 +14,7 @@ import (
 
 	"hearth/server/internal/chat"
 	"hearth/server/internal/config"
+	"hearth/server/internal/perm"
 	"hearth/server/internal/rtc"
 	"hearth/server/internal/rtc/lite"
 	"hearth/server/internal/rtc/livekitembed"
@@ -102,6 +103,7 @@ func (a *API) Router() *chi.Mux {
 	r.Post("/api/register", a.registerWithPolicy)
 	r.Post("/api/login", a.login)
 	r.Get("/api/invites/{code}", a.inviteInfo)
+	r.Get("/api/site", a.site)
 
 	// 健康检查：只表示进程活着（宣告探测的刷新由进程内周期任务触发，不挂在这里）
 	r.Get("/healthz", a.healthz)
@@ -112,8 +114,16 @@ func (a *API) Router() *chi.Mux {
 		r.Post("/api/logout", a.logout)
 		r.Get("/api/me", a.me)
 		r.Get("/api/channels", a.listChannels)
-		r.Post("/api/channels", a.createChannel)
+		r.With(a.requireRole(store.RolePower)).Post("/api/channels", a.createChannel)
 		r.Post("/api/token", a.joinToken)
+
+		// 注册邀请：power+ 可发（产出 user）；admin+ 可指定产出档、可见/可撤全部邀请
+		r.Route("/api/invites", func(r chi.Router) {
+			r.Use(a.requireRole(store.RolePower))
+			r.Post("/", a.createInvite)
+			r.Get("/", a.listInvites)
+			r.Delete("/{id}", a.revokeInvite)
+		})
 
 		// 账户设置
 		r.Post("/api/account/username", a.updateUsername)
@@ -127,10 +137,10 @@ func (a *API) Router() *chi.Mux {
 		r.Put("/api/ingest/token", a.ingestTokenTag)
 
 		// 频道管理：频道解析与权限校验收敛到子路由中间件
-		// （踢人/封禁/静音等管理操作 = 房主或管理员，其余 = 仅房主）
+		// （现场管制与白名单 = 频道管理员及以上，归属变更与邀请制开关 = 仅频道主）
 		r.Route("/api/channels/{channel}", func(r chi.Router) {
 			// kick 单独放行到登录层：踢"自己"的设备（远程下线忘关的 OBS/其他设备）
-			// 不需要管理权限，踢别人在 handler 内要求房主/管理员
+			// 不需要管理权限，踢别人在 handler 内要求频道管理员及以上
 			r.Group(func(r chi.Router) {
 				r.Use(a.requireChannel)
 				r.Post("/kick", a.kick)
@@ -142,14 +152,18 @@ func (a *API) Router() *chi.Mux {
 				r.Post("/mute", a.mute)
 				r.Post("/unmute", a.unmute)
 				r.Get("/bans", a.listBans)
-			})
-			r.Group(func(r chi.Router) {
-				r.Use(a.requireOwner)
-				r.Post("/invite-only", a.setInviteOnly)
 				r.Get("/members", a.listMembers)
 				r.Post("/members", a.addMember)
 				r.Delete("/members", a.removeMember)
 				r.Get("/participants", a.channelParticipants)
+			})
+			r.Group(func(r chi.Router) {
+				r.Use(a.requireOwner)
+				r.Post("/invite-only", a.setInviteOnly)
+				r.Post("/transfer", a.transferChannel)
+				r.Get("/moderators", a.listModerators)
+				r.Post("/moderators", a.addModerator)
+				r.Delete("/moderators", a.removeModerator)
 			})
 		})
 
@@ -162,13 +176,11 @@ func (a *API) Router() *chi.Mux {
 			r.Get("/config", a.adminGetConfig)
 			r.Post("/config", a.adminSetConfig)
 			r.Get("/users", a.adminListUsers)
+			r.Post("/users/{id}/role", a.adminSetUserRole)
 			r.Post("/users/{id}/disable", a.adminSetUserDisabled(true))
 			r.Post("/users/{id}/enable", a.adminSetUserDisabled(false))
 			r.Delete("/users/{id}", a.adminDeleteUser)
 			r.Delete("/channels/{id}", a.adminDeleteChannel)
-			r.Get("/invites", a.adminListInvites)
-			r.Post("/invites", a.adminCreateInvite)
-			r.Delete("/invites/{id}", a.adminRevokeInvite)
 			r.Get("/providers", a.adminListProviders)
 			r.Post("/providers", a.adminCreateProvider)
 			r.Put("/providers/{alias}", a.adminUpdateProvider)
@@ -247,19 +259,27 @@ func (a *API) channelOf(w http.ResponseWriter, r *http.Request) *store.Channel {
 	return c
 }
 
-// requireOwner 房主校验中间件：解析 {channel} 频道并确认当前用户是房主，频道注入 context。
+// requireRole 系统角色门槛中间件：低于该档一律 403（挂在 auth 之后）。
+func (a *API) requireRole(role store.Role) func(http.Handler) http.Handler {
+	label := map[store.Role]string{
+		store.RolePower: "需要高级用户权限",
+		store.RoleAdmin: "需要管理员权限",
+	}[role]
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if !perm.SysAtLeast(userFrom(r), role) {
+				writeErr(w, http.StatusForbidden, label)
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+// requireOwner 频道主校验中间件：解析 {channel} 频道并确认当前用户是频道主
+// （含系统 admin+ 的隐含频道主），频道注入 context。
 func (a *API) requireOwner(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		c := a.channelOf(w, r)
-		if c == nil {
-			return
-		}
-		if c.OwnerID != userFrom(r).ID {
-			writeErr(w, http.StatusForbidden, "只有房主能操作")
-			return
-		}
-		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), ctxChannel, c)))
-	})
+	return a.requireChannelRole(store.ChannelRoleOwner, "只有频道主能操作")(next)
 }
 
 // requireChannel 仅解析 {channel} 注入 context（权限由 handler 自行判定）。
@@ -273,19 +293,31 @@ func (a *API) requireChannel(next http.Handler) http.Handler {
 	})
 }
 
-// requireModerator 房主或管理员校验中间件：用于踢人/封禁/静音等频道管理操作，频道注入 context。
+// requireModerator 频道管理员及以上校验中间件（含频道主与系统 admin+），频道注入 context。
 func (a *API) requireModerator(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		c := a.channelOf(w, r)
-		if c == nil {
-			return
-		}
-		if u := userFrom(r); c.OwnerID != u.ID && !u.IsAdmin {
-			writeErr(w, http.StatusForbidden, "只有房主或管理员能操作")
-			return
-		}
-		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), ctxChannel, c)))
-	})
+	return a.requireChannelRole(store.ChannelRoleModerator, "需要频道管理员权限")(next)
+}
+
+// requireChannelRole 频道角色门槛中间件：解析 {channel} 频道并校验当前用户的频道角色。
+func (a *API) requireChannelRole(need store.ChannelRole, msg string) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			c := a.channelOf(w, r)
+			if c == nil {
+				return
+			}
+			cr, err := perm.ChannelRole(r.Context(), a.st, c, userFrom(r))
+			if err != nil {
+				writeErr(w, http.StatusInternalServerError, "内部错误")
+				return
+			}
+			if !perm.ChannelAtLeast(cr, need) {
+				writeErr(w, http.StatusForbidden, msg)
+				return
+			}
+			next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), ctxChannel, c)))
+		})
+	}
 }
 
 // cors 跨域中间件：开发期前端在 vite dev server（不同端口）。
@@ -367,9 +399,22 @@ func (a *API) listChannels(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "内部错误")
 		return
 	}
+	roles, err := a.st.ChannelRolesOf(r.Context(), u.ID)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "内部错误")
+		return
+	}
+	// 系统 admin+ 在任何频道隐含频道主（与 perm.ChannelRole 同口径，批量填充免逐频道查询）
+	implicit := ""
+	if perm.SysAtLeast(u, store.RoleAdmin) {
+		implicit = string(store.ChannelRoleOwner)
+	}
 	counts, _ := a.roomCounts(r.Context()) // LiveKit 不可达时在线数保持 0
 	for i := range chs {
-		chs[i].IsOwner = chs[i].OwnerID == u.ID
+		chs[i].MyRole = implicit
+		if chs[i].MyRole == "" {
+			chs[i].MyRole = string(roles[chs[i].ID])
+		}
 		chs[i].Online = counts[chs[i].Name]
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"channels": chs})
@@ -401,6 +446,7 @@ func (a *API) createChannel(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "内部错误")
 		return
 	}
+	c.MyRole = string(store.ChannelRoleOwner) // 创建者即频道主
 	writeJSON(w, http.StatusCreated, c)
 }
 
@@ -593,7 +639,7 @@ func (a *API) evict(r *http.Request, c *store.Channel, t *store.User, identity s
 }
 
 // kick 踢出目标用户：identity 为空踢全部设备，非空只踢该设备（须归属该 user_id）。
-// 踢自己（含自己的单个设备）只需登录；踢别人要求房主/管理员。
+// 踢自己（含自己的单个设备）只需登录；踢别人要求频道管理员及以上。
 func (a *API) kick(w http.ResponseWriter, r *http.Request) {
 	c := channelFrom(r)
 	u := userFrom(r)
@@ -604,9 +650,16 @@ func (a *API) kick(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &req) {
 		return
 	}
-	if req.UserID != u.ID && c.OwnerID != u.ID && !u.IsAdmin {
-		writeErr(w, http.StatusForbidden, "只有房主或管理员能踢出他人")
-		return
+	if req.UserID != u.ID {
+		cr, err := perm.ChannelRole(r.Context(), a.st, c, u)
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, "内部错误")
+			return
+		}
+		if !perm.ChannelAtLeast(cr, store.ChannelRoleModerator) {
+			writeErr(w, http.StatusForbidden, "需要频道管理员权限")
+			return
+		}
 	}
 	if req.Identity != "" && !rtc.MatchesUser(req.Identity, req.UserID) {
 		writeErr(w, http.StatusBadRequest, "设备不属于该用户")
@@ -765,6 +818,86 @@ func (a *API) removeMember(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := a.st.RemoveMember(r.Context(), c.ID, t.ID); err != nil {
+		writeErr(w, http.StatusInternalServerError, "内部错误")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// resolveRoleTarget 解析 {user_id} 目标并校验其可持有频道角色：须存在、不是自己、
+// 非访客（访客不持有 owner/moderator，授予即拒绝）。转让与管理员授予共用。
+func (a *API) resolveRoleTarget(w http.ResponseWriter, r *http.Request) *store.User {
+	t := a.resolveTargetUser(w, r, userFrom(r))
+	if t == nil {
+		return nil
+	}
+	if t.Role == store.RoleGuest {
+		writeErr(w, http.StatusBadRequest, "访客不能持有频道角色")
+		return nil
+	}
+	return t
+}
+
+// transferChannel 转让频道（owner）：目标须 user 及以上；旧主自动降为 moderator。
+func (a *API) transferChannel(w http.ResponseWriter, r *http.Request) {
+	c := channelFrom(r)
+	t := a.resolveRoleTarget(w, r)
+	if t == nil {
+		return
+	}
+	if err := a.st.TransferChannel(r.Context(), c.ID, t.ID); err != nil {
+		writeErr(w, http.StatusInternalServerError, "内部错误")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"owner": t.Username})
+}
+
+func (a *API) listModerators(w http.ResponseWriter, r *http.Request) {
+	c := channelFrom(r)
+	mods, err := a.st.ListModerators(r.Context(), c.ID)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "内部错误")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"moderators": mods})
+}
+
+// addModerator 授予频道管理员（owner）；目标是房主时拒绝（房主无需再授）。
+func (a *API) addModerator(w http.ResponseWriter, r *http.Request) {
+	c := channelFrom(r)
+	t := a.resolveRoleTarget(w, r)
+	if t == nil {
+		return
+	}
+	if cr, err := a.st.ChannelRoleOf(r.Context(), c.ID, t.ID); err != nil {
+		writeErr(w, http.StatusInternalServerError, "内部错误")
+		return
+	} else if cr == store.ChannelRoleOwner {
+		writeErr(w, http.StatusBadRequest, "对方是频道主，无需授予")
+		return
+	}
+	if err := a.st.SetChannelRole(r.Context(), c.ID, t.ID, store.ChannelRoleModerator); err != nil {
+		writeErr(w, http.StatusInternalServerError, "内部错误")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// removeModerator 收回频道管理员（owner）：降为 member（白名单行保留）。
+func (a *API) removeModerator(w http.ResponseWriter, r *http.Request) {
+	c := channelFrom(r)
+	t := a.resolveTargetUser(w, r, userFrom(r))
+	if t == nil {
+		return
+	}
+	if cr, err := a.st.ChannelRoleOf(r.Context(), c.ID, t.ID); err != nil {
+		writeErr(w, http.StatusInternalServerError, "内部错误")
+		return
+	} else if cr != store.ChannelRoleModerator {
+		writeErr(w, http.StatusBadRequest, "对方不是频道管理员")
+		return
+	}
+	if err := a.st.SetChannelRole(r.Context(), c.ID, t.ID, store.ChannelRoleMember); err != nil {
 		writeErr(w, http.StatusInternalServerError, "内部错误")
 		return
 	}

@@ -15,12 +15,15 @@ import (
 type userRow struct {
 	bun.BaseModel `bun:"table:users"`
 
-	ID           int64     `bun:",pk,autoincrement"`
-	Username     string    `bun:",notnull,unique,type:varchar(64)"`
-	PasswordHash string    `bun:",notnull,type:varchar(255)"`
-	IsAdmin      int64     `bun:",notnull,default:0"`
-	Disabled     int64     `bun:",notnull,default:0"`
-	CreatedAt    time.Time `bun:",notnull,default:current_timestamp"`
+	ID           int64      `bun:",pk,autoincrement"`
+	Username     string     `bun:",notnull,unique,type:varchar(64)"`
+	PasswordHash string     `bun:",notnull,type:varchar(255)"`
+	IsAdmin      int64      `bun:",notnull,default:0"` // 冻结列：role 是权威，is_admin 只读派生，下个版本删列
+	Disabled     int64      `bun:",notnull,default:0"`
+	Role         string     `bun:",notnull,default:'user',type:varchar(16)"`
+	ExpiresAt    *time.Time // 仅访客有值，过期即清理
+	InviteID     *int64     // 访客来源邀请（升级/审计用）
+	CreatedAt    time.Time  `bun:",notnull,default:current_timestamp"`
 }
 
 type sessionRow struct {
@@ -29,6 +32,7 @@ type sessionRow struct {
 	Token     string    `bun:",pk,type:varchar(128)"`
 	UserID    int64     `bun:",notnull"`
 	ExpiresAt time.Time `bun:",notnull"`
+	DeviceID  string    `bun:",notnull,default:'',type:varchar(32)"` // 非空 = 绑定设备（访客会话）；普通会话留空不绑定
 	CreatedAt time.Time `bun:",notnull,default:current_timestamp"`
 }
 
@@ -122,21 +126,27 @@ type channelMemberRow struct {
 
 	ChannelID int64     `bun:",notnull,unique:uk_channel_members"`
 	UserID    int64     `bun:",notnull,unique:uk_channel_members"`
+	Role      string    `bun:",notnull,default:'member',type:varchar(16)"` // owner/moderator/member；owner 是频道归属的权威
 	CreatedAt time.Time `bun:",notnull,default:current_timestamp"`
 }
 
 type inviteRow struct {
 	bun.BaseModel `bun:"table:invites"`
 
-	ID        int64     `bun:",pk,autoincrement"`
-	Code      string    `bun:",notnull,unique,type:varchar(32)"`
-	Note      string    `bun:",notnull,default:'',type:varchar(255)"`
-	MaxUses   int       `bun:",notnull,default:1"`
-	Used      int       `bun:",notnull,default:0"`
-	Revoked   int64     `bun:",notnull,default:0"`
-	CreatedBy int64     `bun:",notnull"`
-	CreatedAt time.Time `bun:",notnull,default:current_timestamp"`
-	ExpiresAt time.Time `bun:",notnull"`
+	ID         int64     `bun:",pk,autoincrement"`
+	Code       string    `bun:",notnull,unique,type:varchar(32)"`
+	Kind       string    `bun:",notnull,default:'register',type:varchar(16)"` // register/guest
+	ChannelID  *int64    // guest 类必填：授予的频道
+	Role       string    `bun:",notnull,default:'user',type:varchar(16)"` // register 产出的系统角色（user/power）
+	GuestTTL   int       `bun:"guest_ttl_sec,notnull,default:0"`          // guest 类：产出访客的寿命（秒）
+	AllowGuest int64     `bun:",notnull,default:0"`                       // register 类：是否允许「先以访客进入」
+	Note       string    `bun:",notnull,default:'',type:varchar(255)"`
+	MaxUses    int       `bun:",notnull,default:1"`
+	Used       int       `bun:",notnull,default:0"`
+	Revoked    int64     `bun:",notnull,default:0"`
+	CreatedBy  int64     `bun:",notnull"`
+	CreatedAt  time.Time `bun:",notnull,default:current_timestamp"`
+	ExpiresAt  time.Time `bun:",notnull"`
 }
 
 type settingRow struct {

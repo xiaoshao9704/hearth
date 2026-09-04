@@ -13,18 +13,18 @@ import (
 // 选择器不读环境变量：env 的职责只是把 provider 实例带进可选列表。旧部署的选择器 env
 // 由迁移 v2 一次性落库（升级行为不变），此后取值以管理后台/DB 为准。
 func TestSelectorEnvImportedOnce(t *testing.T) {
-	maskProviderEnv(t)                    // 不带 livekit 凭证：隔离 v1 的默认落库，只验 v2 的 env 导入
-	t.Setenv("VOICE_PROVIDER", "livekit") // 应被 v2 落库
+	maskProviderEnv(t)                     // 不带 livekit 凭证：隔离 v1 的默认落库，只验 v2 的 env 导入
+	t.Setenv("VOICE_PROVIDER", "livekit")  // 应被 v2 落库
 	t.Setenv("INGEST_PROVIDER", "bellows") // 推流选择器已删除：不再导入，也不再读取
-	a := testAPI(t)                       // New 内跑迁移
+	a := testAPI(t)                        // New 内跑迁移
 	ctx := context.Background()
 
-	// v2 应把 env 值落库；但 livekit 实例不存在（env 已屏蔽），迁移 v5 随即将这个
+	// v2 应把 env 值落库；但 livekit 实例不存在（env 已屏蔽），迁移 v6 随即将这个
 	// 悬空选择器改写为 lkembed——落库值为 lkembed 即证明 v2 导入过（否则键为空）。
 	if v, _ := a.st.GetSetting(ctx, "cfg_voice_provider"); v != AliasLkembed {
-		t.Fatalf("旧 env 值应由迁移 v2 落库并被 v5 改写为 lkembed，实际 %q", v)
+		t.Fatalf("旧 env 值应由迁移 v2 落库并被 v6 改写为 lkembed，实际 %q", v)
 	}
-	// INGEST_PROVIDER 是已删除的选择器：不导入（cfg_ingest_provider 由 v5 删除）、不参与取值
+	// INGEST_PROVIDER 是已删除的选择器：不导入（cfg_ingest_provider 由 v6 删除）、不参与取值
 	if v, err := a.st.GetSetting(ctx, "cfg_ingest_provider"); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("cfg_ingest_provider 不应存在，实际 %q err=%v", v, err)
 	}

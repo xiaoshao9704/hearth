@@ -82,7 +82,7 @@ func TestAdmitIngestBranches(t *testing.T) {
 }
 
 // 「推流进当前舞台实例」门禁：alias 段不是 stage_provider 选中的实例一律 definitive 404
-//（退场的 bellows 等历史 alias、非舞台的 livekit 实例、未知 alias 同规则），stage=none 时任何推流 404。
+// （退场的 bellows 等历史 alias、非舞台的 livekit 实例、未知 alias 同规则），stage=none 时任何推流 404。
 // 真令牌也照 404——判定不看令牌有效性，门禁先于令牌反查。
 func TestAdmitIngestStageGate(t *testing.T) {
 	maskProviderEnv(t)
@@ -242,8 +242,8 @@ func TestMigrateIngestTokensV3(t *testing.T) {
 	if legacy, err := s.LegacyIngressTokens(ctx); err != nil || len(legacy) != 0 {
 		t.Fatalf("ingresses 表应已 DROP: %v %v", legacy, err)
 	}
-	if v, _ := s.MigrationVersion(ctx); v != 5 {
-		t.Fatalf("游标应为最新版本 5，实际 %d", v)
+	if v, _ := s.MigrationVersion(ctx); v != 6 {
+		t.Fatalf("游标应为最新版本 6，实际 %d", v)
 	}
 	// 幂等：重跑不覆盖用户后续改动（改标签后重跑，令牌与标签都保持）
 	if err := s.UpdateIngestTokenTag(ctx, u1.ID, "cam"); err != nil {
@@ -261,8 +261,8 @@ func TestMigrateV3EmptyDB(t *testing.T) {
 	maskProviderEnv(t)
 	a := testAPI(t)
 	ctx := context.Background()
-	if v, _ := a.st.MigrationVersion(ctx); v != 5 {
-		t.Fatalf("空库游标应为最新版本 5，实际 %d", v)
+	if v, _ := a.st.MigrationVersion(ctx); v != 6 {
+		t.Fatalf("空库游标应为最新版本 6，实际 %d", v)
 	}
 	u, err := a.st.CreateUser(ctx, "alice", "x")
 	if err != nil {
@@ -358,8 +358,8 @@ func TestMigrateEndpointIdentityV4(t *testing.T) {
 	a.st.SetMigrationVersion(ctx, 3) // 回到 v4 之前
 	a.runMigrations(ctx)
 
-	if v, _ := a.st.MigrationVersion(ctx); v != 5 {
-		t.Fatalf("游标应推进到最新版本 5，实际 %d", v)
+	if v, _ := a.st.MigrationVersion(ctx); v != 6 {
+		t.Fatalf("游标应推进到最新版本 6，实际 %d", v)
 	}
 	raw, err = sql.Open("sqlite", path)
 	if err != nil {
