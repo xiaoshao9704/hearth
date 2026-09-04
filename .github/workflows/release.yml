@@ -1,6 +1,6 @@
 # 发布流水线：打 tag（v*）或手动触发
-# - build 作业：前端构建一次 + Go 原生交叉编译双架构静态二进制；
-#   tag 触发时 tar.gz 作为 GitHub Release 资产发布，同时把产物传给 image 作业
+# - build 作业：前端构建一次（拷入 embed 目录）+ Go 原生交叉编译六个目标的静态二进制；
+#   tag 触发时 tar.gz/zip 作为 GitHub Release 资产发布，同时把产物传给 image 作业
 # - image 作业：用 Dockerfile.release 纯 COPY 装配多架构 OCI 镜像推 ghcr.io——
 #   没有任何 RUN 指令，不需要 QEMU，秒级完成（此前 arm64 在 QEMU 下编译要 1 小时+）。
 #   自包含 -livekit/-full 镜像档（Dockerfile.aio + aioinit）已退役：内嵌 LiveKit 并入了主镜像
@@ -40,34 +40,50 @@ jobs:
           npm ci
           npm run build
 
+      - name: 前端产物拷入 embed 目录（go:embed 不能引用模块外路径，构建前落位）
+        run: |
+          rm -rf server/internal/webui/dist
+          mkdir -p server/internal/webui/dist
+          cp -r web/dist/. server/internal/webui/dist/
+
       - uses: actions/setup-go@v7
         with:
           go-version-file: server/go.mod
           cache-dependency-path: server/go.sum
 
-      - name: 原生交叉编译双架构静态二进制
+      - name: 原生交叉编译静态二进制（hearth 六目标；stage/bellows 远端形态只发 linux）
         working-directory: server
         env:
           CGO_ENABLED: 0
-          GOOS: linux
         run: |
           mkdir -p "$GITHUB_WORKSPACE/out"
+          for target in linux/amd64 linux/arm64 windows/amd64 windows/arm64 darwin/amd64 darwin/arm64; do
+            os="${target%/*}"; arch="${target#*/}"
+            bin="hearth-$os-$arch"
+            [ "$os" = windows ] && bin="$bin.exe"
+            GOOS=$os GOARCH=$arch go build -ldflags "-s -w" -o "$GITHUB_WORKSPACE/out/$bin" ./cmd/server
+          done
           for arch in amd64 arm64; do
-            GOARCH=$arch go build -ldflags "-s -w" -o "$GITHUB_WORKSPACE/out/hearth-linux-$arch" ./cmd/server
             # 远端舞台内核：单文件，跑在另一台机器上替代 livekit + bellows 两个容器
-            GOARCH=$arch go build -ldflags "-s -w" -o "$GITHUB_WORKSPACE/out/stage-linux-$arch" ./cmd/stage
+            GOOS=linux GOARCH=$arch go build -ldflags "-s -w" -o "$GITHUB_WORKSPACE/out/stage-linux-$arch" ./cmd/stage
             # 远端 Bellows 推流网关：已被 cmd/stage 取代，下一版本移除
-            GOARCH=$arch go build -ldflags "-s -w" -o "$GITHUB_WORKSPACE/out/bellows-linux-$arch" ./cmd/bellows
+            GOOS=linux GOARCH=$arch go build -ldflags "-s -w" -o "$GITHUB_WORKSPACE/out/bellows-linux-$arch" ./cmd/bellows
           done
 
-      - name: 打包 Release 产物
+      - name: 打包 Release 产物（单文件：前端已嵌进二进制，不再随包发 web 目录）
         run: |
-          for arch in amd64 arm64; do
-            pkg="hearth_${VERSION}_linux_${arch}"
+          for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do
+            os="${target%/*}"; arch="${target#*/}"
+            pkg="hearth_${VERSION}_${os}_${arch}"
             mkdir -p "$pkg"
-            cp "out/hearth-linux-$arch" "$pkg/hearth"
-            cp -r web/dist "$pkg/web"
+            cp "out/hearth-$os-$arch" "$pkg/hearth"
             tar -czf "$pkg.tar.gz" "$pkg"
+          done
+          for arch in amd64 arm64; do
+            pkg="hearth_${VERSION}_windows_${arch}"
+            mkdir -p "$pkg"
+            cp "out/hearth-windows-$arch.exe" "$pkg/hearth.exe"
+            zip -qr "$pkg.zip" "$pkg"
           done
 
       - name: 上传构建产物（喂给 image 作业；手动触发时也可下载）
@@ -75,11 +91,11 @@ jobs:
         with:
           name: dist
           path: |
-            out/hearth-linux-*
+            out/hearth-*
             out/stage-linux-*
             out/bellows-linux-*
-            web/dist
             hearth_*.tar.gz
+            hearth_*.zip
           retention-days: 14
 
       - name: 发布 Release 资产
@@ -88,6 +104,7 @@ jobs:
         with:
           files: |
             hearth_*.tar.gz
+            hearth_*.zip
             out/stage-linux-*
             out/bellows-linux-*
 

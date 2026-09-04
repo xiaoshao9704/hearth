@@ -57,6 +57,7 @@
 - aioinit 因此整体退役：它唯一的职责——按 `EMBED_LIVEKIT`/`EMBED_INGRESS` 拉起外部 livekit-server/redis/ingress、生成 `livekit.yaml`/`ingress.yaml`、把接入地址注入 hearth 环境——随内嵌形态消失而消失，不是「简化保留」，是没有职责剩下；`Dockerfile.aio` 与 `server/cmd/aioinit` 已删除。
 - 残留的 `EMBED_LIVEKIT`/`EMBED_INGRESS`/指向回环地址的 `LIVEKIT_API_URL` 是旧编排的痕迹：hearth 本体从未读取前两者，检测到就打一次启动告警（`warnLegacyConfig`，`server/internal/api/dyncfg.go`），提示改用管理后台把「舞台内核」选 `lkembed`。
 - `/data` 仍是唯一的持久化边界，但只剩数据库：内嵌 LiveKit 的密钥不再走 `/data/aio/keys.env`，改为 `lkembed_api_key`/`lkembed_api_secret` 两个 DB settings 键，留空时首启生成并落库，随数据库一起备份（见上条「rtc 内核插件模型」）。
+- 前端产物经 `server/internal/webui`（`//go:embed all:dist`）编进二进制，单文件分发成立：CI/Dockerfile 在 `go build` 前把 `web/dist` 拷入该目录（gitignore，只留 `.keep`）；目录为空时 `Handler()` 返回 nil，`main.go` 回落 `STATIC_DIR`（开发期 vite dev 不受影响）。裸机单文件的数据目录：`--data`/`HEARTH_DATA` → 可执行文件旁的 `data/`（便携优先）→ 系统用户目录回落；`DB_PATH` 默认 `<data>/hearth.db`，`.env` 先读工作目录再读 `<data>/.env`（后者不覆盖前者）。
 - 旧的 `-livekit`/`-full` 镜像 tag：release.yml 在退役后的第一个版本里把它们发成主镜像的别名（同一次 `docker/build-push-action` 多打两个 tag，不是重新构建），供已有部署把 tag 名切过来；下一个版本发布时随手删掉这两段 metadata 步骤，不长期维护（比照 `pion_*` 只保留一个版本的先例）。
 
 ## 已知的坑（改相关代码前必读）

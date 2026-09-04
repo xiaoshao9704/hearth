@@ -6,11 +6,9 @@ ARG TARGETARCH
 COPY --chmod=755 out/hearth-linux-${TARGETARCH} /app/hearth
 # 远端推流网关同镜像分发：entrypoint 换成 /app/bellows 即可在 LiveKit 同一局域网跑
 COPY --chmod=755 out/bellows-linux-${TARGETARCH} /app/bellows
-COPY web/dist /app/web
 COPY --chown=65532:65532 out/data /data
 ENV ADDR=:8080 \
-    DB_PATH=/data/hearth.db \
-    STATIC_DIR=/app/web
+    DB_PATH=/data/hearth.db
 VOLUME /data
 USER 65532
 EXPOSE 8080

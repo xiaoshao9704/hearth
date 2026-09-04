@@ -20,6 +20,7 @@ import (
 	"hearth/server/internal/rtc/lite"
 	"hearth/server/internal/selfcheck"
 	"hearth/server/internal/store"
+	"hearth/server/internal/webui"
 
 	"golang.org/x/crypto/bcrypt"
 )
@@ -80,8 +81,11 @@ func main() {
 	a.RegisterProxies(r)
 	r.Get("/api/chat", hub.ServeHTTP)
 
-	// 可选：静态托管前端构建产物（单机部署时一个二进制搞定）
-	if cfg.StaticDir != "" {
+	// 静态托管前端：优先二进制内嵌产物（单文件分发），未内嵌时回落 STATIC_DIR 外置目录
+	if h := webui.Handler(); h != nil {
+		r.Get("/*", h.ServeHTTP)
+		r.Head("/*", h.ServeHTTP)
+	} else if cfg.StaticDir != "" {
 		fs := http.FileServer(http.Dir(cfg.StaticDir))
 		r.Get("/*", fs.ServeHTTP)
 		r.Head("/*", fs.ServeHTTP)

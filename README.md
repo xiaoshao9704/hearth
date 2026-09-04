@@ -102,6 +102,14 @@ hearth/
 └── Dockerfile.release       # CI 纯装配镜像（配 .github/workflows/release.yml），语音+舞台+推流三线全在一个镜像里
 ```
 
+## 下载即用（Windows / macOS / Linux 单文件）
+
+GitHub Releases 提供六个平台的单文件产物（`hearth_<版本>_<系统>_<架构>`，Windows 为 zip，其余 tar.gz）：前端已编进二进制，解开只有一个可执行文件，跑起来浏览器打开 `http://localhost:8080` 即用（localhost 下麦克风/投屏不受 HTTPS 限制）。
+
+- 数据（数据库、证书、日志）落在可执行文件旁的 `data/` 目录，写不进去时自动回落到系统用户数据目录；`--data <目录>` 或 `HEARTH_DATA` 可显式指定
+- macOS 未签名：首次运行右键「打开」；Windows 首次监听会弹防火墙询问，点「允许」即可
+- 对外开放访问（NAT 后的端口映射）见下文「自动端口映射」
+
 ## 自托管快速开始
 
 只有一个镜像 tag，一条 `docker run` 到位（数据与密钥全部落在 `/data` 卷，挂载即持久化/备份）。最小形态只放行语音端口：

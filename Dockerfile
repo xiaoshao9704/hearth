@@ -11,23 +11,22 @@ COPY web/ ./
 ENV VITE_SERVER_URL="" VITE_LIVEKIT_URL=""
 RUN npm run build
 
-# ---- Go 后端构建（纯 Go sqlite，无 cgo）----
+# ---- Go 后端构建（纯 Go sqlite，无 cgo；前端产物拷入 embed 目录编进二进制）----
 FROM golang:1.27-alpine AS server
 WORKDIR /build
 COPY server/go.mod server/go.sum ./
 RUN go mod download
 COPY server/ ./
+COPY --from=web /build/dist ./internal/webui/dist
 RUN CGO_ENABLED=0 go build -o /hearth ./cmd/server \
   && mkdir -p /data # distroless 无 shell，/data 在构建阶段备好
 
 # ---- 运行时（distroless/static：仅二进制 + CA 证书 + nonroot 用户，无 shell）----
 FROM gcr.io/distroless/static-debian12:nonroot
 COPY --from=server /hearth /app/hearth
-COPY --from=web /build/dist /app/web
 COPY --from=server --chown=65532:65532 /data /data
 ENV ADDR=:8080 \
-    DB_PATH=/data/hearth.db \
-    STATIC_DIR=/app/web
+    DB_PATH=/data/hearth.db
 VOLUME /data
 USER 65532
 EXPOSE 8080

@@ -23,6 +23,14 @@ build/
 *.db-wal
 *.db-shm
 
+# 单文件运行时数据目录（可执行文件旁的 data/）
+data/
+
+# webui 内嵌产物：CI/Dockerfile 构建前拷入 web/dist，git 里只留 .keep
+!server/internal/webui/dist/
+server/internal/webui/dist/*
+!server/internal/webui/dist/.keep
+
 # 部署生成物（由 deploy/init.sh 生成，含密钥）
 deploy/generated/
 out/
