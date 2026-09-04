@@ -17,6 +17,8 @@ const DOMAIN_RE = /^(?=.{1,253}$)([a-z0-9](-?[a-z0-9])*\.)+[a-z]{2,}$/i;
 
 interface WizardState {
   domain: string;
+  siteDomain: string;
+  ddnsHost: string;
   ddnsProvider: 'off' | 'duckdns' | 'cloudflare' | 'dnspod' | 'aliyun';
   tlsMode: 'acme' | 'selfsigned' | 'off';
 }
@@ -42,7 +44,8 @@ const DDNS_LABELS: Record<string, string> = {
 };
 
 export function renderSetup(root: HTMLElement, alive: () => boolean) {
-  const state: WizardState = { domain: '', ddnsProvider: 'off', tlsMode: 'selfsigned' };
+  const state: WizardState = { domain: '', siteDomain: '', ddnsHost: '', ddnsProvider: 'off', tlsMode: 'selfsigned' };
+  let tlsChosen = false;
 
   const paint = (inner: string) => {
     root.innerHTML = `
@@ -147,7 +150,7 @@ export function renderSetup(root: HTMLElement, alive: () => boolean) {
 
     const fieldsBox = el.querySelector<HTMLDivElement>('#wz-ddns-fields')!;
     const credsBox = el.querySelector<HTMLDivElement>('#wz-ddns-creds')!;
-    let provider: WizardState['ddnsProvider'] = 'off';
+    let provider: WizardState['ddnsProvider'] = state.ddnsProvider;
     const syncDdns = () => {
       el.querySelectorAll<HTMLButtonElement>('#wz-ddns .seg').forEach((b) => b.classList.toggle('on', b.dataset.id === provider));
       fieldsBox.style.display = provider === 'off' ? 'none' : 'flex';
@@ -170,6 +173,8 @@ export function renderSetup(root: HTMLElement, alive: () => boolean) {
     syncDdns();
 
     const input = el.querySelector<HTMLInputElement>('#wz-domain')!;
+    input.value = state.siteDomain;
+    el.querySelector<HTMLInputElement>('#wz-ddns-host')!.value = state.ddnsHost;
     const save = async () => {
       const domain = input.value.trim().toLowerCase();
       if (domain && !DOMAIN_RE.test(domain)) {
@@ -177,6 +182,8 @@ export function renderSetup(root: HTMLElement, alive: () => boolean) {
         return false;
       }
       const values: Record<string, string> = {};
+      state.siteDomain = domain;
+      state.domain = domain;
       if (domain) values.site_domain = domain;
       state.ddnsProvider = provider;
       if (provider !== 'off') {
@@ -187,6 +194,7 @@ export function renderSetup(root: HTMLElement, alive: () => boolean) {
         }
         values.ddns_provider = provider;
         values.ddns_host = host;
+        state.ddnsHost = host;
         for (const c of DDNS_CREDS[provider] ?? []) {
           const v = credsBox.querySelector<HTMLInputElement>(`#wz-cred-${c.key}`)!.value.trim();
           if (!v) {
@@ -198,6 +206,7 @@ export function renderSetup(root: HTMLElement, alive: () => boolean) {
         // 域名留空时服务端会把 ddns_host 回填进 site_domain，前端同步这个结论
         if (!domain) state.domain = host;
       } else {
+        state.ddnsHost = '';
         state.domain = domain;
       }
       if (Object.keys(values).length > 0) {
@@ -208,7 +217,7 @@ export function renderSetup(root: HTMLElement, alive: () => boolean) {
           return false;
         }
       }
-      state.tlsMode = state.domain ? 'acme' : 'selfsigned';
+      if (!tlsChosen) state.tlsMode = state.domain ? 'acme' : 'selfsigned';
       return true;
     };
     el.querySelector('#wz-next')!.addEventListener('click', async () => {
@@ -219,6 +228,8 @@ export function renderSetup(root: HTMLElement, alive: () => boolean) {
       provider = 'off';
       syncDdns();
       state.domain = '';
+      state.siteDomain = '';
+      state.ddnsHost = '';
       state.ddnsProvider = 'off';
       state.tlsMode = 'selfsigned';
       stepTLS();
@@ -286,6 +297,8 @@ export function renderSetup(root: HTMLElement, alive: () => boolean) {
     el.querySelectorAll<HTMLButtonElement>('.wz-tls-opt').forEach((b) => {
       b.addEventListener('click', () => {
         picked = b.dataset.id as WizardState['tlsMode'];
+        state.tlsMode = picked;
+        tlsChosen = true;
         syncRadios();
       });
     });

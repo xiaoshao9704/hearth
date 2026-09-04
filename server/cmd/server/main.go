@@ -42,7 +42,7 @@ func positionals() []string {
 	args := os.Args[1:]
 	for i := 0; i < len(args); i++ {
 		a := args[i]
-		if a == "--data" {
+		if a == "--data" || a == "-data" {
 			i++ // --data 的值不是位置参数
 			continue
 		}
@@ -188,16 +188,17 @@ func runServer(ctx context.Context, cfg config.Config, st *store.Store) {
 
 	// 进程内 TLS：模式/证书由动态配置决定，Sync 幂等热切换（见 internal/tlsx）。
 	// HTTP listener 不随模式重启——它的 handler 是按当前模式分流的壳
-	// （TLS 开启时只做 ACME 挑战 + 301 到 HTTPS）。
+	// （TLS 开启时只做 ACME 挑战 + 308 到 HTTPS）。
 	tlsm := tlsx.New(filepath.Join(cfg.DataDir, "certs"),
 		func() http.Handler { return r },
 		func() []string { ex, _ := a.AnnounceExternals(); return ex })
 	a.SetTLS(tlsm)
 	a.SyncTLS()
+	tlsHTTP := tlsm.HTTPHandler(r)
 
 	// DDNS：公网地址变化时更新域名解析，触发与 RefreshAnnounce 同节拍（见 internal/ddns）
 	a.SetDDNS(ddns.NewRunner(filepath.Join(cfg.DataDir, "ddns-state.json")))
-	a.SyncDDNS() // 启动即对一次：状态回显从第一刻起就是准确的（off/缺凭证也会落状态）
+	go a.SyncDDNS() // 提供方超时不能阻塞 HTTP listener 启动
 
 	// 映射建立/变化后立刻刷新宣告，让新会话拿到映射出的外部地址。
 	// 回调不得阻塞 Mapper 的申请轮次（RefreshAnnounce 里是最长 2s 的 STUN 探测），另起协程。
@@ -209,6 +210,19 @@ func runServer(ctx context.Context, cfg config.Config, st *store.Store) {
 		}()
 	}
 	go mapper.Run(ctx, a.PortWants)
+	go func() {
+		t := time.NewTicker(2 * time.Minute)
+		defer t.Stop()
+		for {
+			select {
+			case <-t.C:
+				a.RefreshAnnounce(ctx)
+				a.SyncDDNS()
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
 
 	// 宣告探测周期刷新：公网 IP 变化后新会话拿到新候选，不重启、不动在途会话
 	go func() {
@@ -219,7 +233,6 @@ func runServer(ctx context.Context, cfg config.Config, st *store.Store) {
 			case <-t.C:
 				a.RefreshAnnounce(ctx)
 				a.SyncTLS()
-				a.SyncDDNS()
 			case <-ctx.Done():
 				return
 			}
@@ -241,7 +254,7 @@ func runServer(ctx context.Context, cfg config.Config, st *store.Store) {
 
 	srv := &http.Server{Addr: cfg.Addr, Handler: http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		if tlsm.TLSOn() {
-			tlsm.HTTPHandler(nil).ServeHTTP(w, req)
+			tlsHTTP.ServeHTTP(w, req)
 			return
 		}
 		r.ServeHTTP(w, req)

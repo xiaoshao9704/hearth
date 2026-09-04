@@ -2,11 +2,64 @@ package tlsx
 
 import (
 	"crypto/tls"
+	"crypto/x509"
 	"net/http"
+	"net/http/httptest"
 	"slices"
+	"strings"
 	"testing"
 	"time"
+
+	"golang.org/x/crypto/acme/autocert"
 )
+
+func TestHTTPHandlerKeepsRecoveryPathsAndRedirectsPermanently(t *testing.T) {
+	m := New(t.TempDir(), nil, nil)
+	m.cfg = Config{Mode: "selfsigned", HTTPSAddr: ":8443"}
+	fallback := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+	h := m.HTTPHandler(fallback)
+
+	for _, path := range []string{"/healthz", "/api/admin/settings"} {
+		rr := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "http://example.com"+path, strings.NewReader("body"))
+		req.RemoteAddr = "127.0.0.1:12345"
+		h.ServeHTTP(rr, req)
+		if rr.Code != http.StatusNoContent {
+			t.Fatalf("%s 应直通业务 handler，实际状态码 %d", path, rr.Code)
+		}
+	}
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "http://example.com/api/login", strings.NewReader("body")))
+	if rr.Code != http.StatusPermanentRedirect {
+		t.Fatalf("非回环 API 请求不得明文直通，实际 %d", rr.Code)
+	}
+
+	rr = httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "http://example.com:8080/room?q=1", strings.NewReader("body"))
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusPermanentRedirect {
+		t.Fatalf("普通请求应返回 308，实际 %d", rr.Code)
+	}
+	if got := rr.Header().Get("Location"); got != "https://example.com/room?q=1" {
+		t.Fatalf("重定向应使用外部 443 且不暴露内部端口，实际 %q", got)
+	}
+
+	m.acme = &autocert.Manager{}
+	rr = httptest.NewRecorder()
+	h = m.HTTPHandler(fallback)
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "http://example.com/.well-known/acme-challenge/token", nil))
+	if rr.Code == http.StatusPermanentRedirect {
+		t.Fatal("ACME HTTP-01 挑战必须先于 HTTPS 重定向处理")
+	}
+
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "http://example.com/providers/bellows/w/channel", strings.NewReader("offer")))
+	if rr.Code != http.StatusPermanentRedirect {
+		t.Fatalf("WHIP POST 应以 308 保留方法与请求体，实际 %d", rr.Code)
+	}
+}
 
 func TestSelfsignedLifecycle(t *testing.T) {
 	m := New(t.TempDir(), func() http.Handler { return http.NotFoundHandler() }, func() []string { return nil })
@@ -76,4 +129,31 @@ func TestGetCertificateBeforeLeaf(t *testing.T) {
 	if _, err := m.getCertificate(&tls.ClientHelloInfo{}); err == nil {
 		t.Fatal("证书未就绪时应报错")
 	}
+}
+
+func TestRecordCertificateUpdatesACMEStatus(t *testing.T) {
+	m := New(t.TempDir(), nil, nil)
+	notAfter := time.Now().Add(30 * 24 * time.Hour).Round(time.Second)
+	m.recordCertificate(&tls.Certificate{Leaf: &x509.Certificate{DNSNames: []string{"example.com"}, NotAfter: notAfter}})
+	st := m.Status()
+	if !st.NotAfter.Equal(notAfter) || !slices.Equal(st.SANs, []string{"example.com"}) {
+		t.Fatalf("ACME 证书状态未回填: %+v", st)
+	}
+}
+
+func TestConcurrentSyncIsSerialized(t *testing.T) {
+	m := New(t.TempDir(), func() http.Handler { return http.NotFoundHandler() }, nil)
+	done := make(chan struct{}, 2)
+	for range 2 {
+		go func() {
+			m.Sync(Config{Mode: "selfsigned", HTTPSAddr: "127.0.0.1:0"})
+			done <- struct{}{}
+		}()
+	}
+	<-done
+	<-done
+	if st := m.Status(); st.LastError != "" || !st.Listening {
+		t.Fatalf("并发 Sync 不应产生监听假故障: %+v", st)
+	}
+	m.Close()
 }

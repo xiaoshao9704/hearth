@@ -8,7 +8,7 @@
 //     地址集合变化即重签。这是局域网/无域名场景的正解，不是 ACME 的降级。
 //
 // 热切换取舍：tls_mode 切模式时 HTTP listener 不重启——主机的 HTTP handler 是一个按当前
-// 模式分流的壳（off 时透传业务 handler，否则只做 ACME 挑战 + 301）；HTTPS listener 由
+// 模式分流的壳（off 时透传业务 handler，否则只做 ACME 挑战 + 308）；HTTPS listener 由
 // Sync 按配置 reconcile（起/停/换地址）。换证书不需要动 listener：GetCertificate 回调
 // 每次握手现取。Sync 幂等，配置保存后、宣告探测刷新后各调一次即可。
 package tlsx
@@ -70,11 +70,12 @@ type Status struct {
 
 // Manager 持有模式状态、证书材料与 HTTPS listener。全部导出方法并发安全。
 type Manager struct {
-	dir     string // <data>/certs
+	dir     string              // <data>/certs
 	handler func() http.Handler // 业务 handler（HTTPS 与 off 模式的 HTTP 共用）
 	// externals 宣告探测快照（公网地址，可能带端口），selfsigned 的 SAN 来源之一
 	externals func() []string
 
+	syncMu sync.Mutex // 串行化多个触发源的完整 reconcile，避免重复监听同一地址
 	mu     sync.Mutex
 	cfg    Config
 	acme   *autocert.Manager // acme 模式时在
@@ -93,6 +94,8 @@ func New(dir string, handler func() http.Handler, externals func() []string) *Ma
 // Sync 按当前配置 reconcile：模式切换起/停 HTTPS listener，selfsigned 下生成/重签
 // 证书，acme 下重建 autocert 管理器。幂等；任何一步失败只落 LastError，不影响其余部分。
 func (m *Manager) Sync(cfg Config) {
+	m.syncMu.Lock()
+	defer m.syncMu.Unlock()
 	if cfg.Mode == "" {
 		cfg.Mode = "off"
 	}
@@ -132,6 +135,12 @@ func (m *Manager) Sync(cfg Config) {
 		st.Listening = m.ensureHTTPS()
 		if st.LastError == "" && !st.Listening {
 			st.LastError = m.lastErr()
+		}
+		if sameCfg {
+			m.mu.Lock()
+			st.SANs = slices.Clone(m.status.SANs)
+			st.NotAfter = m.status.NotAfter
+			m.mu.Unlock()
 		}
 		m.setStatus(st)
 	case "selfsigned":
@@ -254,7 +263,11 @@ func (m *Manager) getCertificate(hello *tls.ClientHelloInfo) (*tls.Certificate, 
 	cfg, acme, leaf := m.cfg, m.acme, m.leaf
 	m.mu.Unlock()
 	if cfg.Mode == "acme" && acme != nil {
-		return acme.GetCertificate(hello)
+		cert, err := acme.GetCertificate(hello)
+		if err == nil {
+			m.recordCertificate(cert)
+		}
+		return cert, err
 	}
 	if leaf != nil {
 		return leaf, nil
@@ -262,34 +275,72 @@ func (m *Manager) getCertificate(hello *tls.ClientHelloInfo) (*tls.Certificate, 
 	return nil, errors.New("证书尚未就绪")
 }
 
+func (m *Manager) recordCertificate(cert *tls.Certificate) {
+	if cert == nil {
+		return
+	}
+	leaf := cert.Leaf
+	if leaf == nil && len(cert.Certificate) > 0 {
+		leaf, _ = x509.ParseCertificate(cert.Certificate[0])
+	}
+	if leaf == nil {
+		return
+	}
+	m.mu.Lock()
+	m.status.SANs = slices.Clone(leaf.DNSNames)
+	m.status.NotAfter = leaf.NotAfter
+	m.mu.Unlock()
+}
+
 // ---- HTTP 分流 ----
 
-// HTTPHandler tls_mode != off 时 HTTP 端口的 handler：ACME HTTP-01 挑战优先，
-// 其余一律 301 到 HTTPS（外部 443，不带端口）。
+// HTTPHandler tls_mode != off 时 HTTP 端口的 handler：健康检查与回环来源的管理 API
+// 保持直通，ACME HTTP-01 挑战优先，其余重定向到 HTTPS（外部 443，不带端口）。
 func (m *Manager) HTTPHandler(fallback http.Handler) http.Handler {
+	if fallback == nil {
+		fallback = http.NotFoundHandler()
+	}
 	redirect := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/healthz" || (strings.HasPrefix(r.URL.Path, "/api/") && loopbackRequest(r)) {
+			fallback.ServeHTTP(w, r)
+			return
+		}
 		m.mu.Lock()
 		cfg := m.cfg
 		m.mu.Unlock()
 		host := cfg.Domain
 		if host == "" {
-			// 没配域名时按请求的 Host 重定向，端口换成 HTTPS 监听端口
+			// 映射对外固定为 443，不能把进程内 HTTPS 监听端口泄漏进公开链接。
 			h, _, err := net.SplitHostPort(r.Host)
 			if err != nil {
 				h = r.Host
 			}
-			_, port, _ := net.SplitHostPort(cfg.HTTPSAddr)
-			host = net.JoinHostPort(h, port)
+			host = h
+			if strings.Contains(host, ":") && !strings.HasPrefix(host, "[") {
+				host = "[" + host + "]"
+			}
 		}
-		http.Redirect(w, r, "https://"+host+r.URL.RequestURI(), http.StatusMovedPermanently)
+		http.Redirect(w, r, "https://"+host+r.URL.RequestURI(), http.StatusPermanentRedirect)
 	})
-	m.mu.Lock()
-	acme := m.acme
-	m.mu.Unlock()
-	if acme != nil {
-		return acme.HTTPHandler(redirect)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		m.mu.Lock()
+		acme := m.acme
+		m.mu.Unlock()
+		if acme != nil {
+			acme.HTTPHandler(redirect).ServeHTTP(w, r)
+			return
+		}
+		redirect.ServeHTTP(w, r)
+	})
+}
+
+func loopbackRequest(r *http.Request) bool {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return false
 	}
-	return redirect
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 // TLSOn 当前配置是否开了 TLS（HTTP 分流用）。
