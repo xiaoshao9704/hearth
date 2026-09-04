@@ -168,8 +168,6 @@ github.com/livekit/mageutil v0.0.0-20250511045019-0f1ff63f7731 h1:9x+U2HGLrSw5AT
 github.com/livekit/mageutil v0.0.0-20250511045019-0f1ff63f7731/go.mod h1:Rs3MhFwutWhGwmY1VQsygw28z5bWcnEYmS1OG9OxjOQ=
 github.com/livekit/mediatransportutil v0.0.0-20260821083140-f234b534b095 h1:BcliKAXoMhl/nWmzQweQ5kmh4Qqagxl4s3Z5pvM/7AY=
 github.com/livekit/mediatransportutil v0.0.0-20260821083140-f234b534b095/go.mod h1:o8CFmAdrVwzJNOCsQCLUzXRjokkufNshnQHOe4fRaqU=
-github.com/livekit/protocol v1.51.1-0.20260903060125-0cf5ba018b8e h1:QAfYvElm7Jr4ZHs1NiX4OTKpVnRO2d9hzSfCPzGMyMI=
-github.com/livekit/protocol v1.51.1-0.20260903060125-0cf5ba018b8e/go.mod h1:qt6LOKs6pzIwJF+P/dSUKHJE1SPowzFWDK6byqktdfU=
 github.com/livekit/psrpc v0.7.5 h1:WxfJIQ41X1b+48A1uzc8Gy9FhYEMxBJNCpCYqPdO/Ds=
 github.com/livekit/psrpc v0.7.5/go.mod h1:rAI+m2+/cb4x9RXhLRtUx5ZwdfjjXOl4zi46IjEetaw=
 github.com/livekit/server-sdk-go/v2 v2.18.2-0.20260903135950-af5ddd69d657 h1:KLN9UB9sardNdWqfOT2v1vyU6ubLkQq2blMKZbQVXkA=
@@ -325,8 +323,10 @@ github.com/vmihailenco/tagparser/v2 v2.0.0 h1:y09buUbR+b5aycVFQs/g70pqKVZNBmxwAh
 github.com/vmihailenco/tagparser/v2 v2.0.0/go.mod h1:Wri+At7QHww0WTrCBeu4J6bNtoV6mEfg5OIWRZA9qds=
 github.com/wlynxg/anet v0.0.5 h1:J3VJGi1gvo0JwZ/P1/Yc/8p63SoW98B5dHkYDmpgvvU=
 github.com/wlynxg/anet v0.0.5/go.mod h1:eay5PRQr7fIVAMbTbchTnO9gG65Hg/uYGdc7mguHxoA=
-github.com/xiaoshao9704/livekit v1.13.6-hearth.1 h1:txP1QYHx0jjsCZGiouoosbOvaeegrvn8D0pykuOSNU0=
-github.com/xiaoshao9704/livekit v1.13.6-hearth.1/go.mod h1:Dxd+bHclL+F08/T8TlZkxjSRYXCHObLo+ujPRc7h7MM=
+github.com/xiaoshao9704/livekit v1.13.6-hearth.2 h1:zZigu7950Jsl5fYiKK6pLobofz+3xng1N8oCkRRBMkg=
+github.com/xiaoshao9704/livekit v1.13.6-hearth.2/go.mod h1:h9V9W1rPCRVZ9wWst70hjpXckqepYzxdAd9CQtzFTWY=
+github.com/xiaoshao9704/livekit-protocol v1.51.1-hearth.1 h1:yxSCYvFRNg5VqX6uZGSCuUXpF6X8mff9akzwPf5WfgY=
+github.com/xiaoshao9704/livekit-protocol v1.51.1-hearth.1/go.mod h1:qt6LOKs6pzIwJF+P/dSUKHJE1SPowzFWDK6byqktdfU=
 github.com/zeebo/assert v1.3.0 h1:g7C04CbJuIDKNPFHmsk4hwZDO5O+kntRxzaUoNXj+IQ=
 github.com/zeebo/assert v1.3.0/go.mod h1:Pq9JiuJQpG8JLJdtkwrJESF0Foym2/D9XMU5ciN/wJ0=
 github.com/zeebo/xxh3 v1.1.0 h1:s7DLGDK45Dyfg7++yxI0khrfwq9661w9EN78eP/UZVs=

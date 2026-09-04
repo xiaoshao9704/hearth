@@ -141,4 +141,6 @@ require (
 	modernc.org/memory v1.11.0 // indirect
 )
 
-replace github.com/livekit/livekit-server => github.com/xiaoshao9704/livekit v1.13.6-hearth.1
+replace github.com/livekit/livekit-server => github.com/xiaoshao9704/livekit v1.13.6-hearth.2
+
+replace github.com/livekit/protocol => github.com/xiaoshao9704/livekit-protocol v1.51.1-hearth.1
