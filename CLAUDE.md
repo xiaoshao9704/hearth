@@ -35,6 +35,10 @@
 - `MuteUserAudio` 契约：禁言 = 禁**全部**媒体发布（音频/摄像头/投屏），不只是音频。
 - 凭证是短时效入场券（10 分钟 TTL），不是会话生命周期授权；断线重连必须回到签发路径重新判定。
 
+### 权限判定（server/internal/perm/）
+
+「谁能做什么」收口在 perm 包（角色类型与存取在 store）：handler 与中间件一律调 `perm.SysAtLeast`/`perm.CanActOn`/`perm.ChannelRole`，不得手写 `IsAdmin`/`OwnerID` 比较（grep 只允许命中 perm 与 store）。系统角色是严格阶梯 `guest<user<power<admin<super`（`users.role` 权威，`is_admin` 双写期只读派生、下个版本删列）：只能操作比自己低档的人；super 全站恰好一个，只经 CLI `hearth promote <用户名>` 转移（旧 super 降 admin）。频道角色权威在 `channel_members.role`（owner/moderator/member），`channels.created_by` 只作历史；系统 admin+ 在任何频道隐含 owner。注册产出档由 `reg_default_role`（user/power）或邀请上指定的档决定。前端不推导权限：显隐一律按服务端返回的 `role`/`my_role`/`can_set_roles`。
+
 ### 入场判定（server/internal/api/admission.go）
 
 一条规则，三个执行点：`admitUser` 是唯一的"谁能进房、能否发布"决策函数（返回 `UID`/`Username`，identity 由调用方经 `rtc.Identity` 组），`joinToken`（凭证签发）、`/providers/ember/voice`（ember 验票入会）、`/providers/{alias}/w` POST（WHIP 推流拦截，统一走 `admitIngest`：令牌反查用户 + URL 取频道，进程内 bellows / 远端 bellows / livekit-ingress / lkembed 反代 LiveKit 自带 WHIP 四条路径共用，definitive 404/403/503 无 fail-open）都调它。远端 `cmd/bellows` 进程没有数据库也不回调：hearth 在反代前做完判定，把结果签成短时效通行证（grant）塞进请求头，远端只本地验签（与 LiveKit join token 同一模型）。新增入口或新增入场约束时**只改这里**，不得在别处散落 `CanJoin`/`IsGagged` 组合。ember 线走一次性入场票（60s、取出即删、防挪用），不做二次判定。
@@ -56,8 +60,8 @@
 ### 前端（web/）
 
 - 房间页是 Solid（`views/room.tsx`）：状态一律走信号/派生 memo，**禁止**引入第二真相源（手工同步的布尔副本）；引擎产的媒体元素是命令式节点，用 ref 挂载不重建。
-- 设置浮层骨架（`views/settings.tsx`）、频道管理（`views/manage.tsx`）、管理后台（`views/admin.tsx`）也是 Solid；设置的六个个人 pane 暂留命令式渲染（`settings-panes.ts`，由骨架挂进容器、切页调清理函数），逐个迁移即可。一次性渲染的轻页面（shell/lobby/login/join）保持 vanilla TS；vite-plugin-solid 只处理 `.tsx`。
-- 设置的三个维度：个人（跟账号/本机走，即改即存）、频道（房主视角，落库即生效、每次操作 toast）、服务器（管理后台 `#/admin`，浮层里只放跳转）。所有齿轮入口都开同一个浮层，只是落点不同；浮层按 `channel` 上下文自查房主决定是否出「频道」分区，入口不必区分谁是房主。
+- 设置浮层骨架（`views/settings.tsx`）、频道管理（`views/manage.tsx`）、管理后台（`views/admin.tsx`）也是 Solid；设置的个人 pane 暂留命令式渲染（`settings-panes.ts`，由骨架挂进容器、切页调清理函数），逐个迁移即可。一次性渲染的轻页面（shell/lobby/login/join）保持 vanilla TS；vite-plugin-solid 只处理 `.tsx`。
+- 设置的三个维度：个人（跟账号/本机走，即改即存）、频道（房主与频道管理员视角，落库即生效、每次操作 toast）、服务器（管理后台 `#/admin`，浮层里只放跳转）。所有齿轮入口都开同一个浮层，只是落点不同；浮层按 `channel` 上下文自查 `my_role`（owner/moderator）决定是否出「频道」分区，入口不必区分谁是房主。
 - CSS 统一在 `src/style.css`，类名复用既有设计系统（ember 主题、三态明暗），选择器注意特异性（button 重置用零特异性 `:where`）。
 - 引擎抽象 `engine/types.ts`：新内核实现 `AVEngine` 并在 `engine/index.ts` 注册动态导入（保持代码分割）。
 

@@ -1,9 +1,9 @@
-// 设置浮层骨架（Solid）：三个维度 —— 个人（跟账号/本机走）/ 频道（房主视角的成员与准入）/ 服务器（管理后台，只跳转）。
+// 设置浮层骨架（Solid）：三个维度 —— 个人（跟账号/本机走）/ 频道（房主与频道管理员的成员与准入）/ 服务器（管理后台，只跳转）。
 // 浮层挂在 body 上，房间内打开不断开通话。个人 pane 的内容仍是命令式渲染（settings-panes.ts），
 // 这里只管导航、上下文与生命周期；频道分区直接复用 manage.tsx 的组件。
 import { createEffect, createResource, createSignal, onCleanup, For, Show } from 'solid-js';
 import { render } from 'solid-js/web';
-import { getUser, listChannels } from '../api';
+import { canInvite, getUser, listChannels } from '../api';
 import { el, icon } from '../ui';
 import { ChannelManage } from './manage';
 import { PERSONAL_PANES, renderPane } from './settings-panes';
@@ -13,7 +13,7 @@ export type Pane = PersonalPane | 'channel';
 
 export interface SettingsContext {
   backLabel?: string;
-  channel?: string; // 当前所在频道：本人是房主时出现「频道」分区
+  channel?: string; // 当前所在频道：本人是房主或频道管理员时出现「频道」分区
 }
 
 let dispose: (() => void) | null = null;
@@ -42,16 +42,20 @@ function SettingsOverlay(p: { pane: Pane; ctx: SettingsContext }) {
   document.addEventListener('keydown', onKeydown);
   onCleanup(() => document.removeEventListener('keydown', onKeydown));
   const [pane, setPane] = createSignal<Pane>(p.pane === 'channel' && !p.ctx.channel ? 'av' : p.pane);
-  // 房主判定取服务端 channels.is_owner，浮层自己查：各入口只需报当前频道，不必区分谁是房主
-  const [ownedChannel] = createResource(async () => {
+  // 「频道」分区判定取服务端 channels.my_role（owner/moderator 可见），浮层自己查：各入口只需报当前频道
+  const [managedChannel] = createResource(async () => {
     if (!p.ctx.channel) return null;
     const chs = await listChannels().catch(() => []);
-    return chs.find((c) => c.name === p.ctx.channel)?.is_owner ? p.ctx.channel : null;
+    const r = chs.find((c) => c.name === p.ctx.channel)?.my_role;
+    return r === 'owner' || r === 'moderator' ? p.ctx.channel : null;
   });
   const isAdmin = getUser()?.is_admin === true;
+  // 「邀请」pane 只对 power 及以上出现；直接以它打开但权限不够时回落个人首页
+  const panes = () => PERSONAL_PANES.filter((x) => x.id !== 'invites' || canInvite(getUser()));
   createEffect(() => {
-    // 直接以频道分区打开、查出来却不是房主：回落个人首页
-    if (pane() === 'channel' && ownedChannel.state === 'ready' && !ownedChannel()) setPane('av');
+    // 直接以频道分区打开、查出来却没有管理角色：回落个人首页
+    if (pane() === 'channel' && managedChannel.state === 'ready' && !managedChannel()) setPane('av');
+    if (pane() === 'invites' && !canInvite(getUser())) setPane('av');
   });
   const meta = () =>
     pane() === 'channel'
@@ -71,8 +75,8 @@ function SettingsOverlay(p: { pane: Pane; ctx: SettingsContext }) {
         <div class="nav-head">设置</div>
         <div class="nav-body">
           <div class="nav-group">个人</div>
-          <For each={PERSONAL_PANES}>{(r) => <NavRow id={r.id} label={r.label} icon={r.icon} />}</For>
-          <Show when={ownedChannel()}>
+          <For each={panes()}>{(r) => <NavRow id={r.id} label={r.label} icon={r.icon} />}</For>
+          <Show when={managedChannel()}>
             <div class="nav-group">频道 · {p.ctx.channel}</div>
             <NavRow id="channel" label="频道管理" icon="shield" />
           </Show>

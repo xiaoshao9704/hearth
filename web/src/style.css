@@ -865,3 +865,15 @@ body {
   .tile .tact { opacity: 1; }
   .volpop { display: flex; }
 }
+
+/* 聊天滚动与未读（backlog #6）：上翻时浮出「有新消息 ↓」回底按钮 */
+/* 窄屏下聊天面板已是 fixed 全屏（自身即包含块），relative 只加给宽屏，不能压过移动端那条 */
+@media (min-width: 861px) {
+  .side-panel.chat-panel { position: relative; }
+}
+.chat-jump {
+  position: absolute; left: 50%; transform: translateX(-50%); bottom: 92px; z-index: 2;
+  padding: 6px 14px; border-radius: 999px;
+  background: var(--ember); color: var(--on-ember);
+  font-size: 12px; font-weight: 600; white-space: nowrap; box-shadow: var(--glow);
+}

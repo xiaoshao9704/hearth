@@ -185,15 +185,21 @@ export async function renderRoom(root: HTMLElement, channel: string) {
     window.matchMedia('(min-width: 1200px)').matches ? 'members' : '',
   );
   const [unread, setUnread] = createSignal(0);
+  // 未读计数上标题用的原标题（与 main.ts 房间路由的写法一致）
+  const roomTitle = `${channel} · Hearth`;
   const [msgs, setMsgs] = createSignal<ChatMessage[]>([]);
+  // 聊天滚动：atBottom 镜像 chatLogEl 的滚动位置（DOM 是唯一真相，靠 scroll 事件同步）；
+  // newBelow = 上翻期间来了新的聊天消息（本地系统行不算），驱动「有新消息 ↓」按钮
+  const [atBottom, setAtBottom] = createSignal(true);
+  const [newBelow, setNewBelow] = createSignal(false);
   const [historyLoaded, setHistoryLoaded] = createSignal(false);
   const [chatReady, setChatReady] = createSignal(false); // 输入框非空 → 发送按钮点亮
   const [chatPlaceholder, setChatPlaceholder] = createSignal(`发消息到 #${channel}`);
   const [roomEvents, setRoomEvents] = createSignal<RoomEvent[]>([]);
   const [voiceState, setVoiceState] = createSignal<VoiceState>({ phase: 'connecting', attempt: 0 });
   const [audioBlocked, setAudioBlocked] = createSignal(false);
-  const [isOwnerSig, setIsOwnerSig] = createSignal(false);
-  const settingsCtx = { backLabel: `返回 ${channel}`, channel }; // 浮层按频道自查房主，决定是否出「频道」分区
+  const [myRoleSig, setMyRoleSig] = createSignal(''); // 服务端下发的我在本频道的角色（owner/moderator/member/""）
+  const settingsCtx = { backLabel: `返回 ${channel}`, channel }; // 浮层按频道自查管理角色（owner/moderator），决定是否出「频道」分区
   const [ownerName, setOwnerName] = createSignal('');
 
   // DOM ref（引擎产的命令式元素挂载点等）
@@ -464,8 +470,8 @@ export async function renderRoom(root: HTMLElement, channel: string) {
   };
 
   // ---- 用户操作菜单（聊天卡片、成员行与视频卡片右键共用；挂 body，保持命令式）----
-  // 管理操作（禁言/踢出）= 房主或管理员，与后端 requireModerator 一致
-  const canModerate = () => isOwnerSig() || getUser()?.is_admin === true;
+  // 管理操作（禁言/踢出）= 频道 owner 或 moderator（与后端 requireModerator 一致；系统 admin 的隐含 owner 已由 my_role 下发）
+  const canModerate = () => myRoleSig() === 'owner' || myRoleSig() === 'moderator';
 
   let longPressTimer = 0; // 触屏长按弹菜单的定时器（tile 触摸事件共用）
   let longPressFired = false; // 本次触摸已触发长按：touchend 要吞掉随之而来的合成 click
@@ -843,7 +849,10 @@ export async function renderRoom(root: HTMLElement, channel: string) {
     });
   };
   const onVisible = () => {
-    if (document.visibilityState === 'visible') retryNow();
+    if (document.visibilityState !== 'visible') return;
+    retryNow();
+    // 回到前台且聊天面板开着：未读视为已看
+    if (panel() === 'chat') setUnread(0);
   };
   document.addEventListener('visibilitychange', onVisible);
   document.addEventListener('fullscreenchange', onFsChange);
@@ -1158,6 +1167,18 @@ export async function renderRoom(root: HTMLElement, channel: string) {
     }
   }
 
+  // 距底多少 px 以内算「在底部」：留出阈值，避免次像素/小数滚动误差把用户判成已上翻
+  const NEAR_BOTTOM_PX = 48;
+  const onChatScroll = () => {
+    const d = chatLogEl.scrollHeight - chatLogEl.scrollTop - chatLogEl.clientHeight;
+    const at = d <= NEAR_BOTTOM_PX;
+    setAtBottom(at);
+    if (at) setNewBelow(false); // 自己滚到底，新消息提示消失
+  };
+  function jumpToLatest() {
+    chatLogEl.scrollTo({ top: chatLogEl.scrollHeight, behavior: 'smooth' });
+  }
+
   const chat = connectChat(channel, {
     onHistory: (messages) => {
       setHistoryLoaded(true);
@@ -1166,7 +1187,15 @@ export async function renderRoom(root: HTMLElement, channel: string) {
     },
     onMessage: (m) => {
       setMsgs((list) => [...list, m]);
-      if (panel() !== 'chat') setUnread((u) => u + 1);
+      if (m.uid === myUid) {
+        // 自己发的不计未读；刚发完消息的人要看的是自己这条，直接落底
+        queueMicrotask(() => {
+          chatLogEl.scrollTop = chatLogEl.scrollHeight;
+        });
+        return;
+      }
+      // 面板关着或页面在后台都计未读（title 前缀与按钮角标共用这一个计数）
+      if (panel() !== 'chat' || document.visibilityState !== 'visible') setUnread((u) => u + 1);
     },
     onKicked: (code) => {
       if (leaving) return;
@@ -1479,10 +1508,22 @@ export async function renderRoom(root: HTMLElement, channel: string) {
       return [...msgs(), ...roomEvents()].sort((a, b) => at(a) - at(b));
     });
 
-    // 新消息 / 历史 / 本地事件到达后滚到底（原实现每次 append 后滚动）
+    // 新消息 / 历史 / 本地事件到达后：本来就在底部才跟着滚底；
+    // 用户已上翻则保持位置，来的是聊天消息（非系统行）时亮「有新消息 ↓」
     createEffect(() => {
-      chatItems();
-      chatLogEl.scrollTop = chatLogEl.scrollHeight;
+      const items = chatItems();
+      if (untrack(atBottom)) {
+        chatLogEl.scrollTop = chatLogEl.scrollHeight;
+        return;
+      }
+      const last = items[items.length - 1];
+      if (last && !('sys' in last) && last.uid !== myUid) setNewBelow(true);
+    });
+
+    // 未读计数上标题；离开房间由路由重写 title，清理块再做兜底还原
+    createEffect(() => {
+      const n = unread();
+      document.title = n > 0 ? `(${n > 99 ? '99+' : n}) ${roomTitle}` : roomTitle;
     });
 
     // 被禁言：按钮状态从名册派生（checkSelfGag 的影子变量只管跳变 toast）
@@ -1571,7 +1612,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
           <div class="spacer"></div>
           <button
             class="hit btn btn-icon"
-            classList={{ hidden: !isOwnerSig() }}
+            classList={{ hidden: !canModerate() }}
             title="频道管理"
             onClick={() => openSettings('channel', settingsCtx)}
           >
@@ -1955,7 +1996,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
                 {el(icon('close', 15, 'var(--text-2)', 1.8))}
               </button>
             </div>
-            <div class="chat-log" ref={chatLogEl}>
+            <div class="chat-log" ref={chatLogEl} onScroll={onChatScroll}>
               <Show when={historyLoaded()}>
                 <div class="chat-day">最近</div>
               </Show>
@@ -1963,6 +2004,11 @@ export async function renderRoom(root: HTMLElement, channel: string) {
                 {(it) => ('sys' in it ? <div class="chat-sys">{it.text}</div> : <ChatMsgView m={it} />)}
               </For>
             </div>
+            <Show when={newBelow()}>
+              <button class="hit chat-jump" onClick={jumpToLatest}>
+                有新消息 ↓
+              </button>
+            </Show>
             <div class="chat-input-wrap">
               <form class="chat-input-box" onSubmit={sendChat}>
                 <input
@@ -1990,11 +2036,11 @@ export async function renderRoom(root: HTMLElement, channel: string) {
   const dispose = render(App, shell.content);
   const unwireMenu = wireMenuButton(root);
 
-  // ---- 房主探测 ----
+  // ---- 频道角色探测 ----
   void listChannels()
     .then((chs) => {
       const ch = chs.find((c) => c.name === channel);
-      setIsOwnerSig(ch?.is_owner === true);
+      setMyRoleSig(ch?.my_role ?? '');
       setOwnerName(ch?.created_by ?? '');
     })
     .catch(() => {});
@@ -2014,6 +2060,8 @@ export async function renderRoom(root: HTMLElement, channel: string) {
       document.removeEventListener('keyup', onHotkeyUp);
       window.removeEventListener('blur', pttRelease);
       window.removeEventListener('online', retryNow);
+      // title 兜底还原：正常已由 route() 换成新页面标题，只在 title 仍属本房间时去掉未读前缀
+      if (document.title.endsWith(roomTitle)) document.title = roomTitle;
       leaving = true;
       exitFs();
       clearTimeout(volSaveTimer);

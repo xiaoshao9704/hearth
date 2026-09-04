@@ -181,7 +181,7 @@ func TestDialectAutoincrementBackfill(t *testing.T) {
 		if m.ID <= 0 || m.Username != "alice" {
 			t.Fatalf("消息 ID 未回填或 JOIN 异常: %+v", m)
 		}
-		inv, err := s.CreateInvite(ctx, u.ID, "n", 3, time.Hour)
+		inv, err := s.CreateInvite(ctx, u.ID, "n", 3, time.Hour, "")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -221,7 +221,8 @@ func TestDialectIgnoreDuplicates(t *testing.T) {
 		if gags, _ := s.ListGags(ctx, c.ID); len(gags) != 1 {
 			t.Fatalf("重复 Gag 应被 Ignore，实际名单: %v", gags)
 		}
-		if members, _ := s.ListMembers(ctx, c.ID); len(members) != 1 {
+		// 名单含建频道时自动写入的 owner 行（alice）+ 重复 AddMember 被 Ignore 的 bob 一行
+		if members, _ := s.ListMembers(ctx, c.ID); len(members) != 2 {
 			t.Fatalf("重复 AddMember 应被 Ignore，实际名单: %v", members)
 		}
 	})
@@ -409,7 +410,7 @@ func TestDialectTimeRoundTrip(t *testing.T) {
 		if m.CreatedAt.IsZero() {
 			t.Fatalf("消息 created_at 往返为零: %+v", m)
 		}
-		inv, _ := s.CreateInvite(ctx, u.ID, "", 1, time.Hour)
+		inv, _ := s.CreateInvite(ctx, u.ID, "", 1, time.Hour, "")
 		got, err := s.InviteByCode(ctx, inv.Code)
 		if err != nil {
 			t.Fatal(err)
@@ -438,7 +439,7 @@ func TestDialectCreateInviteMaxUsesZero(t *testing.T) {
 		ctx := context.Background()
 		u, _ := s.CreateUser(ctx, "alice", "h")
 
-		inv0, err := s.CreateInvite(ctx, u.ID, "unlimited", 0, time.Hour)
+		inv0, err := s.CreateInvite(ctx, u.ID, "unlimited", 0, time.Hour, "")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -450,7 +451,7 @@ func TestDialectCreateInviteMaxUsesZero(t *testing.T) {
 			t.Fatalf("max_uses=0 应原样落库（而非 DEFAULT 1），实际 %d", got.MaxUses)
 		}
 
-		inv2, err := s.CreateInvite(ctx, u.ID, "two", 2, time.Hour)
+		inv2, err := s.CreateInvite(ctx, u.ID, "two", 2, time.Hour, "")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -478,8 +479,8 @@ func TestBaselineReopenNoop(t *testing.T) {
 		if err != nil {
 			t.Fatalf("重复 Open 失败: %v", err)
 		}
-		if n := remoteMigrationRows(t, s2.bun.DB); n != 2 {
-			t.Fatalf("重复 Open 后 bun_migrations 应仍为 2 行，实际 %d", n)
+		if n := remoteMigrationRows(t, s2.bun.DB); n != 3 {
+			t.Fatalf("重复 Open 后 bun_migrations 应仍为 3 行，实际 %d", n)
 		}
 		// 数据无损
 		if _, _, err := s2.UserByName(ctx, "alice"); err != nil {
@@ -747,11 +748,12 @@ func TestLegacyUpgradeRemote(t *testing.T) {
 			if !slices.Equal(after, want) {
 				t.Fatalf("升级后表集合不符:\n got %v\nwant %v", after, want)
 			}
-			if n := remoteMigrationRows(t, s.bun.DB); n != 2 {
-				t.Fatalf("bun_migrations 应有 2 行，实际 %d", n)
+			if n := remoteMigrationRows(t, s.bun.DB); n != 3 {
+				t.Fatalf("bun_migrations 应有 3 行，实际 %d", n)
 			}
 
-			// compat 加列生效：旧库 users 无 is_admin/disabled，由 baseline 的 ALTER 补齐
+			// compat 加列生效：旧库 users 无 is_admin/disabled（baseline ALTER 补齐），
+			// 无 role/expires_at/invite_id（00003 补齐）
 			var colQ string
 			if tc.name == "mysql" {
 				colQ = `SELECT column_name FROM information_schema.columns
@@ -773,7 +775,7 @@ func TestLegacyUpgradeRemote(t *testing.T) {
 				cols = append(cols, name)
 			}
 			rows.Close()
-			for _, wantCol := range []string{"is_admin", "disabled"} {
+			for _, wantCol := range []string{"is_admin", "disabled", "role", "expires_at", "invite_id"} {
 				if !slices.Contains(cols, wantCol) {
 					t.Fatalf("users 缺 compat 列 %s，实际列: %v", wantCol, cols)
 				}

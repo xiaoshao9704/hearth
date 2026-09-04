@@ -1,5 +1,5 @@
 // 凭邀请链接注册：#/join/<code>。倒计时真跑，归零切过期态。
-import { ApiError, getToken, getUser, inviteInfo, register } from '../api';
+import { ApiError, getToken, getUser, inviteInfo, register, siteInfo } from '../api';
 import { wireThemeButton } from '../theme';
 import { avatarHtml, esc, flameLogo, icon, pwBarsHtml, pwScore } from '../ui';
 
@@ -42,11 +42,13 @@ async function renderInviteFlow(root: HTMLElement, code: string, alive: () => bo
   let expiresAt = 0;
   let known = true; // 邀请码是否存在（404 = 不存在）
   let connError = false; // 网络/服务器错误，与「不存在」分开提示
+  let siteName = 'Hearth'; // 站点名（/api/site），拉不到就用默认名
   try {
-    const info = await inviteInfo(code);
+    const [info, site] = await Promise.all([inviteInfo(code), siteInfo().catch(() => null)]);
     inviter = info.inviter;
     expiresAt = new Date(info.expires_at).getTime();
     if (!info.alive) expiresAt = 0; // 名额用完/撤销也按失效展示
+    if (site?.name) siteName = site.name;
   } catch (err) {
     if (err instanceof ApiError && err.status === 404) {
       known = false;
@@ -86,7 +88,7 @@ async function renderInviteFlow(root: HTMLElement, code: string, alive: () => bo
         <div class="card" style="margin-top:26px;display:flex;align-items:center;gap:13px">
           ${avatarHtml(inviter || '?', 'avatar-lg avatar')}
           <div style="flex-grow:1;min-width:0">
-            <div style="font-size:13.5px;line-height:1.5"><span style="font-weight:600">${esc(inviter || '有人')}</span> 邀请你加入 Hearth</div>
+            <div style="font-size:13.5px;line-height:1.5"><span style="font-weight:600">${esc(inviter || '有人')}</span> 邀请你加入 ${esc(siteName)}</div>
             <div class="mono" style="font-size:11px;color:var(--text-2);margin-top:3px">${esc(location.host)}</div>
           </div>
           <div id="ttl-chip"></div>
@@ -130,7 +132,7 @@ async function renderInviteFlow(root: HTMLElement, code: string, alive: () => bo
       <div style="margin-top:24px;padding:22px 20px;border-radius:12px;background:var(--red-tint);border:1px solid var(--red-line);display:flex;flex-direction:column;align-items:center;gap:10px">
         ${icon('warn', 26, 'var(--red)', 1.6)}
         <div style="font-size:14px;font-weight:600;color:var(--red-text)">邀请链接${known ? '已过期' : '不存在'}</div>
-        <div style="font-size:12.5px;line-height:1.6;color:var(--text-1);text-align:center;text-wrap:pretty">找${esc(inviter || '管理员')}再要一条。管理员在后台点一下就能重新生成。</div>
+        <div style="font-size:12.5px;line-height:1.6;color:var(--text-1);text-align:center;text-wrap:pretty">找${esc(inviter || '对方')}再要一条，重新生成只要点一下。</div>
       </div>
       <div style="text-align:center;margin-top:14px;font-size:12px"><a href="#/login">已有账号？去登录</a></div>`;
   }

@@ -2,7 +2,7 @@
 // 四步：管理员账号 → 域名与 DDNS（可跳过）→ 证书方式 → 自检与邀请链接。
 // 一次性轻页面，vanilla TS 渲染（与 login/join 同类，不进 Solid）。
 import {
-  adminCreateInvite,
+  createInvite,
   adminNetcheck,
   adminSetConfig,
   refreshSite,
@@ -370,7 +370,7 @@ export function renderSetup(root: HTMLElement, alive: () => boolean) {
     async function makeInvite() {
       const box = el.querySelector<HTMLDivElement>('#wz-invite')!;
       try {
-        const { url } = await adminCreateInvite('初始邀请', 0, '7d');
+        const { url } = await createInvite('初始邀请', 0, '7d');
         if (!alive()) return;
         box.innerHTML = `
           <div class="card" style="padding:13px 14px">
