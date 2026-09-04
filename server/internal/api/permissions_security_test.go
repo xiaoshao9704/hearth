@@ -48,8 +48,24 @@ func TestChannelModerationRespectsSystemRolesAndProtectsOwners(t *testing.T) {
 	if err := a.st.SetUserDisabled(ctx, disabled.ID, true); err != nil {
 		t.Fatal(err)
 	}
+	peerOwner, err := a.st.CreateUser(ctx, "peer-owner", "x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	peerModerator, err := a.st.CreateUser(ctx, "peer-moderator", "x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	peerChannel, err := a.st.CreateChannel(ctx, "peer", peerOwner.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.st.SetChannelRole(ctx, peerChannel.ID, peerModerator.ID, store.ChannelRoleModerator); err != nil {
+		t.Fatal(err)
+	}
 	attackerToken, _ := a.st.CreateSession(ctx, attacker.ID)
 	superToken, _ := a.st.CreateSession(ctx, super.ID)
+	peerOwnerToken, _ := a.st.CreateSession(ctx, peerOwner.ID)
 	r := a.Router()
 
 	for _, tc := range []struct {
@@ -67,15 +83,37 @@ func TestChannelModerationRespectsSystemRolesAndProtectsOwners(t *testing.T) {
 		})
 	}
 	if rec := doReq(t, r, http.MethodPost, "/api/channels/general/ban", attackerToken,
-		map[string]any{"user_id": member.ID}); rec.Code != http.StatusForbidden {
-		t.Fatalf("同档系统角色之间不得封禁，实际 %d: %s", rec.Code, rec.Body.String())
+		map[string]any{"user_id": secondModerator.ID}); rec.Code != http.StatusForbidden {
+		t.Fatalf("moderator 不得封禁同级 moderator，实际 %d: %s", rec.Code, rec.Body.String())
 	}
 
-	for _, uid := range []int64{super.ID, secondModerator.ID, member.ID} {
+	if rec := doReq(t, r, http.MethodPost, "/api/channels/general/ban", attackerToken,
+		map[string]any{"user_id": member.ID}); rec.Code != http.StatusOK {
+		t.Fatalf("user 档 moderator 应能封禁 user 档 member，实际 %d: %s", rec.Code, rec.Body.String())
+	}
+	if banned, err := a.st.IsBanned(ctx, c.ID, member.ID); err != nil || !banned {
+		t.Fatalf("封禁应落库: banned=%v err=%v", banned, err)
+	}
+	if rec := doReq(t, r, http.MethodPost, "/api/channels/general/unban", attackerToken,
+		map[string]any{"user_id": member.ID}); rec.Code != http.StatusNoContent {
+		t.Fatalf("moderator 应能解封低频道角色用户，实际 %d: %s", rec.Code, rec.Body.String())
+	}
+	if rec := doReq(t, r, http.MethodPost, "/api/channels/general/mute", attackerToken,
+		map[string]any{"user_id": member.ID}); rec.Code != http.StatusOK {
+		t.Fatalf("user 档 moderator 应能禁言 user 档 member，实际 %d: %s", rec.Code, rec.Body.String())
+	}
+	if rec := doReq(t, r, http.MethodPost, "/api/channels/general/unmute", attackerToken,
+		map[string]any{"user_id": member.ID}); rec.Code != http.StatusOK {
+		t.Fatalf("moderator 应能解除低频道角色用户的禁言，实际 %d: %s", rec.Code, rec.Body.String())
+	}
+
+	for uid, wantStatus := range map[int64]int{
+		super.ID: http.StatusBadRequest, secondModerator.ID: http.StatusBadRequest, member.ID: http.StatusNoContent,
+	} {
 		rec := doReq(t, r, http.MethodDelete, "/api/channels/general/members", attackerToken,
 			map[string]any{"user_id": uid})
-		if rec.Code != http.StatusNoContent {
-			t.Fatalf("移出成员 uid=%d 应 204，实际 %d: %s", uid, rec.Code, rec.Body.String())
+		if rec.Code != wantStatus {
+			t.Fatalf("移出成员 uid=%d 应 %d，实际 %d: %s", uid, wantStatus, rec.Code, rec.Body.String())
 		}
 	}
 	for uid, want := range map[int64]store.ChannelRole{
@@ -108,5 +146,10 @@ func TestChannelModerationRespectsSystemRolesAndProtectsOwners(t *testing.T) {
 		if rec.Code != http.StatusBadRequest {
 			t.Fatalf("停用账号不得接管频道角色，%s 实际 %d: %s", path, rec.Code, rec.Body.String())
 		}
+	}
+
+	if rec := doReq(t, r, http.MethodPost, "/api/channels/peer/ban", peerOwnerToken,
+		map[string]any{"user_id": peerModerator.ID}); rec.Code != http.StatusOK {
+		t.Fatalf("user 档 owner 应能封禁 user 档 moderator，实际 %d: %s", rec.Code, rec.Body.String())
 	}
 }

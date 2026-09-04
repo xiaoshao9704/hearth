@@ -19,9 +19,15 @@ func TestRemoveMemberCannotRemoveChannelRoles(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		for _, uid := range []int64{owner.ID, moderator.ID, member.ID} {
-			if err := s.RemoveMember(ctx, c.ID, uid); err != nil {
+		for uid, wantRemoved := range map[int64]bool{
+			owner.ID: false, moderator.ID: false, member.ID: true,
+		} {
+			removed, err := s.RemoveMember(ctx, c.ID, uid)
+			if err != nil {
 				t.Fatal(err)
+			}
+			if removed != wantRemoved {
+				t.Fatalf("uid=%d 移出结果异常: got=%v want=%v", uid, removed, wantRemoved)
 			}
 		}
 		for uid, want := range map[int64]ChannelRole{

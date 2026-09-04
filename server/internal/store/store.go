@@ -406,10 +406,16 @@ func (s *Store) AddMember(ctx context.Context, channelID, userID int64) error {
 	return err
 }
 
-func (s *Store) RemoveMember(ctx context.Context, channelID, userID int64) error {
-	_, err := s.bun.NewRaw(
+// RemoveMember 只移除普通 member；owner/moderator 必须走专用的降级或转让路径。
+// 返回值表示是否真正删除了一行，让 handler 不会对空操作误报成功。
+func (s *Store) RemoveMember(ctx context.Context, channelID, userID int64) (bool, error) {
+	result, err := s.bun.NewRaw(
 		"DELETE FROM channel_members WHERE channel_id = ? AND user_id = ? AND role = 'member'", channelID, userID).Exec(ctx)
-	return err
+	if err != nil {
+		return false, err
+	}
+	n, err := result.RowsAffected()
+	return n > 0, err
 }
 
 // ListMembers 返回该频道全部成员行（owner/moderator/member 都带角色）。

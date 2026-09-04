@@ -621,13 +621,28 @@ func (a *API) resolveTargetUserWithSelf(w http.ResponseWriter, r *http.Request, 
 	return t
 }
 
-// canModerateTarget 把频道管制也纳入系统角色阶梯；解除自身状态是唯一例外。
-func canModerateTarget(w http.ResponseWriter, actor, target *store.User, allowSelf bool) bool {
+// canModerateTarget 同时守住两条正交边界：admin+ 目标仍受严格系统阶梯保护，
+// 频道内又必须严格高于目标的频道角色。解除自身状态是唯一例外。
+func (a *API) canModerateTarget(w http.ResponseWriter, r *http.Request, c *store.Channel, actor, target *store.User, allowSelf bool) bool {
 	if allowSelf && actor.ID == target.ID {
 		return true
 	}
-	if !perm.CanActOn(actor, target) {
-		writeErr(w, http.StatusForbidden, "不能操作系统角色不低于自己的用户")
+	if perm.SysAtLeast(target, store.RoleAdmin) && !perm.CanActOn(actor, target) {
+		writeErr(w, http.StatusForbidden, "不能操作受保护的管理员")
+		return false
+	}
+	actorRole, err := perm.ChannelRole(r.Context(), a.st, c, actor)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "内部错误")
+		return false
+	}
+	targetRole, err := perm.ChannelRole(r.Context(), a.st, c, target)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "内部错误")
+		return false
+	}
+	if !perm.CanActOnChannel(actorRole, targetRole) {
+		writeErr(w, http.StatusForbidden, "不能操作频道角色不低于自己的用户")
 		return false
 	}
 	return true
@@ -686,7 +701,7 @@ func (a *API) kick(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, "用户不存在")
 		return
 	}
-	if !canModerateTarget(w, u, t, true) {
+	if !a.canModerateTarget(w, r, c, u, t, true) {
 		return
 	}
 	n, err := a.evict(r, c, t, req.Identity)
@@ -704,7 +719,7 @@ func (a *API) ban(w http.ResponseWriter, r *http.Request) {
 	if t == nil {
 		return
 	}
-	if !canModerateTarget(w, u, t, false) {
+	if !a.canModerateTarget(w, r, c, u, t, false) {
 		return
 	}
 	if err := a.st.Ban(r.Context(), c.ID, t.ID); err != nil {
@@ -723,7 +738,7 @@ func (a *API) unban(w http.ResponseWriter, r *http.Request) {
 	if t == nil {
 		return
 	}
-	if !canModerateTarget(w, u, t, true) {
+	if !a.canModerateTarget(w, r, c, u, t, true) {
 		return
 	}
 	if err := a.st.Unban(r.Context(), c.ID, t.ID); err != nil {
@@ -743,7 +758,7 @@ func (a *API) setGag(w http.ResponseWriter, r *http.Request, muted bool) {
 	if t == nil {
 		return
 	}
-	if !canModerateTarget(w, u, t, !muted) {
+	if !a.canModerateTarget(w, r, c, u, t, !muted) {
 		return
 	}
 	var err error
@@ -848,8 +863,13 @@ func (a *API) removeMember(w http.ResponseWriter, r *http.Request) {
 	if t == nil {
 		return
 	}
-	if err := a.st.RemoveMember(r.Context(), c.ID, t.ID); err != nil {
+	removed, err := a.st.RemoveMember(r.Context(), c.ID, t.ID)
+	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "内部错误")
+		return
+	}
+	if !removed {
+		writeErr(w, http.StatusBadRequest, "对方不是可移出的普通成员")
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)

@@ -48,3 +48,9 @@ func ChannelRole(ctx context.Context, st *store.Store, c *store.Channel, u *stor
 func ChannelAtLeast(cr, need store.ChannelRole) bool {
 	return cr.Rank() >= need.Rank()
 }
+
+// CanActOnChannel 频道内只能管制比自己低的频道角色。
+// 系统角色的 admin+ 保护是另一条正交约束，由调用方单独判定。
+func CanActOnChannel(actor, target store.ChannelRole) bool {
+	return actor.Rank() > target.Rank()
+}
