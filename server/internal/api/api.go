@@ -14,6 +14,7 @@ import (
 
 	"hearth/server/internal/chat"
 	"hearth/server/internal/config"
+	"hearth/server/internal/portmap"
 	"hearth/server/internal/rtc"
 	"hearth/server/internal/rtc/bellows"
 	"hearth/server/internal/rtc/ember"
@@ -21,6 +22,7 @@ import (
 	"hearth/server/internal/rtc/livekitembed"
 	"hearth/server/internal/rtc/livekitrtc"
 	"hearth/server/internal/store"
+	"hearth/server/internal/tlsx"
 
 	"crypto/rand"
 	"encoding/hex"
@@ -70,6 +72,11 @@ type API struct {
 	lkembedWHIP *livekitrtc.WHIP
 	embedMu     sync.Mutex
 	embedSrv    *livekitembed.Server
+
+	// tls 进程内 TLS 管理器（main 在路由建好后 SetTLS 注入；nil = TLS 关闭）
+	tls *tlsx.Manager
+	// mapper 端口映射器（自检回显用，main 经 SetPortMapper 注入；nil = 未接入）
+	mapper *portmap.Mapper
 }
 
 func New(st *store.Store, cfg config.Config, hub *chat.Hub, mapped lite.MappedFunc) *API {
@@ -109,6 +116,7 @@ func (a *API) Router() *chi.Mux {
 	r.Post("/api/register", a.registerWithPolicy)
 	r.Post("/api/login", a.login)
 	r.Get("/api/invites/{code}", a.inviteInfo)
+	r.Get("/api/site", a.site)
 
 	// 健康检查：只表示进程活着（宣告探测的刷新由进程内周期任务触发，不挂在这里）
 	r.Get("/healthz", a.healthz)
@@ -180,6 +188,8 @@ func (a *API) Router() *chi.Mux {
 			r.Post("/providers", a.adminCreateProvider)
 			r.Put("/providers/{alias}", a.adminUpdateProvider)
 			r.Delete("/providers/{alias}", a.adminDeleteProvider)
+			r.Get("/netcheck", a.adminNetcheck)
+			r.Get("/tls/ca.crt", a.adminTLSCA)
 		})
 	})
 	return r

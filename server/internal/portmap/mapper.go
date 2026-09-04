@@ -588,17 +588,21 @@ func (m *Mapper) unmapOne(ctx context.Context, c client, k mapKey, mp Mapping) {
 	m.logf("portmap: 已撤销映射 %s/%d", k.proto, k.port)
 }
 
-// apply 单条 want 的申请策略：先要 external == internal（上游 DMZ 是端口不变透传，
+// apply 单条 want 的申请策略：先要外部端口 == 首选端口（上游 DMZ 是端口不变透传，
 // 端口一变整条链就断），冲突了再让网关任选；StrictPort 的不接受改派。
 func (m *Mapper) apply(ctx context.Context, c client, w Want) (Mapping, error) {
-	mp, err := m.mapOnce(ctx, c, w, w.Port)
+	preferred := w.Port
+	if w.External > 0 {
+		preferred = w.External
+	}
+	mp, err := m.mapOnce(ctx, c, w, preferred)
 	if errors.Is(err, ErrConflict) && !w.StrictPort {
 		mp, err = m.mapOnce(ctx, c, w, 0) // 0 = 由网关分配
 	}
 	if err != nil {
 		return Mapping{}, err
 	}
-	if w.StrictPort && mp.External != w.Port {
+	if w.StrictPort && mp.External != preferred {
 		// 这条要求内外一致，改派过的映射留着只会是个误导人的假成功。
 		if uerr := c.Unmap(ctx, w, mp.External); uerr != nil {
 			m.logf("portmap: 撤销被改派的映射 %s/%d 失败: %v", w.Proto, w.Port, uerr)

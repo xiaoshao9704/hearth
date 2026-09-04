@@ -14,22 +14,25 @@ import {
   adminListInvites,
   adminListProviders,
   adminListUsers,
+  adminNetcheck,
   adminOverview,
   adminSetConfig,
   adminSetPolicy,
   adminSetUserDisabled,
   adminUpdateProvider,
+  downloadCACert,
   getUser,
   listChannels,
 } from '../api';
-import type { AdminOverview, AdminUser, Channel, ConfigItem, Invite, ProviderField, ProviderInstance, ProviderType } from '../api';
-import { avatarHtml, confirmDialog, copyText, el, icon, menuButtonHtml, timeAgo, toast, wireMenuButton } from '../ui';
+import type { AdminOverview, AdminUser, Channel, ConfigItem, Invite, NetcheckResult, ProviderField, ProviderInstance, ProviderType } from '../api';
+import { avatarHtml, confirmDialog, copyText, el, fmtClock, icon, menuButtonHtml, timeAgo, toast, wireMenuButton } from '../ui';
 
-type Tab = 'status' | 'config' | 'users' | 'rooms' | 'invites';
+type Tab = 'status' | 'config' | 'network' | 'users' | 'rooms' | 'invites';
 
 const NAV: { id: Tab; label: string; icon: string; sub: string }[] = [
   { id: 'status', label: '服务状态', icon: 'pulse', sub: '常驻进程与宿主资源' },
   { id: 'config', label: '服务参数', icon: 'gear', sub: '组件地址与注册策略' },
+  { id: 'network', label: '网络', icon: 'globe', sub: '端口映射、证书与外部可达性' },
   { id: 'users', label: '用户', icon: 'users', sub: '账号、设备与启停' },
   { id: 'rooms', label: '房间', icon: 'volume', sub: '频道、房主与可见性' },
   { id: 'invites', label: '邀请', icon: 'mail', sub: '生成有时效的注册链接' },
@@ -158,6 +161,8 @@ export async function renderAdmin(root: HTMLElement, tab: Tab) {
             <StatusTab />
           ) : tab === 'config' ? (
             <ConfigTab onDirty={setDirtyGroups} />
+          ) : tab === 'network' ? (
+            <NetworkTab />
           ) : tab === 'users' ? (
             <UsersTab />
           ) : tab === 'rooms' ? (
@@ -357,6 +362,166 @@ function StatusTab() {
   );
 }
 
+// ---- 网络（自检：端口映射 / 公网地址 / 域名 / 证书 / 外部可达）----
+
+const TLS_MODE_LABELS: Record<string, string> = {
+  off: '关闭（纯 HTTP）',
+  acme: '自动证书（ACME）',
+  selfsigned: '自签名（本地 CA）',
+};
+const VERDICT_META: Record<string, [string, string]> = {
+  reachable: ['外部可达', 'var(--sage)'],
+  unknown: ['本机无法确认', 'var(--text-2)'],
+  failed: ['不可达', 'var(--red)'],
+};
+const DOMAIN_MATCH_LABELS: Record<string, string> = {
+  ok: '与公网地址一致',
+  mismatch: '与公网地址不一致',
+  unconfigured: '未配置',
+  error: '异常',
+};
+
+function NetworkTab() {
+  const [nc, setNc] = createSignal<NetcheckResult>();
+  const [err, setErr] = createSignal('');
+  const [busy, setBusy] = createSignal(false);
+  const [caBusy, setCaBusy] = createSignal(false);
+
+  const refresh = async () => {
+    setBusy(true);
+    try {
+      setNc(await adminNetcheck());
+      setErr('');
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  void refresh();
+
+  const kv = (k: string, v: string, mono = true) => (
+    <div style="display:flex;gap:12px;padding:9px 14px;border-bottom:1px solid var(--line-soft);align-items:baseline">
+      <span style="font-size:12px;color:var(--text-2);flex-shrink:0;width:76px">{k}</span>
+      <span class={mono ? 'mono' : ''} style="font-size:12px;line-height:1.6;color:var(--text-1);flex-grow:1;word-break:break-all">
+        {v}
+      </span>
+    </div>
+  );
+
+  const downloadCA = async () => {
+    setCaBusy(true);
+    try {
+      await downloadCACert();
+      toast('CA 证书已下载', 'ok');
+    } catch (e) {
+      toast((e as Error).message, 'bad');
+    } finally {
+      setCaBusy(false);
+    }
+  };
+
+  return (
+    <Show when={nc()} fallback={<Placeholder err={err()} />}>
+      {(n) => {
+        const verdict = () => VERDICT_META[n().external.verdict] ?? VERDICT_META.unknown;
+        return (
+          <div style="display:flex;flex-direction:column;gap:16px">
+            <div class="card" style="padding:0">
+              <div style="display:flex;align-items:center;gap:9px;padding:13px 18px;border-bottom:1px solid var(--line-soft)">
+                <span style="font-size:13px;font-weight:600;flex-grow:1">外部可达性</span>
+                <button class="hit btn btn-sm" classList={{ loading: busy() }} disabled={busy()} onClick={() => void refresh()}>
+                  重新自检
+                </button>
+              </div>
+              <div style="padding:14px 18px;display:flex;align-items:baseline;gap:10px">
+                <span style={`font-size:14px;font-weight:600;color:${verdict()[1]}`}>{verdict()[0]}</span>
+                <Show when={n().external.url}>
+                  <span class="mono" style="font-size:11px;color:var(--text-3)">{n().external.url}</span>
+                </Show>
+              </div>
+              <div style="padding:0 18px 14px;font-size:12px;line-height:1.7;color:var(--text-2)">{n().external.detail}</div>
+            </div>
+
+            <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:16px;align-items:start">
+              <div class="card" style="padding:0">
+                <div style="padding:13px 18px;border-bottom:1px solid var(--line-soft);font-size:13px;font-weight:600">端口映射</div>
+                <div style="padding:4px 4px">
+                  {kv('状态', n().portmap.Detail || n().portmap.Diagnosis, false)}
+                  {kv('方式', n().portmap.Method || '未发现网关')}
+                  <Show when={(n().portmap.Mappings ?? []).length > 0}>
+                    {kv(
+                      '映射',
+                      (n().portmap.Mappings ?? [])
+                        .map((mp) => `${mp.Proto} ${mp.Internal} → ${mp.ExternalIP || '?'}:${mp.External}`)
+                        .join('，'),
+                    )}
+                  </Show>
+                  <Show when={(n().portmap.Hops ?? []).length > 1}>
+                    {kv('级联', (n().portmap.Hops ?? []).map((h) => h.Gateway).join(' → '))}
+                  </Show>
+                  <Show when={n().portmap.V6Detail}>
+                    {kv('IPv6', n().portmap.V6Detail, false)}
+                  </Show>
+                </div>
+              </div>
+
+              <div class="card" style="padding:0">
+                <div style="padding:13px 18px;border-bottom:1px solid var(--line-soft);font-size:13px;font-weight:600">公网地址与域名</div>
+                <div style="padding:4px 4px">
+                  {kv('探测结果', (n().externals ?? []).length > 0 ? (n().externals ?? []).join('，') : '还没有探测到（STUN 不可达且未建映射）')}
+                  <Show when={n().probed_at && !n().probed_at.startsWith('0001')}>
+                    {kv('探测时间', fmtClock(n().probed_at))}
+                  </Show>
+                  {kv('站点域名', n().domain.configured || '未配置')}
+                  <Show when={n().domain.configured !== ''}>
+                    {kv('域名解析', (n().domain.resolved ?? []).join('，') || '无记录')}
+                    {kv('比对', DOMAIN_MATCH_LABELS[n().domain.match] ?? n().domain.match, false)}
+                    <Show when={n().domain.detail}>{kv('说明', n().domain.detail!, false)}</Show>
+                  </Show>
+                </div>
+              </div>
+
+              <div class="card" style="padding:0">
+                <div style="padding:13px 18px;border-bottom:1px solid var(--line-soft);font-size:13px;font-weight:600;display:flex;align-items:center;gap:9px">
+                  <span style="flex-grow:1">HTTPS 证书</span>
+                  <Show when={n().tls.ca_available}>
+                    <button class="hit btn btn-sm" classList={{ loading: caBusy() }} disabled={caBusy()} onClick={() => void downloadCA()}>
+                      下载 CA 证书
+                    </button>
+                  </Show>
+                </div>
+                <div style="padding:4px 4px">
+                  {kv('模式', TLS_MODE_LABELS[n().tls.mode] ?? n().tls.mode, false)}
+                  <Show when={n().tls.mode !== 'off'}>
+                    {kv('HTTPS 监听', `${n().tls.https_addr}（${n().tls.listening ? '在跑' : '未监听'}）`)}
+                  </Show>
+                  <Show when={(n().tls.sans ?? []).length > 0}>{kv('证书覆盖', (n().tls.sans ?? []).join('，'))}</Show>
+                  <Show when={n().tls.not_after && !n().tls.not_after.startsWith('0001')}>
+                    {kv('到期', fmtClock(n().tls.not_after))}
+                  </Show>
+                  <Show when={n().tls.last_error}>{kv('最近错误', n().tls.last_error, false)}</Show>
+                </div>
+                <Show when={n().tls.mode === 'selfsigned'}>
+                  <div style="padding:12px 18px;border-top:1px solid var(--line-soft);font-size:11.5px;line-height:1.7;color:var(--text-2)">
+                    不装 CA 也能用——每台设备首次访问点一次「继续访问」即可。装上 CA 后浏览器完全信任本机证书：
+                    <br />
+                    macOS：双击下载的 .crt 进钥匙串，双击该证书设「始终信任」；
+                    <br />
+                    Windows：双击 .crt → 安装证书 → 放入「受信任的根证书颁发机构」；
+                    <br />
+                    iOS：把文件发到手机 → 设置里安装描述文件 → 关于本机 → 证书信任设置里打开。
+                  </div>
+                </Show>
+              </div>
+            </div>
+          </div>
+        );
+      }}
+    </Show>
+  );
+}
+
 // ---- 服务参数 ----
 
 const CAP_LABELS: Record<string, string> = { voice: '语音', stage: '舞台', ingest: '推流' };
@@ -375,6 +540,8 @@ const KERNEL_LABELS: Record<string, string> = {
   none: '关闭',
   auto: '自动',
   off: '关闭',
+  acme: '自动证书（ACME）',
+  selfsigned: '自签名（本地 CA）',
 };
 const GROUP_META: Record<string, [string, string]> = {
   core: ['内核选择', '语音 / 舞台（投屏）/ 推流入口分别选服务实例'],
@@ -383,6 +550,8 @@ const GROUP_META: Record<string, [string, string]> = {
   stage: ['进程内 LiveKit（舞台）', '舞台选 lkembed 时才启动，信令只监听回环'],
   ingress: ['推流入口（OBS）', 'WHIP 上游与公开地址'],
   network: ['网络', '向默认网关申请端口映射，仅 host 网络或裸机可用'],
+  site: ['站点', '公开域名：邀请链接与证书签发都按它'],
+  tls: ['HTTPS 证书', '保存即热生效；外部 80/443 由端口映射指到本机'],
 };
 const POLICIES = [
   { id: 'closed', label: '关闭注册', desc: '只能用 CLI 在服务器上开通' },

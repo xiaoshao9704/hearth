@@ -56,6 +56,8 @@ const PATHS: Record<string, string> = {
   sliders: 'M2.5 6h6.5M15 6h2.5M2.5 14H4M8 14h9.5M15 6a2 2 0 11-4 0 2 2 0 014 0M8 14a2 2 0 11-4 0 2 2 0 014 0',
   fullscreen: 'M3.5 7.5v-4h4M12.5 3.5h4v4M16.5 12.5v4h-4M7.5 16.5h-4v-4',
   more: 'M3.4 10a1.1 1.1 0 102.2 0 1.1 1.1 0 10-2.2 0M8.9 10a1.1 1.1 0 102.2 0 1.1 1.1 0 10-2.2 0M14.4 10a1.1 1.1 0 102.2 0 1.1 1.1 0 10-2.2 0',
+  globe: 'M10 2.5a7.5 7.5 0 100 15 7.5 7.5 0 000-15M2.5 10h15M10 2.5c2.6 2.5 2.6 12.5 0 15M10 2.5c-2.6 2.5-2.6 12.5 0 15',
+  download: 'M10 3v8.5M6 8l4 4 4-4M3.5 16.5h13',
 };
 
 export function icon(name: string, size = 16, color = 'currentColor', strokeWidth = 1.7): string {

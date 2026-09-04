@@ -39,6 +39,14 @@
 
 一条规则，三个执行点：`admitUser` 是唯一的"谁能进房、能否发布"决策函数（返回 `UID`/`Username`，identity 由调用方经 `rtc.Identity` 组），`joinToken`（凭证签发）、`/providers/ember/voice`（ember 验票入会）、`/providers/{alias}/w` POST（WHIP 推流拦截，统一走 `admitIngest`：令牌反查用户 + URL 取频道，进程内 bellows / 远端 bellows / livekit-ingress / lkembed 反代 LiveKit 自带 WHIP 四条路径共用，definitive 404/403/503 无 fail-open）都调它。远端 `cmd/bellows` 进程没有数据库也不回调：hearth 在反代前做完判定，把结果签成短时效通行证（grant）塞进请求头，远端只本地验签（与 LiveKit join token 同一模型）。新增入口或新增入场约束时**只改这里**，不得在别处散落 `CanJoin`/`IsGagged` 组合。ember 线走一次性入场票（60s、取出即删、防挪用），不做二次判定。
 
+### 进程内 TLS 与首启向导（server/internal/tlsx）
+
+- `tls_mode`（off/acme/selfsigned，dyncfg 键）走热切换：HTTP listener 不重启，其 handler 是按当前模式分流的壳（TLS 开 = ACME 挑战 + 301 到 HTTPS）；HTTPS listener 由 `tlsx.Manager.Sync` reconcile（幂等，配置保存后、宣告探测刷新后各调一次）；换证书不动 listener（`GetCertificate` 每次握手现取）。sqlite 直改 `cfg_tls_*` 不触发 Sync，等周期任务（5 分钟）或重启才生效。
+- selfsigned 的本地 CA 与叶子证书在 `<data>/certs/`；叶子 SAN = localhost/回环/LAN 地址/宣告探测到的公网地址/site_domain，集合变化或临期即重签。CA 下载走 `GET /api/admin/tls/ca.crt`（管理员）。
+- `tls_mode != off` 时 PortWants 把 HTTP/HTTPS 映射为外部 80/443 且 StrictPort（公开链接不带端口，网关改派宁可 port_conflict 也不能静默错位）；`publicBase` 优先 PUBLIC_URL，其次 `https://<site_domain>`。
+- 自检全走 `GET /api/admin/netcheck`（管理员）：映射快照、公网地址、域名解析比对、证书状态、本机回探三档结论（reachable/unknown/failed，hairpin 不判死）。`/healthz` 语义不变。
+- 首启向导：`GET /api/site` 公开 `needs_setup`（users 表为空）；此时注册接口放行首个账号（CreateUser 自动置管理员），前端路由层把一切 hash 让位给 `#/setup`。acme 模式下证书未签出前 HTTPS 握手失败、HTTP 全 301——域名/映射没配好时这是预期状态，回 off 即可恢复。
+
 ### 动态配置（server/internal/api/dyncfg.go）
 
 优先级：环境变量（锁定，后台只读）> DB settings（`cfg_` 前缀，保存即生效）> 实现声明的默认值。带 `Options` 的键后端校验枚举值。例外：三个内核选择器（`*_provider`）不读环境变量——env 的职责只是把 provider 实例合成进可选列表，选择一律走管理后台落库；部署侧旧的选择器 env 由迁移 v2 一次性导入后不再读取。

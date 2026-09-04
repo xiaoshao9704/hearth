@@ -1,0 +1,312 @@
+// 首启向导 #/setup：仅 users 表为空时可用（main.ts 路由层已挡）。
+// 四步：管理员账号 → 域名（可跳过）→ 证书方式 → 自检与邀请链接。
+// 一次性轻页面，vanilla TS 渲染（与 login/join 同类，不进 Solid）。
+import {
+  adminCreateInvite,
+  adminNetcheck,
+  adminSetConfig,
+  refreshSite,
+  register,
+  type NetcheckResult,
+} from '../api';
+import { wireThemeButton } from '../theme';
+import { copyText, esc, flameLogo, icon, toast } from '../ui';
+
+const USER_RE = /^[a-zA-Z0-9_-]{2,32}$/;
+const DOMAIN_RE = /^(?=.{1,253}$)([a-z0-9](-?[a-z0-9])*\.)+[a-z]{2,}$/i;
+
+interface WizardState {
+  domain: string;
+  tlsMode: 'acme' | 'selfsigned' | 'off';
+}
+
+export function renderSetup(root: HTMLElement, alive: () => boolean) {
+  const state: WizardState = { domain: '', tlsMode: 'selfsigned' };
+
+  const paint = (inner: string) => {
+    root.innerHTML = `
+      <div class="auth-page" style="position:relative">
+        <button class="hit theme-fab" id="theme-fab"></button>
+        <div class="auth-card" style="width:460px">
+          <div class="auth-brand">
+            ${flameLogo(34, 38)}
+            <div class="word" style="font-size:21px;letter-spacing:0.2em;padding-left:0.2em">HEARTH</div>
+            <div style="font-size:12px;color:var(--text-2);margin-top:2px">初始设置</div>
+          </div>
+          <div id="wz-body" style="width:100%">${inner}</div>
+        </div>
+      </div>`;
+    wireThemeButton(root.querySelector<HTMLButtonElement>('#theme-fab')!);
+    return root.querySelector<HTMLDivElement>('#wz-body')!;
+  };
+
+  const stepChip = (n: number, label: string) =>
+    `<div style="display:flex;align-items:center;gap:8px;margin-top:22px;margin-bottom:14px">
+      <span class="mono" style="font-size:10.5px;color:var(--ember);padding:3px 8px;border-radius:6px;background:var(--ember-tint);border:1px solid var(--ember-line)">第 ${n} / 4 步</span>
+      <span style="font-size:14px;font-weight:600">${label}</span>
+    </div>`;
+
+  const errLine = `<p class="error-text" id="wz-error" style="margin:10px 0 0;min-height:1em"></p>`;
+  const showErr = (e: unknown) => {
+    const el = body().querySelector<HTMLParagraphElement>('#wz-error');
+    if (el) el.textContent = (e as Error).message;
+  };
+  const body = () => root.querySelector<HTMLDivElement>('#wz-body')!;
+
+  // ---- 第 1 步：管理员账号 ----
+  function stepAccount() {
+    const el = paint(`
+      ${stepChip(1, '创建管理员账号')}
+      <form id="wz-form" style="display:flex;flex-direction:column;gap:13px">
+        <div style="display:flex;flex-direction:column;gap:7px">
+          <label class="field-label" for="wz-user">用户名</label>
+          <div class="field" style="height:44px"><input id="wz-user" placeholder="2–32 位，字母数字 - _" autocapitalize="off" autocomplete="username" /></div>
+        </div>
+        <div style="display:flex;flex-direction:column;gap:7px">
+          <label class="field-label" for="wz-pass">密码</label>
+          <div class="field" style="height:44px"><input id="wz-pass" type="password" placeholder="至少 6 位" autocomplete="new-password" /></div>
+        </div>
+        ${errLine}
+        <button type="submit" class="hit btn btn-primary btn-lg" id="wz-next">下一步</button>
+      </form>
+      <div class="auth-note hint-card" style="border-color:var(--line-soft);margin-top:14px">
+        <span style="flex-shrink:0;margin-top:1px">${icon('shield', 16, 'var(--text-2)', 1.6)}</span>
+        <span>这是这台服务器的第一个账号，自动成为管理员。建好之后注册就恢复为邀请制。</span>
+      </div>`);
+    const form = el.querySelector<HTMLFormElement>('#wz-form')!;
+    form.addEventListener('submit', async (ev) => {
+      ev.preventDefault();
+      const username = el.querySelector<HTMLInputElement>('#wz-user')!.value.trim();
+      const password = el.querySelector<HTMLInputElement>('#wz-pass')!.value;
+      if (!USER_RE.test(username) || password.length < 6) {
+        showErr(new Error('用户名需 2-32 位字母数字、-、_，密码至少 6 位'));
+        return;
+      }
+      try {
+        await register(username, password);
+        await refreshSite(); // needs_setup 已翻转为 false，作废路由缓存
+        if (!alive()) return;
+        stepDomain();
+      } catch (e) {
+        showErr(e);
+      }
+    });
+  }
+
+  // ---- 第 2 步：域名（可跳过；DDNS 是阶段三内容，这里只收 site_domain）----
+  function stepDomain() {
+    const el = paint(`
+      ${stepChip(2, '公开域名（可跳过）')}
+      <div style="display:flex;flex-direction:column;gap:7px">
+        <label class="field-label" for="wz-domain">站点域名</label>
+        <div class="field" style="height:44px"><input id="wz-domain" class="mono" placeholder="如 voice.example.com" autocapitalize="off" spellcheck="false" /></div>
+        <div style="font-size:11.5px;line-height:1.6;color:var(--text-2)">把域名解析到这台机器的公网地址后填在这里。没有域名就跳过，走自签名证书，只能局域网 + 手动信任。</div>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:7px;margin-top:13px">
+        <label class="field-label">DDNS 自动更新</label>
+        <div class="field" style="height:44px;opacity:0.55"><input disabled value="暂未开放（后续版本提供）" /></div>
+      </div>
+      ${errLine}
+      <div style="display:flex;gap:10px;margin-top:14px">
+        <button type="button" class="hit btn" id="wz-skip" style="flex:1">跳过</button>
+        <button type="button" class="hit btn btn-primary" id="wz-next" style="flex:1">下一步</button>
+      </div>`);
+    const input = el.querySelector<HTMLInputElement>('#wz-domain')!;
+    const save = async () => {
+      const domain = input.value.trim().toLowerCase();
+      if (domain && !DOMAIN_RE.test(domain)) {
+        showErr(new Error('域名格式不对，如 voice.example.com'));
+        return false;
+      }
+      state.domain = domain;
+      if (domain) {
+        try {
+          await adminSetConfig({ site_domain: domain });
+        } catch (e) {
+          showErr(e);
+          return false;
+        }
+      }
+      state.tlsMode = domain ? 'acme' : 'selfsigned';
+      return true;
+    };
+    el.querySelector('#wz-next')!.addEventListener('click', async () => {
+      if (await save()) stepTLS();
+    });
+    el.querySelector('#wz-skip')!.addEventListener('click', async () => {
+      input.value = '';
+      if (await save()) stepTLS();
+    });
+  }
+
+  // ---- 第 3 步：证书方式 ----
+  function stepTLS() {
+    const hasDomain = state.domain !== '';
+    const options = [
+      {
+        id: 'acme',
+        label: '自动证书（ACME）',
+        desc: hasDomain
+          ? `按 ${state.domain} 向 Let's Encrypt 自动签发与续期。需要外部 80/443 能映射到这台机器（端口映射会自动申请）。`
+          : '需要第 2 步填了域名才能用。',
+        disabled: !hasDomain,
+      },
+      {
+        id: 'selfsigned',
+        label: '自签名证书（本地 CA）',
+        desc: '服务器自己签证书，麦克风/投屏立即可用。每台设备首次访问要点一次「继续访问」；装上 CA 证书（管理后台可下载）就不再提示。局域网与无域名场景选这个。',
+        disabled: false,
+      },
+      {
+        id: 'off',
+        label: '不要 HTTPS',
+        desc: '保持纯 HTTP：只有本机（localhost）能用麦克风。前面有 Caddy/Nginx 反代出证书时才选。',
+        disabled: false,
+      },
+    ];
+    const el = paint(`
+      ${stepChip(3, '证书方式')}
+      <div style="display:flex;flex-direction:column;gap:8px" role="radiogroup">
+        ${options
+          .map(
+            (o) => `
+          <button type="button" class="hit wz-tls-opt" data-id="${o.id}" ${o.disabled ? 'disabled' : ''}
+            style="display:flex;align-items:flex-start;gap:11px;padding:11px 12px;border-radius:9px;border:1px solid var(--line);background:var(--bg-2);text-align:left;width:100%;${o.disabled ? 'opacity:0.5' : ''}">
+            <div class="radio" style="margin-top:1px"><div class="dot"></div></div>
+            <div style="flex-grow:1">
+              <div style="font-size:13px;font-weight:500;color:var(--text-0)">${o.label}</div>
+              <div style="font-size:11px;color:var(--text-2);margin-top:2px;line-height:1.6">${o.desc}</div>
+            </div>
+          </button>`,
+          )
+          .join('')}
+      </div>
+      ${errLine}
+      <div style="display:flex;gap:10px;margin-top:14px">
+        <button type="button" class="hit btn" id="wz-back">上一步</button>
+        <button type="button" class="hit btn btn-primary" id="wz-next" style="flex:1">保存并继续</button>
+      </div>`);
+
+    let picked: WizardState['tlsMode'] = state.tlsMode;
+    const syncRadios = () => {
+      el.querySelectorAll<HTMLButtonElement>('.wz-tls-opt').forEach((b) => {
+        const on = b.dataset.id === picked;
+        b.classList.toggle('on', on);
+        b.style.borderColor = on ? 'var(--ember-line)' : 'var(--line)';
+        b.style.background = on ? 'var(--ember-tint)' : 'var(--bg-2)';
+        b.querySelector('.radio')!.classList.toggle('on', on);
+      });
+    };
+    el.querySelectorAll<HTMLButtonElement>('.wz-tls-opt').forEach((b) => {
+      b.addEventListener('click', () => {
+        picked = b.dataset.id as WizardState['tlsMode'];
+        syncRadios();
+      });
+    });
+    syncRadios();
+
+    el.querySelector('#wz-back')!.addEventListener('click', stepDomain);
+    el.querySelector('#wz-next')!.addEventListener('click', async () => {
+      state.tlsMode = picked;
+      try {
+        // 热生效：保存后服务端立刻起/换 HTTPS listener，不用重启
+        await adminSetConfig({ tls_mode: picked });
+      } catch (e) {
+        showErr(e);
+        return;
+      }
+      stepCheck();
+    });
+  }
+
+  // ---- 第 4 步：自检 + 邀请链接 ----
+  function stepCheck() {
+    const el = paint(`
+      ${stepChip(4, '自检与邀请')}
+      <div id="wz-check" class="muted">正在自检…</div>
+      <div id="wz-invite" style="margin-top:14px"></div>
+      <div style="display:flex;gap:10px;margin-top:16px">
+        <button type="button" class="hit btn" id="wz-recheck">重新自检</button>
+        <button type="button" class="hit btn btn-primary" id="wz-done" style="flex:1">完成，进入 Hearth</button>
+      </div>`);
+    el.querySelector('#wz-done')!.addEventListener('click', () => {
+      location.hash = '#/lobby';
+    });
+    el.querySelector('#wz-recheck')!.addEventListener('click', () => void runCheck());
+
+    const VERDICT: Record<string, [string, string]> = {
+      reachable: ['外部可达', 'var(--sage)'],
+      unknown: ['本机无法确认', 'var(--text-2)'],
+      failed: ['不可达', 'var(--red)'],
+    };
+
+    async function runCheck() {
+      const box = el.querySelector<HTMLDivElement>('#wz-check')!;
+      box.innerHTML = `<div class="muted">正在自检…</div>`;
+      let nc: NetcheckResult;
+      try {
+        nc = await adminNetcheck();
+      } catch (e) {
+        box.innerHTML = `<div class="error-text">${esc((e as Error).message)}</div>`;
+        return;
+      }
+      if (!alive()) return;
+      const [vLabel, vColor] = VERDICT[nc.external.verdict] ?? VERDICT.unknown;
+      const rows: [string, string][] = [
+        ['证书模式', nc.tls.mode === 'off' ? '关闭（纯 HTTP）' : nc.tls.mode === 'acme' ? '自动证书（ACME）' : '自签名（本地 CA）'],
+        ['端口映射', nc.portmap.Detail || nc.portmap.Diagnosis],
+        ['域名解析', nc.domain.configured === '' ? '未配置' : nc.domain.match === 'ok' ? '一致' : (nc.domain.detail ?? nc.domain.match)],
+        ['外部可达', nc.external.detail],
+      ];
+      box.innerHTML = `
+        <div class="card" style="padding:0">
+          ${rows
+            .map(
+              ([k, v]) => `
+            <div style="display:flex;gap:12px;padding:10px 14px;border-bottom:1px solid var(--line-soft);align-items:baseline">
+              <span style="font-size:12px;color:var(--text-2);flex-shrink:0;width:64px">${k}</span>
+              <span style="font-size:12px;line-height:1.6;color:var(--text-1);flex-grow:1">${esc(v)}</span>
+            </div>`,
+            )
+            .join('')}
+          <div style="display:flex;gap:12px;padding:10px 14px;align-items:center">
+            <span style="font-size:12px;color:var(--text-2);flex-shrink:0;width:64px">结论</span>
+            <span style="font-size:12.5px;font-weight:600;color:${vColor}">${vLabel}</span>
+          </div>
+        </div>
+        ${
+          nc.tls.mode === 'selfsigned'
+            ? `<div style="margin-top:10px;font-size:11.5px;line-height:1.7;color:var(--text-2)">自签名模式下每台设备首次访问要点一次「继续访问」。想彻底去掉警告：管理后台 → 网络 → 下载 CA 证书，装进设备（macOS 双击后钥匙串设为始终信任；Windows 双击导入到「受信任的根证书颁发机构」；iOS 设置里安装描述文件后在「关于本机 → 证书信任设置」打开）。</div>`
+            : ''
+        }`;
+    }
+
+    async function makeInvite() {
+      const box = el.querySelector<HTMLDivElement>('#wz-invite')!;
+      try {
+        const { url } = await adminCreateInvite('初始邀请', 0, '7d');
+        if (!alive()) return;
+        box.innerHTML = `
+          <div class="card" style="padding:13px 14px">
+            <div style="font-size:12.5px;font-weight:600;margin-bottom:7px">把这条链接发给要一起开黑的人</div>
+            <div style="display:flex;gap:8px;align-items:center">
+              <div class="mono" style="flex-grow:1;min-width:0;padding:8px 10px;border-radius:7px;background:var(--bg-0);border:1px solid var(--line-soft);font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(url)}</div>
+              <button type="button" class="hit btn btn-sm" id="wz-copy">复制</button>
+            </div>
+            <div style="font-size:11px;color:var(--text-3);margin-top:7px">7 天有效、不限人数。之后随时能在管理后台 → 邀请 里再发。</div>
+          </div>`;
+        box.querySelector('#wz-copy')!.addEventListener('click', () => {
+          copyText(url);
+          toast('已复制邀请链接', 'ok');
+        });
+      } catch {
+        // 邀请链接建失败不挡向导收尾，大厅里还能再发
+      }
+    }
+
+    void runCheck();
+    void makeInvite();
+  }
+
+  stepAccount();
+}

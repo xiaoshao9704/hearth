@@ -25,6 +25,8 @@ type Config struct {
 func Load() Config {
 	loadDotEnv(".env")
 	dataDir := resolveDataDir()
+	// 显式指定的 --data/HEARTH_DATA 可能还不存在，先建好（失败由后续 DB 打开报错）
+	os.MkdirAll(dataDir, 0o755)
 	// 数据目录里的 .env 再读一次：单文件分发时工作目录不确定，配置跟数据走。
 	// loadDotEnv 不覆盖已有值，工作目录的 .env 优先。
 	loadDotEnv(filepath.Join(dataDir, ".env"))

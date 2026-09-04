@@ -447,6 +447,87 @@ export function adminSetConfig(values: Record<string, string>): Promise<void> {
   return req('/api/admin/config', { method: 'POST', body: { values } });
 }
 
+// ---- 站点信息与首启向导 ----
+
+export interface SiteInfo {
+  name: string;
+  policy: string;
+  needs_setup: boolean; // users 表为空：#/setup 向导可用，注册接口放行首个账号（自动成为管理员）
+}
+
+let siteCache: Promise<SiteInfo> | null = null;
+
+// siteInfo 带缓存：路由守卫每次切 hash 都要看 needs_setup，不能每次都打网络请求。
+// 向导建完管理员账号后调 refreshSite 作废缓存。
+export function siteInfo(): Promise<SiteInfo> {
+  if (!siteCache) {
+    siteCache = req<SiteInfo>('/api/site').catch((e) => {
+      siteCache = null; // 失败不留缓存，下次重试
+      throw e;
+    });
+  }
+  return siteCache;
+}
+
+export function refreshSite(): Promise<SiteInfo> {
+  siteCache = null;
+  return siteInfo();
+}
+
+// ---- 网络自检与 TLS ----
+
+export interface NetcheckResult {
+  // portmap.Status 无 JSON tag，键名就是 Go 字段名
+  portmap: {
+    Method: string;
+    Gateway: string;
+    Diagnosis: string;
+    Detail: string;
+    Mappings: { Proto: string; Internal: number; External: number; ExternalIP: string; Method: string }[] | null;
+    Hops: { Gateway: string; Method: string; ExternalIP: string }[] | null;
+    Pinholes: { Proto: string; Port: number; GUA: string; Method: string }[] | null;
+    V6Detail: string;
+  };
+  externals: string[] | null;
+  probed_at: string;
+  domain: { configured: string; resolved: string[] | null; match: string; detail?: string };
+  tls: {
+    mode: string;
+    domain: string;
+    https_addr: string;
+    listening: boolean;
+    sans: string[] | null;
+    not_after: string;
+    ca_available: boolean;
+    last_error: string;
+  };
+  external: { url?: string; verdict: string; detail: string };
+}
+
+export function adminNetcheck(): Promise<NetcheckResult> {
+  return req('/api/admin/netcheck');
+}
+
+// CA 证书下载地址（自签名模式；带管理员会话经 <a> 下载拿不到 Authorization 头，
+// 服务端只认 Bearer，所以用 fetch 取 blob 再触发下载）
+export async function downloadCACert(): Promise<void> {
+  const token = getToken();
+  const res = await fetch(`${SERVER_URL}/api/admin/tls/ca.crt`, {
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+  });
+  if (!res.ok) {
+    const data = (await res.json().catch(() => null)) as { error?: string } | null;
+    throw new ApiError(res.status, data?.error ?? statusMessage(res.status));
+  }
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'hearth-ca.crt';
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
 // ---- 服务实例（内核注册表）----
 
 // 注册表单的字段模式（rtc.ConfigKey 形状）；当前三类可注册实例的字段均为自由文本

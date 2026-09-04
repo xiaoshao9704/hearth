@@ -42,6 +42,28 @@ var portmapKeys = []rtc.ConfigKey{
 			"仅 host 网络或裸机可用（容器 bridge 网络发现不到网关）；off = 关闭并撤销已建映射"},
 }
 
+// siteKeys 站点身份：域名影响邀请链接与信令地址的推导（见 publicBase）与 TLS 证书签发。
+var siteKeys = []rtc.ConfigKey{
+	{Name: "site_domain", Env: "SITE_DOMAIN", Group: "site",
+		Label: "公开域名", Hint: "如 voice.example.com；填了邀请链接就用 https://<域名>，TLS 的 acme 模式也按它签发。PUBLIC_URL 环境变量优先于它"},
+}
+
+// tlsKeys 进程内 TLS（见 internal/tlsx）：切换立即生效（HTTPS listener 热起停，
+// HTTP 端口转做 ACME 挑战 + 301 重定向），不用重启。
+var tlsKeys = []rtc.ConfigKey{
+	{Name: "tls_mode", Env: "TLS_MODE", Group: "tls", Default: "off",
+		Options: []string{"off", "acme", "selfsigned"},
+		Label:   "证书模式",
+		Hint: "off = 纯 HTTP（反代在前的部署）；acme = 按公开域名自动签发（需外部 80/443 可达）；" +
+			"selfsigned = 本地 CA 自签，局域网/无域名场景用，设备装上 CA 证书后不再提示警告"},
+	{Name: "https_addr", Env: "HTTPS_ADDR", Group: "tls", Default: ":8443",
+		Label: "HTTPS 监听地址", Hint: "证书模式不为 off 时生效；保存即热切换。端口映射会把外部 443 指到它"},
+	{Name: "acme_directory", Env: "ACME_DIRECTORY", Group: "tls", Default: "https://acme-v02.api.letsencrypt.org/directory",
+		Label: "ACME 目录", Hint: "默认 Let's Encrypt；可换 ZeroSSL 或内网 step-ca"},
+	{Name: "acme_email", Env: "ACME_EMAIL", Group: "tls",
+		Label: "ACME 账户邮箱", Hint: "可空；填了 CA 能在证书快过期时联系到管理员"},
+}
+
 // selectorEnv 选择器对应的旧环境变量名：只供迁移 v2 一次性导入与启动告警，不参与取值。
 var selectorEnv = map[string]string{
 	"voice_provider":  "VOICE_PROVIDER",
@@ -103,7 +125,9 @@ func (a *API) warnLegacyConfig(ctx context.Context) {
 
 func (a *API) allConfigKeys() []rtc.ConfigKey {
 	keys := append(append([]rtc.ConfigKey{}, selectorKeys...), a.kernelKeys...)
-	return append(keys, portmapKeys...)
+	keys = append(keys, portmapKeys...)
+	keys = append(keys, siteKeys...)
+	return append(keys, tlsKeys...)
 }
 
 // PortWants 当前要向网关申请的映射：HTTP 端口 + 当前选中内核里跑在本进程的媒体端口
@@ -121,6 +145,21 @@ func (a *API) PortWants(ctx context.Context) []portmap.Want {
 	if _, port, err := net.SplitHostPort(a.cfg.Addr); err == nil {
 		if p, err := strconv.Atoi(port); err == nil {
 			ws = append(ws, portmap.Want{Proto: "tcp", Port: p, Desc: "hearth http"})
+		}
+	}
+	// TLS 开启时公开链接按 80/443 拼（不带端口，ACME 两种挑战也都要这两个口）：
+	// HTTP 与 HTTPS 的映射都指定首选外部端口并要求内外一致，网关改派宁可判失败走
+	// port_conflict 诊断，也不能让邀请链接静默对不上。
+	if a.dynVal(ctx, "tls_mode") != "off" {
+		if _, port, err := net.SplitHostPort(a.dynVal(ctx, "https_addr")); err == nil {
+			if p, err := strconv.Atoi(port); err == nil {
+				ws = append(ws, portmap.Want{Proto: "tcp", Port: p, External: 443, StrictPort: true, Desc: "hearth https"})
+			}
+		}
+		for i := range ws {
+			if ws[i].Desc == "hearth http" {
+				ws[i].External, ws[i].StrictPort = 80, true
+			}
 		}
 	}
 	if alias, _ := a.voiceInstance(ctx); alias == TypeEmber {
@@ -314,6 +353,13 @@ func (a *API) adminSetConfig(w http.ResponseWriter, r *http.Request) {
 	// 舞台选择器切到/切走 lkembed：立即启停进程内 LiveKit（另起协程，启动要 1 秒级）
 	if _, ok := req.Values["stage_provider"]; ok {
 		go a.EnsureStageKernel(context.Background())
+	}
+	// TLS/域名相关键保存即热生效：HTTPS listener 热起停、证书现签（取舍见 internal/tlsx 包注释）
+	for _, name := range []string{"tls_mode", "https_addr", "site_domain", "acme_directory", "acme_email"} {
+		if _, ok := req.Values[name]; ok {
+			go a.SyncTLS()
+			break
+		}
 	}
 	// 让缓存的在线人数立即按新配置重取
 	a.countsMu.Lock()

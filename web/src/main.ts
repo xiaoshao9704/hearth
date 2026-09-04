@@ -1,7 +1,7 @@
-// hash 路由：#/login、#/join/<code>、#/lobby、#/room/<频道名>、#/manage/<频道名>、#/admin/<tab>。
+// hash 路由：#/login、#/join/<code>、#/lobby、#/room/<频道名>、#/manage/<频道名>、#/admin/<tab>、#/setup。
 import './style.css';
 import { initScreenCodecAuto } from './prefs';
-import { fetchMe, getToken } from './api';
+import { fetchMe, getToken, siteInfo } from './api';
 import { renderAdmin } from './views/admin';
 import { renderJoin } from './views/join';
 import { isLobbyHash, renderLobby } from './views/lobby';
@@ -9,6 +9,7 @@ import { renderLogin } from './views/login';
 import { renderManage } from './views/manage';
 import { renderRoom } from './views/room';
 import { closeSettings } from './views/settings';
+import { renderSetup } from './views/setup';
 
 // 登录后回跳用：main.ts 判定未登录时记，login.ts 登录成功后读取并清除（同一把 key）
 const NEXT_KEY = 'hearth_next';
@@ -17,7 +18,7 @@ const NEXT_KEY = 'hearth_next';
 // 过期（页面已经切走）就不再碰 DOM，替代原来「渲染一半页面已经不在了」的裸奔写法
 let gen = 0;
 
-function route() {
+async function route() {
   gen++;
   const myGen = gen;
   const alive = () => gen === myGen;
@@ -27,6 +28,28 @@ function route() {
   const authed = getToken() !== null;
 
   closeSettings(); // 换路由时收掉设置浮层
+
+  // 首启向导：users 表为空时一切路由都让位给 #/setup；走完（needs_setup 变 false）后向导页本身即失效
+  let needsSetup = false;
+  try {
+    needsSetup = (await siteInfo()).needs_setup;
+  } catch {
+    // 连不上服务器时按「不需要向导」继续，各页面自己有连接失败态
+  }
+  if (gen !== myGen) return;
+  if (needsSetup && !hash.startsWith('#/setup')) {
+    location.replace('#/setup');
+    return;
+  }
+  if (!needsSetup && hash.startsWith('#/setup')) {
+    location.replace(authed ? '#/lobby' : '#/login');
+    return;
+  }
+  if (hash.startsWith('#/setup')) {
+    document.title = '初始设置 · Hearth';
+    renderSetup(app, alive);
+    return;
+  }
 
   if (hash.startsWith('#/join/')) {
     document.title = '加入 Hearth';
@@ -67,10 +90,10 @@ function route() {
   }
 }
 
-window.addEventListener('hashchange', route);
+window.addEventListener('hashchange', () => void route());
 // 先画首屏，再后台校准用户信息（拿 is_admin / 改名后的新名字），失败静默——
 // 401 已由 api.ts 统一处理（记回跳、toast、跳登录页），这里不用再兜底
-route();
+void route();
 if (getToken()) {
   void fetchMe()
     .then(() => window.dispatchEvent(new Event('hearth:user')))

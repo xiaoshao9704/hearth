@@ -140,6 +140,8 @@ func (a *API) inviteInfo(w http.ResponseWriter, r *http.Request) {
 }
 
 // registerWithPolicy 按注册策略处理注册：open 直接注册；invite 校验并消耗邀请；closed 拒绝。
+// 例外：users 表为空（首启向导）时直接放行——首个账号由 CreateUser 自动成为管理员，
+// 这也是单机形态下唯一能自助建起管理员账号的入口。
 func (a *API) registerWithPolicy(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Username string `json:"username"`
@@ -150,6 +152,9 @@ func (a *API) registerWithPolicy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	policy := a.regPolicy(r)
+	if n, _, err := a.st.Counts(r.Context()); err == nil && n == 0 {
+		policy = "open" // 首启向导：只此一次，建完即回到正常策略
+	}
 	var inv *store.Invite
 	switch policy {
 	case "closed":
@@ -251,6 +256,7 @@ func (a *API) adminOverview(w http.ResponseWriter, r *http.Request) {
 			return sv
 		}(),
 		"resources": hostResources(),
+		"tls":       a.tlsStatus(),
 	})
 }
 
@@ -419,10 +425,14 @@ func (a *API) adminCreateInvite(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// publicBase 站点公开地址：配置优先，否则按请求推导同源。
+// publicBase 站点公开地址：PUBLIC_URL（env 锁定）优先，其次 site_domain（固定 443 不带端口），
+// 都没有则按请求推导同源。
 func (a *API) publicBase(r *http.Request) string {
 	if a.cfg.PublicURL != "" {
 		return strings.TrimSuffix(a.cfg.PublicURL, "/")
+	}
+	if d := a.dynVal(r.Context(), "site_domain"); d != "" {
+		return "https://" + d
 	}
 	return requestScheme(r) + "://" + r.Host
 }

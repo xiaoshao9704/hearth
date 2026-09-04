@@ -20,9 +20,12 @@ import (
 // Want 一条待映射的本机监听端口。
 type Want struct {
 	Proto string // "tcp" | "udp"
-	Port  int    // 本机监听端口，也是首选的外部端口
+	Port  int    // 本机监听端口
 	Desc  string // 网关映射表里的描述，如 "hearth http"
-	// StrictPort 外部端口必须等于内部端口：网关改派别的端口时视为失败（DiagPortConflict），
+	// External 首选的外部端口，0 = 与内部端口一致。公开链接按固定端口拼（80/443）时
+	// 用它指定；网关改派别的端口时按 StrictPort 决定接受还是判失败。
+	External int
+	// StrictPort 外部端口必须等于首选端口：网关改派别的端口时视为失败（DiagPortConflict），
 	// 而不是接受改派后的端口。
 	StrictPort bool
 }
