@@ -85,10 +85,9 @@ func (a *API) cleanTicketsLocked() {
 	}
 }
 
-// ---- 推流入场判定（/w POST，进程内 bellows / 远端 bellows / livekit-ingress /
-// lkembed 反代 LiveKit 自带 WHIP 四条路径共用）----
+// ---- 推流入场判定（/w POST）----
 
-// ingestCtxKey 进程内推流网关（bellows / lkembed）的判定结果传递：admitIngest 在 serveWHIP 做完后把组好的
+// ingestCtxKey 推流判定结果的传递：admitIngest 在 serveWHIP 做完后把组好的
 // 身份四元组挂到请求 ctx，ingressResolver（ResolveFunc 只有令牌参数，频道在 URL 里
 // 由接入层解析）原样取回。
 type ingestCtxKey struct{}
@@ -99,15 +98,23 @@ type ingestAdmission struct {
 	Room     string
 	Identity string
 	Meta     rtc.Meta
-	TokenID  int64 // ingest_tokens 主键（livekit-ingress 的端点记录按它归到令牌名下）
 }
 
-// admitIngest 统一推流入场判定（替代旧 canPublishByStreamKey 与 admitWhipRemote）：
-// 令牌反查用户 + URL 取频道 → admitUser（封禁/邀请制/禁言）。四条路径全部 definitive：
+// admitIngest 统一推流入场判定（替代旧 canPublishByStreamKey 与 admitWhipRemote）。
+// 推流不再是独立选择器：URL 的 alias 段必须是当前舞台实例（stage_provider 选中的那个，
+// 推进别的实例观众看不到），且该实例有 WHIP 推流能力，否则 definitive 404——
+// 内建 bellows 等旧形态因此天然 404。
+// 其后：令牌反查用户 + URL 取频道 → admitUser（封禁/邀请制/禁言）。全部 definitive：
 // 令牌不存在 404、频道不存在 404、不许推（封禁/邀请制/禁言/账号停用）403、查询出错 503——
 // 不再有 fail-open：上游收到的已是 hearth 出示的实例凭证，不再承担鉴权。
 // 返回 false 时响应已写好。
 func (a *API) admitIngest(ctx context.Context, w http.ResponseWriter, alias, channel, token string) (ingestAdmission, bool) {
+	stageAlias, sp := a.stageInstance(ctx)
+	inst := a.instance(alias)
+	if sp == nil || alias != stageAlias || inst == nil || inst.Ingest == nil {
+		writeErr(w, http.StatusNotFound, "推流入口不存在（OBS 请指向当前舞台内核实例的地址）")
+		return ingestAdmission{}, false
+	}
 	if token == "" {
 		writeErr(w, http.StatusBadRequest, "缺少推流令牌")
 		return ingestAdmission{}, false
@@ -161,6 +168,5 @@ func (a *API) admitIngest(ctx context.Context, w http.ResponseWriter, alias, cha
 		Room:     c.Name,
 		Identity: rtc.Identity(u.ID, it.Tag),
 		Meta:     rtc.Meta{UID: u.ID, Username: u.Username, Kind: "ingest", Tag: it.Tag},
-		TokenID:  it.ID,
 	}, true
 }

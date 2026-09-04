@@ -764,7 +764,7 @@ function renderStream(body: HTMLElement) {
         ${
           enabled
             ? ''
-            : `<div class="notice-bad"><span style="font-size:12px;line-height:1.55">推流入口当前不可用：管理后台的推流内核缺少必需配置，或舞台线已关闭。地址和令牌照常可用，但现在推会被拒。</span></div>`
+            : `<div class="notice-bad"><span style="font-size:12px;line-height:1.55">推流进当前舞台内核：舞台内核未启用或缺配置时推流不可用。地址和令牌照常可用，但现在推会被拒。</span></div>`
         }
         <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap">
           <div style="font-size:12.5px;color:var(--text-1)">频道</div>
@@ -804,7 +804,7 @@ function renderStream(body: HTMLElement) {
             <div class="field" style="flex-grow:1;height:40px;max-width:280px;background:var(--bg-2)"><input id="tag-input" value="${esc(tag)}" /></div>
             <button class="hit btn btn-primary disabled" id="tag-save" style="height:40px;padding:0 16px">保存</button>
           </div>
-          <div id="tag-hint" style="font-size:11.5px;color:var(--text-2)">推流设备在房间里显示为「用户名-标签」；改完下次推流生效。端点要按新标签重建，正在推的流可能被中断，建议停播后再改</div>
+          <div id="tag-hint" style="font-size:11.5px;color:var(--text-2)">推流设备在房间里显示为「用户名-标签」；改完下次推流生效，正在推的流保持旧标签、不会断</div>
         </div>
         ${notice ? `<div class="notice-ok">${icon('check', 15, 'var(--sage)', 1.8)}<span>${esc(notice)}</span></div>` : ''}
         <div class="hint-card" style="border-color:var(--line-soft)">
@@ -875,7 +875,7 @@ function renderStream(body: HTMLElement) {
         tagHint.textContent = '标签仅限 1-32 位小写字母、数字、-，且以字母或数字开头';
         tagHint.style.color = 'var(--red-text)';
       } else {
-        tagHint.textContent = '推流设备在房间里显示为「用户名-标签」；改完下次推流生效。端点要按新标签重建，正在推的流可能被中断，建议停播后再改';
+        tagHint.textContent = '推流设备在房间里显示为「用户名-标签」；改完下次推流生效，正在推的流保持旧标签、不会断';
         tagHint.style.color = 'var(--text-2)';
       }
     };

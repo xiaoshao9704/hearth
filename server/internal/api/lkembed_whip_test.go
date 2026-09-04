@@ -26,7 +26,7 @@ import (
 	"hearth/server/internal/rtc"
 )
 
-// stageAPI 造一个选中 lkembed 舞台线与推流入口的 API，并把进程内 LiveKit 真的拉起来。
+// stageAPI 造一个选中 lkembed 舞台线的 API，并把进程内 LiveKit 真的拉起来。
 // 返回 API、hearth 的 httptest 服务地址与进程内 LiveKit 的回环端口。
 func stageAPI(t *testing.T) (*API, string, int) {
 	t.Helper()
@@ -38,7 +38,6 @@ func stageAPI(t *testing.T) (*API, string, int) {
 		"cfg_lkembed_port":     strconv.Itoa(httpPort),
 		"cfg_lkembed_udp_port": strconv.Itoa(udpPort),
 		"cfg_stage_provider":   AliasLkembed,
-		"cfg_ingest_provider":  AliasLkembed,
 	} {
 		if err := a.st.SetSetting(ctx, k, v); err != nil {
 			t.Fatalf("写配置 %s 失败: %v", k, err)
@@ -262,6 +261,16 @@ func TestLkembedWhipEndToEnd(t *testing.T) {
 
 	sub := subscribeStage(t, a, lkPort, "chan1")
 
+	// 内建 bellows 仍在注册表（类型表后续步骤才删），但它不是当前舞台实例：definitive 404
+	resp0, err := http.Post(base+"/providers/bellows/w/chan1/"+it.Token, "application/sdp", strings.NewReader("sdp"))
+	if err != nil {
+		t.Fatalf("POST bellows: %v", err)
+	}
+	resp0.Body.Close()
+	if resp0.StatusCode != http.StatusNotFound {
+		t.Fatalf("/providers/bellows/w 应 404（非当前舞台实例），实际 %d", resp0.StatusCode)
+	}
+
 	c := whipPush(t, base, "/providers/lkembed/w/chan1/"+it.Token)
 	defer c.close()
 	if c.code != http.StatusCreated {
@@ -377,7 +386,8 @@ func TestLkembedWhipGagged(t *testing.T) {
 	}
 }
 
-// 注册表：lkembed 同时具备 stage 与 ingest 能力，两个选择器都能选中它。
+// 注册表：lkembed 同时具备 stage 与 ingest 能力，舞台选择器能选中它；
+// 推流无独立选择器，推流入口跟随舞台实例（见 TestSelectorResolutionAndFallback）。
 func TestLkembedCapabilities(t *testing.T) {
 	maskProviderEnv(t)
 	a := testAPI(t)
@@ -386,9 +396,6 @@ func TestLkembedCapabilities(t *testing.T) {
 	if inst == nil || inst.Stage == nil || inst.Ingest == nil {
 		t.Fatalf("lkembed 应同时具备 stage 与 ingest 能力: %+v", inst)
 	}
-	if msg := a.checkSelector(ctx, "ingest_provider", AliasLkembed); msg != "" {
-		t.Fatalf("ingest_provider=lkembed 应合法: %s", msg)
-	}
 	if msg := a.checkSelector(ctx, "stage_provider", AliasLkembed); msg != "" {
 		t.Fatalf("stage_provider=lkembed 应合法: %s", msg)
 	}
@@ -396,10 +403,10 @@ func TestLkembedCapabilities(t *testing.T) {
 	if inst.Ingest.Enabled(ctx) {
 		t.Fatal("舞台线未选中 lkembed 时推流入口应为不可用")
 	}
-	// 推流入口的默认回落不随舞台选择器联动，仍是内建 bellows
+	// 推流入口跟随舞台实例：选中 lkembed 即解析到它
 	a.st.SetSetting(ctx, "cfg_stage_provider", AliasLkembed)
-	if alias, _, _ := a.ingestInstance(ctx); alias != TypeBellows {
-		t.Fatalf("未显式选择时推流入口应回落 bellows，实际 %q", alias)
+	if alias, ip := a.ingestInstance(ctx); alias != AliasLkembed || ip == nil {
+		t.Fatalf("推流入口应跟随舞台实例 lkembed，实际 %q", alias)
 	}
 }
 

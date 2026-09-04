@@ -3,9 +3,9 @@
 // 公网 IP 变化只影响新会话），无外部依赖：不连 hearth、不要 redis、不要 ingress。
 //
 // hearth 侧接线与外部 LiveKit 完全一样：LIVEKIT_API_URL 指向本进程的 API 地址（私网通道）
-// 合成 env 锁定的 livekit 实例，后台把 stage_provider 与 ingest_provider 都选成它——
-// 浏览器信令与 OBS 的 WHIP 都经 hearth 反代到这里，媒体走同一个打洞出来的 UDP 端口，
-// 不再需要 Bellows 转发一道。入场判定仍在 hearth 做完（推流经 admitIngest 后由 hearth
+// 合成 env 锁定的 livekit 实例，后台把 stage_provider 选成它（推流无独立选择器，
+// OBS 的 WHIP 一律进当前舞台实例）——浏览器信令与 OBS 的 WHIP 都经 hearth 反代到这里，
+// 媒体走同一个打洞出来的 UDP 端口，不再需要 Bellows 转发一道。入场判定仍在 hearth 做完（推流经 admitIngest 后由 hearth
 // 现签短时效 LiveKit JWT 换票），本进程只认票。
 //
 // 环境变量：

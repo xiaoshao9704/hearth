@@ -5,20 +5,24 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
+	"hearth/server/internal/lkroom"
 	"hearth/server/internal/rtc"
 	"hearth/server/internal/store"
 )
 
 var livekitLocRe = regexp.MustCompile(`^/providers/stage1/w/sessions/[0-9a-f]{32}$`)
 
-// 注册一个 livekit 类型实例指向已跑起来的 LiveKit，ingest_provider 选它，
-// 推流 201 → 观众名册里出现 kind=ingest 的推流设备 → DELETE 后消失。
+// 注册一个 livekit 类型实例指向已跑起来的 LiveKit，stage_provider 选它（推流无独立
+// 选择器，一律进当前舞台实例自带的 WHIP 入口），推流 201 → 观众名册里出现 kind=ingest
+// 的推流设备 → DELETE 后消失。此时 lkembed 不再是当前舞台实例，/providers/lkembed/w 应 404。
 // api_url 故意写 ws:// 形式：验 whipBase 的 scheme 归一（照抄浏览器信令地址的常见填法）。
 func TestLivekitInstanceWhipEndToEnd(t *testing.T) {
 	a, base, lkPort := stageAPI(t)
@@ -31,18 +35,52 @@ func TestLivekitInstanceWhipEndToEnd(t *testing.T) {
 		t.Fatalf("注册 livekit 实例失败: %v", err)
 	}
 	a.reloadProviders(ctx)
-	if msg := a.checkSelector(ctx, "ingest_provider", "stage1"); msg != "" {
-		t.Fatalf("ingest_provider=stage1 应合法: %s", msg)
+	if msg := a.checkSelector(ctx, "stage_provider", "stage1"); msg != "" {
+		t.Fatalf("stage_provider=stage1 应合法: %s", msg)
 	}
-	if err := a.st.SetSetting(ctx, "cfg_ingest_provider", "stage1"); err != nil {
+	if err := a.st.SetSetting(ctx, "cfg_stage_provider", "stage1"); err != nil {
 		t.Fatalf("写选择器失败: %v", err)
 	}
-	if alias, _, fellBack := a.ingestInstance(ctx); alias != "stage1" || fellBack {
-		t.Fatalf("推流入口应为 stage1，实际 %q（回落=%v）", alias, fellBack)
+	if alias, ip := a.ingestInstance(ctx); alias != "stage1" || ip == nil {
+		t.Fatalf("推流入口应跟随舞台实例 stage1，实际 %q", alias)
 	}
 
 	u, it := seedIngestUser(t, a, "dave", "chan1")
 	identity := rtc.Identity(u.ID, "obs")
+	// stage1 的 api_url 故意写的 ws://（验 WHIP 换票的 scheme 归一），实例对象的 Twirp
+	// 管理面走不通这个 scheme；参与者断言因此直连 LiveKit 列名册，验的是上游真实状态
+	lkc := lkroom.NewClient(fmt.Sprintf("http://127.0.0.1:%d", lkPort),
+		a.dynVal(ctx, "lkembed_api_key"), a.dynVal(ctx, "lkembed_api_secret"))
+	waitIdentity := func(want bool) {
+		t.Helper()
+		deadline := time.Now().Add(15 * time.Second)
+		for time.Now().Before(deadline) {
+			found := false
+			if ps, err := lkc.ListParticipants(ctx, "chan1"); err == nil {
+				for _, p := range ps {
+					if p.Identity == identity {
+						found = true
+						var meta rtc.Meta
+						if err := json.Unmarshal([]byte(p.Metadata), &meta); err == nil &&
+							(meta.UID != u.ID || meta.Kind != "ingest" || meta.Tag != "obs") {
+							t.Fatalf("推流参与者元数据不符: %+v", meta)
+						}
+					}
+				}
+			}
+			if found == want {
+				return
+			}
+			time.Sleep(200 * time.Millisecond)
+		}
+		t.Fatalf("等待 %s 出现/消失超时（want=%v）", identity, want)
+	}
+
+	// 旧默认 alias：lkembed 已不是当前舞台实例，推流应 definitive 404
+	if c := whipPush(t, base, "/providers/lkembed/w/chan1/"+it.Token); c.code != http.StatusNotFound {
+		t.Fatalf("非当前舞台实例推流应 404，实际 %d: %s", c.code, c.body)
+	}
+
 	c := whipPush(t, base, "/providers/stage1/w/chan1/"+it.Token)
 	defer c.close()
 	if c.code != http.StatusCreated {
@@ -54,12 +92,7 @@ func TestLivekitInstanceWhipEndToEnd(t *testing.T) {
 	if !strings.Contains(c.body, "m=video") {
 		t.Fatalf("answer 应含视频 m-line: %s", c.body)
 	}
-	waitParticipant(t, a, "chan1", identity, true)
-	for _, p := range stageParticipants(t, a, "chan1") {
-		if p.Identity == identity && (p.UID != u.ID || p.Kind != "ingest" || p.Tag != "obs") {
-			t.Fatalf("推流参与者信息不符: %+v", p)
-		}
-	}
+	waitIdentity(true)
 
 	req, _ := http.NewRequest("DELETE", base+c.location, nil)
 	resp, err := http.DefaultClient.Do(req)
@@ -70,10 +103,10 @@ func TestLivekitInstanceWhipEndToEnd(t *testing.T) {
 	if resp.StatusCode != http.StatusNoContent {
 		t.Fatalf("DELETE 应 204，实际 %d", resp.StatusCode)
 	}
-	waitParticipant(t, a, "chan1", identity, false)
+	waitIdentity(false)
 }
 
-// livekit 实例三面齐全：语音/舞台/推流三个选择器都能选中它。
+// livekit 实例三面齐全：语音/舞台两个选择器都能选中它，推流面（Ingest）随之可用。
 func TestLivekitInstanceCaps(t *testing.T) {
 	maskProviderEnv(t)
 	a := testAPI(t)

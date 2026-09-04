@@ -299,7 +299,7 @@ func TestAdminProviderReadOnly(t *testing.T) {
 	}
 }
 
-// 删除被选择器引用的实例 → 409「先切换选择器」；三个选择器都覆盖。
+// 删除被选择器引用的实例 → 409「先切换选择器」；两个选择器都覆盖。
 func TestAdminProviderDeleteReferenced(t *testing.T) {
 	maskProviderEnv(t)
 	a := testAPI(t)
@@ -312,7 +312,7 @@ func TestAdminProviderDeleteReferenced(t *testing.T) {
 	}
 	a.reloadProviders(ctx)
 
-	for _, sel := range []string{"cfg_voice_provider", "cfg_stage_provider", "cfg_ingest_provider"} {
+	for _, sel := range []string{"cfg_voice_provider", "cfg_stage_provider"} {
 		if err := a.st.SetSetting(ctx, sel, "lk1"); err != nil {
 			t.Fatalf("设选择器失败: %v", err)
 		}

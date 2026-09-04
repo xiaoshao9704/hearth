@@ -1,6 +1,6 @@
-// 推流令牌链路测试：admitIngest 全分支、令牌 API 三端点、三条 /w 路径
-// （进程内 bellows 真 Gateway / 远端 bellows httptest 上游 / livekit-ingress httptest 上游）、
-// Location 改写、游标 v3 数据迁移。
+// 推流链路测试：admitIngest 全分支（含「alias 必须是当前舞台实例」门禁）、
+// 令牌 API 三端点、/w 路径（livekit 系实例的换票反代见 livekit_whip_test/lkembed_whip_test）、
+// 游标 v3/v4 数据迁移。
 package api
 
 import (
@@ -12,11 +12,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
-	"sync"
 	"testing"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/pion/webrtc/v4"
 
 	"hearth/server/internal/chat"
 	"hearth/server/internal/config"
@@ -43,6 +41,7 @@ func seedIngestUser(t *testing.T, a *API, username, channel string) (*store.User
 }
 
 // admitIngest 全分支：令牌 404 / 频道 404 / 封禁 403 / 禁言 403 / 正常（identity=u{id}-{标签}，meta 带 uid/用户名）。
+// alias 用默认舞台实例 lkembed（门禁见 TestAdmitIngestStageGate）。
 func TestAdmitIngestBranches(t *testing.T) {
 	a := testAPI(t)
 	ctx := context.Background()
@@ -50,7 +49,7 @@ func TestAdmitIngestBranches(t *testing.T) {
 
 	call := func(channel, token string) (int, ingestAdmission, bool) {
 		rec := httptest.NewRecorder()
-		adm, ok := a.admitIngest(ctx, rec, "bellows", channel, token)
+		adm, ok := a.admitIngest(ctx, rec, AliasLkembed, channel, token)
 		return rec.Code, adm, ok
 	}
 
@@ -84,6 +83,46 @@ func TestAdmitIngestBranches(t *testing.T) {
 	}
 }
 
+// 「推流进当前舞台实例」门禁：alias 段不是 stage_provider 选中的实例一律 definitive 404
+//（内建 bellows、非舞台的 livekit 实例、未知 alias 同规则），stage=none 时任何推流 404。
+// 真令牌也照 404——判定不看令牌有效性，门禁先于令牌反查。
+func TestAdmitIngestStageGate(t *testing.T) {
+	maskProviderEnv(t)
+	a := testAPI(t)
+	ctx := context.Background()
+	_, it := seedIngestUser(t, a, "alice", "chan1")
+	if err := a.st.CreateProvider(ctx, &store.ProviderRecord{Alias: "lk2", Type: TypeLivekit,
+		Params: map[string]string{"livekit_api_url": "http://x", "livekit_api_key": "k", "livekit_api_secret": "s"}}); err != nil {
+		t.Fatalf("注册实例失败: %v", err)
+	}
+	a.reloadProviders(ctx)
+	r := a.Router()
+	a.RegisterProxies(r)
+
+	post := func(alias string) int {
+		rec := httptest.NewRecorder()
+		r.ServeHTTP(rec, httptest.NewRequest("POST", "/providers/"+alias+"/w/chan1/"+it.Token, strings.NewReader("sdp")))
+		return rec.Code
+	}
+
+	// 默认舞台 lkembed：bellows（内建但不再是推流入口）、lk2（非当前舞台）、未知 alias 全 404
+	for _, alias := range []string{TypeBellows, "lk2", "nope"} {
+		if code := post(alias); code != 404 {
+			t.Fatalf("alias %s 应 404，实际 %d", alias, code)
+		}
+	}
+	// 当前舞台实例：过门禁后才查令牌（坏令牌 404 证明走到了令牌反查）
+	if code := post(AliasLkembed); code == 404 {
+		t.Fatalf("当前舞台实例 + 真令牌不应被门禁拦下（上游未起会 502，但不该 404）")
+	}
+
+	// stage=none：连当前舞台实例都没有，推流一律 404
+	a.st.SetSetting(ctx, "cfg_stage_provider", "none")
+	if code := post(AliasLkembed); code != 404 {
+		t.Fatalf("stage=none 时推流应 404，实际 %d", code)
+	}
+}
+
 // 令牌 API：GET 自动创建（tag=obs，base 为同源 /providers/{alias}/w/ 绝对地址）、
 // PUT 改标签（校验规则）、reset 换值且旧令牌立即 404。
 func TestIngestTokenAPI(t *testing.T) {
@@ -110,8 +149,8 @@ func TestIngestTokenAPI(t *testing.T) {
 	if code != 200 || body["token"] == "" || body["tag"] != "obs" {
 		t.Fatalf("GET 应自动创建令牌: %d %v", code, body)
 	}
-	if body["base"] != "http://example.com/providers/bellows/w/" {
-		t.Fatalf("base 应为同源推流基地址，实际 %q", body["base"])
+	if body["base"] != "http://example.com/providers/lkembed/w/" {
+		t.Fatalf("base 应为当前舞台实例的同源推流基地址，实际 %q", body["base"])
 	}
 	// 再 GET 不重建
 	code2, body2 := get()
@@ -145,147 +184,12 @@ func TestIngestTokenAPI(t *testing.T) {
 		t.Fatalf("reset 应保留标签，实际 %q", resetBody["tag"])
 	}
 	wrec := httptest.NewRecorder()
-	if _, ok := a.admitIngest(ctx, wrec, "bellows", "chan1", body["token"]); ok || wrec.Code != 404 {
+	if _, ok := a.admitIngest(ctx, wrec, AliasLkembed, "chan1", body["token"]); ok || wrec.Code != 404 {
 		t.Fatalf("旧令牌应立即 404，实际 %d ok=%v", wrec.Code, ok)
 	}
 }
 
-// ---- 进程内 bellows 路径（真 Gateway + 假舞台 Publisher）----
-
-// fakeStagePublisher 实现 rtc.StageProvider + rtc.Publisher，作为内建 bellows 的发布出口。
-type fakeStagePublisher struct {
-	mu    sync.Mutex
-	calls []string // identity
-}
-
-func (f *fakeStagePublisher) Name() string { return "fake-stage" }
-func (f *fakeStagePublisher) JoinCredentials(context.Context, string, rtc.Meta, bool) (rtc.Credentials, error) {
-	return rtc.Credentials{}, nil
-}
-func (f *fakeStagePublisher) RoomCounts(context.Context) (map[string]int, error) { return nil, nil }
-func (f *fakeStagePublisher) ListParticipants(context.Context, string) ([]rtc.Participant, error) {
-	return nil, nil
-}
-func (f *fakeStagePublisher) RemoveParticipantsOf(context.Context, string, int64, string) (int, error) {
-	return 0, nil
-}
-func (f *fakeStagePublisher) MuteUserAudio(context.Context, string, int64, bool) error { return nil }
-func (f *fakeStagePublisher) SignalProxyUpstream(context.Context) string               { return "" }
-func (f *fakeStagePublisher) PublishRemote(_ context.Context, _, identity, _ string, _ rtc.Meta, _ *webrtc.TrackRemote) (func(), error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.calls = append(f.calls, identity)
-	return func() {}, nil
-}
-
-// 可解析的 H264 WHIP offer（audio/opus + video/h264，sendonly；字面量 \n 书写，返回前转 CRLF）。
-func whipOfferH264() string {
-	const offer = `v=0
-o=- 0 0 IN IP4 127.0.0.1
-s=-
-t=0 0
-a=group:BUNDLE 0 1
-m=audio 9 UDP/TLS/RTP/SAVPF 111
-c=IN IP4 0.0.0.0
-a=mid:0
-a=sendonly
-a=rtcp-mux
-a=rtpmap:111 opus/48000/2
-a=ice-ufrag:test
-a=ice-pwd:testtesttesttesttesttest
-a=fingerprint:sha-256 00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00
-a=setup:actpass
-a=candidate:1 1 UDP 2130706431 127.0.0.1 9 typ host
-m=video 9 UDP/TLS/RTP/SAVPF 96
-c=IN IP4 0.0.0.0
-a=mid:1
-a=sendonly
-a=rtcp-mux
-a=rtpmap:96 H264/90000
-a=fmtp:96 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f
-a=ice-ufrag:test
-a=ice-pwd:testtesttesttesttesttest
-a=fingerprint:sha-256 00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00
-a=setup:actpass
-a=candidate:1 1 UDP 2130706431 127.0.0.1 9 typ host
-`
-	return strings.ReplaceAll(offer, "\n", "\r\n")
-}
-
-// 进程内 bellows：POST 经 admitIngest → ctx 传四元组 → 真 Gateway 建会话（201），
-// Location 改写为 /providers/bellows/w/sessions/{rid}；DELETE 按归属路由到内建网关；
-// 令牌 reset 后 RevokeToken 掐断在推会话、旧令牌 404。
-func TestWhipProcessInternalBellows(t *testing.T) {
-	maskProviderEnv(t)
-	a := testAPI(t)
-	ctx := context.Background()
-	u, it := seedIngestUser(t, a, "alice", "chan1")
-	sess, err := a.st.CreateSession(ctx, u.ID)
-	if err != nil {
-		t.Fatalf("建会话失败: %v", err)
-	}
-	// 发布出口：注册假舞台实例并选中（stagePublisherSink 每次发布时取当前舞台线）
-	pub := &fakeStagePublisher{}
-	a.providersMu.Lock()
-	a.providers["fakestage"] = &ProviderInstance{Alias: "fakestage", Type: "fake", Stage: pub}
-	a.providerOrder = append(a.providerOrder, "fakestage")
-	a.providersMu.Unlock()
-	a.st.SetSetting(ctx, "cfg_stage_provider", "fakestage")
-	a.st.SetSetting(ctx, "cfg_bellows_udp_port", "47733")
-	a.st.SetSetting(ctx, "cfg_bellows_public_ip", "127.0.0.1")
-
-	r := a.Router()
-	a.RegisterProxies(r)
-	gw := a.instance(TypeBellows).Ingest.(rtc.WHIPServer)
-
-	post := func(path string) *httptest.ResponseRecorder {
-		rec := httptest.NewRecorder()
-		r.ServeHTTP(rec, httptest.NewRequest("POST", path, strings.NewReader(whipOfferH264())))
-		return rec
-	}
-
-	// 未知令牌：404（admitIngest 拦截，不进网关）
-	if rec := post("/providers/bellows/w/chan1/badtoken"); rec.Code != 404 {
-		t.Fatalf("未知令牌应 404，实际 %d", rec.Code)
-	}
-
-	// 正常推流：201，Location 改写，会话在内建网关在册
-	rec := post("/providers/bellows/w/chan1/" + it.Token)
-	if rec.Code != 201 {
-		t.Fatalf("进程内推流应 201，实际 %d: %s", rec.Code, rec.Body.String())
-	}
-	loc := rec.Header().Get("Location")
-	if !strings.HasPrefix(loc, "/providers/bellows/w/sessions/") || strings.Contains(loc, it.Token) {
-		t.Fatalf("Location 应改写且不含令牌，实际 %q", loc)
-	}
-	rid := strings.TrimPrefix(loc, "/providers/bellows/w/sessions/")
-	if !gw.HasSession(rid) {
-		t.Fatal("会话应在内建 bellows 在册")
-	}
-
-	// DELETE 按 rid 归属路由到内建网关 → 204
-	drec := httptest.NewRecorder()
-	r.ServeHTTP(drec, httptest.NewRequest("DELETE", loc, nil))
-	if drec.Code != 204 || gw.HasSession(rid) {
-		t.Fatalf("DELETE 应 204 且会话移除: %d", drec.Code)
-	}
-
-	// 令牌 reset：进行中的会话被 RevokeToken 掐断，旧令牌 404
-	rec = post("/providers/bellows/w/chan1/" + it.Token)
-	if rec.Code != 201 {
-		t.Fatalf("重推应 201，实际 %d", rec.Code)
-	}
-	rid2 := strings.TrimPrefix(rec.Header().Get("Location"), "/providers/bellows/w/sessions/")
-	doReq(t, r, "POST", "/api/ingest/token/reset", sess, nil)
-	if gw.HasSession(rid2) {
-		t.Fatal("reset 后在推会话应被掐断")
-	}
-	if rec := post("/providers/bellows/w/chan1/" + it.Token); rec.Code != 404 {
-		t.Fatalf("reset 后旧令牌应 404，实际 %d", rec.Code)
-	}
-}
-
-// ---- livekit-ingress 路径 ----
+// ---- livekit-ingress 假上游（供游标 v4 迁移测试用）----
 
 // twirpCall 假 LiveKit Twirp API 记录的一次调用。
 type twirpCall struct {
@@ -327,96 +231,11 @@ func newFakeLivekit(t *testing.T) (twirpURL, whipURL string, calls *([]twirpCall
 	whipReqs = &[][2]string{}
 	whip := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		*whipReqs = append(*whipReqs, [2]string{r.Header.Get("Authorization"), r.URL.Path})
-		// 真实 ingress 的 Location 形态不受我们控制，这里用绝对 URL（上游主机对客户端不可达）
 		w.Header().Set("Location", "http://"+r.Host+"/w/sessions/upstream-rid")
 		w.WriteHeader(201)
 	}))
 	t.Cleanup(whip.Close)
 	return twirp.URL, whip.URL, calls, whipReqs
-}
-
-// livekit-ingress：首次推流 EnsureEndpoint 建端点（惰性，每令牌每实例）+ BindRoom 到 URL 频道，
-// Bearer 改写为上游 stream key、路径规范为 /w 后反代；换频道再推只 BindRoom 不重建端点；
-// reset 删端点（DeleteEndpoint）且旧令牌 404。
-func TestWhipLivekitIngress(t *testing.T) {
-	maskProviderEnv(t)
-	a := testAPI(t)
-	ctx := context.Background()
-	u, it := seedIngestUser(t, a, "alice", "chan1")
-	if _, err := a.st.CreateChannel(ctx, "chan2", u.ID); err != nil {
-		t.Fatalf("建频道失败: %v", err)
-	}
-	sess, err := a.st.CreateSession(ctx, u.ID)
-	if err != nil {
-		t.Fatalf("建会话失败: %v", err)
-	}
-	twirpURL, whipURL, calls, whipReqs := newFakeLivekit(t)
-	a.st.CreateProvider(ctx, &store.ProviderRecord{Alias: "ing1", Type: TypeLivekitIngress, Params: map[string]string{
-		"livekit_api_url": twirpURL, "livekit_api_key": "k", "livekit_api_secret": "s",
-		"ingress_upstream_url": whipURL}})
-	a.reloadProviders(ctx)
-	r := a.Router()
-	a.RegisterProxies(r)
-
-	post := func(channel, token string) *httptest.ResponseRecorder {
-		rec := httptest.NewRecorder()
-		r.ServeHTTP(rec, httptest.NewRequest("POST", "/providers/ing1/w/"+channel+"/"+token, strings.NewReader("sdp")))
-		return rec
-	}
-
-	if rec := post("chan1", "badtoken"); rec.Code != 404 || len(*calls) != 0 || len(*whipReqs) != 0 {
-		t.Fatalf("未知令牌应 404 且不打上游: %d calls=%d whip=%d", rec.Code, len(*calls), len(*whipReqs))
-	}
-
-	first := post("chan1", it.Token)
-	if first.Code != 201 {
-		t.Fatalf("ingress 推流应 201，实际 %d: %s", first.Code, first.Body.String())
-	}
-	// 会话资源地址必须改写回同源代理路径，否则客户端的 PATCH/DELETE 会打到已删除的 /w/...
-	if loc := first.Header().Get("Location"); loc != "/providers/ing1/w/sessions/upstream-rid" {
-		t.Fatalf("Location 应改写为同源代理路径，实际 %q", loc)
-	}
-	// 控制面：CreateIngress（identity=u{id}-obs，name=用户名）+ UpdateIngress 换房到 chan1
-	if len(*calls) != 2 || (*calls)[0].op != "create" || (*calls)[1].op != "update" {
-		t.Fatalf("首推应 create+update: %+v", *calls)
-	}
-	if (*calls)[0].body["participant_identity"] != rtc.Identity(u.ID, "obs") ||
-		(*calls)[0].body["participant_name"] != "alice" {
-		t.Fatalf("CreateIngress 身份不符: %+v", (*calls)[0].body)
-	}
-	if (*calls)[1].body["room_name"] != "chan1" {
-		t.Fatalf("BindRoom 应为 chan1: %+v", (*calls)[1].body)
-	}
-	// 反代：Bearer 改写为上游 stream key，路径规范为 /w
-	if len(*whipReqs) != 1 || (*whipReqs)[0][0] != "Bearer sk1" || (*whipReqs)[0][1] != "/w" {
-		t.Fatalf("上游应收到 Bearer sk1 与精确 /w: %+v", *whipReqs)
-	}
-
-	// 稳态同频道：零控制面调用
-	if rec := post("chan1", it.Token); rec.Code != 201 || len(*calls) != 2 {
-		t.Fatalf("稳态推流不应触发控制面调用: %d calls=%d", rec.Code, len(*calls))
-	}
-	// 换频道：只 BindRoom 不重建端点
-	if rec := post("chan2", it.Token); rec.Code != 201 || len(*calls) != 3 || (*calls)[2].op != "update" ||
-		(*calls)[2].body["room_name"] != "chan2" {
-		t.Fatalf("换频道应只 BindRoom: %d %+v", rec.Code, *calls)
-	}
-
-	// reset：端点删除（DeleteIngress）+ 记录清空，旧令牌 404
-	doReq(t, r, "POST", "/api/ingest/token/reset", sess, nil)
-	if len(*calls) != 4 || (*calls)[3].op != "delete" || (*calls)[3].body["ingress_id"] != "in1" {
-		t.Fatalf("reset 应 DeleteIngress(in1): %+v", *calls)
-	}
-	newTok, err := a.st.IngestTokenByUser(ctx, u.ID)
-	if err != nil {
-		t.Fatalf("reset 后应能查到新令牌: %v", err)
-	}
-	if ep, err := a.st.IngestEndpoint(ctx, newTok.ID, "ing1"); !errors.Is(err, store.ErrNotFound) {
-		t.Fatalf("reset 后端点记录应清空: %+v %v", ep, err)
-	}
-	if rec := post("chan1", it.Token); rec.Code != 404 {
-		t.Fatalf("reset 后旧令牌应 404，实际 %d", rec.Code)
-	}
 }
 
 // ---- 游标 v3 数据迁移 ----
@@ -521,111 +340,8 @@ func TestWhipNoIngestCap(t *testing.T) {
 	}
 }
 
-// ---- 改名/并发/可用性回归 ----
-
-// 改用户名必须让上游端点失效重建：端点的 name/metadata 在建端点时固化，复用旧端点会让
-// 推流顶着旧用户名显示。identity 换成 u{id} 后归属本身不再受改名影响（管制照常命中），
-// 这里保的是展示信息的一致性。
-func TestRenameTearsDownIngestEndpoint(t *testing.T) {
-	maskProviderEnv(t)
-	a := testAPI(t)
-	ctx := context.Background()
-	u, it := seedIngestUser(t, a, "alice", "chan1")
-	sess, err := a.st.CreateSession(ctx, u.ID)
-	if err != nil {
-		t.Fatalf("建会话失败: %v", err)
-	}
-	twirpURL, whipURL, calls, _ := newFakeLivekit(t)
-	a.st.CreateProvider(ctx, &store.ProviderRecord{Alias: "ing1", Type: TypeLivekitIngress, Params: map[string]string{
-		"livekit_api_url": twirpURL, "livekit_api_key": "k", "livekit_api_secret": "s",
-		"ingress_upstream_url": whipURL}})
-	a.reloadProviders(ctx)
-	r := a.Router()
-	a.RegisterProxies(r)
-
-	post := func(channel, token string) *httptest.ResponseRecorder {
-		rec := httptest.NewRecorder()
-		r.ServeHTTP(rec, httptest.NewRequest("POST", "/providers/ing1/w/"+channel+"/"+token, strings.NewReader("sdp")))
-		return rec
-	}
-	if rec := post("chan1", it.Token); rec.Code != 201 {
-		t.Fatalf("首推应 201，实际 %d", rec.Code)
-	}
-	if (*calls)[0].body["participant_identity"] != rtc.Identity(u.ID, "obs") ||
-		(*calls)[0].body["participant_name"] != "alice" {
-		t.Fatalf("首推身份不符: %+v", (*calls)[0].body)
-	}
-
-	// 改名 → 端点应被删除（DeleteIngress）且记录清空
-	if rec := doReq(t, r, "POST", "/api/account/username", sess, map[string]string{"username": "bob"}); rec.Code != 200 {
-		t.Fatalf("改名应 200，实际 %d: %s", rec.Code, rec.Body.String())
-	}
-	if n := len(*calls); n != 3 || (*calls)[2].op != "delete" {
-		t.Fatalf("改名应触发 DeleteIngress: %+v", *calls)
-	}
-	if ep, eerr := a.st.IngestEndpoint(ctx, it.ID, "ing1"); !errors.Is(eerr, store.ErrNotFound) {
-		t.Fatalf("改名后端点记录应清空: %+v %v", ep, eerr)
-	}
-
-	// 令牌不变（令牌是用户维度凭证，与用户名无关），下次推流按新用户名重建端点
-	if rec := post("chan1", it.Token); rec.Code != 201 {
-		t.Fatalf("改名后同一令牌应仍可推流，实际 %d", rec.Code)
-	}
-	created := (*calls)[3]
-	// identity 只认 user_id：改名前后不变（归属稳定）；展示名与元数据按新用户名重建
-	if created.op != "create" || created.body["participant_identity"] != rtc.Identity(u.ID, "obs") ||
-		created.body["participant_name"] != "bob" {
-		t.Fatalf("重建端点应保持 identity、换新展示名: %+v", created.body)
-	}
-}
-
-// 并发首推只建一个上游端点：两个请求同时进来时，先建的那个若不落库就会带着有效
-// stream key 永久残留（重置令牌也删不到）。
-func TestConcurrentFirstPushCreatesOneEndpoint(t *testing.T) {
-	maskProviderEnv(t)
-	a := testAPI(t)
-	ctx := context.Background()
-	_, it := seedIngestUser(t, a, "alice", "chan1")
-	twirpURL, whipURL, calls, _ := newFakeLivekit(t)
-	a.st.CreateProvider(ctx, &store.ProviderRecord{Alias: "ing1", Type: TypeLivekitIngress, Params: map[string]string{
-		"livekit_api_url": twirpURL, "livekit_api_key": "k", "livekit_api_secret": "s",
-		"ingress_upstream_url": whipURL}})
-	a.reloadProviders(ctx)
-	r := a.Router()
-	a.RegisterProxies(r)
-
-	const n = 6
-	var wg sync.WaitGroup
-	codes := make([]int, n)
-	for i := 0; i < n; i++ {
-		wg.Add(1)
-		go func(i int) {
-			defer wg.Done()
-			rec := httptest.NewRecorder()
-			r.ServeHTTP(rec, httptest.NewRequest("POST",
-				"/providers/ing1/w/chan1/"+it.Token, strings.NewReader("sdp")))
-			codes[i] = rec.Code
-		}(i)
-	}
-	wg.Wait()
-	for i, c := range codes {
-		if c != 201 {
-			t.Fatalf("并发推流 #%d 应 201，实际 %d", i, c)
-		}
-	}
-	creates := 0
-	for _, c := range *calls {
-		if c.op == "create" {
-			creates++
-		}
-	}
-	if creates != 1 {
-		t.Fatalf("并发首推应只建一个上游端点，实际 %d 次 create: %+v", creates, *calls)
-	}
-}
-
-// 令牌接口回报推流入口可用性：舞台线关闭时内建 bellows 取不到发布出口（Enabled=false），
-// 地址照给但前端要能提示——否则用户填进 OBS 推起来才撞 503。
+// 令牌接口回报推流入口可用性：enabled = 当前舞台实例的推流面可用（配置齐且在跑），
+// 舞台线关闭时 base 给空串——前端据此提示，免得用户填进 OBS 推起来才撞 404。
 func TestIngestTokenReportsEnabled(t *testing.T) {
 	maskProviderEnv(t)
 	a := testAPI(t)
@@ -650,20 +366,19 @@ func TestIngestTokenReportsEnabled(t *testing.T) {
 		}
 		return body
 	}
-	// 舞台线显式关闭（stage=none）：进程内 bellows 无发布出口
-	//（默认部署 stage=lkembed，发布出口恒在，enabled 恒为 true）
-	a.st.SetSetting(ctx, "cfg_stage_provider", "none")
-	if got := get()["enabled"]; got != false {
-		t.Fatalf("舞台线关闭时 enabled 应为 false，实际 %v", got)
+	// 默认 stage=lkembed 但进程内 LiveKit 未启动（测试不拉内核）：地址照给，enabled=false
+	body := get()
+	if body["base"] != "http://example.com/providers/lkembed/w/" {
+		t.Fatalf("base 应为 lkembed 的推流基地址，实际 %q", body["base"])
 	}
-	// 接上舞台线的 Publisher 后转为可用
-	a.providersMu.Lock()
-	a.providers["fakestage"] = &ProviderInstance{Alias: "fakestage", Type: "fake", Stage: &fakeStagePublisher{}}
-	a.providerOrder = append(a.providerOrder, "fakestage")
-	a.providersMu.Unlock()
-	a.st.SetSetting(ctx, "cfg_stage_provider", "fakestage")
-	if got := get()["enabled"]; got != true {
-		t.Fatalf("发布出口可用时 enabled 应为 true，实际 %v", got)
+	if body["enabled"] != false {
+		t.Fatalf("内核未在跑时 enabled 应为 false，实际 %v", body["enabled"])
+	}
+	// 舞台线显式关闭（stage=none）：没有推流入口，base 空、enabled=false
+	a.st.SetSetting(ctx, "cfg_stage_provider", "none")
+	body = get()
+	if body["base"] != "" || body["enabled"] != false {
+		t.Fatalf("stage=none 时 base 应为空且 enabled=false: %v", body)
 	}
 }
 

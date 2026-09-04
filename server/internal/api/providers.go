@@ -1,7 +1,7 @@
 // 内核实例注册表：实例即对象，每条注册构造独立的 rtc 接口对象，api 持 map[alias]实例。
 // 实例来源三类：内建（ember/bellows，进程内零依赖兜底）、env 锁定（环境变量合成，只读）、
 // DB 注册（providers 表，params 即旧命名空间键名，rtc 实现零改动）。
-// 选择器（voice_provider/stage_provider/ingest_provider）的值是实例 alias。
+// 选择器（voice_provider/stage_provider）的值是实例 alias；推流无选择器，一律随舞台实例。
 package api
 
 import (
@@ -297,13 +297,18 @@ func (a *API) stageInstance(ctx context.Context) (string, rtc.StageProvider) {
 	return "", nil
 }
 
-// ingestInstance 按选择器取推流实例；未知 alias 或无推流能力回落内建 bellows（fellBack=true）。
-// 回落意味着选择器配置无效：调用方不得据此做端点删除/重建等破坏性操作。
-func (a *API) ingestInstance(ctx context.Context) (alias string, ip rtc.IngestProvider, fellBack bool) {
-	if inst := a.instance(a.dynVal(ctx, "ingest_provider")); inst != nil && inst.Ingest != nil {
-		return inst.Alias, inst.Ingest, false
+// ingestInstance 推流入口不再是独立选择器：OBS 的 WHIP 一律进当前舞台实例自带的
+// WHIP 入口（推进别的实例观众看不到），这里返回当前舞台实例的推流面。
+// 舞台线关闭（none）或实例无推流能力时 ip 为 nil（admitIngest 对这类请求回 404）。
+func (a *API) ingestInstance(ctx context.Context) (alias string, ip rtc.IngestProvider) {
+	alias, sp := a.stageInstance(ctx)
+	if sp == nil {
+		return "", nil
 	}
-	return TypeBellows, a.instance(TypeBellows).Ingest, true
+	if inst := a.instance(alias); inst != nil {
+		return alias, inst.Ingest
+	}
+	return "", nil
 }
 
 // migrationStep 一个版本步：v 单调递增；run 必须幂等（失败会在下次启动重入）。

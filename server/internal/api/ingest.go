@@ -18,14 +18,19 @@ import (
 var ingestTagRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,31}$`)
 
 // writeIngestToken 回令牌、设备标签与同源 WHIP 基地址（/providers/{alias}/w/ 绝对地址，
-// 前端拼上频道即完整服务器地址）。enabled=false 表示推流入口当前不可用（所选实例缺配置，
-// 或舞台线关闭让进程内 bellows 取不到发布出口）：地址照常给出，前端据此提示，
-// 免得用户填进 OBS 推起来才撞 503。
+// 前端拼上频道即完整服务器地址）。推流一律进当前舞台实例自带的 WHIP 入口；
+// enabled=false 表示入口当前不可用（舞台线关闭，或实例推流面缺配置/未在跑）：
+// 地址照常给出，前端据此提示，免得用户填进 OBS 推起来才撞 404。
 func (a *API) writeIngestToken(w http.ResponseWriter, r *http.Request, t *store.IngestToken) {
-	alias, ip, _ := a.ingestInstance(r.Context())
-	base := (&neturl.URL{Scheme: requestScheme(r), Host: r.Host, Path: "/providers/" + alias + "/w/"}).String()
+	alias, ip := a.ingestInstance(r.Context())
+	base := ""
+	enabled := false
+	if ip != nil {
+		base = (&neturl.URL{Scheme: requestScheme(r), Host: r.Host, Path: "/providers/" + alias + "/w/"}).String()
+		enabled = ip.Enabled(r.Context())
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"token": t.Token, "tag": t.Tag, "base": base, "enabled": ip.Enabled(r.Context()),
+		"token": t.Token, "tag": t.Tag, "base": base, "enabled": enabled,
 	})
 }
 
@@ -43,14 +48,13 @@ func (a *API) ingestTokenGet(w http.ResponseWriter, r *http.Request) {
 	a.writeIngestToken(w, r, t)
 }
 
-// POST /api/ingest/token/reset：换令牌值——旧令牌立即失效，其名下进行中的会话全部掐断，
-// 各实例端点删除（下次推流重建）。无令牌时等同创建。
+// POST /api/ingest/token/reset：换令牌值——旧令牌立即失效，其名下进行中的会话全部掐断。
+// 无令牌时等同创建。
 func (a *API) ingestTokenReset(w http.ResponseWriter, r *http.Request) {
 	u := userFrom(r)
 	ctx := r.Context()
 	if old, err := a.st.IngestTokenByUser(ctx, u.ID); err == nil {
 		a.revokeIngestSessions(ctx, old.Token)
-		a.teardownIngestEndpoints(ctx, old.ID)
 	}
 	t, err := a.st.ResetIngestToken(ctx, u.ID)
 	if errors.Is(err, store.ErrNotFound) {
@@ -63,9 +67,7 @@ func (a *API) ingestTokenReset(w http.ResponseWriter, r *http.Request) {
 	a.writeIngestToken(w, r, t)
 }
 
-// PUT /api/ingest/token {tag}：改设备标签（下次推流的 identity 生效）。端点带旧 identity，
-// 随标签一并删除重建——livekit-ingress 形态下删端点会终止其上正在进行的推流（进程内 bellows
-// 无上游端点，不受影响）。无令牌时按新标签直接创建。
+// PUT /api/ingest/token {tag}：改设备标签（下次推流的 identity 生效）。无令牌时按新标签直接创建。
 func (a *API) ingestTokenTag(w http.ResponseWriter, r *http.Request) {
 	u := userFrom(r)
 	var req struct {
@@ -84,7 +86,6 @@ func (a *API) ingestTokenTag(w http.ResponseWriter, r *http.Request) {
 		t, err = a.st.CreateIngestToken(ctx, u.ID, req.Tag)
 	} else if err == nil {
 		if err = a.st.UpdateIngestTokenTag(ctx, u.ID, req.Tag); err == nil {
-			a.teardownIngestEndpoints(ctx, t.ID)
 			t.Tag = req.Tag
 		}
 	}
@@ -111,25 +112,5 @@ func (a *API) revokeIngestSessions(ctx context.Context, token string) {
 		if err != nil {
 			log.Printf("撤销推流会话失败（实例 %s）: %v", inst.Alias, err)
 		}
-	}
-}
-
-// teardownIngestEndpoints 删除该令牌名下的全部实例端点：逐实例尽力 DeleteEndpoint
-// （内核侧）后清空 ingest_endpoints 表，下次推流重建。
-func (a *API) teardownIngestEndpoints(ctx context.Context, tokenID int64) {
-	for _, inst := range a.listInstances(ctx) {
-		if inst.Ingest == nil {
-			continue
-		}
-		ep, err := a.st.IngestEndpoint(ctx, tokenID, inst.Alias)
-		if err != nil { // 含 ErrNotFound（该实例无端点）；查询失败同样尽力跳过
-			continue
-		}
-		if derr := inst.Ingest.DeleteEndpoint(ctx, ep.IngressID); derr != nil {
-			log.Printf("删除 ingress 端点失败（实例 %s）: %v", inst.Alias, derr)
-		}
-	}
-	if err := a.st.DeleteIngestEndpointsByToken(ctx, tokenID); err != nil {
-		log.Printf("清空 ingress 端点记录失败: %v", err)
 	}
 }

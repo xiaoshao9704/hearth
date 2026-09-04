@@ -1,8 +1,8 @@
 // 动态配置与内核注册表。
-// 配置键 = 内核选择器（voice_provider / stage_provider / ingest_provider）+ 内建实例的全局命名空间键。
+// 配置键 = 内核选择器（voice_provider / stage_provider）+ 内建实例的全局命名空间键。
 // 规则：环境变量（含 .env，进程启动时已加载）设置了 → 以环境为准，管理后台只读展示；
 // 未设置 → 管理后台可填，落库 settings（cfg_ 前缀），保存后即时生效。
-// 例外：三个选择器不读环境变量（env 的职责只是把 provider 实例带进可选列表）；
+// 例外：选择器不读环境变量（env 的职责只是把 provider 实例带进可选列表）；
 // 部署侧旧的选择器 env 由迁移 v2 一次性落库，此后以管理后台为准。
 package api
 
@@ -22,14 +22,12 @@ import (
 // 内核选择器：值是注册表里的实例 alias（见 providers.go），合法性由 adminSetConfig 的
 // 选择器钩子按实例能力校验（Options 在 adminGetConfig 里按当前实例动态填充，注册新实例
 // 即进可选列表）。语音线（voice）与舞台线（stage：投屏/摄像头/OBS 推流及其伴音）各占一个槽位。
+// 推流不再是独立选择器：OBS 的 WHIP 一律进当前舞台实例自带的入口（见 admitIngest）。
 var selectorKeys = []rtc.ConfigKey{
 	{Name: "voice_provider", Group: "core",
-		Label: "语音内核", Hint: "实例 alias；内建 ember = 进程内纯音频 SFU，零外部依赖；语音舞台同选一套 livekit 即单线形态"},
+		Label: "语音内核", Hint: "实例 alias；语音舞台同选一套 livekit 即单线（combined）形态"},
 	{Name: "stage_provider", Group: "core",
-		Label: "舞台内核", Hint: "实例 alias；none = 纯语音部署，禁用投屏与摄像头"},
-	{Name: "ingest_provider", Group: "core",
-		Label: "推流入口", Hint: "OBS/WHIP 推流的接入实例 alias；内建 bellows = 进程内直通网关（支持 HEVC/AV1，发进舞台内核）；" +
-			"舞台线选 lkembed 时也可把这里一并选 lkembed，推流直接进进程内 LiveKit 自带的 WHIP 入口，少一跳回环 PeerConnection"},
+		Label: "舞台内核", Hint: "实例 alias；none = 纯语音部署，禁用投屏与摄像头；OBS 推流也进这个实例自带的 WHIP 入口"},
 }
 
 // portmapKeys 自动端口映射：进程内网络基建，与 bellows_udp_port 同类的全局键（不进实例 params）。
@@ -43,9 +41,8 @@ var portmapKeys = []rtc.ConfigKey{
 
 // selectorEnv 选择器对应的旧环境变量名：只供迁移 v2 一次性导入，不参与取值。
 var selectorEnv = map[string]string{
-	"voice_provider":  "VOICE_PROVIDER",
-	"stage_provider":  "STAGE_PROVIDER",
-	"ingest_provider": "INGEST_PROVIDER",
+	"voice_provider": "VOICE_PROVIDER",
+	"stage_provider": "STAGE_PROVIDER",
 }
 
 // warnLegacyConfig 启动时检查已废弃/不再读取的旧环境变量，各打一行日志提示管理员从
@@ -97,9 +94,6 @@ func (a *API) PortWants(ctx context.Context) []portmap.Want {
 	if alias, _ := a.voiceInstance(ctx); alias == TypeEmber {
 		ws = append(ws, portmap.Want{Proto: "udp", Port: dynPort(a.dynVal(ctx, "ember_udp_port")), Desc: "hearth voice"})
 	}
-	if alias, _, _ := a.ingestInstance(ctx); alias == TypeBellows {
-		ws = append(ws, portmap.Want{Proto: "udp", Port: dynPort(a.dynVal(ctx, "bellows_udp_port")), Desc: "hearth whip"})
-	}
 	// lkembed（进程内 LiveKit）的媒体端口必须 StrictPort：LiveKit 的候选地址改写（补丁二）只换
 	// IP 不换端口，与 pion 的 SDP 宣告同源限制一致；网关若把外部端口改派成别的号，宣告出去的
 	// 候选端口就是错的，宁可让 Mapper 判定失败、走 port_conflict 诊断，也不能假装映射成功。
@@ -136,8 +130,7 @@ func envFixed(k *rtc.ConfigKey) bool { return k.Env != "" && os.Getenv(k.Env) !=
 
 // dynVal 取生效值：环境变量（选择器除外） > 数据库 > 实现声明的兜底默认。
 // 选择器默认：voice→lkembed、stage→lkembed（进程内 LiveKit，语音舞台同选即 combined
-// 单连接）、ingest→bellows（内建实例兜底，零外部依赖）；
-// 选择器取到未注册或无对应能力的 alias 时由各 *Instance 取值函数回落（见 providers.go）。
+// 单连接）；选择器取到未注册或无对应能力的 alias 时由各 *Instance 取值函数回落（见 providers.go）。
 func (a *API) dynVal(ctx context.Context, name string) string {
 	k := a.findDynKey(name)
 	if k == nil {
@@ -156,8 +149,6 @@ func (a *API) dynVal(ctx context.Context, name string) string {
 		return AliasLkembed
 	case "stage_provider":
 		return AliasLkembed
-	case "ingest_provider":
-		return TypeBellows
 	}
 	return k.Default
 }
@@ -169,8 +160,6 @@ func selectorCap(name string) string {
 		return "voice"
 	case "stage_provider":
 		return "stage"
-	case "ingest_provider":
-		return "ingest"
 	}
 	return ""
 }

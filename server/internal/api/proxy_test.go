@@ -2,17 +2,11 @@ package api
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/base64"
-	"encoding/hex"
-	"encoding/json"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
-	"hearth/server/internal/rtc"
 	"hearth/server/internal/store"
 )
 
@@ -56,9 +50,9 @@ func TestProviderDispatch(t *testing.T) {
 	}
 }
 
-// WHIP 按 alias：bellows-remote 实例的 POST 先过 admitIngest（definitive），签 grant
-// 随反代带给远端；应答 Location /w/sessions/{rid} 改写成 /providers/{alias}/w/sessions/{rid}；
-// 未知令牌 404 且不到达上游；PATCH/DELETE 按 rid 路由反代。
+// WHIP 按 alias：推流只进当前舞台实例，bellows-remote 等退场形态的实例即使仍在
+// 注册表里（类型表第 4 步才删），POST 也被 admitIngest 的门禁 definitive 404，
+// 请求不到达其上游。
 func TestWhipPerAlias(t *testing.T) {
 	a := testAPI(t)
 	ctx := context.Background()
@@ -74,15 +68,9 @@ func TestWhipPerAlias(t *testing.T) {
 		t.Fatalf("建令牌失败: %v", err)
 	}
 
-	type whipReq struct {
-		method, path, grant, auth string
-		body                      string
-	}
-	var got []whipReq
+	reached := 0
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		b, _ := io.ReadAll(r.Body)
-		got = append(got, whipReq{r.Method, r.URL.Path, r.Header.Get("X-Bellows-Grant"), r.Header.Get("Authorization"), string(b)})
-		w.Header().Set("Location", "/w/sessions/rid9")
+		reached++
 		w.WriteHeader(201)
 	}))
 	defer upstream.Close()
@@ -92,55 +80,11 @@ func TestWhipPerAlias(t *testing.T) {
 	r := a.Router()
 	a.RegisterProxies(r)
 
-	// 未知令牌：404 且不到达上游
+	// 真令牌也 404（r1 不是当前舞台实例），且不到达上游
 	rec := httptest.NewRecorder()
-	r.ServeHTTP(rec, httptest.NewRequest("POST", "/providers/r1/w/chan1/badtoken", strings.NewReader("sdp")))
-	if rec.Code != 404 || len(got) != 0 {
-		t.Fatalf("未知令牌应 404 且不到达上游: %d reached=%d", rec.Code, len(got))
-	}
-
-	// 路径模式：admitIngest 通过 → 带 grant 反代，Location 改写
-	rec = httptest.NewRecorder()
 	r.ServeHTTP(rec, httptest.NewRequest("POST", "/providers/r1/w/chan1/"+it.Token, strings.NewReader("sdp")))
-	if rec.Code != 201 {
-		t.Fatalf("真令牌应反代成功，实际 %d: %s", rec.Code, rec.Body.String())
-	}
-	if loc := rec.Header().Get("Location"); loc != "/providers/r1/w/sessions/rid9" {
-		t.Fatalf("Location 应改写为 /providers/r1/w/sessions/rid9，实际 %q", loc)
-	}
-	if len(got) != 1 || got[0].path != "/w/chan1/"+it.Token || got[0].body != "sdp" {
-		t.Fatalf("上游收到的请求不符: %+v", got)
-	}
-	// grant payload：字段齐全，identity 主体是 user_id，展示信息在 meta 里
-	var p struct {
-		Op, Token, Room, Identity, Offer string
-		Meta                             rtc.Meta
-	}
-	raw, err := base64.RawURLEncoding.DecodeString(strings.SplitN(got[0].grant, ".", 2)[0])
-	if err != nil || json.Unmarshal(raw, &p) != nil {
-		t.Fatalf("grant 解码失败: %v", err)
-	}
-	sum := sha256.Sum256([]byte("sdp"))
-	if p.Op != "publish" || p.Token != it.Token || p.Room != "chan1" || p.Identity != rtc.Identity(u.ID, "obs") ||
-		p.Meta.UID != u.ID || p.Meta.Username != "alice" || p.Meta.Kind != "ingest" || p.Meta.Tag != "obs" ||
-		p.Offer != hex.EncodeToString(sum[:]) {
-		t.Fatalf("grant payload 不符: %+v", p)
-	}
-
-	// bearer 模式：令牌在 Authorization，反代时原样带上（远端验签要比对 grant.token）
-	rec = httptest.NewRecorder()
-	req := httptest.NewRequest("POST", "/providers/r1/w/chan1", strings.NewReader("sdp"))
-	req.Header.Set("Authorization", "Bearer "+it.Token)
-	r.ServeHTTP(rec, req)
-	if rec.Code != 201 || len(got) != 2 || got[1].path != "/w/chan1" || got[1].auth != "Bearer "+it.Token {
-		t.Fatalf("bearer 模式反代不符: %d %+v", rec.Code, got)
-	}
-
-	// 会话收尾：PATCH/DELETE 按 /w/sessions/{rid} 反代
-	rec = httptest.NewRecorder()
-	r.ServeHTTP(rec, httptest.NewRequest("PATCH", "/providers/r1/w/sessions/rid9", strings.NewReader("a=x")))
-	if len(got) != 3 || got[2].method != "PATCH" || got[2].path != "/w/sessions/rid9" {
-		t.Fatalf("PATCH 应反代到 /w/sessions/rid9: %+v", got)
+	if rec.Code != 404 || reached != 0 {
+		t.Fatalf("非当前舞台实例应 404 且不到达上游: %d reached=%d", rec.Code, reached)
 	}
 }
 
@@ -176,7 +120,7 @@ func TestReservedChannelNames(t *testing.T) {
 	}
 }
 
-// Location 改写要认三种形态：上游返什么由它自己决定（livekit-ingress 不受我们控制），
+// Location 改写要认三种形态：上游返什么由它自己决定（外部 LiveKit 不受我们控制），
 // 只有纯相对形式本就落在代理路径下、不该动。
 func TestRewriteWHIPLocation(t *testing.T) {
 	const prefix = "/providers/ing1"

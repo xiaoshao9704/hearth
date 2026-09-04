@@ -377,7 +377,7 @@ const KERNEL_LABELS: Record<string, string> = {
   off: '关闭',
 };
 const GROUP_META: Record<string, [string, string]> = {
-  core: ['内核选择', '语音 / 舞台（投屏）/ 推流入口分别选服务实例'],
+  core: ['内核选择', '语音 / 舞台（投屏）分别选服务实例；OBS 推流一律进当前舞台内核'],
   livekit: ['LiveKit', '信令与令牌签发'],
   voice: ['Ember 内置语音', '本进程直出音频，UDP 单端口'],
   stage: ['进程内 LiveKit（舞台）', '舞台选 lkembed 时才启动，信令只监听回环'],

@@ -53,15 +53,16 @@ func TestSelectorResolutionAndFallback(t *testing.T) {
 	maskProviderEnv(t)
 	a := testAPI(t)
 	ctx := context.Background()
-	// 未设置选择器：默认 lkembed / lkembed / bellows（内建优先，默认解析不算回落）
+	// 未设置选择器：默认 lkembed / lkembed（内建优先，默认解析不算回落）；
+	// 推流无独立选择器，ingestInstance 跟随舞台实例
 	if alias, _ := a.voiceInstance(ctx); alias != AliasLkembed {
 		t.Fatalf("voice 默认应为 lkembed，实际 %q", alias)
 	}
 	if alias, sp := a.stageInstance(ctx); alias != AliasLkembed || sp == nil {
 		t.Fatalf("stage 默认应为 lkembed，实际 %q", alias)
 	}
-	if alias, _, fellBack := a.ingestInstance(ctx); alias != "bellows" || fellBack {
-		t.Fatalf("ingest 默认应为 bellows 且非回落，实际 %q fellBack=%v", alias, fellBack)
+	if alias, ip := a.ingestInstance(ctx); alias != AliasLkembed || ip == nil {
+		t.Fatalf("ingest 应跟随舞台实例 lkembed，实际 %q", alias)
 	}
 	// 注册一套 livekit 并选中
 	a.st.CreateProvider(ctx, &store.ProviderRecord{Alias: "lk2", Type: TypeLivekit,
@@ -71,10 +72,15 @@ func TestSelectorResolutionAndFallback(t *testing.T) {
 	if alias, _ := a.voiceInstance(ctx); alias != "lk2" {
 		t.Fatalf("voice 应解析到 lk2，实际 %q", alias)
 	}
-	// livekit 实例三面齐全：推流槽位选中它即生效（推流走它自带的 WHIP 入口）
-	a.st.SetSetting(ctx, "cfg_ingest_provider", "lk2")
-	if alias, _, fellBack := a.ingestInstance(ctx); alias != "lk2" || fellBack {
-		t.Fatalf("ingest 应解析到 lk2，实际 %q fellBack=%v", alias, fellBack)
+	// 舞台切到 lk2：推流入口跟着切（livekit 实例三面齐全，推流走它自带的 WHIP 入口）
+	a.st.SetSetting(ctx, "cfg_stage_provider", "lk2")
+	if alias, ip := a.ingestInstance(ctx); alias != "lk2" || ip == nil {
+		t.Fatalf("ingest 应跟随舞台实例 lk2，实际 %q", alias)
+	}
+	// 舞台线关闭：推流入口随之不存在
+	a.st.SetSetting(ctx, "cfg_stage_provider", "none")
+	if alias, ip := a.ingestInstance(ctx); alias != "" || ip != nil {
+		t.Fatalf("stage=none 时 ingest 应为空，实际 %q ip=%v", alias, ip)
 	}
 	// 选了无对应槽位能力的实例 → 回落（livekit-ingress 只有推流面）
 	a.st.CreateProvider(ctx, &store.ProviderRecord{Alias: "ing2", Type: TypeLivekitIngress,
@@ -257,8 +263,8 @@ func TestMigrateFreshDeployKeepsBuiltinDefaults(t *testing.T) {
 	if alias, sp := a.stageInstance(ctx); alias != AliasLkembed || sp == nil {
 		t.Fatalf("全新部署舞台应走内建 lkembed，实际 %q", alias)
 	}
-	if alias, _, _ := a.ingestInstance(ctx); alias != "bellows" {
-		t.Fatalf("全新部署推流应走内建 bellows，实际 %q", alias)
+	if alias, ip := a.ingestInstance(ctx); alias != AliasLkembed || ip == nil {
+		t.Fatalf("全新部署推流应跟随舞台实例 lkembed，实际 %q", alias)
 	}
 }
 
@@ -339,11 +345,12 @@ func TestFallbacksSafeWhenInitialReloadFails(t *testing.T) {
 	if alias, vp := a.voiceInstance(ctx); alias != AliasLkembed || vp == nil {
 		t.Fatalf("启动期加载失败时语音应落默认 lkembed 且非 nil: %q", alias)
 	}
-	alias, ip, _ := a.ingestInstance(ctx)
-	if alias != "bellows" || ip == nil {
-		t.Fatalf("启动期加载失败时推流应回落 bellows 且非 nil: %q", alias)
+	// 推流跟随舞台实例：舞台默认 lkembed，其推流面同样非 nil
+	alias, ip := a.ingestInstance(ctx)
+	if alias != AliasLkembed || ip == nil {
+		t.Fatalf("启动期加载失败时推流应跟随 lkembed 且非 nil: %q", alias)
 	}
-	_ = ip.Enabled(ctx) // 回落对象的调用路径不得 panic
+	_ = ip.Enabled(ctx) // 调用路径不得 panic
 }
 
 // 内建 lkembed：可被舞台选择器选中，配置映射到回环，密钥首次生成后落库不变。

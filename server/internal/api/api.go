@@ -57,9 +57,6 @@ type API struct {
 	ticketMu sync.Mutex
 	tickets  map[string]voiceTicket
 
-	// endpointMu 串行化上游推流端点的惰性创建（见 bindIngressEndpoint）
-	endpointMu sync.Mutex
-
 	// mapped 端口映射结果查询，透传给进程内 ICE-Lite 内核做宣告（无映射来源时为 nil）
 	mapped lite.MappedFunc
 
@@ -90,7 +87,7 @@ func New(st *store.Store, cfg config.Config, hub *chat.Hub, mapped lite.MappedFu
 	a.kernelKeys = append(ember.ConfigKeys(), bellows.ConfigKeys()...)
 	a.kernelKeys = append(a.kernelKeys, livekitembed.ConfigKeys()...)
 	// 注册表先种内建实例：启动期迁移或 ListProviders 失败（保留旧表）时，
-	// voiceInstance/ingestInstance 的回落路径仍有 ember/bellows 对象可用
+	// 各选择器的默认/回落路径仍有内建对象可用
 	for _, inst := range a.builtinInstances() {
 		a.providers[inst.Alias] = inst
 		a.providerOrder = append(a.providerOrder, inst.Alias)
