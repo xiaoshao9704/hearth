@@ -1,6 +1,6 @@
 # 计划：浏览器 ICE 配置由服务端下发，连通性三层兜底
 
-状态：**设计定稿（2026-09-05），待实施。** 第一阶段（STUN 并列 + 服务端下发 + 补丁三 + 埋点收编）为本期范围；第二阶段（TURN over TLS 443）设计已定、实施待排。
+状态：**设计定稿（2026-09-05），待实施。** 第一阶段（STUN 并列 + 服务端下发 + 补丁四 + 埋点收编）为本期范围；第二阶段（TURN over TLS 443）设计已定、实施待排。
 本计划自包含，实施会话读完即可开工，不需要本会话的其他上下文。
 
 ## 背景与判据
@@ -43,12 +43,14 @@
 - 留空 = 默认值。改动重启生效（与 `lkembed_log_level` 同款 Hint）。
 - `cmd/stage` 对应 `STAGE_CLIENT_STUN_SERVERS`，默认同一常量。
 
-**补丁三（fork `v1.13.6-hearth.3`）：显式客户端 STUN 列表，不回落默认**
+**补丁四（fork `v1.13.6-hearth.4`）：显式客户端 STUN 列表，不回落默认**
+
+编号说明：fork 的 `hearth` 分支上此前已有一个未收进补丁目录的提交（darwin 无 cgo 构建退化 + protocol replace），本期一并补成 0003 让 `server/livekit-patches/` 重新成为权威副本；`v1.13.6-hearth.3` 这个 tag 名已被一个废弃实验（补丁二 host 候选翻成 external-only）占用，不采用、不删除，新补丁顺延为 0004 / `hearth.4`。
 
 `pkg/config/config.go` 的 `RTCConfig` 加非 YAML 字段（与补丁二的 `ExternalIPs` 同款风格）：
 
 ```go
-// hearth patch 3: explicit STUN list to advertise to clients. nil keeps upstream behaviour
+// hearth patch 4: explicit STUN list to advertise to clients. nil keeps upstream behaviour
 // (fall back to DefaultStunServers when nothing else is configured); non-nil is authoritative,
 // and an empty slice means "advertise no STUN at all". Not a YAML field.
 ClientSTUNServers *[]string `yaml:"-"`
@@ -65,7 +67,7 @@ if cs := rtcConf.ClientSTUNServers; cs != nil {
 }
 ```
 
-TURN 分支在其之前已 `append`，不受影响——第二阶段的 TURN 与本字段正交。约 10 行。补丁文件 `server/livekit-patches/0003-hearth-patch-3-client-stun-servers-explicit.patch`，README 表格加一行，fork 打 `v1.13.6-hearth.3`，`server/go.mod` 的 `replace` 跟进。
+TURN 分支在其之前已 `append`，不受影响——第二阶段的 TURN 与本字段正交。约 10 行。补丁文件 `server/livekit-patches/0004-hearth-patch-4-client-stun-servers-explicit.patch`（另有 `0003-*-telemetry-darwin-nocgo-protocol-fork.patch` 补齐既有提交），README 表格加两行，fork 打 `v1.13.6-hearth.4`，`server/go.mod` 的 `replace` 跟进。
 
 **hearth 侧接线**
 
@@ -114,9 +116,9 @@ TURN 分支在其之前已 `append`，不受影响——第二阶段的 TURN 与
 
 | 位置 | 改动 |
 | --- | --- |
-| fork `pkg/config/config.go`、`pkg/service/roommanager.go` | 补丁三（约 10 行）；打 `v1.13.6-hearth.3` |
-| `server/livekit-patches/0003-*.patch`、`README.md` | 补丁权威副本；表格加行 |
-| `server/go.mod` | `replace ... v1.13.6-hearth.3` |
+| fork `pkg/config/config.go`、`pkg/service/roommanager.go` | 补丁四（约 10 行）；打 `v1.13.6-hearth.4` |
+| `server/livekit-patches/0003-*.patch`、`0004-*.patch`、`README.md` | 补丁权威副本（0003 补齐既有提交，0004 新增）；表格加两行 |
+| `server/go.mod` | `replace ... v1.13.6-hearth.4` |
 | `server/internal/rtc/livekitembed/livekitembed.go` | `Options.ClientSTUNServers`、`DefaultClientSTUNServers`、`Start` 挂 `conf.RTC.ClientSTUNServers`、dyn 键 `lkembed_client_stun_servers`、`lkembed_tcp_port` Hint |
 | `server/internal/rtc/livekitembed/livekitembed_test.go` | `none`/空/列表三种取值挂到 `conf.RTC` 的断言 |
 | `server/internal/api/lkembed.go` | `EnsureStageKernel` 传新键 |
@@ -140,7 +142,7 @@ TURN 分支在其之前已 `append`，不受影响——第二阶段的 TURN 与
 
 ## 风险与不做
 
-- fork 再发一版：按 `livekit-patches/README.md` 的"跟上游"流程，三个补丁、四个文件，冲突概率低。
+- fork 再发一版：按 `livekit-patches/README.md` 的"跟上游"流程，四个补丁，冲突概率低。
 - 改动重启生效：与现有 `lkembed_*` 键一致，不做热更新。
 - **不做**：TURN 的实施（第三层，单独排期）；改 `lkembed_stun_servers` 的语义；给客户端下发 TURN 以外的任何 relay；hearth 自管 TLS 形态下的 443 分流。
 - 不把本次排障中出现的任何具体网络环境（路由器型号/分流软件/出口地址）写进代码注释与提交信息。
