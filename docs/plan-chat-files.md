@@ -1,86 +1,116 @@
-# 计划：聊天发送图片/文件（只传输，不落服务器硬盘）
+# 计划：聊天与文件走 LiveKit 数据通道，hearth 不维护聊天长连接、不经手文件
 
-状态：**设计草案（2026-09-05），待选定方案后实施。** 需要用户在「方案对比」里拍板走哪条路。
-本计划自包含。
+状态：**方案定稿（2026-09-05，用户拍板），待实施。** 本计划自包含，实施会话读完即可开工。
 
-## 目标与判据
+## 决定（用户拍板）
 
-给频道聊天加"发图片/文件"，但**不让 hearth 把文件字节持久化到硬盘**（`/data` 只放数据库，上行有限的小服务器硬盘吃不消）。判据：
-
-- 发一张截图/一个文件，接收方能看到（图片内联预览、文件给下载）。
-- 文件字节**不写 hearth 磁盘**、**不进聊天数据库**（DB 也在磁盘上，且要随库备份，塞不下）。
-- 不引入必须常驻的重依赖（redis/对象存储）作为默认形态——保持"单文件开箱即用"。
-- 传输失败不影响文本聊天与语音/舞台。
+1. 聊天改走 **LiveKit 数据通道**，拆掉 hearth 自己的聊天 WebSocket hub——不再自己维护长连接、重连、心跳。
+2. 文件/图片**字节走 LiveKit 数据通道**（Data Streams），经 SFU 扇出，**优先走 sandbox 那条线**；hearth 既不落盘也不占内存。
+3. 聊天**历史必须保住**（现有的最近 50 条回放与翻历史是功能，不能回退）：文本与文件"卡片"仍由 hearth 落库，字节不落。
 
 ## 现状（已核实）
 
-- 聊天独立于媒体：`web/src/chat.ts` ↔ `server/internal/chat/hub.go` 的 `/api/chat` WebSocket；连接参数 `channel`+`token`，与是否进语音房无关。
-- 消息模型 `store.Message{ID, ChannelID, UID, Username, Content, CreatedAt}`；`Content` 是 `text`、≤2000 字符；`AddMessage` 落库、`RecentMessages` 取最近 50 条。
-- Hub 内存维护 `rooms[channelID] → set(client)`，每条消息落库后 `broadcast`；出站走每个 client 的 `send` channel + `writeLoop`（nhooyr 不允许并发写）。
-- 传输帧是 `wsjson`（文本 JSON）。没有任何上传/multipart/对象存储代码，也没有文件相关配置键。
+- 聊天：`web/src/chat.ts` ↔ `server/internal/chat/hub.go` 的 `/api/chat` WS（`main.go:160` 注册，`api.go:35` 持有 `hub`，`api.go:672` 踢人时 `CloseUserChannel`）。消息 `store.Message{ID, ChannelID, UID, Username, Content, CreatedAt}`，`Content` text ≤2000；`AddMessage`/`RecentMessages(limit 50)`。
+- 进房票：`server/internal/lktoken/lktoken.go:28` 的 `VideoGrant{CanPublish: !gagged, CanPublishData: true(写死)}`；`admission.go:37` 产出 `CanPublish: !gagged`。`server/internal/lkroom/lkroom.go:156` 的权限更新路径设 `CanPublishData: true`。
+- 前端两条线：`room.tsx:181` `stageEngine() = combined ? voiceLine.engine : stageLine?.engine`；`lineFor(role)`。每个成员在拆分形态下同时连 voice（bj lkembed）与 stage（sandbox）两个 LiveKit 房间（诊断日志已证实 role=voice/stage 两个 PC）。
+- `AVEngine`（`web/src/engine/types.ts`）没有数据通道方法；`livekit-client 2.22.1` 具备 `sendText/sendFile/streamBytes` 与 `registerTextStreamHandler/registerByteStreamHandler`（`topic`、`destinationIdentities`）。fork 服务端 v1.13.6 ≥ Data Streams 所需版本。
 
-## 方案对比（三条路，按契合度排序）
+## 设计
 
-### 方案 A：Hub 内存中转，即传即弃（推荐默认）
+### 数据线（data line）
 
-发送方把文件字节交给 hearth，hearth **只在内存里短暂持有**、广播一条"文件消息"给频道在线成员，接收方按 id 拉取；TTL 到期或全部在线成员取过即从内存驱逐。**不写磁盘、不进 DB。**
+**定义**：`stageEngine()` 非空即用它（拆分形态 = sandbox；合并形态 = 同一条），否则回落 `voiceLine.engine`。聊天文本与文件都走这一条。选 stage 线的理由：sandbox 打洞/上行正常、把扇出带宽从上行有限的 bj 挪走；成员本来就都连着它。
 
-- **上传**：`POST /api/chat/blob?channel=<id>`（Bearer token，复用 `admitUser` 的频道成员判定），body 是字节流；服务端流式读入一个**有界**缓冲，超过单文件上限即 413。返回 `{blob_id, name, mime, size}`。
-- **消息**：沿用聊天 WS，`clientMsg` 加可选结构化字段（`kind:"file"` + `blob_id/name/mime/size`）；服务端广播为一条 `Message`，`Content` 存**元数据 JSON**（不是字节，几十字节，可落库当历史记录，也可选择 `kind=file` 的消息不落库只广播——见「待定」）。
-- **下载**：`GET /api/chat/blob/<blob_id>`（同样 token+成员判定），从内存流式吐出，`Content-Type` 用记录的 mime、`Content-Disposition` 用原名。
-- **内存治理**（关键，小服务器）：全局在途字节上限（如 64MB）、单文件上限（如图片 10MB / 任意文件 25MB，配置键）、每 blob TTL（如 10 分钟）、每用户在途数上限；超总量时拒绝新上传（429/507）而不是 OOM。驱逐条件：TTL 到 || 已被在线成员全取 || 上传者断线且无人取。
-- **优点**：零磁盘、零外部依赖、不碰 NAT/媒体路径、契合"只传输不管理"。图片/截图这类小文件体验好。
-- **代价/边界**：**要求收发双方在 TTL 内同时在线**（无离线补收——离线成员回来看到的是"文件已过期"占位）；大文件受内存上限约束；服务端进程内存峰值上升（需背压与硬上限兜底）。
+### 文本消息：先落库、再广播
 
-### 方案 B：外部对象存储 + 预签名直传（离线/大文件的升级路，非默认）
+```
+发送方  POST /api/channels/{channel}/messages {content}
+        → hearth: 鉴权 + admitUser（禁言 403）+ AddMessage → 返回 Message{id,...}
+        → 发送方 sendText(JSON(Message), {topic:"chat"})   ← 经数据线 SFU 扇出
+接收方  registerTextStreamHandler("chat") → 解析 Message → 按 id 去重 → 渲染
+进房/重连  GET /api/channels/{channel}/messages?after=<最大已知 id>&limit=50 → 补齐
+```
 
-hearth 只签 URL、**永不经手字节**：客户端拿预签名 PUT 直传到对象存储（S3/R2/MinIO 等），把对象 URL 发进聊天，接收方直连存储 GET。hearth 磁盘与 DB 都不碰文件。
+- **权威在 DB**（架构铁律：业务状态权威在 store，内核只是现场执行器）：POST 成功才广播，广播里带 DB id，接收方按 id 去重；数据线断了也不丢消息，重连时 `after=` 补齐。
+- 发送方本地直接渲染 POST 返回的 Message（SDK 不回显自己的数据）。
+- 引擎 `onReconnected` → 触发一次 `after=` 补齐；进房首次 `GET` 取最近 50 条（与现状一致）。
+- 不做轮询。数据线不在（尚未连上/正在重连）时 POST 照常落库、跳过广播，UI 不阻塞发送。
 
-- **优点**：支持离线补收、大文件、成员错峰；hearth 侧几乎零负载。
-- **代价**：引入必须配置的外部存储（与"单文件开箱即用"冲突，只能做可选形态）；有存储成本与生命周期管理（靠 bucket lifecycle 过期）；多一套凭证与 CORS 配置。
-- **定位**：作为方案 A 之上的**可选增强**（配了对象存储就走 B，没配就走 A 或禁用文件），不是默认。
+### 文件/图片：字节走 Data Streams，hearth 只存卡片
 
-### 方案 C：WebRTC DataChannel 点对点（不推荐作为主路）
+```
+发送方  POST /api/channels/{channel}/messages {kind:"file", file:{name,mime,size}}
+        → hearth 校验（大小上限、禁言）+ 落库卡片 → 返回 Message{id, kind:"file", file:{...}}
+        → sendText(JSON(Message), {topic:"chat"})                  ← 卡片先到，接收方先显示"传输中"
+        → sendFile(File, {topic:"chat-file", name, mimeType, attributes:{message_id}})  ← 字节经 SFU 扇出
+接收方  registerByteStreamHandler("chat-file") → 读全部块 → Blob → 按 attributes.message_id 挂到卡片
+        图片：<img src=BlobURL> 内联预览；其它：文件卡片 + 下载（a[download]=BlobURL）
+```
 
-收发方之间开一条直连 DataChannel，字节纯 P2P、任何服务器都不过。
+- **hearth 不经手字节**：没有上传端点、没有内存 blob 存储、`/data` 无新增文件、DB 只有元数据。
+- **在线才有字节**：晚进房的人看到卡片但没有字节，显示"已过期（发送时不在线）"；这是设计边界，如实呈现，不假装可离线补收。
+- **大小上限**：配置键 `chat_file_max_mb`（Group `chat`，默认 25）；服务端在 POST 卡片时校验 `size`（超限 413），客户端选文件时先拦。扇出成本 = 大小 × 在线人数，落在数据线的 SFU 上（sandbox），文档写明。
+- 发送进度：`sendFile` 的 `onProgress` 驱动发送方卡片进度；接收方 handler 按块累计给进度。
+- 安全：下载一律用 `a[download]`（Blob URL），非图片不内联渲染；图片按 `mime` 白名单（png/jpeg/gif/webp）内联，其它一律当文件。
 
-- **为什么不推荐**：hearth 是 SFU、无 mesh，这会新开一条**独立的 P2P 通道**，直接撞上我们刚花一整晚排查的 NAT/UDP 被分流问题（`docs/plan-client-ice.md`）；且 1 对 N 要建 N 条通道、要额外信令与 TURN 兜底；同样要求双方在线。投入产出比最差。
-- 仅在"极大文件 + 点对点 + 能接受复杂度"时才值得,不在本计划范围。
+### 禁言 = 也禁数据
 
-## 推荐
+- `lktoken.Sign`：`CanPublishData: boolPtr(canPublish)`（与 `CanPublish` 同源，两条线的票都如此）。
+- `lkroom` 权限更新路径：翻 `CanPublish` 时同步翻 `CanPublishData`（`MuteUserAudio` 契约"禁言 = 禁全部媒体发布"自然延伸到数据）。
+- hearth `POST messages` 对禁言用户 403——两层各自独立成立。
+- 踢出/封禁：现有 kick 已把人移出 LiveKit 房间，数据通道随之断；`CloseUserChannel` 与 hub 一起删除。
 
-**默认走方案 A**（内存中转、即传即弃），把方案 B 作为"配了对象存储就自动启用"的可选升级，方案 C 明确不做。理由：A 唯一满足"零磁盘 + 零依赖 + 不碰媒体/NAT + 只传输不管理"，正好命中约束；它的短板（要求同时在线、大小受限）对"群里发张截图/小文件"这个主场景可以接受，而离线/大文件用 B 兜。
+### 消息模型
 
-## 待定（需用户决定）
+`store.Message` 加两列（迁移文件 `server/internal/store/00004_chat_kind.go`，不改 baseline）：
+- `kind TEXT NOT NULL DEFAULT 'text'`（`text` | `file`）
+- `meta TEXT`（`kind=file` 时为 JSON `{name,mime,size}`；text 为空）
 
-1. **主方案**：只做 A？还是 A + 预留 B 的可选形态？（C 默认排除）
-2. **file 类型消息是否落库**：落库=文件"卡片"（名字/大小/过期状态）留在历史里，字节仍不落库，过期后显示"已过期"；不落库=刷新/重进就看不到该文件消息。倾向落元数据卡片、不落字节。
-3. **大小与内存上限**：单图上限、单文件上限、全局在途上限、TTL 的具体默认值（初稿：图 10MB / 文件 25MB / 全局 64MB / TTL 10 分钟，全部做成配置键）。
-4. **类型限制**：是否限制可发 MIME（安全上：下载一律带 `Content-Disposition: attachment` + `X-Content-Type-Options: nosniff`，不在浏览器里直接渲染非图片，图片预览用 `<img>` 指向下载端点）。
+JSON 形状（前后端契约）：
 
-## 改动清单（按方案 A）
+```json
+{"id":123,"channel_id":1,"uid":7,"username":"a","kind":"text","content":"hi","created_at":"..."}
+{"id":124,"channel_id":1,"uid":7,"username":"a","kind":"file","content":"","file":{"name":"x.png","mime":"image/png","size":12345},"created_at":"..."}
+```
+
+### 前端引擎抽象
+
+`AVEngine` 加：
+
+```ts
+sendText(topic: string, text: string): Promise<void>;
+sendFile(file: File, topic: string, attrs: Record<string,string>, onProgress?: (p: number) => void): Promise<void>;
+// 回调
+onText?(topic: string, text: string, fromIdentity: string): void;
+onFile?(topic: string, info: { name: string; mime: string; size: number; attrs: Record<string,string> }, bytes: Uint8Array, fromIdentity: string): void;
+```
+
+`livekit.ts` 用 `localParticipant.sendText/sendFile` 与 `room.registerTextStreamHandler/registerByteStreamHandler` 实现；handler 在 `connect` 前注册（SDK 要求）。注册表只剩 `livekit` 一个实现，其它实现按接口补即可。
+
+## 改动清单
 
 | 位置 | 改动 |
 | --- | --- |
-| `server/internal/chat/blobstore.go`（新） | 有界内存 blob 存储：`Put(streaming, limits) → id`、`Get(id) → reader`、TTL/总量/驱逐；纯内存、并发安全 |
-| `server/internal/api/chat_blob.go`（新） | `POST /api/chat/blob`、`GET /api/chat/blob/{id}`；Bearer + `admitUser` 频道成员判定；流式读写、大小上限、安全响应头 |
-| `server/internal/chat/hub.go` | `clientMsg`/`serverMsg` 支持 `kind=file` 与文件元数据；广播路径复用 |
-| `server/internal/store`（可选） | 若 file 消息落元数据卡片：`Message` 加 `Kind` 与元数据列（迁移文件），或复用 `Content` 存 JSON + 一个 `kind` 列 |
-| `server/internal/api/dyncfg.go` | 配置键：单文件/图片上限、全局在途上限、TTL（Group `chat` 或 `network`） |
-| `web/src/chat.ts` | 发送：先 `POST blob` 拿 id、再经 WS 发 file 消息；接收：`kind=file` 渲染 |
-| `web/src/views/room.tsx`、`style.css` | 聊天输入区加"发图片/文件"入口（选择/粘贴/拖拽）；消息列表渲染图片预览与文件卡片、过期占位 |
+| `server/internal/store/00004_chat_kind.go`（新）、`models.go`、`store.go` | `kind`/`meta` 列；`AddMessage` 扩展为可带 kind+meta；`RecentMessages` 加 `after` 游标变体 |
+| `server/internal/api/chat_messages.go`（新） | `GET /api/channels/{channel}/messages?after=&limit=`、`POST /api/channels/{channel}/messages`；鉴权 + `admitUser`（禁言 403）+ 大小上限（413）+ 文本长度（≤2000）；响应即 Message JSON |
+| `server/internal/api/dyncfg.go` | `chat_file_max_mb`（Group `chat`，Default `25`） |
+| `server/internal/lktoken/lktoken.go`、`server/internal/lkroom/lkroom.go` | `CanPublishData` 跟随 `canPublish` |
+| `server/internal/chat/hub.go`、`server/cmd/server/main.go`、`server/internal/api/api.go` | **删除** hub、`/api/chat` 路由、`hub` 字段与 `CloseUserChannel` 调用 |
+| `web/src/engine/types.ts`、`web/src/engine/livekit.ts` | 数据通道方法与回调 |
+| `web/src/chat.ts` | 重写：`fetchHistory(channel, after?)`、`postMessage(channel, body)`；去掉 WS |
+| `web/src/views/room.tsx`、`style.css` | 用数据线收发；进房/重连补齐；发送框加图片/文件入口（选择、粘贴、拖拽）；图片预览、文件卡片、进度、"已过期"占位 |
 
 ## 验收标准
 
-1. `cd server && go build ./... && go vet ./... && go test ./internal/...`；`cd web && npx tsc --noEmit && npm run build` 通过。
-2. 发一张图 → 频道内其他在线成员看到内联预览、点开是原图；发一个文件 → 得到下载。
-3. 全程 hearth 的 `/data` 无新增文件、`chat_messages` 无字节（只有元数据）；`du` 对照上传前后无增长。
-4. 超单文件上限 → 413；超全局在途上限 → 429/507，且不 OOM（压测并发上传）；TTL 到 → 下载得到"已过期"。
-5. 非成员/无 token 访问上传或下载端点 → 403/401；下载响应带 `Content-Disposition: attachment` 与 `nosniff`。
-6. 文件传输失败不影响文本聊天与语音/舞台。
+1. `cd server && go build ./... && go vet ./... && go test ./internal/...`；`cd web && npx tsc --noEmit && npm run build`。
+2. 服务端测试：POST 文本落库并返回 id；禁言用户 POST 403；`kind=file` 超 `chat_file_max_mb` 413；`GET after=` 只返回更新的消息；迁移后旧消息 `kind=text`。`lktoken` 测试：gagged → `CanPublishData=false`。
+3. 真机（两台设备同频道）：A 发文本 B 即时收到且刷新后仍在历史里；A 发图 B 内联预览、发文件 B 可下载；B 中途刷新重进，看到卡片显示"已过期"；禁言 A 后 A 发不出（POST 403 且 SDK 发数据被拒）。
+4. 全程 hearth `/data` 无新增文件；`chat_messages` 只有元数据；bj 出站流量不随文件大小增长（字节走 sandbox）。
+5. `server/internal/chat` 目录与 `/api/chat` 路由不复存在；`grep -rn "connectChat\|/api/chat\b" web/src server` 为空。
 
 ## 不做 / 风险
 
-- 不做方案 C（P2P DataChannel）；不把文件字节写入磁盘或数据库；不默认引入对象存储。
-- 内存中转的固有边界（要求同时在线、大小受限）如实告知用户，不假装能离线补收；靠总量硬上限与背压防 OOM。
+- 不做离线补收文件、不做服务端存字节、不做 P2P DataChannel、不做轮询。
+- 文件扇出成本落在 sandbox 的上行（大小 × 人数），上限键兜底；文档写明。
+- 数据线 = stage 线意味着 `stage_provider=none` 的纯语音部署回落到 voice 线，行为一致只是走 bj。
 - 隐私铁律：文档、注释、提交信息不出现任何个人部署信息。
