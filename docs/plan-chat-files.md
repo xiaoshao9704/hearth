@@ -5,14 +5,14 @@
 ## 决定（用户拍板）
 
 1. 聊天改走 **LiveKit 数据通道**，拆掉 hearth 自己的聊天 WebSocket hub——不再自己维护长连接、重连、心跳。
-2. 文件/图片**字节走 LiveKit 数据通道**（Data Streams），经 SFU 扇出，**优先走 sandbox 那条线**；hearth 既不落盘也不占内存。
+2. 文件/图片**字节走 LiveKit 数据通道**（Data Streams），经 SFU 扇出，**默认优先走舞台实例那条线**（可配）；hearth 既不落盘也不占内存。
 3. 聊天**历史必须保住**（现有的最近 50 条回放与翻历史是功能，不能回退）：文本与文件"卡片"仍由 hearth 落库，字节不落。
 
 ## 现状（已核实）
 
 - 聊天：`web/src/chat.ts` ↔ `server/internal/chat/hub.go` 的 `/api/chat` WS（`main.go:160` 注册，`api.go:35` 持有 `hub`，`api.go:672` 踢人时 `CloseUserChannel`）。消息 `store.Message{ID, ChannelID, UID, Username, Content, CreatedAt}`，`Content` text ≤2000；`AddMessage`/`RecentMessages(limit 50)`。
 - 进房票：`server/internal/lktoken/lktoken.go:28` 的 `VideoGrant{CanPublish: !gagged, CanPublishData: true(写死)}`；`admission.go:37` 产出 `CanPublish: !gagged`。`server/internal/lkroom/lkroom.go:156` 的权限更新路径设 `CanPublishData: true`。
-- 前端两条线：`room.tsx:181` `stageEngine() = combined ? voiceLine.engine : stageLine?.engine`；`lineFor(role)`。每个成员在拆分形态下同时连 voice（bj lkembed）与 stage（sandbox）两个 LiveKit 房间（诊断日志已证实 role=voice/stage 两个 PC）。
+- 前端两条线：`room.tsx:181` `stageEngine() = combined ? voiceLine.engine : stageLine?.engine`；`lineFor(role)`。每个成员在拆分形态下同时连 voice（本机 lkembed）与 stage（远端舞台实例）两个 LiveKit 房间（诊断日志已证实 role=voice/stage 两个 PC）。
 - `AVEngine`（`web/src/engine/types.ts`）没有数据通道方法；`livekit-client 2.22.1` 具备 `sendText/sendFile/streamBytes` 与 `registerTextStreamHandler/registerByteStreamHandler`（`topic`、`destinationIdentities`）。fork 服务端 v1.13.6 ≥ Data Streams 所需版本。
 
 ## 设计
@@ -56,7 +56,7 @@
 
 - **hearth 不经手字节**：没有上传端点、没有内存 blob 存储、`/data` 无新增文件、DB 只有元数据。
 - **在线才有字节**：晚进房的人看到卡片但没有字节，显示"已过期（发送时不在线）"；这是设计边界，如实呈现，不假装可离线补收。
-- **大小上限**：配置键 `chat_file_max_mb`（Group `chat`，默认 25）；服务端在 POST 卡片时校验 `size`（超限 413），客户端选文件时先拦。扇出成本 = 大小 × 在线人数，落在数据线的 SFU 上（sandbox），文档写明。
+- **大小上限**：配置键 `chat_file_max_mb`（Group `chat`，默认 25）；服务端在 POST 卡片时校验 `size`（超限 413），客户端选文件时先拦。扇出成本 = 大小 × 在线人数，落在数据线的 SFU 所在机器上，文档写明。
 - 发送进度：`sendFile` 的 `onProgress` 驱动发送方卡片进度；接收方 handler 按块累计给进度。
 - 安全：下载一律用 `a[download]`（Blob URL），非图片不内联渲染；图片按 `mime` 白名单（png/jpeg/gif/webp）内联，其它一律当文件。
 
@@ -113,13 +113,13 @@ onFile?(topic: string, info: { name: string; mime: string; size: number; attrs: 
 1. `cd server && go build ./... && go vet ./... && go test ./internal/...`；`cd web && npx tsc --noEmit && npm run build`。
 2. 服务端测试：POST 文本落库并返回 id；禁言用户 POST 403；`kind=file` 超 `chat_file_max_mb` 413；`GET after=` 只返回更新的消息；迁移后旧消息 `kind=text`。`lktoken` 测试：gagged → `CanPublishData=false`。
 3. 真机（两台设备同频道）：A 发文本 B 即时收到且刷新后仍在历史里；A 发图 B 内联预览、发文件 B 可下载；B 中途刷新重进，看到卡片显示"已过期"；禁言 A 后 A 发不出（POST 403 且 SDK 发数据被拒）。
-4. 全程 hearth `/data` 无新增文件；`chat_messages` 只有元数据；bj 出站流量不随文件大小增长（字节走 sandbox）。
+4. 全程 hearth `/data` 无新增文件；`chat_messages` 只有元数据；hearth 所在机器的出站流量不随文件大小增长（字节走数据线的 SFU）。
 5. `server/internal/chat` 目录与 `/api/chat` 路由不复存在；`grep -rn "connectChat\|/api/chat\b" web/src server` 为空。
 
 ## 不做 / 风险
 
 - 不做离线补收文件、不做服务端存字节、不做 P2P DataChannel、不做轮询。
-- 文件扇出成本落在 sandbox 的上行（大小 × 人数），上限键兜底；文档写明。
+- 文件扇出成本落在数据线 SFU 所在机器的上行（大小 × 人数），上限键兜底；文档写明。
 - `auto` 下 `stage_provider=none` 的纯语音部署回落到 voice 线，行为一致只是走自带内核所在机器。
 - 官方 LiveKit < 1.8 作为舞台实例时 Data Streams 不可用：前端回落到语音线；若两条线都不支持，文件功能不可用但文本聊天照常（HTTP 落库 + 补齐）。
 - 隐私铁律：文档、注释、提交信息不出现任何个人部署信息。
