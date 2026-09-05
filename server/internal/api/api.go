@@ -49,6 +49,10 @@ type API struct {
 	counts   map[string]int
 	countsAt time.Time
 
+	// 前端诊断只用于连接故障排查；按登录用户限频，避免浏览器异常循环刷满日志。
+	clientLogMu    sync.Mutex
+	clientLogRates map[int64]clientLogRate
+
 	// announcer 进程内唯一的宣告探测器（STUN/显式公网 IP + 端口映射 → 宣告候选）：
 	// lkembed 的 ExternalIPs 回调从它的快照取外部地址（见 lkembed.go）
 	announcer *lite.Announcer
@@ -113,6 +117,7 @@ func (a *API) Router() *chi.Mux {
 		r.Use(a.auth)
 		r.Post("/api/logout", a.logout)
 		r.Get("/api/me", a.me)
+		r.Post("/api/client-log", a.clientLog)
 		r.Get("/api/channels", a.listChannels)
 		r.With(a.requireRole(store.RolePower)).Post("/api/channels", a.createChannel)
 		r.Post("/api/token", a.joinToken)

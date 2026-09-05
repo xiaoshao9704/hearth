@@ -28,6 +28,8 @@ export class LiveKitEngine implements AVEngine {
   private rnnoiseBroken = false;
   private disposed = false;
   private resume = () => void this.rnnoise.resume();
+  private iceProbeTimer: number | undefined;
+  private iceProbeSeen = new Set<string>();
 
   constructor(cbs: EngineCallbacks) {
     this.cbs = cbs;
@@ -123,6 +125,8 @@ export class LiveKitEngine implements AVEngine {
       .on(RoomEvent.AudioPlaybackStatusChanged, () => {
         if (!this.room.canPlaybackAudio) this.cbs.onAudioBlocked?.();
       })
+      .on(RoomEvent.ConnectionStateChanged, (state) => this.cbs.onDiagnostic?.('connection_state', String(state)))
+      .on(RoomEvent.SignalConnected, () => this.cbs.onDiagnostic?.('signal_connected', 'connected'))
       .on(RoomEvent.Reconnecting, () => this.cbs.onReconnecting())
       .on(RoomEvent.Reconnected, () => this.cbs.onReconnected())
       .on(RoomEvent.Disconnected, (reason) => {
@@ -139,7 +143,99 @@ export class LiveKitEngine implements AVEngine {
   // 这里不能再套同期限的 Promise.race：外层先超时会绕过 SDK 的清理，下一次完整入场
   // 可能与尚未退出的 participant 重叠，被服务端判成 duplicate identity。
   async connect(url: string, token: string) {
-    await this.room.connect(url, token);
+    this.startIceProbe();
+    try {
+      // 诊断期间显式覆盖客户端 STUN，避免继续使用服务端下发的默认列表。
+      await this.room.connect(url, token, {
+        rtcConfig: { iceServers: [{ urls: 'stun:stun.miwifi.com:3478' }] },
+      });
+      await this.reportIceStats();
+    } catch (err) {
+      // connect 失败时 SDK 会立即清理 PeerConnection；轮询负责在清理前留下候选，
+      // 这里再尽力抓一次最终状态。
+      await this.reportIceStats();
+      throw err;
+    } finally {
+      this.stopIceProbe();
+    }
+  }
+
+  private startIceProbe() {
+    this.stopIceProbe();
+    this.iceProbeSeen.clear();
+    // RTCEngine/PCTransport 要等信令 JoinResponse 后才创建，连接期间轮询才能在
+    // SDK 超时关闭 PeerConnection 之前留下失败候选。
+    this.iceProbeTimer = window.setInterval(() => void this.reportIceStats(), 400);
+  }
+
+  private stopIceProbe() {
+    if (this.iceProbeTimer !== undefined) window.clearInterval(this.iceProbeTimer);
+    this.iceProbeTimer = undefined;
+  }
+
+  private emitIceOnce(event: string, state: string) {
+    const key = `${event}\0${state}`;
+    if (this.iceProbeSeen.has(key)) return;
+    this.iceProbeSeen.add(key);
+    this.cbs.onDiagnostic?.(event, state);
+  }
+
+  private async reportIceStats() {
+    type StatsTransport = { getStats?: () => Promise<RTCStatsReport> | undefined };
+    const manager = (this.room as unknown as {
+      engine?: { pcManager?: { publisher?: StatsTransport; subscriber?: StatsTransport } };
+    }).engine?.pcManager;
+    if (!manager) return;
+    await Promise.all([
+      this.reportTransportStats('pub', manager.publisher),
+      this.reportTransportStats('sub', manager.subscriber),
+    ]);
+  }
+
+  private async reportTransportStats(target: 'pub' | 'sub', transport?: { getStats?: () => Promise<RTCStatsReport> | undefined }) {
+    const pending = transport?.getStats?.();
+    if (!pending) return;
+    try {
+      const report = await pending;
+      const byID = new Map<string, Record<string, unknown>>();
+      const pairs: Record<string, unknown>[] = [];
+      let selectedPairID = '';
+      report.forEach((raw) => {
+        const stat = raw as unknown as Record<string, unknown>;
+        const id = String(stat.id ?? '');
+        if (id) byID.set(id, stat);
+        if (stat.type === 'transport') selectedPairID = String(stat.selectedCandidatePairId ?? '');
+        if (stat.type === 'candidate-pair') pairs.push(stat);
+      });
+      const endpoint = (stat: Record<string, unknown> | undefined) => {
+        if (!stat) return 'unknown';
+        // Safari/WebKit 的 RTCStats 仍可能只提供旧字段 ip；Chromium/Firefox 用 address。
+        const address = String(stat.address ?? stat.ip ?? 'unknown');
+        const host = address.includes(':') ? `[${address}]` : address;
+        return `${String(stat.protocol ?? '?')}/${String(stat.candidateType ?? '?')} ${host}:${String(stat.port ?? '?')}`;
+      };
+      for (const stat of byID.values()) {
+        if (stat.type === 'local-candidate') this.emitIceOnce('ice_local_candidate', `${target} ${endpoint(stat)}`);
+        if (stat.type === 'remote-candidate') this.emitIceOnce('ice_remote_candidate', `${target} ${endpoint(stat)}`);
+      }
+      for (const pair of pairs) {
+        const state = String(pair.state ?? 'unknown');
+        const nominated = pair.nominated === true ? ' nominated' : '';
+        const local = byID.get(String(pair.localCandidateId ?? ''));
+        const remote = byID.get(String(pair.remoteCandidateId ?? ''));
+        this.emitIceOnce('ice_pair', `${target} ${state}${nominated} ${endpoint(local)} -> ${endpoint(remote)}`);
+      }
+      const selected =
+        (selectedPairID ? byID.get(selectedPairID) : undefined) ??
+        pairs.find((pair) => pair.selected === true) ??
+        pairs.find((pair) => pair.nominated === true && pair.state === 'succeeded');
+      if (selected) {
+        const remote = byID.get(String(selected.remoteCandidateId ?? ''));
+        this.emitIceOnce('selected_server', `${target} ${endpoint(remote)}`);
+      }
+    } catch (err) {
+      this.emitIceOnce('ice_stats_error', `${target} ${err instanceof Error ? err.name : 'unknown'}`);
+    }
   }
 
   async resumeAudio() {
@@ -368,6 +464,7 @@ export class LiveKitEngine implements AVEngine {
 
   dispose() {
     this.disposed = true;
+    this.stopIceProbe();
     document.removeEventListener('pointerdown', this.resume, false);
     void this.rnnoise.stop();
     void this.room.disconnect();

@@ -7,7 +7,7 @@
 // - 视图层（Solid）：信号驱动，引擎回调只写信号，DOM 由 JSX 派生，消灭手工 refresh* 互相调用。
 import { createEffect, createMemo, createSignal, on, untrack, For, Show } from 'solid-js';
 import { render } from 'solid-js/web';
-import { ApiError, fetchJoinCredentials, getUser, kickUser, listChannels, muteUser } from '../api';
+import { ApiError, fetchJoinCredentials, getUser, kickUser, listChannels, muteUser, reportClientLog } from '../api';
 import type { EngineCred } from '../api';
 import { playCue } from '../audio';
 import { connectChat } from '../chat';
@@ -96,6 +96,24 @@ export async function renderRoom(root: HTMLElement, channel: string) {
   const prefs = loadPrefs();
   const canScreenShare = typeof navigator.mediaDevices?.getDisplayMedia === 'function';
 
+  const diagBytes = new Uint8Array(8);
+  if (globalThis.crypto?.getRandomValues) globalThis.crypto.getRandomValues(diagBytes);
+  else for (let i = 0; i < diagBytes.length; i++) diagBytes[i] = Math.floor(Math.random() * 256);
+  const diagSession = Array.from(diagBytes, (b) => b.toString(16).padStart(2, '0')).join('');
+  const diag = (
+    level: 'info' | 'warn' | 'error',
+    event: string,
+    role?: Role,
+    fields: Omit<Parameters<typeof reportClientLog>[0], 'level' | 'event' | 'session' | 'channel' | 'role'> = {},
+  ) => reportClientLog({ level, event, session: diagSession, channel, role, ...fields });
+  const endpointOf = (raw: string): string => {
+    try {
+      return new URL(raw, location.href).host;
+    } catch {
+      return '';
+    }
+  };
+
   const shell = renderShell(root, { activeChannel: channel });
   shell.setConn(false, '正在协商…');
 
@@ -110,6 +128,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
   let bounced = false;
   let seq = 0; // 卡片到达顺序计数
   const audioEls = new Map<string, Set<SinkMedia>>();
+  diag('info', 'room_open', undefined, { state: document.visibilityState });
 
   // iOS Safari 的 volume 只读（设置被静默忽略）：探测后切到 Web Audio 增益链，
   // 每 identity 一个 GainNode，元素本体 muted；可写平台维持 elm.volume 直控
@@ -717,12 +736,19 @@ export async function renderRoom(root: HTMLElement, channel: string) {
   async function connectLines(first: boolean, only?: Role) {
     if (leaving || bounced) return;
     let creds;
+    const started = performance.now();
+    diag('info', 'credentials_start', only, { attempt: lineFor(only ?? 'voice')?.attempts ?? 0 });
     try {
       creds = await fetchJoinCredentials(channel);
     } catch (err) {
+      diag('error', 'credentials_failed', only, { elapsed_ms: performance.now() - started, error: err });
       handleCredsError(err, first);
       return;
     }
+    diag('info', 'credentials_ok', only, {
+      elapsed_ms: performance.now() - started,
+      state: creds.combined ? 'combined' : creds.stage ? 'split' : 'voice-only',
+    });
     if (leaving || bounced) return;
     combined = creds.combined;
     if (!only || only === 'voice') {
@@ -770,6 +796,10 @@ export async function renderRoom(root: HTMLElement, channel: string) {
     if (line.inflight || line.engine?.connected()) return;
     line.inflight = true;
     if (!first) line.attempts++;
+    const attempt = line.attempts;
+    const started = performance.now();
+    const details = { engine: cred.engine, endpoint: endpointOf(cred.url), attempt };
+    diag('info', 'connect_start', role, details);
     try {
       if (!line.engine || cred.engine !== line.engineName) {
         line.engine?.dispose();
@@ -789,6 +819,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
         return;
       }
       line.attempts = 0;
+      diag('info', 'connect_ok', role, { ...details, elapsed_ms: performance.now() - started });
       if (role === 'voice') {
         setStatusText('');
         cueBaseline = true; // 重连成功后的第一份名册只重置基线，不当成一屋子人刚进来
@@ -821,6 +852,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
       refreshRoster();
       refreshMeta();
     } catch (err) {
+      diag('error', 'connect_failed', role, { ...details, elapsed_ms: performance.now() - started, error: err });
       if (role === 'voice') {
         handleCredsError(err, first);
       } else {
@@ -853,6 +885,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
     });
   };
   const onVisible = () => {
+    diag('info', 'visibility_changed', undefined, { state: document.visibilityState });
     if (document.visibilityState !== 'visible') return;
     retryNow();
     // 回到前台且聊天面板开着：未读视为已看
@@ -861,7 +894,19 @@ export async function renderRoom(root: HTMLElement, channel: string) {
   document.addEventListener('visibilitychange', onVisible);
   document.addEventListener('fullscreenchange', onFsChange);
   document.addEventListener('keydown', onFsKey);
-  window.addEventListener('online', retryNow);
+  const onOnline = () => {
+    diag('info', 'browser_online');
+    retryNow();
+  };
+  const onOffline = () => diag('warn', 'browser_offline');
+  const onPageHide = () => diag('info', 'page_hide', undefined, { state: document.visibilityState });
+  const onWindowError = (ev: ErrorEvent) => diag('error', 'window_error', undefined, { error: ev.error ?? ev.message });
+  const onUnhandledRejection = (ev: PromiseRejectionEvent) => diag('error', 'unhandled_rejection', undefined, { error: ev.reason });
+  window.addEventListener('online', onOnline);
+  window.addEventListener('offline', onOffline);
+  window.addEventListener('pagehide', onPageHide);
+  window.addEventListener('error', onWindowError);
+  window.addEventListener('unhandledrejection', onUnhandledRejection);
 
   // ---- 引擎回调（按线）：只写信号 / 增删条目，不碰 DOM ----
   function makeCallbacks(role: Role): EngineCallbacks {
@@ -903,12 +948,14 @@ export async function renderRoom(root: HTMLElement, channel: string) {
         refreshRoster();
       },
       onReconnecting: () => {
+        diag('warn', 'sdk_reconnecting', role);
         if (role === 'voice' || combined) {
           setStatusText('连接不稳定，正在恢复…');
           setVoiceState((s) => ({ phase: 'retry', attempt: s.attempt }));
         }
       },
       onReconnected: () => {
+        diag('info', 'sdk_reconnected', role);
         if (role === 'voice' || combined) {
           setStatusText('');
           cueBaseline = true; // 引擎自愈也会重发整份名册
@@ -918,7 +965,9 @@ export async function renderRoom(root: HTMLElement, channel: string) {
         refreshMeta();
       },
       onAudioBlocked: () => setAudioBlocked(true),
+      onDiagnostic: (event, state) => diag('info', `sdk_${event}`, role, { state }),
       onEnded: (reason) => {
+        diag(reason === 'lost' ? 'warn' : 'info', 'sdk_ended', role, { reason });
         if (leaving) return;
         if (reason === 'kicked') return bounce('你已被移出该频道');
         if (reason === 'room-deleted') return bounce('频道已删除');
@@ -2085,9 +2134,14 @@ export async function renderRoom(root: HTMLElement, channel: string) {
       document.removeEventListener('keydown', onHotkeyDown);
       document.removeEventListener('keyup', onHotkeyUp);
       window.removeEventListener('blur', pttRelease);
-      window.removeEventListener('online', retryNow);
+      window.removeEventListener('online', onOnline);
+      window.removeEventListener('offline', onOffline);
+      window.removeEventListener('pagehide', onPageHide);
+      window.removeEventListener('error', onWindowError);
+      window.removeEventListener('unhandledrejection', onUnhandledRejection);
       // title 兜底还原：正常已由 route() 换成新页面标题，只在 title 仍属本房间时去掉未读前缀
       if (document.title.endsWith(roomTitle)) document.title = roomTitle;
+      diag('info', 'room_close');
       leaving = true;
       exitFs();
       clearTimeout(volSaveTimer);

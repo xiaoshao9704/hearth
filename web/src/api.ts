@@ -205,6 +205,90 @@ export function fetchJoinCredentials(channel: string): Promise<JoinCredentials> 
   });
 }
 
+// ---- 前端诊断 ----
+
+export interface ClientLogEntry {
+  level: 'info' | 'warn' | 'error';
+  event: string;
+  session: string;
+  channel?: string;
+  role?: 'voice' | 'stage';
+  engine?: string;
+  endpoint?: string;
+  attempt?: number;
+  elapsed_ms?: number;
+  state?: string;
+  reason?: string;
+  error?: unknown;
+}
+
+function redactDiagnosticText(value: string, max: number): string {
+  return value
+    .replace(/\bBearer\s+\S+/gi, 'Bearer <redacted>')
+    .replace(/\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}(?:\.[A-Za-z0-9_-]{10,})?\b/g, '<token>')
+    .replace(/\b((?:https?|wss?):\/\/[^\s?]+)\?[^\s]+/gi, '$1?<redacted>')
+    .replace(/((?:access[_-]?token|token|secret|signature|authorization|api[_-]?key|key)=)[^&\s]+/gi, '$1<redacted>')
+    .replace(/[\u0000-\u001f\u007f]+/g, ' ')
+    .trim()
+    .slice(0, max);
+}
+
+function diagnosticNetwork(): string {
+  const c = (navigator as Navigator & {
+    connection?: { type?: string; effectiveType?: string; saveData?: boolean; downlink?: number; rtt?: number };
+  }).connection;
+  if (!c) return '';
+  return [c.type, c.effectiveType, c.saveData ? 'save-data' : '', c.downlink == null ? '' : `${c.downlink}mbps`, c.rtt == null ? '' : `${c.rtt}ms`]
+    .filter(Boolean)
+    .join(',');
+}
+
+// 诊断上报必须完全旁路业务请求：失败静默、短超时，不触发 401 跳转或 toast。
+export function reportClientLog(entry: ClientLogEntry): void {
+  const token = getToken();
+  if (!token) return;
+  let errorName = '';
+  let errorMessage = '';
+  if (entry.error != null) {
+    if (entry.error instanceof Error || entry.error instanceof DOMException) {
+      errorName = entry.error.name;
+      errorMessage = entry.error.message || String(entry.error);
+    } else {
+      errorName = typeof entry.error;
+      errorMessage = String(entry.error);
+    }
+  }
+  const payload = {
+    level: entry.level,
+    event: entry.event,
+    session: redactDiagnosticText(entry.session, 40),
+    channel: redactDiagnosticText(entry.channel ?? '', 120),
+    role: entry.role,
+    engine: redactDiagnosticText(entry.engine ?? '', 40),
+    endpoint: redactDiagnosticText(entry.endpoint ?? '', 200),
+    attempt: entry.attempt ?? 0,
+    elapsed_ms: Math.max(0, Math.round(entry.elapsed_ms ?? 0)),
+    online: navigator.onLine,
+    visibility: document.visibilityState,
+    network: diagnosticNetwork(),
+    state: redactDiagnosticText(entry.state ?? '', 80),
+    reason: redactDiagnosticText(entry.reason ?? '', 120),
+    error_name: redactDiagnosticText(errorName, 80),
+    error_message: redactDiagnosticText(errorMessage, 600),
+  };
+  const controller = new AbortController();
+  const timer = window.setTimeout(() => controller.abort(), 5000);
+  void fetch(`${SERVER_URL}/api/client-log`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+    signal: controller.signal,
+    keepalive: true,
+  })
+    .catch(() => {})
+    .finally(() => clearTimeout(timer));
+}
+
 // ---- WHIP 推流令牌（每用户一把，房间在 URL 里）----
 
 export interface IngestTokenInfo {
