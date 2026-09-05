@@ -1,6 +1,6 @@
 # 计划：浏览器 ICE 配置由服务端下发，连通性三层兜底
 
-状态：**设计定稿（2026-09-05），待实施。** 第一阶段（STUN 并列 + 服务端下发 + 补丁四 + 埋点收编）为本期范围；第二阶段（TURN over TLS 443）设计已定、实施待排。
+状态：**设计定稿（2026-09-05），待实施。** 第一阶段（STUN 并列 + hearth 信令反代改写下发 + 埋点收编，**不改 livekit**）为本期范围；第二阶段（TURN over TLS 443）设计已定、实施待排。
 本计划自包含，实施会话读完即可开工，不需要本会话的其他上下文。
 
 ## 背景与判据
@@ -28,6 +28,7 @@
 | 浏览器对多个 STUN 并行探测、先返回者先成候选；STUN 超时不阻塞 trickle ICE | WebRTC 标准行为；本次对照实验（零 STUN 亦可建连）反证 |
 | 前端诊断链路：`engine.onDiagnostic` → `room.tsx` `diag()` → `api.reportClientLog` → `POST /api/client-log` → 服务端 `log.Printf("前端诊断: ...")`；服务端已有鉴权、120 条/分钟/用户限流、8 KB body 上限、token/URL 脱敏与两个测试 | `server/internal/api/clientlog.go`、`clientlog_test.go`、`web/src/api.ts:247` |
 | 引擎侧 ICE 采集现为 **400 ms 轮询 `getStats`**，每个 local/remote candidate、每个 candidate-pair 各上报一条（`iceProbeSeen` 去重）；`state` 字段服务端截断 80 字符 | `web/src/engine/livekit.ts` `startIceProbe/reportTransportStats`；`clientlog.go` `redactClientLogText(in.State, 80)` |
+| 信令反代是 `httputil.ReverseProxy`（`proxy.go` `newReverseProxy`），WebSocket 走 hijack + 双向 `io.Copy`，无法看见帧；改写首帧必须换手写桥 | `server/internal/api/proxy.go:163-171` |
 | iOS/WebKit 的 RTCStats 隐藏候选地址字段（日志里全是 `unknown`），桌面 Chrome 完整 | 本次真机日志对比 |
 | 截至 2026-09-05，前端 ~98 行诊断代码与 `clientlog.go`/`clientlog_test.go` **均未提交** | `git status` |
 
@@ -37,43 +38,31 @@
 
 **语义**
 
-- 新增管理后台键 `lkembed_client_stun_servers`（Group `stage`，Env `LKEMBED_CLIENT_STUN_SERVERS`）：逗号分隔，**发给浏览器**的 STUN 列表。与既有 `lkembed_stun_servers`（服务端自己探测公网映射用）严格分开——两者语义不同，不得复用一个键。
+- 新增**全局**管理后台键 `client_stun_servers`（Group `network`，Env `CLIENT_STUN_SERVERS`）：逗号分隔，**发给浏览器**的 STUN 列表，对所有实例生效。与既有实例参数 `lkembed_stun_servers`（服务端自己探测公网映射用）严格分开——两者语义不同，不得复用一个键。
 - 默认值 `stun.miwifi.com:3478,stun.l.google.com:19302`：国内/海外各有一个能命中的；浏览器并行探测、谁先回用谁。
 - 显式 `none` = 不下发任何 STUN（对照实验/纯内网部署用）。沿用仓库里选择器 `none` 的惯例。
-- 留空 = 默认值。改动重启生效（与 `lkembed_log_level` 同款 Hint）。
-- `cmd/stage` 对应 `STAGE_CLIENT_STUN_SERVERS`，默认同一常量。
+- 留空 = 默认值。保存即生效（反代逐连接读配置）。
+- `cmd/stage` 不需要对应 env：远端实例的信令同样经 hearth 反代，改写在 hearth 侧统一发生。
 
-**补丁四（fork `v1.13.6-hearth.4`）：显式客户端 STUN 列表，不回落默认**
+**下发机制：hearth 在信令反代层改写，不改 livekit**
 
-编号说明：fork 的 `hearth` 分支上此前已有一个未收进补丁目录的提交（darwin 无 cgo 构建退化 + protocol replace），本期一并补成 0003 让 `server/livekit-patches/` 重新成为权威副本；`v1.13.6-hearth.3` 这个 tag 名已被一个废弃实验（补丁二 host 候选翻成 external-only）占用，不采用、不删除，新补丁顺延为 0004 / `hearth.4`。
+为什么不打补丁：fork 每多一个补丁，跟上游就多一处冲突面；而且补丁只对 fork 实例（`lkembed` / `cmd/stage`）生效，注册制里若接入官方 LiveKit 实例，它照样给浏览器下发 google/twilio 默认 STUN。反代改写对**所有**实例类型一视同仁——浏览器信令一律经 `/providers/{alias}/rtc/*` 进来（架构铁律），改写点只有一个。（fork 上曾为此打过 `v1.13.6-hearth.4`，与废弃的 `hearth.3` 同样处理：留着、不 pin、不删；`go.mod` 维持 `hearth.2`。）
 
-`pkg/config/config.go` 的 `RTCConfig` 加非 YAML 字段（与补丁二的 `ExternalIPs` 同款风格）：
+改写点：`server/internal/api/proxy.go` 现在整段用 `httputil.ReverseProxy`，对 WebSocket Upgrade 是 hijack 后双向 `io.Copy`，看不见帧。改法：
 
-```go
-// hearth patch 4: explicit STUN list to advertise to clients. nil keeps upstream behaviour
-// (fall back to DefaultStunServers when nothing else is configured); non-nil is authoritative,
-// and an empty slice means "advertise no STUN at all". Not a YAML field.
-ClientSTUNServers *[]string `yaml:"-"`
-```
+- `/rtc` 子路径上，**只对带 `Upgrade: websocket` 的请求**改走手写 WS 桥（`nhooyr.io/websocket` 已是依赖）：Accept 客户端 → Dial 上游（`SignalProxyUpstream` 给的 URL，query 原样带过去）→ 两个方向逐帧转发。`/rtc/validate` 等普通 HTTP 仍走现有 ReverseProxy。
+- 上游 → 客户端方向：每帧尝试 `proto.Unmarshal` 成 `livekit.SignalResponse`（`github.com/livekit/protocol/livekit`，hearth 已依赖）。命中 `Join`（`JoinResponse.IceServers`）或 `Reconnect`（`ReconnectResponse.IceServers`）时改写后 `proto.Marshal` 再发；其余帧原样透传（不解析失败即透传，绝不因解析问题断连）。客户端 → 上游方向不解析、原样转发。
+- 改写规则（纯函数，单测覆盖）：从上游给的 `[]*livekit.ICEServer` 里**剔除**所有只含 `stun:` URL 的项，**保留**含 `turn:`/`turns:` 的项（第三阶段 TURN 凭证由 LiveKit 按参与者签，不经我们的手），再把 hearth 配置的 STUN 列表作为一项追加到末尾；配置为 `none` 时只剔除不追加。
+- 信令首帧是 `Join`，之后 `Reconnect` 只在完整重连时出现，改写只发生在这两种帧上，逐帧 `Unmarshal` 的开销可忽略。
+- 帧类型：livekit-client 默认协议是 protobuf 二进制（binary 帧）；若遇到 text 帧（JSON 模式）原样透传不改写，日志记一次 warn 即可，不追求覆盖 JSON 模式。
+- `context.WithoutCancel`：桥的生命周期不能挂在 `r.Context()` 上（已知的坑：`websocket.Accept` hijack 后 `r.Context()` 被 net/http 取消）。
+- 出站写入：每个方向一个 goroutine 串行写自己那一端，天然满足 nhooyr 不允许并发写的约束。
 
-`pkg/service/roommanager.go` `iceServersForParticipant`，放在 `if len(rtcConf.STUNServers) > 0` 之前：
+**配置键（全局，不再挂在 `lkembed_*` 下）**
 
-```go
-if cs := rtcConf.ClientSTUNServers; cs != nil {
-	if len(*cs) > 0 {
-		iceServers = append(iceServers, iceServerForStunServers(*cs))
-	}
-	return iceServers // explicit: never fall back to DefaultStunServers
-}
-```
-
-TURN 分支在其之前已 `append`，不受影响——第二阶段的 TURN 与本字段正交。约 10 行。补丁文件 `server/livekit-patches/0004-hearth-patch-4-client-stun-servers-explicit.patch`（另有 `0003-*-telemetry-darwin-nocgo-protocol-fork.patch` 补齐既有提交），README 表格加两行，fork 打 `v1.13.6-hearth.4`，`server/go.mod` 的 `replace` 跟进。
-
-**hearth 侧接线**
-
-- `livekitembed.Options` 加 `ClientSTUNServers string`（原样逗号分隔；`none` → 显式空）；导出常量 `DefaultClientSTUNServers`。`Start` 里在 `conf.RTC.ExternalIPs = o.ExternalIPs` 同处挂 `conf.RTC.ClientSTUNServers`（必须在 `NewLocalNode`/`InitializeServer` 之前，理由同补丁二）。`buildYAML` 的 `stun_servers: []` 保持不动——服务端自己的探测仍由 `node_ip` 绕过。
-- `server/internal/api/lkembed.go` `EnsureStageKernel` 传 `a.dynVal(ctx, "lkembed_client_stun_servers")`；键声明加在 `livekitembed.go` 的 dyn 键表里、紧邻 `lkembed_stun_servers`，Hint 写清"发给浏览器的列表，与上一项探测用途不同；`none` = 不下发"。
-- `cmd/stage/main.go` 加 `STAGE_CLIENT_STUN_SERVERS`，头部 env 注释同步。
+- `client_stun_servers`（Group `network`，Env `CLIENT_STUN_SERVERS`，与 `portmap_mode` 同组）：逗号分隔，发给浏览器的 STUN 列表。默认 `stun.miwifi.com:3478,stun.l.google.com:19302`；`none` = 不下发任何 STUN；留空 = 默认。**保存即生效**（改写逐连接读配置，不需要重启——这是比补丁方案多出来的一点）。
+- 它是 hearth 面向浏览器的策略，对所有实例生效，所以不是实例参数；`lkembed_stun_servers`（服务端探测公网映射用）语义不同，保持不动。
+- `cmd/stage` **不需要任何改动**：浏览器连远端 stage 的信令同样经 hearth 反代。
 
 **前端**
 
@@ -116,13 +105,11 @@ TURN 分支在其之前已 `append`，不受影响——第二阶段的 TURN 与
 
 | 位置 | 改动 |
 | --- | --- |
-| fork `pkg/config/config.go`、`pkg/service/roommanager.go` | 补丁四（约 10 行）；打 `v1.13.6-hearth.4` |
-| `server/livekit-patches/0003-*.patch`、`0004-*.patch`、`README.md` | 补丁权威副本（0003 补齐既有提交，0004 新增）；表格加两行 |
-| `server/go.mod` | `replace ... v1.13.6-hearth.4` |
-| `server/internal/rtc/livekitembed/livekitembed.go` | `Options.ClientSTUNServers`、`DefaultClientSTUNServers`、`Start` 挂 `conf.RTC.ClientSTUNServers`、dyn 键 `lkembed_client_stun_servers`、`lkembed_tcp_port` Hint |
-| `server/internal/rtc/livekitembed/livekitembed_test.go` | `none`/空/列表三种取值挂到 `conf.RTC` 的断言 |
-| `server/internal/api/lkembed.go` | `EnsureStageKernel` 传新键 |
-| `server/cmd/stage/main.go` | `STAGE_CLIENT_STUN_SERVERS` + 头部注释 |
+| `server/internal/api/proxy.go`（或新文件 `signalbridge.go`） | `/rtc` 的 WebSocket Upgrade 改走手写桥；上游→客户端帧改写 `Join`/`Reconnect` 的 `IceServers`；改写规则为纯函数 |
+| `server/internal/api/dyncfg.go` | 全局键 `client_stun_servers`（Group `network`，Env `CLIENT_STUN_SERVERS`，默认常量） |
+| `server/internal/rtc/livekitembed/livekitembed.go` | 只改 `lkembed_tcp_port` 的 Hint |
+| `server/livekit-patches/0003-*.patch`、`README.md` | 补齐既有 darwin nocgo 提交的权威副本；README 备注 hearth.3/hearth.4 不在序列内 |
+| `server/internal/api/*_test.go` | 改写规则单测（剔 stun 留 turn / `none` 只剔 / 默认追加）；WS 桥集成测试：起进程内 LiveKit，经 hearth 反代握手，断言首帧 `Join.IceServers` |
 | `server/internal/api/clientlog.go`、`clientlog_test.go` | `Detail` 字段与上限；测试补 `Detail` 脱敏/截断；**提交** |
 | `web/src/engine/livekit.ts` | 删 `rtcConfig` 硬编码；ICE 采集改结果驱动；**提交** |
 | `web/src/api.ts`、`web/src/views/room.tsx` | `ClientLogEntry` 加 `detail`；**提交** |
@@ -132,17 +119,17 @@ TURN 分支在其之前已 `append`，不受影响——第二阶段的 TURN 与
 
 1. `cd server && go build ./... && go vet ./... && go test ./internal/api/... ./internal/rtc/...`；`cd web && npx tsc --noEmit && npm run build` 全过。
 2. 前端源码中不再出现任何 STUN 地址字面量（`grep -rn "stun:" web/src` 为空）。
-3. fork 单测：`ClientSTUNServers` 为 nil 时行为与上游一致（回落默认）；为空切片时 `iceServersForParticipant` 返回不含任何 `stun:` URL；为列表时按列表下发。
+3. 改写规则单测三种情形（默认列表追加且剔除上游 stun 项 / `none` 只剔除 / 上游含 turn 项时原样保留）；WS 桥集成测试：经 hearth 反代握手，首帧 `Join.IceServers` 不含 google/twilio、含配置项。
 4. 真机（桌面 Chrome，地址字段完整）三组对照，其余条件全部锁定：
    - 默认并列列表：`selected_server` 与建连耗时不劣于本次基线（家庭分流网络 tcp ≈ 561 ms，蜂窝 udp ≈ 322 ms）。
    - `none`：仍能建连（复现本次对照实验结论）。
    - 单填一个本地不可达的 STUN：仍能建连，耗时增幅可解释（STUN 超时不阻塞 trickle）。
 5. 一次成功进房的诊断日志 ≤ 4 行 SDK 事件（`connection_state`×2、`signal_connected`、`selected_server`）；人为制造失败（如临时把 `lkembed_tcp_port` 设 0 并在分流网络进房）时，日志里出现一条含完整 pair 快照的 `sdk_ice_failed`。
-6. `cmd/stage` 与 `lkembed` 两种形态各跑一遍第 4 条的默认组。
+6. `cmd/stage`（远端实例经 hearth 反代）与 `lkembed` 两种形态各跑一遍第 4 条的默认组，确认改写对两者同样生效。
 
 ## 风险与不做
 
-- fork 再发一版：按 `livekit-patches/README.md` 的"跟上游"流程，四个补丁，冲突概率低。
-- 改动重启生效：与现有 `lkembed_*` 键一致，不做热更新。
-- **不做**：TURN 的实施（第三层，单独排期）；改 `lkembed_stun_servers` 的语义；给客户端下发 TURN 以外的任何 relay；hearth 自管 TLS 形态下的 443 分流。
+- 反代层多一段 protobuf 解/改/编，与 `livekit/protocol` 的 `SignalResponse` 结构耦合；hearth 本来就依赖该包，升级 protocol 时这处随 `go build` 一起暴露。
+- 手写 WS 桥替代 ReverseProxy 的 Upgrade 处理：关闭码/关闭原因要双向透传，任一端断开另一端要跟着关，避免半开连接泄漏 goroutine。
+- **不做**：给 livekit fork 加任何新补丁；TURN 的实施（第三层，单独排期）；改 `lkembed_stun_servers` 的语义；JSON 信令模式的改写；hearth 自管 TLS 形态下的 443 分流。
 - 不把本次排障中出现的任何具体网络环境（路由器型号/分流软件/出口地址）写进代码注释与提交信息。
