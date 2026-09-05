@@ -18,6 +18,22 @@ import type { AVEngine, EPart, EngineCallbacks, TrackSource, VideoStats } from '
 const toSource = (s: Track.Source): TrackSource | null =>
   s === Track.Source.Camera ? 'camera' : s === Track.Source.ScreenShare ? 'screen' : null;
 
+// 一条 candidate-pair 的格式化快照（endpoint 已按 `protocol/candidateType addr:port` 拼好）
+interface IcePairSnapshot {
+  state: string;
+  nominated: boolean;
+  local: string;
+  remote: string;
+}
+
+// 一个 transport（pub/sub）的最新一次 getStats 快照：只保留结果，不逐条上报
+interface IceTransportSnapshot {
+  pairs: IcePairSnapshot[];
+  local: string[]; // 去重后的本地候选
+  remote: string[]; // 去重后的远端候选
+  selected: string | null; // 当前选中 pair 的远端 endpoint
+}
+
 export class LiveKitEngine implements AVEngine {
   // 凭证是短时效入场券，断线后必须回房间层重新签发并重做入场判定。禁用 SDK 内部
   // resume 也避免无 Redis 的 stage 重启后，客户端拿已消失的 participant 状态反复
@@ -29,7 +45,7 @@ export class LiveKitEngine implements AVEngine {
   private disposed = false;
   private resume = () => void this.rnnoise.resume();
   private iceProbeTimer: number | undefined;
-  private iceProbeSeen = new Set<string>();
+  private snapshot: Record<'pub' | 'sub', IceTransportSnapshot | null> = { pub: null, sub: null };
 
   constructor(cbs: EngineCallbacks) {
     this.cbs = cbs;
@@ -145,15 +161,14 @@ export class LiveKitEngine implements AVEngine {
   async connect(url: string, token: string) {
     this.startIceProbe();
     try {
-      // 诊断期间显式覆盖客户端 STUN，避免继续使用服务端下发的默认列表。
-      await this.room.connect(url, token, {
-        rtcConfig: { iceServers: [{ urls: 'stun:stun.miwifi.com:3478' }] },
-      });
-      await this.reportIceStats();
+      await this.room.connect(url, token);
+      await this.captureIceStats();
+      this.emitSelectedServer();
     } catch (err) {
       // connect 失败时 SDK 会立即清理 PeerConnection；轮询负责在清理前留下候选，
-      // 这里再尽力抓一次最终状态。
-      await this.reportIceStats();
+      // 这里再尽力抓一次最终状态（PC 可能已经被清理，抓不到就用轮询期间攒下的快照）。
+      await this.captureIceStats();
+      this.emitIceFailed();
       throw err;
     } finally {
       this.stopIceProbe();
@@ -162,10 +177,10 @@ export class LiveKitEngine implements AVEngine {
 
   private startIceProbe() {
     this.stopIceProbe();
-    this.iceProbeSeen.clear();
+    this.snapshot = { pub: null, sub: null };
     // RTCEngine/PCTransport 要等信令 JoinResponse 后才创建，连接期间轮询才能在
-    // SDK 超时关闭 PeerConnection 之前留下失败候选。
-    this.iceProbeTimer = window.setInterval(() => void this.reportIceStats(), 400);
+    // SDK 超时关闭 PeerConnection 之前留下失败候选；轮询只刷新快照，不上报。
+    this.iceProbeTimer = window.setInterval(() => void this.captureIceStats(), 400);
   }
 
   private stopIceProbe() {
@@ -173,26 +188,40 @@ export class LiveKitEngine implements AVEngine {
     this.iceProbeTimer = undefined;
   }
 
-  private emitIceOnce(event: string, state: string) {
-    const key = `${event}\0${state}`;
-    if (this.iceProbeSeen.has(key)) return;
-    this.iceProbeSeen.add(key);
-    this.cbs.onDiagnostic?.(event, state);
+  private emitSelectedServer() {
+    const pub = this.snapshot.pub?.selected ?? '';
+    const sub = this.snapshot.sub?.selected ?? '';
+    this.cbs.onDiagnostic?.('selected_server', `pub ${pub}`, sub ? `sub ${sub}` : '');
   }
 
-  private async reportIceStats() {
+  private emitIceFailed() {
+    const pub = this.snapshot.pub;
+    const sub = this.snapshot.sub;
+    const state = `pub ${pub?.pairs.length ?? 0} pairs, sub ${sub?.pairs.length ?? 0} pairs`;
+    const fmt = (target: 'pub' | 'sub', pair: IcePairSnapshot) =>
+      `${target} ${pair.state}${pair.nominated ? ' nominated' : ''} ${pair.local} -> ${pair.remote}`;
+    const lines = [...(pub?.pairs ?? []).map((p) => fmt('pub', p)), ...(sub?.pairs ?? []).map((p) => fmt('sub', p))];
+    const shown = lines.slice(0, 24);
+    if (lines.length > shown.length) shown.push(`...(+${lines.length - shown.length})`);
+    const localList = [...new Set([...(pub?.local ?? []), ...(sub?.local ?? [])])];
+    const remoteList = [...new Set([...(pub?.remote ?? []), ...(sub?.remote ?? [])])];
+    shown.push(`local: ${localList.join(', ')}`, `remote: ${remoteList.join(', ')}`);
+    this.cbs.onDiagnostic?.('ice_failed', state, shown.join('\n').slice(0, 2000));
+  }
+
+  private async captureIceStats() {
     type StatsTransport = { getStats?: () => Promise<RTCStatsReport> | undefined };
     const manager = (this.room as unknown as {
       engine?: { pcManager?: { publisher?: StatsTransport; subscriber?: StatsTransport } };
     }).engine?.pcManager;
     if (!manager) return;
     await Promise.all([
-      this.reportTransportStats('pub', manager.publisher),
-      this.reportTransportStats('sub', manager.subscriber),
+      this.captureTransportStats('pub', manager.publisher),
+      this.captureTransportStats('sub', manager.subscriber),
     ]);
   }
 
-  private async reportTransportStats(target: 'pub' | 'sub', transport?: { getStats?: () => Promise<RTCStatsReport> | undefined }) {
+  private async captureTransportStats(target: 'pub' | 'sub', transport?: { getStats?: () => Promise<RTCStatsReport> | undefined }) {
     const pending = transport?.getStats?.();
     if (!pending) return;
     try {
@@ -214,27 +243,26 @@ export class LiveKitEngine implements AVEngine {
         const host = address.includes(':') ? `[${address}]` : address;
         return `${String(stat.protocol ?? '?')}/${String(stat.candidateType ?? '?')} ${host}:${String(stat.port ?? '?')}`;
       };
+      const local = new Set<string>();
+      const remote = new Set<string>();
       for (const stat of byID.values()) {
-        if (stat.type === 'local-candidate') this.emitIceOnce('ice_local_candidate', `${target} ${endpoint(stat)}`);
-        if (stat.type === 'remote-candidate') this.emitIceOnce('ice_remote_candidate', `${target} ${endpoint(stat)}`);
+        if (stat.type === 'local-candidate') local.add(endpoint(stat));
+        if (stat.type === 'remote-candidate') remote.add(endpoint(stat));
       }
-      for (const pair of pairs) {
-        const state = String(pair.state ?? 'unknown');
-        const nominated = pair.nominated === true ? ' nominated' : '';
-        const local = byID.get(String(pair.localCandidateId ?? ''));
-        const remote = byID.get(String(pair.remoteCandidateId ?? ''));
-        this.emitIceOnce('ice_pair', `${target} ${state}${nominated} ${endpoint(local)} -> ${endpoint(remote)}`);
-      }
-      const selected =
+      const pairSnaps: IcePairSnapshot[] = pairs.map((pair) => ({
+        state: String(pair.state ?? 'unknown'),
+        nominated: pair.nominated === true,
+        local: endpoint(byID.get(String(pair.localCandidateId ?? ''))),
+        remote: endpoint(byID.get(String(pair.remoteCandidateId ?? ''))),
+      }));
+      const selectedPair =
         (selectedPairID ? byID.get(selectedPairID) : undefined) ??
         pairs.find((pair) => pair.selected === true) ??
         pairs.find((pair) => pair.nominated === true && pair.state === 'succeeded');
-      if (selected) {
-        const remote = byID.get(String(selected.remoteCandidateId ?? ''));
-        this.emitIceOnce('selected_server', `${target} ${endpoint(remote)}`);
-      }
-    } catch (err) {
-      this.emitIceOnce('ice_stats_error', `${target} ${err instanceof Error ? err.name : 'unknown'}`);
+      const selected = selectedPair ? endpoint(byID.get(String(selectedPair.remoteCandidateId ?? ''))) : null;
+      this.snapshot[target] = { pairs: pairSnaps, local: [...local], remote: [...remote], selected };
+    } catch {
+      // getStats 失败（如 PC 已关闭）：保留上一次快照，让失败上报仍有内容可看
     }
   }
 

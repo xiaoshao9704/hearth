@@ -965,7 +965,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
         refreshMeta();
       },
       onAudioBlocked: () => setAudioBlocked(true),
-      onDiagnostic: (event, state) => diag('info', `sdk_${event}`, role, { state }),
+      onDiagnostic: (event, state, detail) => diag('info', `sdk_${event}`, role, { state, detail }),
       onEnded: (reason) => {
         diag(reason === 'lost' ? 'warn' : 'info', 'sdk_ended', role, { reason });
         if (leaving) return;

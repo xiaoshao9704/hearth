@@ -218,6 +218,7 @@ export interface ClientLogEntry {
   attempt?: number;
   elapsed_ms?: number;
   state?: string;
+  detail?: string;
   reason?: string;
   error?: unknown;
 }
@@ -272,6 +273,7 @@ export function reportClientLog(entry: ClientLogEntry): void {
     visibility: document.visibilityState,
     network: diagnosticNetwork(),
     state: redactDiagnosticText(entry.state ?? '', 80),
+    detail: redactDiagnosticText(entry.detail ?? '', 2000),
     reason: redactDiagnosticText(entry.reason ?? '', 120),
     error_name: redactDiagnosticText(errorName, 80),
     error_message: redactDiagnosticText(errorMessage, 600),

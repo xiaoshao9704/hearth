@@ -37,7 +37,7 @@ export interface EngineCallbacks {
   onSpeakers(identities: string[]): void;
   onReconnecting(): void; // 引擎内部在自行恢复
   onReconnected(): void;
-  onDiagnostic?(event: string, state: string): void; // SDK 状态流，仅供脱敏后的故障诊断上报
+  onDiagnostic?(event: string, state: string, detail?: string): void; // SDK 状态流，仅供脱敏后的故障诊断上报
   // 连接终结。lost = 引擎放弃恢复，房间层负责拿新凭证重连；其余为终态
   onEnded(reason: 'kicked' | 'room-deleted' | 'duplicate' | 'lost'): void;
   onAudioBlocked?(): void; // 浏览器拦截了自动播放：需要用户手势才能出声
