@@ -680,6 +680,17 @@ function renderScreen(body: HTMLElement, goStream: () => void) {
           <span class="mono" style="font-size:11.5px;color:var(--text-1);width:70px;text-align:right" id="br-label">${prefs.bitrate.toFixed(1)} Mbps</span>
         </div>
         <div class="mono" style="padding-left:66px;font-size:10.5px;color:var(--text-3);margin-top:-8px">${prefs.res} · ${prefs.fps}fps 建议 ${lim.min}–${lim.max} Mbps${prefs.bitrateAuto ? '（当前为自动推荐值）' : ''}</div>
+        <button class="hit switch-row" id="screen-audio-row" style="width:100%;text-align:left">
+          <div style="flex-grow:1">
+            <div class="s-title">共享系统声音</div>
+            <div class="s-desc">把电脑里正在播放的声音随画面一起发出去</div>
+          </div>
+          <div class="switch ${prefs.screenAudio ? 'on' : ''}" id="screen-audio-switch"><div class="knob"></div></div>
+        </button>
+        <div class="hint-card">
+          ${icon('info', 15, 'var(--text-2)')}
+          <div>改这项要下次开始投屏才生效：带不带声音在选窗口时就定死了，中途改只能停下重选。另外这受浏览器限制——macOS 上的 Chrome 只有共享「标签页」才带声音，整屏和单个窗口都没有；Safari 不支持。</div>
+        </div>
         <div class="hint-card">
           ${icon('cube', 15, 'var(--text-2)')}
           <div>VP9/AV1 走 SVC 分层：弱网观众自动降到低分辨率层，不拖累全场，也让上行带宽决定的观众数上限变成软性劣化；AV1 压缩率最高但软编极吃 CPU（实验）。H.264 单层兼容性最好。浏览器软编到 1080p60 为止——再往上是编码器的物理上限。<button class="hit" id="go-stream" style="color:var(--ember)">2K / 4K / 120fps 走 OBS 推流 →</button></div>
@@ -740,6 +751,12 @@ function renderScreen(body: HTMLElement, goStream: () => void) {
       savePrefs(prefs);
       notifyPrefsChanged('screen');
       body.querySelector('#br-label')!.textContent = `${prefs.bitrate.toFixed(1)} Mbps`;
+    });
+    const screenAudioSwitch = body.querySelector<HTMLDivElement>('#screen-audio-switch')!;
+    body.querySelector('#screen-audio-row')!.addEventListener('click', () => {
+      prefs.screenAudio = !prefs.screenAudio;
+      screenAudioSwitch.classList.toggle('on', prefs.screenAudio);
+      savePrefs(prefs); // 不发 prefs 事件：采集参数没法热改，下次投屏才读得到
     });
     body.querySelector('#go-stream')!.addEventListener('click', goStream);
   };

@@ -511,6 +511,11 @@ export class LiveKitEngine implements AVEngine {
     const capture: ScreenShareCaptureOptions = {
       resolution: { width: d.width, height: d.height, frameRate: p.fps },
       contentHint: 'detail', // 屏幕内容以文字/细节为主
+      // 系统声音是音乐/游戏音效，不是人声：回声消除/降噪/自动增益会把它嚼烂，
+      // 声道数也和麦克风相反——麦克风降到单声道避免单耳，这里要保住左右声场
+      audio: p.screenAudio
+        ? { echoCancellation: false, noiseSuppression: false, autoGainControl: false, channelCount: 2 }
+        : false,
     };
     const encoding = { maxBitrate: Math.round(p.bitrate * 1e6), maxFramerate: p.fps };
     let publish: TrackPublishOptions;
@@ -536,7 +541,9 @@ export class LiveKitEngine implements AVEngine {
         backupCodec: { codec: 'h264' },
       };
     }
-    return { capture, publish };
+    // 这次发布连带的投屏音轨（有就发）：128k 立体声，关 DTX 免得静音段断流吞掉音乐尾音，
+    // 关 RED 免得为冗余多占上行。只作用于本次投屏发布，麦克风走 micPublishOptions
+    return { capture, publish: { ...publish, audioPreset: { maxBitrate: 128_000 }, dtx: false, red: false } };
   }
 
   dispose() {

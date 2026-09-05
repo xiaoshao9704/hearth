@@ -33,6 +33,7 @@ export interface RoomPrefs {
   bitrateAuto: boolean;
   screenCodec: ScreenCodec; // 投屏编码：h264/h265 单层 / vp9·av1 走 SVC 分层
   screenCodecAuto: boolean; // true = 按本机能力自动选（硬编优先）；用户手选后置 false
+  screenAudio: boolean; // 投屏是否连带系统声音；改了要下次开始投屏才生效（采集参数在选窗口时定死）
   denoise: DenoiseMode; // 三选一：RNNoise / 浏览器自带 / 不降噪
   echoCancellation: boolean;
   autoGainControl: boolean;
@@ -59,6 +60,7 @@ export function defaultPrefs(): RoomPrefs {
     bitrateAuto: true,
     screenCodec: 'vp9',
     screenCodecAuto: true,
+    screenAudio: true,
     denoise: 'rnnoise',
     echoCancellation: true,
     autoGainControl: true,
@@ -101,6 +103,7 @@ export function loadPrefs(): RoomPrefs {
       bitrateAuto: p.bitrateAuto !== false,
       screenCodec: p.screenCodec === 'h264' || p.screenCodec === 'h265' || p.screenCodec === 'av1' ? p.screenCodec : 'vp9',
       screenCodecAuto: p.screenCodecAuto !== false,
+      screenAudio: p.screenAudio !== false,
       denoise,
       echoCancellation: p.echoCancellation !== false,
       autoGainControl: p.autoGainControl !== false,
