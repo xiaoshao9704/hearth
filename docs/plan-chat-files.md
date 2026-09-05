@@ -19,7 +19,14 @@
 
 ### 数据线（data line）
 
-**定义**：`stageEngine()` 非空即用它（拆分形态 = sandbox；合并形态 = 同一条），否则回落 `voiceLine.engine`。聊天文本与文件都走这一条。选 stage 线的理由：sandbox 打洞/上行正常、把扇出带宽从上行有限的 bj 挪走；成员本来就都连着它。
+**定义**：由 `chat_data_line` 决定（见下节「面向通用部署」）；`auto` 时 `stageEngine()` 非空即用它（拆分形态 = 远端舞台实例；合并形态 = 同一条），否则回落 `voiceLine.engine`。聊天文本与文件都走这一条。默认偏向舞台线的理由：拆分部署里舞台实例通常是专门放媒体、上行更好的那台，把扇出带宽从 hearth 所在机器挪走；成员本来就都连着它。
+
+### 面向通用部署（用户 2026-09-05 追加要求）
+
+方案不得依赖"舞台实例就是那台上行好的小主机"这类具体拓扑。两处显式化：
+
+- **数据线可配**：全局键 `chat_data_line`（Group `chat`，Env `CHAT_DATA_LINE`，`Options: auto|voice|stage`，默认 `auto`）。`auto` = 有舞台线用舞台线、否则语音线；`voice`/`stage` 强制。随进房凭证响应下发（`fetchJoinCredentials` 的返回里加 `data_line` 字段），前端据此选线，不自己猜拓扑。适用场景：舞台实例是按流量计费的云 LiveKit 时选 `voice`（走自带内核）；舞台实例是远端 `cmd/stage`/官方 LiveKit 且上行更好时选 `stage`。
+- **远端实例版本边界与回落**：Data Streams（`sendText`/`sendFile`）需要 LiveKit 服务端 ≥ 1.8。fork（`lkembed`/`cmd/stage`）满足；接入的官方 LiveKit 需自查版本。前端在数据线发送被拒（不支持、未连上、权限被拒以外的失败）时**回落到另一条已连接的线**再试一次；文本的权威路径是 HTTP 落库，实时广播失败不丢消息（对端重连/进房时 `after=` 补齐）；文件回落失败则卡片标"发送失败"，字节不重试第三次。README 部署段写明版本要求与 `chat_data_line` 的含义。
 
 ### 文本消息：先落库、再广播
 
@@ -93,7 +100,8 @@ onFile?(topic: string, info: { name: string; mime: string; size: number; attrs: 
 | --- | --- |
 | `server/internal/store/00004_chat_kind.go`（新）、`models.go`、`store.go` | `kind`/`meta` 列；`AddMessage` 扩展为可带 kind+meta；`RecentMessages` 加 `after` 游标变体 |
 | `server/internal/api/chat_messages.go`（新） | `GET /api/channels/{channel}/messages?after=&limit=`、`POST /api/channels/{channel}/messages`；鉴权 + `admitUser`（禁言 403）+ 大小上限（413）+ 文本长度（≤2000）；响应即 Message JSON |
-| `server/internal/api/dyncfg.go` | `chat_file_max_mb`（Group `chat`，Default `25`） |
+| `server/internal/api/dyncfg.go` | `chat_file_max_mb`（Group `chat`，Default `25`）；`chat_data_line`（`auto|voice|stage`，默认 `auto`） |
+| `server/internal/api/*`（进房凭证响应） | 加 `data_line` 字段透传 `chat_data_line` |
 | `server/internal/lktoken/lktoken.go`、`server/internal/lkroom/lkroom.go` | `CanPublishData` 跟随 `canPublish` |
 | `server/internal/chat/hub.go`、`server/cmd/server/main.go`、`server/internal/api/api.go` | **删除** hub、`/api/chat` 路由、`hub` 字段与 `CloseUserChannel` 调用 |
 | `web/src/engine/types.ts`、`web/src/engine/livekit.ts` | 数据通道方法与回调 |
@@ -112,5 +120,6 @@ onFile?(topic: string, info: { name: string; mime: string; size: number; attrs: 
 
 - 不做离线补收文件、不做服务端存字节、不做 P2P DataChannel、不做轮询。
 - 文件扇出成本落在 sandbox 的上行（大小 × 人数），上限键兜底；文档写明。
-- 数据线 = stage 线意味着 `stage_provider=none` 的纯语音部署回落到 voice 线，行为一致只是走 bj。
+- `auto` 下 `stage_provider=none` 的纯语音部署回落到 voice 线，行为一致只是走自带内核所在机器。
+- 官方 LiveKit < 1.8 作为舞台实例时 Data Streams 不可用：前端回落到语音线；若两条线都不支持，文件功能不可用但文本聊天照常（HTTP 落库 + 补齐）。
 - 隐私铁律：文档、注释、提交信息不出现任何个人部署信息。
