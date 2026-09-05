@@ -348,6 +348,7 @@ export class LiveKitEngine implements AVEngine {
     const music = p.musicMode;
     return {
       deviceId: p.micDeviceId ? { ideal: p.micDeviceId } : undefined,
+      channelCount: { ideal: 1 }, // 语音单声道：立体声麦克风若只有一路有声，发布出去就成了单耳
       echoCancellation: music ? false : p.echoCancellation,
       noiseSuppression: music ? false : p.denoise === 'browser',
       autoGainControl: music ? false : p.autoGainControl,

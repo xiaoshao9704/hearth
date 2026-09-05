@@ -23,7 +23,12 @@ export class RnnoisePipeline {
     await ctx.audioWorklet.addModule(rnnoiseWorkletUrl);
     const wasmBinary = await loadRnnoise({ url: rnnoiseWasmUrl, simdUrl: rnnoiseWasmSimdUrl });
     const node = new RnnoiseWorkletNode(ctx, { maxChannels: 1, wasmBinary });
+    // 目标节点强制单声道：RNNoise 只处理一路，默认的立体声 destination 会让处理后的
+    // 音轨只填左声道、右声道空，发布出去别人就只有左耳有声。单声道音轨在播放端两边都出。
     const dest = ctx.createMediaStreamDestination();
+    dest.channelCount = 1;
+    dest.channelCountMode = 'explicit';
+    dest.channelInterpretation = 'speakers';
     ctx.createMediaStreamSource(raw).connect(node);
     node.connect(dest);
     const track = dest.stream.getAudioTracks()[0];
