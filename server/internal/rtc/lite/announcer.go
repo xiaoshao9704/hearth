@@ -6,6 +6,7 @@ import (
 	"maps"
 	"net/netip"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -197,18 +198,23 @@ func (a *Announcer) Snapshot() (externals []string, probedAt time.Time) {
 	return out, a.probedAt
 }
 
-// ExternalIPv4s 把 Snapshot 的外部地址列表（可能带端口）压成去重的 IPv4 列表，
-// 顺序不变。给 LiveKit 的地址改写回调用：它只换 IP 不换端口，也只认 IPv4。
-func ExternalIPv4s(externals []string) []string {
+// ExternalIPs 把 Snapshot 与额外配置的地址列表（可能带端口）压成去重的 IP 列表，
+// 顺序不变。给 LiveKit 的地址改写回调用：它只换 IP 不换端口；IPv4 与 IPv6 都保留，
+// 让多出口主机能同时给公网、局域网覆盖地址与覆盖网络地址提供候选。
+func ExternalIPs(externals []string) []string {
 	var out []string
 	seen := map[string]bool{}
 	for _, e := range externals {
-		ip := e
-		if ap, err := netip.ParseAddrPort(e); err == nil {
+		ip := strings.TrimSpace(e)
+		if ap, err := netip.ParseAddrPort(ip); err == nil {
 			ip = ap.Addr().String()
 		}
 		addr, err := netip.ParseAddr(ip)
-		if err != nil || !addr.Is4() || seen[ip] {
+		if err != nil {
+			continue
+		}
+		ip = addr.Unmap().String()
+		if seen[ip] {
 			continue
 		}
 		seen[ip] = true

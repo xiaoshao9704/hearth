@@ -44,6 +44,8 @@ func ConfigKeys() []rtc.ConfigKey {
 			Label: "API Secret", Hint: "留空 = 首次启动自动生成并落库"},
 		{Name: "lkembed_public_ip", Env: "LKEMBED_PUBLIC_IP", Group: "stage",
 			Label: "公网 IP", Hint: "留空 = 自动宣告全部网卡地址与 STUN 探测到的公网映射；显式设置则只通告该地址（覆盖）"},
+		{Name: "lkembed_extra_ips", Env: "LKEMBED_EXTRA_IPS", Group: "stage",
+			Label: "额外候选 IP", Hint: "逗号分隔；容器部署时可填宿主的 IPv6、局域网或覆盖网络地址，与自动探测结果并列宣告"},
 		{Name: "lkembed_stun_servers", Env: "LKEMBED_STUN_SERVERS", Group: "stage",
 			Label: "STUN 服务器", Hint: "逗号分隔；探测各网卡公网映射用，留空用内置默认（不可达时改填可用地址）"},
 	}
@@ -85,7 +87,7 @@ type Options struct {
 	APISecret string
 	// LogLevel LiveKit 自己的日志级别，空 = warn（错误看得见，正常运行不刷屏）。
 	LogLevel string
-	// ExternalIPs 是补丁二的回调：每建一个 PeerConnection 取一次当前外部 IPv4，
+	// ExternalIPs 是补丁二的回调：每建一个 PeerConnection 取一次当前外部地址，
 	// 追加为候选（本机 host 候选保留）。nil = 只宣告本机地址。
 	ExternalIPs func() []string
 	// LogSink 收本包自己的生命周期日志。LiveKit 内部日志进不来：protocol/logger 的

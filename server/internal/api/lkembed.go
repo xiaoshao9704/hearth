@@ -47,11 +47,14 @@ func (a *API) ensureEmbedKeys(ctx context.Context) (key, secret string, err erro
 }
 
 // stageExternalIPs 补丁二的回调：进程内 LiveKit 每建一个 PeerConnection 取一次当前外部
-// IPv4，追加为候选。数据源是进程内唯一的 Announcer 的快照（映射结果排最前，其次 STUN
-// 探测结果）——同一台机器只有一个公网地址，不另起第二个探测器。
+// 地址并追加为候选。Announcer 提供端口映射/STUN 结果；extra_ips 用于容器无法枚举宿主
+// 网卡的部署，把宿主的 IPv6、局域网或覆盖网络地址一并交给 ICE 逐条探测。
 func (a *API) stageExternalIPs() []string {
 	externals, _ := a.announcer.Snapshot()
-	return lite.ExternalIPv4s(externals)
+	externals = append(externals, strings.FieldsFunc(a.dynVal(context.Background(), "lkembed_extra_ips"), func(r rune) bool {
+		return r == ',' || r == ';' || r == '\n' || r == '\t' || r == ' '
+	})...)
+	return lite.ExternalIPs(externals)
 }
 
 // EnsureStageKernel 按当前选择器启停进程内 LiveKit：语音线或舞台线任一选中 lkembed

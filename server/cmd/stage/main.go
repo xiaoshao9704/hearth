@@ -73,7 +73,7 @@ func main() {
 		LogLevel:  envOr("STAGE_LOG_LEVEL", "warn"),
 		ExternalIPs: func() []string {
 			externals, _ := ann.Snapshot()
-			return lite.ExternalIPv4s(externals)
+			return lite.ExternalIPs(externals)
 		},
 		LogSink: log.Printf,
 	})

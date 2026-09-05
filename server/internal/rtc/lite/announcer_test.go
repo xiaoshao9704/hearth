@@ -155,6 +155,16 @@ func TestAnnouncerExplicitPublicIP(t *testing.T) {
 	}
 }
 
+func TestExternalIPsKeepsBothFamiliesAndDedupes(t *testing.T) {
+	got := ExternalIPs([]string{
+		"203.0.113.5:47700", "203.0.113.5", "[2001:db8::5]:47700", "2001:db8::5", "bad-ip",
+	})
+	want := []string{"203.0.113.5", "2001:db8::5"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("地址=%v, want %v", got, want)
+	}
+}
+
 func TestAnnouncerMappedAndSTUNSideBySide(t *testing.T) {
 	// 映射命中时三类并列：映射地址排最前、STUN IP + 本地端口、STUN IP + 映射端口
 	a := announcerWith("", map[string]string{"192.168.50.4": "198.51.100.7"},

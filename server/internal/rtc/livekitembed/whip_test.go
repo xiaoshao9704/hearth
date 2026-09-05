@@ -167,6 +167,7 @@ func TestWhipExternalIPPerTransport(t *testing.T) {
 
 	const ip1 = "203.0.113.7" // TEST-NET-3，RFC 5737 文档保留地址
 	const ip2 = "203.0.113.8"
+	const ip6 = "2001:db8::7" // RFC 3849 文档保留地址
 	var current atomic.Value
 	current.Store(ip1)
 
@@ -175,7 +176,7 @@ func TestWhipExternalIPPerTransport(t *testing.T) {
 		UDPPort:     udpPort,
 		APIKey:      testAPIKey,
 		APISecret:   testAPISecret,
-		ExternalIPs: func() []string { return []string{current.Load().(string)} },
+		ExternalIPs: func() []string { return []string{current.Load().(string), ip6} },
 		LogSink:     func(format string, args ...any) { t.Logf(format, args...) },
 	})
 	if err != nil {
@@ -187,6 +188,7 @@ func TestWhipExternalIPPerTransport(t *testing.T) {
 	defer pc1.Close()
 	_, body1, _ := whipPublish(t, httpPort, "whip-ext-1", pc1)
 	assertCandidatesContainIP(t, body1, ip1)
+	assertCandidatesContainIP(t, body1, ip6)
 	assertCandidatesExcludeIP(t, body1, ip2)
 	assertHasLANHostCandidate(t, body1, ip1)
 	waitICEConnected(t, pc1, 10*time.Second)
@@ -197,6 +199,7 @@ func TestWhipExternalIPPerTransport(t *testing.T) {
 	defer pc2.Close()
 	_, body2, _ := whipPublish(t, httpPort, "whip-ext-2", pc2)
 	assertCandidatesContainIP(t, body2, ip2)
+	assertCandidatesContainIP(t, body2, ip6)
 	assertCandidatesExcludeIP(t, body2, ip1)
 	assertHasLANHostCandidate(t, body2, ip2)
 
