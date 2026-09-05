@@ -113,11 +113,12 @@ func (c *Client) RemoveParticipantsOf(ctx context.Context, room string, userID i
 
 // MuteUserAudio 服务端禁言/解禁 room 里 identity 属于该用户的参与者
 // （identity 规则同 RemoveParticipantsOf，对全部设备生效）。
-// 契约见 rtc.Provider：禁言收走全部媒体发布（CanPublish=false 覆盖音频/摄像头/投屏）。
-// 通过 UpdateParticipant 改写发布权限实现（CanPublish=false）：LiveKit 服务端会下架
+// 契约见 rtc.Provider：禁言收走全部媒体发布（CanPublish=false 覆盖音频/摄像头/投屏），
+// 数据通道（CanPublishData）一并收走——聊天与文件走数据通道，留着等于没禁，与进房票
+// （lktoken.Sign）同源。通过 UpdateParticipant 改写发布权限实现：LiveKit 服务端会下架
 // 其全部已发布轨道，且客户端无法自行重新发布（区别于仅静音轨道，后者客户端可自行取消）。
 // 权限是整体替换语义（见 auth.VideoGrant.UpdateFromPermission），故从参与者当前权限
-// （ParticipantInfo.Permission）出发只翻转 CanPublish，避免误清 CanSubscribe/CanPublishData 等。
+// （ParticipantInfo.Permission）出发只翻转这两位，避免误清 CanSubscribe 等。
 //
 // 推流设备（元数据 kind=ingest）走另一条路：禁言
 // 直接把它移出房间。推流端没有信令通道，收走 CanPublish 会让 LiveKit 下架它已发布的全部
@@ -156,6 +157,7 @@ func (c *Client) MuteUserAudio(ctx context.Context, room string, userID int64, m
 			perm = &livekit.ParticipantPermission{CanSubscribe: true, CanPublish: true, CanPublishData: true}
 		}
 		perm.CanPublish = !muted
+		perm.CanPublishData = !muted // 聊天与文件走数据通道，禁言不掐它等于没禁
 		if _, err := c.api.UpdateParticipant(ctx, &livekit.UpdateParticipantRequest{
 			Room:       room,
 			Identity:   p.Identity,

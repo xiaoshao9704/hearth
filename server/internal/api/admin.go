@@ -438,8 +438,8 @@ func (a *API) adminDeleteChannel(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "频道 ID 无效")
 		return
 	}
-	c, err := a.st.ChannelByID(r.Context(), id)
-	if errors.Is(err, store.ErrNotFound) {
+	// 先查一次只为把"频道不存在"与删除失败区分开
+	if _, err = a.st.ChannelByID(r.Context(), id); errors.Is(err, store.ErrNotFound) {
 		writeErr(w, http.StatusNotFound, "频道不存在")
 		return
 	}
@@ -451,8 +451,6 @@ func (a *API) adminDeleteChannel(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "内部错误")
 		return
 	}
-	// 现场清理尽力而为：房间里的人各自断开
-	a.hub.CloseChannel(c.ID)
 	w.WriteHeader(http.StatusNoContent)
 }
 

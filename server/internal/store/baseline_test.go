@@ -244,8 +244,8 @@ func TestOpenUpgradesLegacyDB(t *testing.T) {
 	if len(msgs) != 1 || msgs[0].Content != "hello" || msgs[0].CreatedAt.IsZero() {
 		t.Fatalf("消息数据不符: %+v", msgs)
 	}
-	if n := migrationRows(t, s.bun.DB); n != 3 {
-		t.Fatalf("bun_migrations 应有 3 行，实际 %d", n)
+	if n := migrationRows(t, s.bun.DB); n != 4 {
+		t.Fatalf("bun_migrations 应有 4 行，实际 %d", n)
 	}
 	s.Close()
 
@@ -254,8 +254,8 @@ func TestOpenUpgradesLegacyDB(t *testing.T) {
 	if err != nil {
 		t.Fatalf("重复 Open 失败: %v", err)
 	}
-	if n := migrationRows(t, s2.bun.DB); n != 3 {
-		t.Fatalf("重复 Open 后 bun_migrations 应仍为 3 行，实际 %d", n)
+	if n := migrationRows(t, s2.bun.DB); n != 4 {
+		t.Fatalf("重复 Open 后 bun_migrations 应仍为 4 行，实际 %d", n)
 	}
 	s2.Close()
 }
@@ -293,7 +293,7 @@ func TestOpenFreshDB(t *testing.T) {
 	if c.ID != 1 || c.CreatedAt.IsZero() {
 		t.Fatalf("频道创建异常: %+v", c)
 	}
-	m, err := s.AddMessage(ctx, c.ID, u.ID, "hi")
+	m, err := s.AddMessage(ctx, c.ID, u.ID, KindText, "hi", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

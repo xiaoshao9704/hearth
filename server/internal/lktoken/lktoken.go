@@ -19,7 +19,8 @@ const ttl = 10 * time.Minute
 // LiveKit 不允许房间内重复 identity(后者顶掉前者)，identity 用 rtc.Identity 组的
 // u{user_id}-{设备标签}，同一账号可在不同设备同时在线；同设备重复进房会顶掉旧连接(防僵尸占位)。
 // 用户名只进显示名与参与者元数据（前端据元数据认人，不解析 identity）。
-// canPublish=false 用于被禁言用户：进房即无发布权限。
+// canPublish=false 用于被禁言用户：进房即无发布权限。数据通道（CanPublishData）与之同源——
+// 聊天与文件都走数据通道，禁言若只掐媒体，被禁言者照样能发言。
 func Sign(key, secret, room string, meta rtc.Meta, canPublish bool) (string, error) {
 	rawMeta, err := json.Marshal(meta)
 	if err != nil {
@@ -30,7 +31,7 @@ func Sign(key, secret, room string, meta rtc.Meta, canPublish bool) (string, err
 		Room:           room,
 		CanPublish:     boolPtr(canPublish),
 		CanSubscribe:   boolPtr(true),
-		CanPublishData: boolPtr(true),
+		CanPublishData: boolPtr(canPublish),
 	}
 	at := auth.NewAccessToken(key, secret)
 	at.SetVideoGrant(grant).

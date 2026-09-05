@@ -15,7 +15,6 @@ import (
 	"time"
 
 	"hearth/server/internal/api"
-	"hearth/server/internal/chat"
 	"hearth/server/internal/config"
 	"hearth/server/internal/portmap"
 	"hearth/server/internal/rtc/lite"
@@ -144,20 +143,18 @@ func main() {
 }
 
 func runServer(ctx context.Context, cfg config.Config, st *store.Store) {
-	hub := chat.NewHub(st, cfg.CORSOrigin)
 	// 端口映射先建好：它是内核宣告外部地址的来源之一（lite.MappedFunc），要在内核构造前交出去。
 	// Run 之前查不到任何映射，返回 false 即可，内核那边只是暂时少一条 srflx 候选。
 	mapper := portmap.New()
-	a := api.New(st, cfg, hub, lite.MappedFunc(mapper.UDPExternal))
+	a := api.New(st, cfg, lite.MappedFunc(mapper.UDPExternal))
 
 	// 语音线或舞台线选中 lkembed 时拉起进程内 LiveKit（默认两线同选，即默认常驻；
 	// 两线都切走——语音选外部实例、舞台选 none——时什么都不起）
 	a.EnsureStageKernel(context.Background())
 
-	// chi 路由：API + 聊天 WS + /providers/* 接入分发；具体路由优先于静态通配，无 ServeMux 模式冲突问题
+	// chi 路由：API + /providers/* 接入分发；具体路由优先于静态通配，无 ServeMux 模式冲突问题
 	r := a.Router()
 	a.RegisterProxies(r)
-	r.Get("/api/chat", hub.ServeHTTP)
 
 	// 静态托管前端：优先二进制内嵌产物（单文件分发），未内嵌时回落 STATIC_DIR 外置目录
 	if h := webui.Handler(); h != nil {

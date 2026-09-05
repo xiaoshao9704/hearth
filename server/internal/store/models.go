@@ -53,6 +53,8 @@ type messageRow struct {
 	ChannelID int64     `bun:",notnull"`
 	UserID    int64     `bun:",notnull"`
 	Content   string    `bun:",notnull,type:text"`
+	Kind      string    `bun:",notnull,default:'text',type:varchar(16)"` // text/file
+	Meta      *string   `bun:",type:text"`                               // kind=file 时的卡片 JSON {name,mime,size}；字节不入库
 	CreatedAt time.Time `bun:",notnull,default:current_timestamp"`
 }
 

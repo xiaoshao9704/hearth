@@ -50,6 +50,22 @@ var clientICEKeys = []rtc.ConfigKey{
 			"与实例参数 lkembed_stun_servers 语义不同——那个是服务端自己探测公网映射用的"},
 }
 
+// chatKeys 聊天：hearth 只落库消息与文件卡片，字节从不经过它。
+var chatKeys = []rtc.ConfigKey{
+	{Name: "chat_data_line", Env: "CHAT_DATA_LINE", Group: "chat", Default: "auto",
+		Options: []string{"auto", "voice", "stage"},
+		Label:   "聊天数据线",
+		Hint: "聊天与文件走哪条线的数据通道（随进房凭证下发，前端不自己猜拓扑）。" +
+			"auto = 有舞台线走舞台线、否则语音线；voice/stage = 强制。" +
+			"舞台实例按流量计费时选 voice，舞台实例上行更好时选 stage。" +
+			"Data Streams 需要内核服务端 ≥ 1.8，接入官方 LiveKit 时自查版本"},
+	{Name: "chat_file_max_mb", Env: "CHAT_FILE_MAX_MB", Group: "chat", Default: "25",
+		Label: "聊天文件大小上限 (MB)",
+		Hint: "文件字节走内核数据通道经 SFU 扇出，hearth 不落盘、不存字节，库里只有名字/类型/大小。" +
+			"扇出成本 = 文件大小 × 当时在线人数，压在舞台内核实例的上行上，按它的带宽定这个值。" +
+			"字节只对当时在线的人可见，晚进房的人看到卡片但收不到内容"},
+}
+
 // selectorEnv 选择器对应的旧环境变量名：只供迁移 v2 一次性导入，不参与取值。
 var selectorEnv = map[string]string{
 	"voice_provider": "VOICE_PROVIDER",
@@ -83,7 +99,8 @@ func (a *API) warnLegacyConfig() {
 func (a *API) allConfigKeys() []rtc.ConfigKey {
 	keys := append(append([]rtc.ConfigKey{}, selectorKeys...), a.kernelKeys...)
 	keys = append(keys, portmapKeys...)
-	return append(keys, clientICEKeys...)
+	keys = append(keys, clientICEKeys...)
+	return append(keys, chatKeys...)
 }
 
 // PortWants 当前要向网关申请的映射：HTTP 端口 + 当前选中内核里跑在本进程的媒体端口

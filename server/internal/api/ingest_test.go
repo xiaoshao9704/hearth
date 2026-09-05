@@ -14,7 +14,6 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
-	"hearth/server/internal/chat"
 	"hearth/server/internal/config"
 	"hearth/server/internal/rtc"
 	"hearth/server/internal/store"
@@ -230,7 +229,7 @@ func TestMigrateIngestTokensV3(t *testing.T) {
 	}
 	raw.Close()
 
-	a := New(s, config.Load(), chat.NewHub(s, ""), nil) // New 内跑 v1+v2+v3
+	a := New(s, config.Load(), nil) // New 内跑 v1+v2+v3
 	it, err := s.IngestTokenByUser(ctx, u1.ID)
 	if err != nil || it.Token != "key-new" || it.Tag != "obs" {
 		t.Fatalf("多频道密钥应合并为最近创建的一把: %+v %v", it, err)

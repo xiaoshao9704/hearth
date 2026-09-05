@@ -8,6 +8,7 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
@@ -160,12 +161,22 @@ type Channel struct {
 type Message struct {
 	bun.BaseModel `bun:"table:messages,alias:m"`
 
-	ID        int64     `bun:",pk,autoincrement" json:"id"`
-	ChannelID int64     `json:"channel_id"`
-	UserID    int64     `json:"uid"`              // 发送者 user_id（右键菜单等管理操作的目标）
-	Username  string    `bun:"-" json:"username"` // 发送者用户名（JOIN 填充，纯展示）
-	Content   string    `json:"content"`
-	CreatedAt time.Time `json:"created_at"`
+	ID        int64        `bun:",pk,autoincrement" json:"id"`
+	ChannelID int64        `json:"channel_id"`
+	UserID    int64        `json:"uid"`              // 发送者 user_id（右键菜单等管理操作的目标）
+	Username  string       `bun:"-" json:"username"` // 发送者用户名（JOIN 填充，纯展示）
+	Kind      string       `json:"kind"`             // text/file
+	Content   string       `json:"content"`
+	File      *MessageFile `bun:"-" json:"file,omitempty"` // kind=file 才有；由 meta 列的 JSON 解出
+	CreatedAt time.Time    `json:"created_at"`
+}
+
+// MessageFile 文件消息的卡片元数据。字节不经 hearth（走内核数据通道扇出），
+// 库里只留"发过这么一个文件"的记录，晚进房的人看到卡片但拿不到字节。
+type MessageFile struct {
+	Name string `json:"name"`
+	Mime string `json:"mime"`
+	Size int64  `json:"size"`
 }
 
 // ---- 设备 ----
@@ -490,23 +501,56 @@ func (s *Store) CanJoin(ctx context.Context, c *Channel, userID int64) (bool, st
 
 // ---- 消息 ----
 
-func (s *Store) AddMessage(ctx context.Context, channelID, userID int64, content string) (*Message, error) {
-	row := &messageRow{ChannelID: channelID, UserID: userID, Content: content}
+// 消息类型：文本 / 文件卡片。
+const (
+	KindText = "text"
+	KindFile = "file"
+)
+
+const messageCols = `m.id, m.channel_id, m.user_id, u.username, m.kind, m.content, m.meta, m.created_at`
+
+// scanMessage 按 messageCols 的列序读一行，并把 meta 列的 JSON 解成 File。
+func scanMessage(sc interface{ Scan(...any) error }) (Message, error) {
+	var m Message
+	var meta sql.NullString
+	if err := sc.Scan(&m.ID, &m.ChannelID, &m.UserID, &m.Username, &m.Kind, &m.Content, &meta, &m.CreatedAt); err != nil {
+		return Message{}, err
+	}
+	if m.Kind == KindFile && meta.Valid && meta.String != "" {
+		var f MessageFile
+		if json.Unmarshal([]byte(meta.String), &f) == nil {
+			m.File = &f
+		}
+	}
+	return m, nil
+}
+
+// AddMessage 落一条消息。kind=text 时 file 传 nil；kind=file 时 file 是卡片元数据
+// （字节不入库，由发送方经内核数据通道扇出）。
+func (s *Store) AddMessage(ctx context.Context, channelID, userID int64, kind, content string, file *MessageFile) (*Message, error) {
+	row := &messageRow{ChannelID: channelID, UserID: userID, Kind: kind, Content: content}
+	if file != nil {
+		raw, err := json.Marshal(file)
+		if err != nil {
+			return nil, err
+		}
+		meta := string(raw)
+		row.Meta = &meta
+	}
 	if _, err := s.bun.NewInsert().Model(row).Exec(ctx); err != nil {
 		return nil, err
 	}
-	var m Message
-	err := s.bun.NewRaw(`
-SELECT m.id, m.channel_id, m.user_id, u.username, m.content, m.created_at
-FROM messages m JOIN users u ON u.id = m.user_id WHERE m.id = ?`, row.ID).
-		Scan(ctx, &m.ID, &m.ChannelID, &m.UserID, &m.Username, &m.Content, &m.CreatedAt)
-	return &m, err
+	m, err := scanMessage(s.bun.QueryRowContext(ctx, `SELECT `+messageCols+`
+FROM messages m JOIN users u ON u.id = m.user_id WHERE m.id = ?`, row.ID))
+	if err != nil {
+		return nil, err
+	}
+	return &m, nil
 }
 
 // RecentMessages 返回频道最近 limit 条消息（按时间正序）。
 func (s *Store) RecentMessages(ctx context.Context, channelID int64, limit int) ([]Message, error) {
-	rows, err := s.bun.QueryContext(ctx, `
-SELECT m.id, m.channel_id, m.user_id, u.username, m.content, m.created_at
+	rows, err := s.bun.QueryContext(ctx, `SELECT `+messageCols+`
 FROM messages m JOIN users u ON u.id = m.user_id
 WHERE m.channel_id = ? ORDER BY m.id DESC LIMIT ?`, channelID, limit)
 	if err != nil {
@@ -515,8 +559,8 @@ WHERE m.channel_id = ? ORDER BY m.id DESC LIMIT ?`, channelID, limit)
 	defer rows.Close()
 	var out []Message
 	for rows.Next() {
-		var m Message
-		if err := rows.Scan(&m.ID, &m.ChannelID, &m.UserID, &m.Username, &m.Content, &m.CreatedAt); err != nil {
+		m, err := scanMessage(rows)
+		if err != nil {
 			return nil, err
 		}
 		out = append(out, m)
@@ -524,6 +568,30 @@ WHERE m.channel_id = ? ORDER BY m.id DESC LIMIT ?`, channelID, limit)
 	// 反转为时间正序
 	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
 		out[i], out[j] = out[j], out[i]
+	}
+	return out, rows.Err()
+}
+
+// MessagesAfter 返回频道内 id 大于 afterID 的消息（按时间正序，至多 limit 条）；
+// afterID<=0 等价"最近 limit 条"。断线重连后前端带最大已知 id 来补齐用。
+func (s *Store) MessagesAfter(ctx context.Context, channelID, afterID int64, limit int) ([]Message, error) {
+	if afterID <= 0 {
+		return s.RecentMessages(ctx, channelID, limit)
+	}
+	rows, err := s.bun.QueryContext(ctx, `SELECT `+messageCols+`
+FROM messages m JOIN users u ON u.id = m.user_id
+WHERE m.channel_id = ? AND m.id > ? ORDER BY m.id ASC LIMIT ?`, channelID, afterID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Message
+	for rows.Next() {
+		m, err := scanMessage(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, m)
 	}
 	return out, rows.Err()
 }

@@ -8,7 +8,7 @@
 - **高码率投屏**：1080p60 · 8Mbps+，VP9/AV1 SVC 分层（弱网观众自动降层不拖累全场），H.264 硬编档可选
 - **语音优先**：语音与投屏可拆成两条独立媒体线（双线模式），投屏挤爆上行时语音不陪葬
 - **纯浏览器**：推流与观看无需插件；OBS 走标准 WHIP 协议接入
-- **一体化**：单二进制 = API + 聊天 WS + 进程内 LiveKit（语音 + 舞台 + WHIP 推流一个内核）+ 信令/WHIP 反代 + 静态托管
+- **一体化**：单二进制 = API + 进程内 LiveKit（语音 + 舞台 + WHIP 推流一个内核）+ 信令/WHIP 反代 + 静态托管
 
 ## 架构：双线内核插槽
 
@@ -30,7 +30,7 @@ flowchart LR
   end
 
   subgraph hearth["hearth 进程（单二进制，可跑在上行有限的服务器上）"]
-    API["REST · 聊天 WS · 静态托管"]
+    API["REST · 静态托管"]
     ADM["入场判定 admitUser<br/>封禁 / 邀请制 / 禁言 · 唯一决策点"]
     DB[("SQLite / MySQL / Postgres")]
     LKE["lkembed · 进程内 LiveKit<br/>语音 / 投屏 / 摄像头 / SVC 分层 / WHIP 推流"]
@@ -62,7 +62,7 @@ flowchart LR
 - 频道语音房：说话高亮、本地电平表、多设备同账号、断线自动重连（含服务重启自愈）
 - 投屏/摄像头：编码三档（VP9/AV1 SVC、H.264 单层）、码率/帧率/分辨率可调、软/硬编实时标注（浏览器 API 真值）
 - OBS WHIP 推流：每用户一把推流令牌、频道写在 URL 里（换房间只改服务器地址，令牌不动），服务端不转码原样透传（2K/4K/120fps）
-- 文字聊天：频道内 WebSocket，断线重连
+- 文字聊天与文件：消息经 LiveKit 数据通道实时扇出，历史由 `/api/channels/{channel}/messages` 落库回放；文件字节同走数据通道，hearth 不经手
 - 管理：踢出、封禁、**服务端禁言**（落库持久、离房也可操作、全内核生效、推流入口同步拦截）、邀请制白名单；右键用户卡片直达操作
 - 注册：默认邀请制（管理员发有时效链接），首个账号自动管理员
 - 管理后台：内核切换（选服务实例）、**服务实例注册**（外部 LiveKit——远端 `cmd/stage` 或官方 LiveKit，alias 命名、同类型可多个；env 配置的合成同名锁定实例、后台只读）、用户/频道/邀请管理、宿主资源监控
@@ -74,7 +74,7 @@ flowchart LR
 | 媒体内核（内嵌） | LiveKit（补丁式 fork，进程内跑，`lkembed`） | 语音/投屏/推流一个内核：高码率转发、SVC 分层、自带 WHIP 入口；也可换成独立部署的外部 LiveKit |
 | 后端 | Go + sqlite（`modernc.org/sqlite`，无 cgo） | 单二进制，交叉编译 ARM64 |
 | 前端 | Vite + TypeScript；房间页 Solid.js，其余原生 | 主包 ~130KB；房间页状态→视图自动同步 |
-| 聊天 | WebSocket | 简单可靠 |
+| 聊天与文件 | LiveKit 数据通道 + HTTP 持久化 | 复用已有连接，不再维护第二条长连接；文件字节不落 hearth |
 
 ## 目录结构
 
@@ -83,10 +83,9 @@ hearth/
 ├── server/
 │   ├── cmd/server/          # 入口 + adduser CLI
 │   └── internal/
-│       ├── api/             # REST + WS 路由、入场判定(admission)、动态配置、反代
+│       ├── api/             # REST 路由、入场判定(admission)、动态配置、反代
 │       ├── rtc/             # 内核抽象接口 + livekitrtc 实现；livekitembed 只管进程内启停 LiveKit（接口仍由 livekitrtc 承担）
 │       ├── lkroom|lktoken/  # LiveKit 管理面客户端
-│       ├── chat/            # 聊天 hub
 │       └── store/           # sqlite/MySQL/Postgres
 ├── web/                     # Vite + TS；views/room.tsx 为 Solid，其余 vanilla
 ├── deploy/                  # 自托管 compose + 配置模板 + init.sh（外部 LiveKit 等可选高级形态）
@@ -198,6 +197,7 @@ cd deploy && cp .env.example .env && $EDITOR .env
 - **反代内置**：`/providers/{alias}` 下的内核信令与 WHIP、Web、API 同端口，不强制 Caddy/nginx；TLS 可用 `--profile caddy` 或接入自己的网关
 - **动态配置**：环境变量（含 .env）设置的项在后台只读（LiveKit 的 env 会合成同名锁定服务实例）；未设置的可在管理后台注册服务实例、切换内核选择器，保存即生效
 - **媒体端口**：hearth 进程内内核 `lkembed_udp_port`（默认 47720/udp）、外部 LiveKit RTC 端口需防火墙/安全组放行（媒体不经反代）；开了 ICE-TCP 就同号 udp/tcp 双放行；NAT 后的线路见「自动端口映射」
+- **聊天与文件**：消息经内核数据通道扇出（历史仍由 hearth 落库，字节不落）。走哪条线由 `chat_data_line` 决定：`auto`（默认）= 有舞台线走舞台线、否则语音线，`voice`/`stage` = 强制——舞台实例按流量计费时选 `voice`，舞台实例上行更好时选 `stage`。文件大小上限 `chat_file_max_mb`（默认 25），扇出成本 = 大小 × 在线人数。数据通道用的 Data Streams 需要内核服务端 ≥ 1.8（`lkembed` 与 `stage` 镜像均满足，接入官方 LiveKit 时自查版本）
 - **数据库**：默认 sqlite（`/data` 卷）；`DATABASE_URL` 可切 MySQL/Postgres
 - **ARM64**：镜像含 arm64 变体，arm64 小主机可用
 

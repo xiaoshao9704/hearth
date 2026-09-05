@@ -1,10 +1,10 @@
 # Hearth Server
 
-Go 后端：用户体系（bcrypt + Bearer 会话）、频道管理、LiveKit 令牌签发、频道聊天 WebSocket、内核接入反代（`/providers/{alias}` 下的信令与 WHIP）。
+Go 后端：用户体系（bcrypt + Bearer 会话）、频道管理、LiveKit 令牌签发、聊天历史持久化、内核接入反代（`/providers/{alias}` 下的信令与 WHIP）。
 
 - 存储：sqlite 默认（`modernc.org/sqlite`，纯 Go 无 cgo），`DATABASE_URL` 可切 MySQL/Postgres；可交叉编译到 linux/arm64。store 层基于 Bun（`github.com/uptrace/bun`，包在原有三个纯 Go 驱动之上）：一份模型定义出三方言 DDL，schema 变更走 `internal/store/` 下的版本化迁移文件（`NNNNN_name.go`，由 `bun/migrate` 执行，启动时自动应用）
 - 路由：chi（`github.com/go-chi/chi/v5`），认证/房主校验为中间件
-- 聊天 WS：`nhooyr.io/websocket`
+- 信令反代的 WebSocket：`nhooyr.io/websocket`
 
 ## 开发
 
@@ -49,9 +49,10 @@ go test -race -count=1 ./internal/store/
 | GET | `/api/channels` | 频道列表 |
 | POST | `/api/channels` | 创建频道 `{name}`（1-64 位 `[a-zA-Z0-9_-]`，唯一） |
 | POST | `/api/token` | 获取频道对应的 LiveKit JWT `{channel}`，grant 带 canPublish/canSubscribe/canPublishData，24h 过期；频道名即 room 名 |
-| GET | `/api/chat?channel=xx&token=xx` | 聊天 WebSocket，进房推最近 50 条历史，消息落库并广播 |
-| POST | `/api/channels/{channel}/kick` | （房主）踢出 `{username}`：LiveKit 侧移除其全部设备 + 断开聊天 WS |
-| POST | `/api/channels/{channel}/ban` | （房主）封禁 `{username}`：加入黑名单并立即踢出；被封后 `/api/token` 与聊天 WS 均 403 |
+| GET | `/api/channels/{channel}/messages?after=&limit=` | 聊天历史（`after` 缺省=最近 `limit` 条，默认 50、上限 200；否则只回 id 更大的） |
+| POST | `/api/channels/{channel}/messages` | 发消息 `{content}` 或 `{kind:"file", file:{name,mime,size}}`，返回落库后的消息（含 id）；被禁言 403，文件超 `chat_file_max_mb` 413 |
+| POST | `/api/channels/{channel}/kick` | （房主）踢出 `{username}`：LiveKit 侧移除其全部设备（数据通道随之断） |
+| POST | `/api/channels/{channel}/ban` | （房主）封禁 `{username}`：加入黑名单并立即踢出；被封后 `/api/token` 与聊天接口均 403 |
 | POST | `/api/channels/{channel}/unban` | （房主）解除封禁 |
 | GET | `/api/channels/{channel}/bans` | （房主）黑名单列表 |
 | POST | `/api/channels/{channel}/invite-only` | （房主）邀请制开关 `{enabled}`；开启后仅房主与白名单可进 |
@@ -61,9 +62,9 @@ go test -race -count=1 ./internal/store/
 
 `GET /api/channels` 响应中每个频道带 `invite_only` 与 `is_owner`（对当前用户）。房主 = 频道创建者，不能对自己执行管理操作。
 
-除注册/登录外均需 `Authorization: Bearer <token>`（WS 走 query 参数）。
+除注册/登录外均需 `Authorization: Bearer <token>`。
 
-聊天 WS 协议：服务端下发 `{"type":"history","messages":[...]}` 与 `{"type":"message","message":{...}}`；客户端上行 `{"content":"..."}`。
+聊天不再有服务端长连接：hearth 只负责落库与历史回放，实时扇出由发送方经内核数据通道广播（POST 返回的消息原样发出，接收方按 id 去重）。消息 JSON 形状：`{id, channel_id, uid, username, kind, content, file{name,mime,size}, created_at}`，`kind=text` 时无 `file`。文件字节不经 hearth——走数据通道经 SFU 扇出，库里只留卡片，晚进房的人看得到卡片但收不到内容。
 
 ## 构建
 

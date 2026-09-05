@@ -12,7 +12,6 @@ import (
 	"sync"
 	"time"
 
-	"hearth/server/internal/chat"
 	"hearth/server/internal/config"
 	"hearth/server/internal/perm"
 	"hearth/server/internal/rtc"
@@ -32,7 +31,6 @@ import (
 type API struct {
 	st  *store.Store
 	cfg config.Config
-	hub *chat.Hub
 
 	// 内核实例注册表：接入层只依赖 rtc 接口，按选择器（实例 alias）取实例对象（见 providers.go）
 	reloadMu      sync.Mutex // 串行化「写 DB → 重建注册表」（mutateProviders/reloadProviders）
@@ -69,8 +67,8 @@ type API struct {
 	embedSrv    *livekitembed.Server
 }
 
-func New(st *store.Store, cfg config.Config, hub *chat.Hub, mapped lite.MappedFunc) *API {
-	a := &API{st: st, cfg: cfg, hub: hub, mapped: mapped,
+func New(st *store.Store, cfg config.Config, mapped lite.MappedFunc) *API {
+	a := &API{st: st, cfg: cfg, mapped: mapped,
 		providers: map[string]*ProviderInstance{}}
 	// 内建实例只有 lkembed（进程内 LiveKit，语音/舞台/推流三面齐全，见 providers.go）
 	a.announcer = lite.NewAnnouncer(
@@ -149,6 +147,9 @@ func (a *API) Router() *chi.Mux {
 			r.Group(func(r chi.Router) {
 				r.Use(a.requireChannel)
 				r.Post("/kick", a.kick)
+				// 聊天：权限按入场判定（封禁/邀请制/禁言），在 handler 内判，不需要频道管理权限
+				r.Get("/messages", a.listMessages)
+				r.Post("/messages", a.postMessage)
 			})
 			r.Group(func(r chi.Router) {
 				r.Use(a.requireModerator)
@@ -500,6 +501,8 @@ func (a *API) joinToken(w http.ResponseWriter, r *http.Request) {
 	resp := map[string]any{"voice": a.fillCred(r, vc, voiceAlias)}
 	combined := stageP != nil && voiceAlias == stageAlias
 	resp["combined"] = combined
+	// 聊天与文件走哪条线的数据通道由服务端决定并下发，前端不自己猜拓扑
+	resp["data_line"] = a.dynVal(r.Context(), "chat_data_line")
 	if stageP != nil && !combined {
 		sc, serr := stageP.JoinCredentials(r.Context(), c.Name, meta, adm.CanPublish)
 		if serr != nil {
@@ -653,8 +656,8 @@ func (a *API) canModerateTarget(w http.ResponseWriter, r *http.Request, c *store
 	return true
 }
 
-// evict 把用户从频道现场移除：identity 为空踢全部设备并断聊天 WS；
-// 非空只踢该设备（归属约束由内核侧按 user_id 保底），聊天不动。
+// evict 把用户从频道现场移除：identity 为空踢全部设备，非空只踢该设备
+// （归属约束由内核侧按 user_id 保底）。聊天没有独立长连接——数据通道随参与者一起断。
 func (a *API) evict(r *http.Request, c *store.Channel, t *store.User, identity string) (int, error) {
 	_, vp := a.voiceInstance(r.Context())
 	n, err := vp.RemoveParticipantsOf(r.Context(), c.Name, t.ID, identity)
@@ -667,9 +670,6 @@ func (a *API) evict(r *http.Request, c *store.Channel, t *store.User, identity s
 	}
 	if err != nil {
 		log.Printf("内核踢出 uid=%d（设备 %q）失败: %v", t.ID, identity, err)
-	}
-	if identity == "" {
-		a.hub.CloseUserChannel(t.ID, c.ID)
 	}
 	return n, err
 }
