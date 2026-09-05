@@ -5,7 +5,7 @@
 // 结构分两层：
 // - 连接层（非 UI）：Line 双线模型、重连调度、引擎回调、聊天连接、离开清理——命令式，逻辑与旧版一致；
 // - 视图层（Solid）：信号驱动，引擎回调只写信号，DOM 由 JSX 派生，消灭手工 refresh* 互相调用。
-import { createEffect, createMemo, createSignal, on, untrack, For, Show } from 'solid-js';
+import { createEffect, createMemo, createSignal, on, onCleanup, untrack, For, Show } from 'solid-js';
 import { render } from 'solid-js/web';
 import { ApiError, fetchJoinCredentials, getUser, kickUser, listChannels, muteUser, reportClientLog } from '../api';
 import type { DataLine, EngineCred } from '../api';
@@ -259,6 +259,8 @@ export async function renderRoom(root: HTMLElement, channel: string) {
   const [chatDrag, setChatDrag] = createSignal(false); // 文件拖到聊天区上方
   // 文件卡片的字节状态，按消息 id 索引（消息本体在 msgs()，这里只管字节）
   const [fileStates, setFileStates] = createSignal<Map<number, FileState>>(new Map());
+  // 灯箱当前展示的图片；null 表示未打开——聊天图片点击态的唯一真相源
+  const [lightbox, setLightbox] = createSignal<{ url: string; name: string; size: number } | null>(null);
   const [roomEvents, setRoomEvents] = createSignal<RoomEvent[]>([]);
   const [voiceState, setVoiceState] = createSignal<VoiceState>({ phase: 'connecting', attempt: 0 });
   const [audioBlocked, setAudioBlocked] = createSignal(false);
@@ -1127,6 +1129,11 @@ export async function renderRoom(root: HTMLElement, channel: string) {
   // 按住说话只在本轮按下期间开麦：失焦/松开都要能复位，否则麦克风会一直开着
   let pttHeld = false;
   const onHotkeyDown = (ev: KeyboardEvent) => {
+    if (ev.key === 'Escape' && lightbox()) {
+      ev.preventDefault();
+      setLightbox(null);
+      return;
+    }
     if (ev.repeat || ev.ctrlKey || ev.metaKey || ev.altKey) return; // repeat 防抖；带修饰键让位浏览器快捷键
     if (inTypingTarget(ev)) return;
     const key = ev.key.toLowerCase();
@@ -1485,8 +1492,12 @@ export async function renderRoom(root: HTMLElement, channel: string) {
   };
 
   const onChatPaste = (ev: ClipboardEvent) => {
-    const list = [...(ev.clipboardData?.files ?? [])];
-    if (!list.length) return;
+    // 走 items 而非 files：部分浏览器粘贴截图时 clipboardData.files 为空，items 才拿得到 kind === 'file' 的项
+    const items = ev.clipboardData?.items;
+    const list = items
+      ? [...items].filter((it) => it.kind === 'file').map((it) => it.getAsFile()).filter((f): f is File => !!f)
+      : [...(ev.clipboardData?.files ?? [])];
+    if (!list.length) return; // 没有文件项：不拦截，文本正常粘进输入框
     ev.preventDefault(); // 截图粘贴：不要同时把文件名塞进输入框
     void sendFiles(list);
   };
@@ -1754,9 +1765,13 @@ export async function renderRoom(root: HTMLElement, channel: string) {
             </div>
           }
         >
-          <a class="chat-img" href={st()!.url} download={meta().name}>
+          <button
+            type="button"
+            class="chat-img"
+            onClick={() => setLightbox({ url: st()!.url, name: meta().name, size: meta().size })}
+          >
             <img src={st()!.url} alt={meta().name} />
-          </a>
+          </button>
         </Show>
         {/* 图片分支的状态另起一行：卡片分支的那行在 fc-sub 里 */}
         <Show when={inline() && note()}>
@@ -1920,6 +1935,14 @@ export async function renderRoom(root: HTMLElement, channel: string) {
       ) : (
         <AudioTileView e={p.e} spotlight={spotlight} focusKey={focusKey} />
       );
+
+    // 灯箱打开时锁住背景滚动；卸载时兜底还原，避免半路离开房间留下 overflow:hidden
+    createEffect(() => {
+      document.body.style.overflow = lightbox() ? 'hidden' : '';
+    });
+    onCleanup(() => {
+      document.body.style.overflow = '';
+    });
 
     return (
       <div class="room-frame">
@@ -2411,6 +2434,27 @@ export async function renderRoom(root: HTMLElement, channel: string) {
             </div>
           </aside>
         </div>
+        <Show when={lightbox()}>
+          <div class="lightbox-scrim" onClick={() => setLightbox(null)}>
+            <div class="lightbox-box" onClick={(ev) => ev.stopPropagation()}>
+              <img src={lightbox()!.url} alt={lightbox()!.name} />
+              <div class="lightbox-bar">
+                <div class="lightbox-meta">
+                  <span class="lightbox-name">{lightbox()!.name}</span>
+                  <span class="lightbox-size mono">{fmtSize(lightbox()!.size)}</span>
+                </div>
+                <div class="lightbox-actions">
+                  <a class="hit lightbox-dl" href={lightbox()!.url} download={lightbox()!.name}>
+                    下载
+                  </a>
+                  <button type="button" class="hit lightbox-close" onClick={() => setLightbox(null)} aria-label="关闭">
+                    {el(icon('close', 16, 'currentColor', 1.8))}
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </Show>
       </div>
     );
   };

@@ -547,7 +547,7 @@ body {
 /* ---- 聊天里的图片/文件（字节走数据通道，服务端只有卡片） ---- */
 .chat-log.dropping { outline: 1.5px dashed var(--ember-line); outline-offset: -6px; background: var(--ember-weak); }
 .chat-file { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
-.chat-img { display: block; max-width: 240px; border-radius: 10px; overflow: hidden; border: 1px solid var(--line); background: var(--bg-2); }
+.chat-img { display: block; max-width: 240px; border-radius: 10px; overflow: hidden; border: 1px solid var(--line); background: var(--bg-2); cursor: zoom-in; }
 .chat-img img { display: block; width: 100%; height: auto; max-height: 300px; object-fit: cover; }
 .file-card {
   display: flex; align-items: center; gap: 10px; min-width: 0; max-width: 260px;
@@ -561,6 +561,29 @@ body {
 .file-card .fc-dl { flex-shrink: 0; font-size: 11px; font-weight: 600; color: var(--ember); text-decoration: none; }
 .fc-bar { height: 3px; border-radius: 999px; background: var(--bg-4); overflow: hidden; max-width: 260px; }
 .fc-bar i { display: block; height: 100%; background: var(--ember); transition: width 0.12s linear; }
+
+/* ---- 聊天图片灯箱 ---- */
+.lightbox-scrim {
+  position: fixed; inset: 0; z-index: 310; display: flex; align-items: center; justify-content: center;
+  background: var(--scrim); padding: 32px;
+}
+.lightbox-box { display: flex; flex-direction: column; gap: 10px; max-width: 90vw; max-height: 90vh; }
+.lightbox-box img { display: block; max-width: 90vw; max-height: calc(90vh - 40px); object-fit: contain; border-radius: 8px; }
+.lightbox-bar { display: flex; align-items: center; gap: 12px; color: var(--on-stage); }
+.lightbox-meta { flex-grow: 1; min-width: 0; display: flex; align-items: baseline; gap: 8px; }
+.lightbox-name { font-size: 12.5px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lightbox-size { font-size: 10.5px; color: var(--stage-line); flex-shrink: 0; }
+.lightbox-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+.lightbox-dl {
+  font-size: 12px; font-weight: 600; color: var(--on-stage); background: rgba(255, 255, 255, 0.12);
+  border-radius: 7px; padding: 6px 12px;
+}
+.lightbox-dl:hover { color: var(--on-stage); background: rgba(255, 255, 255, 0.2); }
+.lightbox-close {
+  width: 28px; height: 28px; border-radius: 7px; display: flex; align-items: center; justify-content: center;
+  color: var(--on-stage); background: rgba(255, 255, 255, 0.12);
+}
+.lightbox-close:hover { background: rgba(255, 255, 255, 0.2); }
 
 /* ---- 设置（全屏接管） ---- */
 .settings-overlay { position: fixed; inset: 0; z-index: 50; display: flex; background: var(--bg-0); }
