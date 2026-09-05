@@ -13,6 +13,7 @@ import type { AudioCaptureOptions, LocalVideoTrack, ScreenShareCaptureOptions, T
 import { RnnoisePipeline } from '../audio';
 import { RES_DIMS, loadPrefs } from '../prefs';
 import type { RoomPrefs, ScreenCodec } from '../prefs';
+import { DATA_TOPIC_FILE, DATA_TOPIC_TEXT } from './types';
 import type { AVEngine, EPart, EngineCallbacks, TrackSource, VideoStats } from './types';
 
 const toSource = (s: Track.Source): TrackSource | null =>
@@ -101,6 +102,35 @@ export class LiveKitEngine implements AVEngine {
   }
 
   private wire() {
+    // Data Streams 的 handler 必须在 connect 之前注册，否则 join 后先到的流没人接：
+    // 和下面的事件订阅一样只在构造时做一次
+    this.room.registerTextStreamHandler(DATA_TOPIC_TEXT, (reader, from) => {
+      void reader
+        .readAll()
+        .then((text) => this.cbs.onText?.(DATA_TOPIC_TEXT, text, from.identity))
+        .catch(() => {}); // 单条流读失败不该掀翻房间：发送方会重发或走 REST 补齐
+    });
+    this.room.registerByteStreamHandler(DATA_TOPIC_FILE, (reader, from) => {
+      const info = reader.info;
+      void reader
+        .readAll()
+        .then((chunks) => {
+          const total = chunks.reduce((n, c) => n + c.byteLength, 0);
+          const bytes = new Uint8Array(total);
+          let off = 0;
+          for (const c of chunks) {
+            bytes.set(c, off);
+            off += c.byteLength;
+          }
+          this.cbs.onFile?.(
+            DATA_TOPIC_FILE,
+            { name: info.name, mime: info.mimeType, size: info.size ?? total, attrs: info.attributes ?? {} },
+            bytes,
+            from.identity,
+          );
+        })
+        .catch(() => {}); // 传输中断：接收方卡片停在「传输中」，不伪造一个坏文件
+    });
     this.room
       .on(RoomEvent.TrackSubscribed, (track: RemoteTrack, _pub, p: RemoteParticipant) => {
         if (track.kind === Track.Kind.Audio) {
@@ -268,6 +298,24 @@ export class LiveKitEngine implements AVEngine {
 
   async resumeAudio() {
     await this.room.startAudio();
+  }
+
+  async sendText(topic: string, text: string) {
+    await this.room.localParticipant.sendText(text, { topic });
+  }
+
+  // 用 sendBytes 而不是 SDK 的 sendFile：后者的 SendFileOptions 只取 topic/mimeType/
+  // destinationIdentities，attributes 会被丢掉，而卡片关联全靠 attrs.message_id。
+  // 代价是整包读进内存——文件本来就有大小上限，可接受。
+  async sendFile(file: File, topic: string, attrs: Record<string, string>, onProgress?: (p: number) => void) {
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    await this.room.localParticipant.sendBytes(bytes, {
+      topic,
+      name: file.name,
+      mimeType: file.type || 'application/octet-stream',
+      attributes: attrs,
+      onProgress,
+    });
   }
 
   disconnect() {

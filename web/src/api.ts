@@ -62,10 +62,6 @@ export function clearSession() {
   localStorage.removeItem(USER_KEY);
 }
 
-export function wsBase(): string {
-  return SERVER_URL.replace(/^http/, 'ws');
-}
-
 // 请求失败的统一错误类型：status 是 HTTP 状态码，0 表示网络层失败（连不上 / 超时）。
 // 调用方据此区分「服务器拒绝」与「压根没到服务器」，message 一律是可直接展示的中文。
 export class ApiError extends Error {
@@ -124,6 +120,9 @@ async function req<T>(path: string, options: { method?: string; body?: unknown }
   if (res.status === 204) return undefined as T;
   return (await res.json()) as T;
 }
+
+// 供同源的其它模块复用鉴权/超时/401 处理（chat.ts 的消息接口）：形状与内部调用完全一致
+export { req as apiRequest };
 
 export async function register(username: string, password: string, invite?: string): Promise<User> {
   const data = await req<{ token: string; user: User }>('/api/register', {

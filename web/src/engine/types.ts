@@ -26,6 +26,19 @@ export interface EPart {
   tag: string; // 推流设备标签（identity = {username}-{tag}）；非推流参与者为空
 }
 
+// 数据通道话题：文本走 TEXT，文件字节走 FILE。引擎只按 topic 注册/透传，
+// 「哪个 topic 装什么」是房间层的约定，两边共用这两个常量避免拼错字符串。
+export const DATA_TOPIC_TEXT = 'chat';
+export const DATA_TOPIC_FILE = 'chat-file';
+
+// 收到的文件字节的附带信息（attrs 是发送方挂的自定义键值，房间层用 message_id 关联卡片）
+export interface DataFileInfo {
+  name: string;
+  mime: string;
+  size: number;
+  attrs: Record<string, string>;
+}
+
 // 引擎 → 房间视图的事件回调。引擎负责把媒体轨变成可挂载的元素；
 // 音量/静音/挂载位置等呈现层决策全部留在房间视图。
 export interface EngineCallbacks {
@@ -42,6 +55,10 @@ export interface EngineCallbacks {
   onEnded(reason: 'kicked' | 'room-deleted' | 'duplicate' | 'lost'): void;
   onAudioBlocked?(): void; // 浏览器拦截了自动播放：需要用户手势才能出声
   onLocalTrackEnded(kind: 'mic' | 'camera' | 'screen'): void; // 采集中途终止：设备断开（如连续互通断开）、浏览器原生「停止共享」
+  // 数据通道到达（内核不解释内容，原样上交）；自己发的不会回显
+  onText?(topic: string, text: string, fromIdentity: string): void;
+  // bytes 显式标注非共享 buffer：调用方要直接喂 Blob，泛型省掉 lib.dom 的 SharedArrayBuffer 分支
+  onFile?(topic: string, info: DataFileInfo, bytes: Uint8Array<ArrayBuffer>, fromIdentity: string): void;
 }
 
 export interface AVEngine {
@@ -68,5 +85,9 @@ export interface AVEngine {
   remoteVideoStats(identity: string, source: TrackSource): Promise<VideoStats | null>;
   switchCamera(deviceId: string): Promise<void>;
   resumeAudio(): Promise<void>; // 用户手势后重放被拦截的音频元素
+  // 数据通道发送：未连接时抛错，调用方先看 connected()
+  sendText(topic: string, text: string): Promise<void>;
+  // attrs 随字节一起送达接收方（房间层挂 message_id 关联卡片）；onProgress 收 0~1
+  sendFile(file: File, topic: string, attrs: Record<string, string>, onProgress?: (p: number) => void): Promise<void>;
   dispose(): void; // 离开房间：断开并释放全部采集资源
 }

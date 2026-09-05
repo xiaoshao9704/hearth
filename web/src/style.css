@@ -538,6 +538,29 @@ body {
 .chat-input-box .send-btn { width: 28px; height: 28px; border-radius: 7px; display: flex; align-items: center; justify-content: center; color: var(--text-3); }
 .chat-input-box .send-btn.ready { background: var(--ember); color: var(--on-ember); }
 .chat-hint { padding: 7px 3px 0; font-size: 10px; color: var(--text-3); }
+.chat-input-box .attach-btn {
+  width: 28px; height: 28px; margin-left: -6px; border-radius: 7px; flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center; color: var(--text-3);
+}
+.chat-input-box .attach-btn:hover { color: var(--ember); background: var(--ember-weak); }
+
+/* ---- 聊天里的图片/文件（字节走数据通道，服务端只有卡片） ---- */
+.chat-log.dropping { outline: 1.5px dashed var(--ember-line); outline-offset: -6px; background: var(--ember-weak); }
+.chat-file { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.chat-img { display: block; max-width: 240px; border-radius: 10px; overflow: hidden; border: 1px solid var(--line); background: var(--bg-2); }
+.chat-img img { display: block; width: 100%; height: auto; max-height: 300px; object-fit: cover; }
+.file-card {
+  display: flex; align-items: center; gap: 10px; min-width: 0; max-width: 260px;
+  padding: 8px 10px; border-radius: 10px; background: var(--bg-2); border: 1px solid var(--line); color: var(--text-1);
+}
+.file-card.dim { color: var(--text-2); border-style: dashed; }
+.file-card > svg { flex-shrink: 0; }
+.file-card .fc-body { min-width: 0; flex-grow: 1; display: flex; flex-direction: column; gap: 2px; }
+.file-card .fc-name { font-size: 12.5px; color: var(--text-0); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat-file .fc-sub { font-size: 10px; color: var(--text-2); }
+.file-card .fc-dl { flex-shrink: 0; font-size: 11px; font-weight: 600; color: var(--ember); text-decoration: none; }
+.fc-bar { height: 3px; border-radius: 999px; background: var(--bg-4); overflow: hidden; max-width: 260px; }
+.fc-bar i { display: block; height: 100%; background: var(--ember); transition: width 0.12s linear; }
 
 /* ---- 设置（全屏接管） ---- */
 .settings-overlay { position: fixed; inset: 0; z-index: 50; display: flex; background: var(--bg-0); }

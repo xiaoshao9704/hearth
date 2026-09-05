@@ -10,9 +10,10 @@ import { render } from 'solid-js/web';
 import { ApiError, fetchJoinCredentials, getUser, kickUser, listChannels, muteUser, reportClientLog } from '../api';
 import type { EngineCred } from '../api';
 import { playCue } from '../audio';
-import { connectChat } from '../chat';
+import { fetchMessages, postMessage } from '../chat';
 import type { ChatMessage } from '../chat';
 import { createEngine } from '../engine';
+import { DATA_TOPIC_FILE, DATA_TOPIC_TEXT } from '../engine/types';
 import type { AVEngine, EPart, EngineCallbacks, TrackSource, VideoStats } from '../engine/types';
 import { encoderIsHw, loadPrefs, prefsBus, savePrefs } from '../prefs';
 import { renderShell } from '../shell';
@@ -70,6 +71,30 @@ interface RoomEvent {
 
 // 语音线连接阶段（顶栏 chip 与外壳连接框的唯一来源）；retry 带上第几次，避免再开一个信号
 type VoiceState = { phase: 'connecting' | 'up' | 'retry'; attempt: number };
+
+// 文件卡片的本地字节状态：消息本体（卡片）来自服务端，字节只经数据通道，
+// 二者互不重叠——这里存的是「本次会话有没有拿到字节」，不是消息的副本。
+// expired = 历史里的卡片，字节是发送那一刻扇出的，晚到的人补不回来
+type FileStatus = 'sending' | 'ready' | 'receiving' | 'expired' | 'failed';
+
+interface FileState {
+  status: FileStatus;
+  progress: number; // 0~1，仅发送侧
+  url: string; // Blob URL（ready 时非空）
+}
+
+// 内联预览的图片 MIME 白名单：白名单外一律当文件走 a[download]，不进 <img>
+const IMAGE_MIME = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
+
+// 客户端上限：与服务端 chat_file_max_mb 的默认值一致，先拦一道少一次白跑的往返；
+// 真正的权威仍是服务端（按实际配置校验，超限 413）
+const FILE_MAX_MB = 25;
+
+function fmtSize(n: number): string {
+  if (n >= 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MB`;
+  if (n >= 1024) return `${Math.round(n / 1024)} KB`;
+  return `${n} B`;
+}
 
 // ---- 每设备本地音量持久化（0~100，按 identity）----
 const VOLS_KEY = 'hearth_room_volumes';
@@ -179,6 +204,9 @@ export async function renderRoom(root: HTMLElement, channel: string) {
   const tileTimers = new Set<number>(); // 投屏徽章的实测轮询定时器，离房时兜底清掉
 
   const stageEngine = () => (combined ? voiceLine.engine : stageLine?.engine) ?? null;
+  // 数据线：聊天文本与文件字节都走这一条。舞台线在就用它（拆分形态下把扇出带宽放在
+  // 舞台侧，成员本来也都连着），没有舞台线（纯语音部署）回落语音线，行为一致
+  const dataEngine = () => stageEngine() ?? voiceLine.engine;
 
   // ---- 视图层信号 ----
   const [roster, setRoster] = createSignal<EPart[]>([]); // parts() 合并结果的快照
@@ -213,7 +241,9 @@ export async function renderRoom(root: HTMLElement, channel: string) {
   const [newBelow, setNewBelow] = createSignal(false);
   const [historyLoaded, setHistoryLoaded] = createSignal(false);
   const [chatReady, setChatReady] = createSignal(false); // 输入框非空 → 发送按钮点亮
-  const [chatPlaceholder, setChatPlaceholder] = createSignal(`发消息到 #${channel}`);
+  const [chatDrag, setChatDrag] = createSignal(false); // 文件拖到聊天区上方
+  // 文件卡片的字节状态，按消息 id 索引（消息本体在 msgs()，这里只管字节）
+  const [fileStates, setFileStates] = createSignal<Map<number, FileState>>(new Map());
   const [roomEvents, setRoomEvents] = createSignal<RoomEvent[]>([]);
   const [voiceState, setVoiceState] = createSignal<VoiceState>({ phase: 'connecting', attempt: 0 });
   const [audioBlocked, setAudioBlocked] = createSignal(false);
@@ -225,6 +255,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
   let audioBinEl!: HTMLDivElement;
   let chatLogEl!: HTMLDivElement;
   let chatInputEl!: HTMLInputElement;
+  let chatFileEl!: HTMLInputElement;
   let vuBarEl: HTMLElement | undefined; // 麦克风 VU 条（micOn 时才在 DOM 里）
 
   // 双线参与者合并：语音线是名册权威（micOn），舞台线补充 sharing/推流标记
@@ -820,6 +851,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
       }
       line.attempts = 0;
       diag('info', 'connect_ok', role, { ...details, elapsed_ms: performance.now() - started });
+      if (!first) void syncMessages(false); // 断线重进：广播漏的从库里补
       if (role === 'voice') {
         setStatusText('');
         cueBaseline = true; // 重连成功后的第一份名册只重置基线，不当成一屋子人刚进来
@@ -963,6 +995,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
         }
         refreshRoster();
         refreshMeta();
+        void syncMessages(false); // 自愈期间数据线丢的广播，按 after= 从库里补
       },
       onAudioBlocked: () => setAudioBlocked(true),
       onDiagnostic: (event, state, detail) => diag('info', `sdk_${event}`, role, { state, detail }),
@@ -982,6 +1015,14 @@ export async function renderRoom(root: HTMLElement, channel: string) {
           shell.setConn(!!voiceLine.engine?.connected(), connBoxMeta());
           scheduleRejoin('stage', 0);
         }
+      },
+      // 数据通道：只有数据线那条会真收到（另一条没人往里发），重复到达也会被 id 去重挡掉
+      onText: (_topic, text) => onChatBroadcast(text),
+      onFile: (_topic, info, bytes) => {
+        const id = Number(info.attrs.message_id ?? '');
+        if (!Number.isInteger(id) || id <= 0) return;
+        const mime = info.mime || 'application/octet-stream';
+        putFileState(id, { status: 'ready', progress: 1, url: URL.createObjectURL(new Blob([bytes], { type: mime })) });
       },
       onLocalTrackEnded: (kind) => {
         if (kind === 'mic' && micOn()) {
@@ -1232,46 +1273,192 @@ export async function renderRoom(root: HTMLElement, channel: string) {
     chatLogEl.scrollTo({ top: chatLogEl.scrollHeight, behavior: 'smooth' });
   }
 
-  const chat = connectChat(channel, {
-    onHistory: (messages) => {
-      setHistoryLoaded(true);
-      setMsgs(messages);
-      setUnread(0);
-    },
-    onMessage: (m) => {
-      setMsgs((list) => [...list, m]);
-      if (m.uid === myUid) {
-        // 自己发的不计未读；刚发完消息的人要看的是自己这条，直接落底
-        queueMicrotask(() => {
-          chatLogEl.scrollTop = chatLogEl.scrollHeight;
-        });
-        return;
-      }
-      // 面板关着或页面在后台都计未读（title 前缀与按钮角标共用这一个计数）
-      if (panel() !== 'chat' || document.visibilityState !== 'visible') setUnread((u) => u + 1);
-    },
-    onKicked: (code) => {
-      if (leaving) return;
-      bounce(code === 1001 ? '频道已删除' : '你已被移出该频道');
-    },
-    onState: (state) => {
-      setChatPlaceholder(state === 'open' ? `发消息到 #${channel}` : '聊天重连中…');
-    },
-  });
+  // ---- 文件卡片的字节状态 ----
 
-  function sendChat(ev: Event) {
-    ev.preventDefault();
-    const content = chatInputEl.value.trim();
-    if (!content) return;
-    // ws 断开时 send 会静默丢消息：保留输入框内容，让用户重连后能再发一次
-    if (!chat.connected()) {
-      toast('聊天未连接，稍后再发', 'bad');
+  function putFileState(id: number, st: FileState) {
+    setFileStates((prev) => {
+      const m = new Map(prev);
+      const old = m.get(id);
+      if (old?.url && old.url !== st.url) URL.revokeObjectURL(old.url);
+      m.set(id, st);
+      return m;
+    });
+  }
+
+  function patchFileState(id: number, patch: Partial<FileState>) {
+    setFileStates((prev) => {
+      const cur = prev.get(id);
+      if (!cur) return prev;
+      const m = new Map(prev);
+      m.set(id, { ...cur, ...patch });
+      return m;
+    });
+  }
+
+  // 历史里的文件卡片：字节是发送那一刻扇出的，本次会话没收到就补不回来
+  function markExpired(list: ChatMessage[]) {
+    for (const m of list) {
+      if (m.kind === 'file' && !fileStates().has(m.id)) {
+        putFileState(m.id, { status: 'expired', progress: 0, url: '' });
+      }
+    }
+  }
+
+  // ---- 聊天消息（落库为权威，数据线只是实时扇出）----
+
+  // 追加一条消息，按 id 去重（数据线广播与 REST 补齐会重叠）
+  function appendMessage(m: ChatMessage) {
+    let added = false;
+    setMsgs((list) => {
+      if (list.some((x) => x.id === m.id)) return list;
+      added = true;
+      return [...list, m].sort((a, b) => a.id - b.id);
+    });
+    if (!added) return;
+    // 别人发的文件：卡片先到，字节随后经数据通道到
+    if (m.kind === 'file' && !fileStates().has(m.id)) {
+      putFileState(m.id, { status: 'receiving', progress: 0, url: '' });
+    }
+    if (m.uid === myUid) {
+      // 自己发的不计未读；刚发完消息的人要看的是自己这条，直接落底
+      queueMicrotask(() => {
+        chatLogEl.scrollTop = chatLogEl.scrollHeight;
+      });
       return;
     }
-    chat.send(content);
+    // 面板关着或页面在后台都计未读（title 前缀与按钮角标共用这一个计数）
+    if (panel() !== 'chat' || document.visibilityState !== 'visible') setUnread((u) => u + 1);
+  }
+
+  // 数据线到的是一整条 Message 的 JSON：解析失败就丢，重连时 after= 会补齐
+  function onChatBroadcast(text: string) {
+    let m: ChatMessage;
+    try {
+      m = JSON.parse(text) as ChatMessage;
+    } catch {
+      return;
+    }
+    if (!m || typeof m.id !== 'number' || m.id <= 0) return;
+    appendMessage(m);
+  }
+
+  // 数据线不在（未连上/正在重连）时只落库不广播：接收方靠 after= 补齐，发送不阻塞
+  function broadcast(m: ChatMessage) {
+    const eng = dataEngine();
+    if (!eng?.connected()) return;
+    void eng.sendText(DATA_TOPIC_TEXT, JSON.stringify(m)).catch(() => {});
+  }
+
+  // 进房首次取最近 50 条；重连时按最大已知 id 补断线期间漏掉的
+  let syncing = false;
+  async function syncMessages(first: boolean) {
+    if (syncing || leaving) return;
+    syncing = true;
+    try {
+      const after = first ? 0 : msgs().reduce((max, m) => (m.id > max ? m.id : max), 0);
+      const list = await fetchMessages(channel, after);
+      if (leaving) return;
+      // 必须先标过期再入列：appendMessage 会把没见过的文件卡片当成「字节在路上」，
+      // 而从库里补来的这批，字节早在发送那一刻就扇出完了
+      markExpired(list);
+      if (first) {
+        setMsgs(list);
+        setHistoryLoaded(true);
+        setUnread(0);
+      } else {
+        list.forEach((m) => appendMessage(m));
+      }
+    } catch {
+      // 取历史失败不阻断进房：下次重连或发消息时自然补齐
+    } finally {
+      syncing = false;
+    }
+  }
+
+  let sendingText = false;
+  async function sendChat(ev: Event) {
+    ev.preventDefault();
+    const content = chatInputEl.value.trim();
+    if (!content || sendingText) return;
+    sendingText = true;
     chatInputEl.value = '';
     setChatReady(false);
+    try {
+      const m = await postMessage(channel, { content });
+      appendMessage(m);
+      broadcast(m);
+    } catch (err) {
+      // 落库失败才是真失败（禁言 403、超长 400）：把内容还给输入框，让用户能重发
+      chatInputEl.value = content;
+      setChatReady(true);
+      toast((err as Error).message, 'bad');
+    } finally {
+      sendingText = false;
+    }
   }
+
+  // ---- 发文件/图片 ----
+
+  async function sendFiles(files: File[]) {
+    for (const f of files) {
+      if (f.size > FILE_MAX_MB * 1024 * 1024) {
+        toast(`「${f.name}」超过 ${FILE_MAX_MB} MB，发不出去`, 'bad');
+        continue;
+      }
+      await sendOneFile(f);
+    }
+  }
+
+  async function sendOneFile(file: File) {
+    const meta = { name: file.name, mime: file.type || 'application/octet-stream', size: file.size };
+    let m: ChatMessage;
+    try {
+      m = await postMessage(channel, { kind: 'file', file: meta });
+    } catch (err) {
+      toast((err as Error).message, 'bad');
+      return;
+    }
+    // 自己的卡片直接用手上的 File 预览/下载，不等字节绕一圈回来
+    putFileState(m.id, { status: 'sending', progress: 0, url: URL.createObjectURL(file) });
+    appendMessage(m);
+    broadcast(m);
+    const eng = dataEngine();
+    if (!eng?.connected()) {
+      // 卡片已落库但字节没人收得到：如实告知，别假装发出去了
+      patchFileState(m.id, { status: 'ready', progress: 1 });
+      toast('数据线未连接，对方只会看到一张过期卡片', 'bad');
+      return;
+    }
+    try {
+      await eng.sendFile(file, DATA_TOPIC_FILE, { message_id: String(m.id) }, (p) =>
+        patchFileState(m.id, { progress: p }),
+      );
+      patchFileState(m.id, { status: 'ready', progress: 1 });
+    } catch (err) {
+      patchFileState(m.id, { status: 'failed' });
+      toast(`「${file.name}」发送失败：${(err as Error)?.message ?? ''}`, 'bad');
+    }
+  }
+
+  const pickFiles = () => {
+    const list = [...(chatFileEl.files ?? [])];
+    chatFileEl.value = ''; // 同一个文件连发两次也要触发 change
+    if (list.length) void sendFiles(list);
+  };
+
+  const onChatPaste = (ev: ClipboardEvent) => {
+    const list = [...(ev.clipboardData?.files ?? [])];
+    if (!list.length) return;
+    ev.preventDefault(); // 截图粘贴：不要同时把文件名塞进输入框
+    void sendFiles(list);
+  };
+
+  const onChatDrop = (ev: DragEvent) => {
+    ev.preventDefault();
+    setChatDrag(false);
+    const list = [...(ev.dataTransfer?.files ?? [])];
+    if (list.length) void sendFiles(list);
+  };
 
   // ---- 设置页偏好热应用 ----
   const onPrefs = async (ev: Event) => {
@@ -1491,6 +1678,61 @@ export async function renderRoom(root: HTMLElement, channel: string) {
     );
   };
 
+  // 文件卡片：消息本体来自服务端（卡片一定在），字节只经数据通道（可能没有）
+  const FileCard = (p: { m: ChatMessage }) => {
+    const meta = () => p.m.file ?? { name: '文件', mime: '', size: 0 };
+    const st = () => fileStates().get(p.m.id);
+    // 有本地 URL 才谈得上预览/下载：发送方从手上的 File 直接拿，接收方等字节到齐
+    const hasBytes = () => !!st()?.url;
+    const inline = () => hasBytes() && IMAGE_MIME.has(meta().mime);
+    // 字节不在位时才补一句状态，在位了只留体积
+    const note = () => {
+      const s = st();
+      if (!s || s.status === 'ready') return '';
+      if (s.status === 'sending') return `发送中 ${Math.round(s.progress * 100)}%`;
+      if (s.status === 'receiving') return '传输中…';
+      if (s.status === 'failed') return '发送失败';
+      return '已过期（发送时不在线）';
+    };
+    return (
+      <div class="chat-file">
+        <Show
+          when={inline()}
+          fallback={
+            <div class="file-card" classList={{ dim: !hasBytes() }}>
+              {el(icon('file', 16, 'currentColor'))}
+              <div class="fc-body">
+                <div class="fc-name">{meta().name}</div>
+                <div class="fc-sub mono">
+                  {fmtSize(meta().size)}
+                  {note() && ` · ${note()}`}
+                </div>
+              </div>
+              <Show when={hasBytes()}>
+                <a class="hit fc-dl" href={st()!.url} download={meta().name}>
+                  下载
+                </a>
+              </Show>
+            </div>
+          }
+        >
+          <a class="chat-img" href={st()!.url} download={meta().name}>
+            <img src={st()!.url} alt={meta().name} />
+          </a>
+        </Show>
+        {/* 图片分支的状态另起一行：卡片分支的那行在 fc-sub 里 */}
+        <Show when={inline() && note()}>
+          <div class="fc-sub mono">{note()}</div>
+        </Show>
+        <Show when={st()?.status === 'sending'}>
+          <div class="fc-bar">
+            <i style={{ width: `${Math.round((st()?.progress ?? 0) * 100)}%` }} />
+          </div>
+        </Show>
+      </div>
+    );
+  };
+
   const ChatMsgView = (p: { m: ChatMessage }) => {
     const mine = p.m.uid === myUid;
     const openMenu = (ev: MouseEvent) => showUserMenu(ev.clientX, ev.clientY, p.m.uid, p.m.username);
@@ -1509,7 +1751,9 @@ export async function renderRoom(root: HTMLElement, channel: string) {
             <span class="who">{p.m.username}</span>
             <span class="at">{fmtClock(p.m.created_at)}</span>
           </div>
-          <div class="text">{p.m.content}</div>
+          <Show when={p.m.kind === 'file'} fallback={<div class="text">{p.m.content}</div>}>
+            <FileCard m={p.m} />
+          </Show>
         </div>
       </div>
     );
@@ -2071,7 +2315,20 @@ export async function renderRoom(root: HTMLElement, channel: string) {
                 {el(icon('close', 15, 'var(--text-2)', 1.8))}
               </button>
             </div>
-            <div class="chat-log" ref={chatLogEl} onScroll={onChatScroll}>
+            <div
+              class="chat-log"
+              classList={{ dropping: chatDrag() }}
+              ref={chatLogEl}
+              onScroll={onChatScroll}
+              onDragOver={(ev) => {
+                ev.preventDefault();
+                setChatDrag(true);
+              }}
+              onDragLeave={(ev) => {
+                if (!chatLogEl.contains(ev.relatedTarget as Node | null)) setChatDrag(false);
+              }}
+              onDrop={onChatDrop}
+            >
               <Show when={historyLoaded()}>
                 <div class="chat-day">最近</div>
               </Show>
@@ -2086,21 +2343,33 @@ export async function renderRoom(root: HTMLElement, channel: string) {
             </Show>
             <div class="chat-input-wrap">
               <form class="chat-input-box" onSubmit={sendChat}>
+                <button
+                  type="button"
+                  class="hit attach-btn"
+                  title={`发送图片或文件（上限 ${FILE_MAX_MB} MB）`}
+                  aria-label="发送图片或文件"
+                  onClick={() => chatFileEl.click()}
+                >
+                  {el(icon('clip', 16, 'currentColor', 1.8))}
+                </button>
                 <input
                   ref={chatInputEl}
-                  placeholder={chatPlaceholder()}
+                  placeholder={`发消息到 #${channel}`}
                   maxlength="2000"
                   autocomplete="off"
                   onInput={() => setChatReady(chatInputEl.value.trim().length > 0)}
+                  onPaste={onChatPaste}
                   onKeyDown={(ev) => {
-                    if ((ev.ctrlKey || ev.metaKey) && ev.key === 'Enter') sendChat(ev);
+                    if ((ev.ctrlKey || ev.metaKey) && ev.key === 'Enter') void sendChat(ev);
                   }}
                 />
                 <button type="submit" class="hit send-btn" classList={{ ready: chatReady() }}>
                   {el(icon('back', 15, 'currentColor', 1.8))}
                 </button>
               </form>
-              <div class="chat-hint mono">仅保留最近 50 条历史</div>
+              {/* 放在 form 外：.chat-input-box input 那条样式是给文本框的，别把它套到隐藏的文件选择器上 */}
+              <input ref={chatFileEl} type="file" multiple hidden onChange={pickFiles} />
+              <div class="chat-hint mono">仅保留最近 50 条历史；图片/文件只在发送时在线的人能收到</div>
             </div>
           </aside>
         </div>
@@ -2160,7 +2429,9 @@ export async function renderRoom(root: HTMLElement, channel: string) {
       void vuCtx?.close();
       clearTimeout(voiceLine.timer);
       if (stageLine && stageLine !== voiceLine) clearTimeout(stageLine.timer);
-      chat.close();
+      fileStates().forEach((st) => {
+        if (st.url) URL.revokeObjectURL(st.url);
+      });
       voiceLine.engine?.dispose();
       if (stageLine && stageLine !== voiceLine) stageLine.engine?.dispose();
       dispose();
@@ -2171,5 +2442,6 @@ export async function renderRoom(root: HTMLElement, channel: string) {
   window.addEventListener('hashchange', onHashChange);
 
   updateStageButtons();
+  void syncMessages(true); // 历史不等连接：先把最近 50 条摆出来
   await connectLines(true);
 }
