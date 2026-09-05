@@ -86,7 +86,9 @@ function SettingsOverlay(p: { pane: Pane; ctx: SettingsContext }) {
               class="hit nav-row"
               onClick={() => {
                 closeSettings();
-                location.hash = '#/admin';
+                // 房间里开的设置：管理后台走新标签页，别把正在通话的房间顶掉
+                if (location.hash.startsWith('#/room/')) window.open('#/admin', '_blank', 'noopener');
+                else location.hash = '#/admin';
               }}
             >
               {el(icon('gauge', 16, 'currentColor', 1.6))}

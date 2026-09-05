@@ -2,6 +2,7 @@
 import './style.css';
 import { initScreenCodecAuto } from './prefs';
 import { fetchMe, getToken } from './api';
+import { allowLeave } from './nav';
 import { renderAdmin } from './views/admin';
 import { renderJoin } from './views/join';
 import { isLobbyHash, renderLobby } from './views/lobby';
@@ -18,6 +19,10 @@ const NEXT_KEY = 'hearth_next';
 let gen = 0;
 
 function route() {
+  // 在房间里往外跳先问一句；hashchange 是先注册先执行，route() 排在房间视图自己的清理之前，
+  // 所以拦截只能放在这里的最前面
+  if (!allowLeave()) return;
+
   gen++;
   const myGen = gen;
   const alive = () => gen === myGen;

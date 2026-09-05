@@ -1,4 +1,5 @@
 // 与 server 交互的 REST 客户端，会话 token 存 localStorage（MVP 简化处理）。
+import { setLeaveGuard } from './nav';
 import { toast } from './ui';
 
 const SERVER_URL: string = import.meta.env.VITE_SERVER_URL ?? 'http://localhost:8080';
@@ -131,6 +132,7 @@ async function req<T>(path: string, options: { method?: string; body?: unknown }
     if (res.status === 401 && token) {
       if (!location.hash.startsWith('#/login')) sessionStorage.setItem(NEXT_KEY, location.hash);
       clearSession();
+      setLeaveGuard(null); // 会话都没了，不该再被房间的离开确认拦住
       toast('登录已失效，请重新登录', 'bad');
       // replace 而非 push：否则用户按返回键会回到失效页再被踢回来，死循环
       location.replace('#/login');

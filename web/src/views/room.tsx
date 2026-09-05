@@ -15,6 +15,7 @@ import type { ChatMessage } from '../chat';
 import { createEngine } from '../engine';
 import { DATA_TOPIC_FILE, DATA_TOPIC_TEXT } from '../engine/types';
 import type { AVEngine, EPart, EngineCallbacks, TrackSource, VideoStats } from '../engine/types';
+import { clearLeaveGuard, setLeaveGuard } from '../nav';
 import { encoderIsHw, loadPrefs, prefsBus, savePrefs } from '../prefs';
 import { renderShell } from '../shell';
 import { avatarHtml, confirmDialog, el, esc, fmtClock, icon, licon, menuButtonHtml, micIcon, slashIcon, toast, wireMenuButton } from '../ui';
@@ -747,6 +748,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
   function bounce(msg: string) {
     if (bounced) return;
     bounced = true;
+    clearLeavePrompt(); // 被动出场：接下来跳大厅是既定结果，别再拦一道
     setStatusText(msg);
     toast(msg, 'bad');
     setTimeout(() => {
@@ -950,11 +952,24 @@ export async function renderRoom(root: HTMLElement, channel: string) {
   };
   const onOffline = () => diag('warn', 'browser_offline');
   const onPageHide = () => diag('info', 'page_hide', undefined, { state: document.visibilityState });
+  // 误关标签页/误刷新的代价大（通话断、投屏中断）：在房间里就挂原生离开确认，
+  // 站内改 hash 另由路由守卫拦。主动离开与被踢/频道删除等被动出场前都要先撤掉，免得再弹一次
+  const onBeforeUnload = (ev: BeforeUnloadEvent) => {
+    ev.preventDefault();
+    ev.returnValue = '';
+  };
+  const leaveConfirm = () => confirm('离开当前房间？');
+  function clearLeavePrompt() {
+    window.removeEventListener('beforeunload', onBeforeUnload);
+    clearLeaveGuard(leaveConfirm);
+  }
   const onWindowError = (ev: ErrorEvent) => diag('error', 'window_error', undefined, { error: ev.error ?? ev.message });
   const onUnhandledRejection = (ev: PromiseRejectionEvent) => diag('error', 'unhandled_rejection', undefined, { error: ev.reason });
   window.addEventListener('online', onOnline);
   window.addEventListener('offline', onOffline);
   window.addEventListener('pagehide', onPageHide);
+  window.addEventListener('beforeunload', onBeforeUnload);
+  setLeaveGuard(leaveConfirm);
   window.addEventListener('error', onWindowError);
   window.addEventListener('unhandledrejection', onUnhandledRejection);
 
@@ -1176,6 +1191,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
     if (screenOn() && !(await confirmDialog({ title: '正在投屏，确定离开？', body: '离开房间会立刻中断投屏。', confirmText: '离开', danger: true }))) {
       return;
     }
+    clearLeavePrompt(); // 用户已经明确要走，路由守卫不必再问
     location.hash = '#/lobby';
   }
 
@@ -2488,6 +2504,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
       window.removeEventListener('online', onOnline);
       window.removeEventListener('offline', onOffline);
       window.removeEventListener('pagehide', onPageHide);
+      clearLeavePrompt();
       window.removeEventListener('error', onWindowError);
       window.removeEventListener('unhandledrejection', onUnhandledRejection);
       // title 兜底还原：正常已由 route() 换成新页面标题，只在 title 仍属本房间时去掉未读前缀
