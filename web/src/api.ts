@@ -86,6 +86,25 @@ function statusMessage(status: number): string {
 const NEXT_KEY = 'hearth_next';
 const REQ_TIMEOUT_MS = 15000;
 
+// 服务端升级探测：每个 /api/* 响应都带 X-Hearth-Version（见 server/internal/api/api.go 的
+// versionHeader 中间件）。记住首次看到的值，后续值一变就说明服务端重启到了新版本——旧标签页的
+// 前端代码还是旧的，提示用户刷新。只在拿到响应头（非空）时比较，网络层失败/拿不到头都不判断；
+// 只弹一次，避免同一页面反复弹。
+let knownVersion: string | null = null;
+let versionUpdateNotified = false;
+
+function checkVersionHeader(res: Response): void {
+  const v = res.headers.get('X-Hearth-Version');
+  if (!v) return;
+  if (knownVersion === null) {
+    knownVersion = v;
+    return;
+  }
+  if (v === knownVersion || versionUpdateNotified) return;
+  versionUpdateNotified = true;
+  toast('服务已更新，点击此提示刷新页面以使用新版本', '', 20000, () => location.reload());
+}
+
 async function req<T>(path: string, options: { method?: string; body?: unknown } = {}): Promise<T> {
   const headers: Record<string, string> = {};
   const token = getToken();
@@ -104,6 +123,7 @@ async function req<T>(path: string, options: { method?: string; body?: unknown }
     const timeout = (e as { name?: string } | null)?.name === 'TimeoutError';
     throw new ApiError(0, timeout ? '服务器响应超时，请稍后重试' : '连不上服务器，请检查网络或服务器地址');
   }
+  checkVersionHeader(res);
   if (!res.ok) {
     const data = (await res.json().catch(() => null)) as { error?: string } | null;
     // 带着 token 却 401 说明会话已失效（区别于登录页密码错误——那时本地无 token）：

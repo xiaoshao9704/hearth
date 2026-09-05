@@ -145,7 +145,8 @@ function dropToast(rec: ToastRec) {
 }
 
 // 返回关闭句柄：需要提前撤掉某条提示（如「保存中…」）时调用，旧调用方忽略即可
-export function toast(msg: string, tone: 'ok' | 'bad' | '' = '', ms = 3200): () => void {
+// onClick 可选：点击提示时先执行（例如触发刷新），再照常关闭
+export function toast(msg: string, tone: 'ok' | 'bad' | '' = '', ms = 3200, onClick?: () => void): () => void {
   if (!toastWrap || !document.body.contains(toastWrap)) {
     toastWrap = document.createElement('div');
     toastWrap.className = 'toast-wrap';
@@ -168,7 +169,10 @@ export function toast(msg: string, tone: 'ok' | 'bad' | '' = '', ms = 3200): () 
   toastWrap.appendChild(el);
   const rec: ToastRec = { key, el, timer: 0 };
   rec.timer = setTimeout(() => dropToast(rec), ms);
-  el.addEventListener('click', () => dropToast(rec));
+  el.addEventListener('click', () => {
+    onClick?.();
+    dropToast(rec);
+  });
   toasts.push(rec);
   while (toasts.length > TOAST_MAX) dropToast(toasts[0]);
   return () => dropToast(rec);

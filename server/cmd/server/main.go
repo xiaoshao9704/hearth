@@ -27,6 +27,10 @@ import (
 
 var usernameRe = regexp.MustCompile(`^[a-zA-Z0-9_-]{2,32}$`)
 
+// version 由 CI 发版时以 -ldflags "-X main.version=<tag>" 注入；本地构建保持 dev，
+// 前端据此探测服务端升级（见 api.New 的 version 参数与 X-Hearth-Version 响应头）。
+var version = "dev"
+
 // positionals 返回子命令及其位置参数，只跳过程序自己识别的全局 flag。
 // 子命令在 config.Load 前分派，不能依赖 flag 包事后解析。
 func positionals() []string {
@@ -146,7 +150,7 @@ func runServer(ctx context.Context, cfg config.Config, st *store.Store) {
 	// 端口映射先建好：它是内核宣告外部地址的来源之一（lite.MappedFunc），要在内核构造前交出去。
 	// Run 之前查不到任何映射，返回 false 即可，内核那边只是暂时少一条 srflx 候选。
 	mapper := portmap.New()
-	a := api.New(st, cfg, lite.MappedFunc(mapper.UDPExternal))
+	a := api.New(st, cfg, lite.MappedFunc(mapper.UDPExternal), version)
 
 	// 语音线或舞台线选中 lkembed 时拉起进程内 LiveKit（默认两线同选，即默认常驻；
 	// 两线都切走——语音选外部实例、舞台选 none——时什么都不起）

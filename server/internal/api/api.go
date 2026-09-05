@@ -29,8 +29,9 @@ import (
 )
 
 type API struct {
-	st  *store.Store
-	cfg config.Config
+	st      *store.Store
+	cfg     config.Config
+	version string // 构建版本号（main.version 注入，本地为 dev），随 X-Hearth-Version 响应头下发
 
 	// 内核实例注册表：接入层只依赖 rtc 接口，按选择器（实例 alias）取实例对象（见 providers.go）
 	reloadMu      sync.Mutex // 串行化「写 DB → 重建注册表」（mutateProviders/reloadProviders）
@@ -67,8 +68,8 @@ type API struct {
 	embedSrv    *livekitembed.Server
 }
 
-func New(st *store.Store, cfg config.Config, mapped lite.MappedFunc) *API {
-	a := &API{st: st, cfg: cfg, mapped: mapped,
+func New(st *store.Store, cfg config.Config, mapped lite.MappedFunc, version string) *API {
+	a := &API{st: st, cfg: cfg, mapped: mapped, version: version,
 		providers: map[string]*ProviderInstance{}}
 	// 内建实例只有 lkembed（进程内 LiveKit，语音/舞台/推流三面齐全，见 providers.go）
 	a.announcer = lite.NewAnnouncer(
@@ -101,6 +102,7 @@ func New(st *store.Store, cfg config.Config, mapped lite.MappedFunc) *API {
 func (a *API) Router() *chi.Mux {
 	r := chi.NewRouter()
 	r.Use(a.cors)
+	r.Use(a.versionHeader)
 
 	r.Post("/api/register", a.registerWithPolicy)
 	r.Post("/api/login", a.login)
@@ -332,9 +334,21 @@ func (a *API) cors(next http.Handler) http.Handler {
 		w.Header().Set("Access-Control-Allow-Origin", a.cfg.CORSOrigin)
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		w.Header().Set("Access-Control-Expose-Headers", "X-Hearth-Version")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
 			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// versionHeader 给 /api/* 响应回填构建版本号：前端凭它探测服务端升级（新旧值不同）
+// 并提示刷新，不影响静态资源与 /healthz。
+func (a *API) versionHeader(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/api/") {
+			w.Header().Set("X-Hearth-Version", a.version)
 		}
 		next.ServeHTTP(w, r)
 	})

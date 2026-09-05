@@ -25,7 +25,7 @@ func testAPIWithDB(t *testing.T) (*API, string) {
 		t.Fatalf("打开测试库失败: %v", err)
 	}
 	t.Cleanup(func() { s.Close() })
-	return New(s, config.Load(), nil), path
+	return New(s, config.Load(), nil, "dev"), path
 }
 
 func TestBuiltinInstancesFirst(t *testing.T) {
@@ -306,7 +306,7 @@ func TestFallbacksSafeWhenInitialReloadFails(t *testing.T) {
 	}
 	t.Cleanup(func() { s.Close() })
 	s.Close() // 模拟启动期 DB 不可用（迁移与首次 ListProviders 都会失败）
-	a := New(s, config.Load(), nil)
+	a := New(s, config.Load(), nil, "dev")
 	ctx := context.Background()
 	// 配置读不到 → 落到默认选择器：语音 lkembed（内建对象在 New 已种下，非 nil）
 	if alias, vp := a.voiceInstance(ctx); alias != AliasLkembed || vp == nil {
