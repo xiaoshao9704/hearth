@@ -8,7 +8,7 @@
 import { createEffect, createMemo, createSignal, on, untrack, For, Show } from 'solid-js';
 import { render } from 'solid-js/web';
 import { ApiError, fetchJoinCredentials, getUser, kickUser, listChannels, muteUser, reportClientLog } from '../api';
-import type { EngineCred } from '../api';
+import type { DataLine, EngineCred } from '../api';
 import { playCue } from '../audio';
 import { fetchMessages, postMessage } from '../chat';
 import type { ChatMessage } from '../chat';
@@ -204,9 +204,24 @@ export async function renderRoom(root: HTMLElement, channel: string) {
   const tileTimers = new Set<number>(); // 投屏徽章的实测轮询定时器，离房时兜底清掉
 
   const stageEngine = () => (combined ? voiceLine.engine : stageLine?.engine) ?? null;
-  // 数据线：聊天文本与文件字节都走这一条。舞台线在就用它（拆分形态下把扇出带宽放在
-  // 舞台侧，成员本来也都连着），没有舞台线（纯语音部署）回落语音线，行为一致
-  const dataEngine = () => stageEngine() ?? voiceLine.engine;
+  // 服务端 chat_data_line 的下发值（随进房凭证到，两条线的凭证带的是同一个值）
+  const [dataLine, setDataLine] = createSignal<DataLine>('auto');
+  // 数据线：聊天文本与文件字节都走这一条。voice = 强制语音线；stage/auto = 舞台线在就
+  // 用它（拆分形态下把扇出带宽放在舞台侧，成员本来也都连着），没有舞台线（纯语音部署，
+  // 或强制 stage 但本服没配舞台）回落语音线，行为一致
+  const dataEngine = () => (dataLine() === 'voice' ? voiceLine.engine : (stageEngine() ?? voiceLine.engine));
+  // 数据线发送失败时可换的另一条线：必须已连上，且真是另一个引擎（合并形态下两条线
+  // 同一个引擎，没有第二条可试）
+  function altEngine(used: AVEngine | null): AVEngine | null {
+    const alt = used === voiceLine.engine ? stageEngine() : voiceLine.engine;
+    if (!alt || alt === used || !alt.connected()) return null;
+    return alt;
+  }
+  // 实际发送用的线：选定的那条没连上就直接用另一条已连上的（这只是选线，不占回落次数）
+  function liveDataEngine(): AVEngine | null {
+    const eng = dataEngine();
+    return eng?.connected() ? eng : altEngine(eng);
+  }
 
   // ---- 视图层信号 ----
   const [roster, setRoster] = createSignal<EPart[]>([]); // parts() 合并结果的快照
@@ -782,6 +797,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
     });
     if (leaving || bounced) return;
     combined = creds.combined;
+    setDataLine(creds.data_line ?? 'auto');
     if (!only || only === 'voice') {
       await connectLine(voiceLine, creds.voice, first, 'voice');
       if (leaving) return;
@@ -1342,11 +1358,20 @@ export async function renderRoom(root: HTMLElement, channel: string) {
     appendMessage(m);
   }
 
-  // 数据线不在（未连上/正在重连）时只落库不广播：接收方靠 after= 补齐，发送不阻塞
+  // 数据线不在（未连上/正在重连）时只落库不广播：接收方靠 after= 补齐，发送不阻塞。
+  // 发送失败换另一条已连上的线再试一次（远端实例太老、不支持 Data Streams 时靠这个兜底），
+  // 只试这一次；禁言是服务端的确定拒绝，换线一样被拒，不试。两次都失败就静默——
+  // 权威在库里，对端重连时 after= 会补上
   function broadcast(m: ChatMessage) {
-    const eng = dataEngine();
-    if (!eng?.connected()) return;
-    void eng.sendText(DATA_TOPIC_TEXT, JSON.stringify(m)).catch(() => {});
+    const eng = liveDataEngine();
+    if (!eng) return;
+    const text = JSON.stringify(m);
+    void eng.sendText(DATA_TOPIC_TEXT, text).catch(() => {
+      if (isSelfGagged()) return;
+      const alt = altEngine(eng);
+      if (!alt) return;
+      void alt.sendText(DATA_TOPIC_TEXT, text).catch(() => {});
+    });
   }
 
   // 进房首次取最近 50 条；重连时按最大已知 id 补断线期间漏掉的
@@ -1422,19 +1447,32 @@ export async function renderRoom(root: HTMLElement, channel: string) {
     putFileState(m.id, { status: 'sending', progress: 0, url: URL.createObjectURL(file) });
     appendMessage(m);
     broadcast(m);
-    const eng = dataEngine();
-    if (!eng?.connected()) {
+    const eng = liveDataEngine();
+    if (!eng) {
       // 卡片已落库但字节没人收得到：如实告知，别假装发出去了
       patchFileState(m.id, { status: 'ready', progress: 1 });
       toast('数据线未连接，对方只会看到一张过期卡片', 'bad');
       return;
     }
+    const sendOn = (on: AVEngine) =>
+      on.sendFile(file, DATA_TOPIC_FILE, { message_id: String(m.id) }, (p) => patchFileState(m.id, { progress: p }));
     try {
-      await eng.sendFile(file, DATA_TOPIC_FILE, { message_id: String(m.id) }, (p) =>
-        patchFileState(m.id, { progress: p }),
-      );
+      await sendOn(eng);
       patchFileState(m.id, { status: 'ready', progress: 1 });
+      return;
     } catch (err) {
+      // 与文本同一套回落：换另一条已连上的线重发一次；禁言不换线，字节也不试第三次
+      const alt = isSelfGagged() ? null : altEngine(eng);
+      if (alt) {
+        try {
+          patchFileState(m.id, { progress: 0 });
+          await sendOn(alt);
+          patchFileState(m.id, { status: 'ready', progress: 1 });
+          return;
+        } catch {
+          // 落到下面统一标失败（报第一条线的原因，两条线的失败通常同源）
+        }
+      }
       patchFileState(m.id, { status: 'failed' });
       toast(`「${file.name}」发送失败：${(err as Error)?.message ?? ''}`, 'bad');
     }

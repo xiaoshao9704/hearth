@@ -172,12 +172,17 @@ export interface EngineCred {
   token: string;
 }
 
+// 聊天与文件走哪条线的数据通道（服务端 chat_data_line 下发，前端不猜拓扑）：
+// auto = 有舞台线走舞台线、否则语音线；voice/stage = 强制
+export type DataLine = 'auto' | 'voice' | 'stage';
+
 // 双线进房凭证：语音线必有；舞台线（投屏/摄像头）可缺席；
 // combined = 两线同一内核，前端用一条连接承担两种角色
 export interface JoinCredentials {
   voice: EngineCred;
   stage?: EngineCred | null;
   combined: boolean;
+  data_line?: DataLine;
 }
 
 // 持久设备 ID：首次访问生成并存 localStorage，用于区分同一账号的多设备

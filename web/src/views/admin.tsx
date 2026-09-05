@@ -374,6 +374,7 @@ const GROUP_META: Record<string, [string, string]> = {
   livekit: ['LiveKit', '信令与令牌签发'],
   stage: ['进程内 LiveKit（舞台）', '舞台选 lkembed 时才启动，信令只监听回环'],
   network: ['网络', '向默认网关申请端口映射，仅 host 网络或裸机可用'],
+  chat: ['聊天', '消息经内核数据通道扇出，hearth 只落库卡片、不经手文件字节'],
 };
 const POLICIES = [
   { id: 'closed', label: '关闭注册', desc: '只能用 CLI 在服务器上开通' },

@@ -197,7 +197,7 @@ cd deploy && cp .env.example .env && $EDITOR .env
 - **反代内置**：`/providers/{alias}` 下的内核信令与 WHIP、Web、API 同端口，不强制 Caddy/nginx；TLS 可用 `--profile caddy` 或接入自己的网关
 - **动态配置**：环境变量（含 .env）设置的项在后台只读（LiveKit 的 env 会合成同名锁定服务实例）；未设置的可在管理后台注册服务实例、切换内核选择器，保存即生效
 - **媒体端口**：hearth 进程内内核 `lkembed_udp_port`（默认 47720/udp）、外部 LiveKit RTC 端口需防火墙/安全组放行（媒体不经反代）；开了 ICE-TCP 就同号 udp/tcp 双放行；NAT 后的线路见「自动端口映射」
-- **聊天与文件**：消息经内核数据通道扇出（历史仍由 hearth 落库，字节不落）。走哪条线由 `chat_data_line` 决定：`auto`（默认）= 有舞台线走舞台线、否则语音线，`voice`/`stage` = 强制——舞台实例按流量计费时选 `voice`，舞台实例上行更好时选 `stage`。文件大小上限 `chat_file_max_mb`（默认 25），扇出成本 = 大小 × 在线人数。数据通道用的 Data Streams 需要内核服务端 ≥ 1.8（`lkembed` 与 `stage` 镜像均满足，接入官方 LiveKit 时自查版本）
+- **聊天与文件**：消息经内核数据通道扇出（历史仍由 hearth 落库，字节不落）。走哪条线由 `chat_data_line` 决定：`auto`（默认）= 有舞台线走舞台线、否则语音线，`voice`/`stage` = 强制——舞台实例按流量计费时选 `voice`，舞台实例上行更好时选 `stage`。文件大小上限 `chat_file_max_mb`（默认 25），扇出成本 = 大小 × 在线人数。数据通道用的 Data Streams 需要内核服务端 ≥ 1.8（`lkembed` 与 `stage` 镜像均满足，接入官方 LiveKit 时自查版本；版本不够导致发送失败时前端自动改走另一条已连上的线，拆分部署下通常就是语音线）
 - **数据库**：默认 sqlite（`/data` 卷）；`DATABASE_URL` 可切 MySQL/Postgres
 - **ARM64**：镜像含 arm64 变体，arm64 小主机可用
 
