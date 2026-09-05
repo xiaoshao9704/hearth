@@ -82,13 +82,32 @@ function cueNote(ctx: AudioContext, freq: number, at: number) {
   osc.stop(at + 0.1);
 }
 
-// playCue 播放进入（两个上行音）/ 离开（两个下行音）提示；
+// 消息提示音：单音，比进出音更短更柔——5ms attack，总长 70ms，峰值增益 0.1
+function messageNote(ctx: AudioContext, at: number) {
+  const osc = ctx.createOscillator();
+  const gain = ctx.createGain();
+  osc.type = 'sine';
+  osc.frequency.value = 880;
+  gain.gain.setValueAtTime(0, at);
+  gain.gain.linearRampToValueAtTime(0.1, at + 0.005);
+  gain.gain.setValueAtTime(0.1, at + 0.02);
+  gain.gain.linearRampToValueAtTime(0, at + 0.07);
+  osc.connect(gain).connect(ctx.destination);
+  osc.start(at);
+  osc.stop(at + 0.08);
+}
+
+// playCue 播放进入（两个上行音）/ 离开（两个下行音）/ 消息（一声轻音）提示；
 // 自动播放策略下上下文可能是 suspended，恢复失败就静默跳过（提示音不值得打扰用户）
-export function playCue(kind: 'join' | 'leave') {
+export function playCue(kind: 'join' | 'leave' | 'message') {
   try {
     if (!cueCtx) cueCtx = new AudioContext();
     const ctx = cueCtx;
     const play = () => {
+      if (kind === 'message') {
+        messageNote(ctx, ctx.currentTime);
+        return;
+      }
       const [a, b] = kind === 'join' ? [660, 880] : [660, 440];
       cueNote(ctx, a, ctx.currentTime);
       cueNote(ctx, b, ctx.currentTime + 0.09);

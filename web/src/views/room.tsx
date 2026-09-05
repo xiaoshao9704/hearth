@@ -1345,8 +1345,9 @@ export async function renderRoom(root: HTMLElement, channel: string) {
 
   // ---- 聊天消息（落库为权威，数据线只是实时扇出）----
 
-  // 追加一条消息，按 id 去重（数据线广播与 REST 补齐会重叠）
-  function appendMessage(m: ChatMessage) {
+  // 追加一条消息，按 id 去重（数据线广播与 REST 补齐会重叠）；
+  // live=true 表示这是实时到达的一条（而非进房/重连时的历史补齐），只有这种才可能响提示音
+  function appendMessage(m: ChatMessage, live = false) {
     let added = false;
     setMsgs((list) => {
       if (list.some((x) => x.id === m.id)) return list;
@@ -1366,7 +1367,19 @@ export async function renderRoom(root: HTMLElement, channel: string) {
       return;
     }
     // 面板关着或页面在后台都计未读（title 前缀与按钮角标共用这一个计数）
-    if (panel() !== 'chat' || document.visibilityState !== 'visible') setUnread((u) => u + 1);
+    const hidden = panel() !== 'chat' || document.visibilityState !== 'visible';
+    if (hidden) setUnread((u) => u + 1);
+    if (live && hidden) playChatCue();
+  }
+
+  // 聊天提示音节流 1.5 秒：一段时间内连来多条消息只响一次
+  let lastChatCueAt = 0;
+  function playChatCue() {
+    if (!loadPrefs().chatCue) return;
+    const now = Date.now();
+    if (now - lastChatCueAt < 1500) return;
+    lastChatCueAt = now;
+    playCue('message');
   }
 
   // 数据线到的是一整条 Message 的 JSON：解析失败就丢，重连时 after= 会补齐
@@ -1378,7 +1391,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
       return;
     }
     if (!m || typeof m.id !== 'number' || m.id <= 0) return;
-    appendMessage(m);
+    appendMessage(m, true);
   }
 
   // 数据线不在（未连上/正在重连）时只落库不广播：接收方靠 after= 补齐，发送不阻塞。

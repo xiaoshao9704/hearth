@@ -315,6 +315,13 @@ function renderAV(body: HTMLElement): () => void {
           </div>
           <div class="switch ${prefs.joinCue ? 'on' : ''}" id="join-cue-switch"><div class="knob"></div></div>
         </button>
+        <button class="hit switch-row" id="chat-cue-row" style="width:100%;text-align:left">
+          <div style="flex-grow:1">
+            <div class="s-title">聊天提示音</div>
+            <div class="s-desc">收到他人聊天消息时播放一声短提示</div>
+          </div>
+          <div class="switch ${prefs.chatCue ? 'on' : ''}" id="chat-cue-switch"><div class="knob"></div></div>
+        </button>
         <div class="opt-list" id="audio-chain"></div>
       </div>
       <div style="display:flex;flex-direction:column;gap:9px">
@@ -606,6 +613,13 @@ function renderAV(body: HTMLElement): () => void {
     prefs.joinCue = !prefs.joinCue;
     joinCueSwitch.classList.toggle('on', prefs.joinCue);
     save('join-cue');
+  });
+
+  const chatCueSwitch = body.querySelector<HTMLDivElement>('#chat-cue-switch')!;
+  body.querySelector('#chat-cue-row')!.addEventListener('click', () => {
+    prefs.chatCue = !prefs.chatCue;
+    chatCueSwitch.classList.toggle('on', prefs.chatCue);
+    save('chat-cue');
   });
 
   const mirrorSwitch = body.querySelector<HTMLDivElement>('#mirror-switch')!;
