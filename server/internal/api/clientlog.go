@@ -39,6 +39,8 @@ type clientLogRequest struct {
 	Reason       string `json:"reason,omitempty"`
 	ErrorName    string `json:"error_name,omitempty"`
 	ErrorMessage string `json:"error_message,omitempty"`
+	// Detail 失败时的候选/候选对快照，前端已按上限裁好（见 docs/plan-client-ice.md）
+	Detail string `json:"detail,omitempty"`
 }
 
 var (
@@ -129,7 +131,7 @@ func (a *API) clientLog(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusTooManyRequests, "诊断上报过于频繁")
 		return
 	}
-	log.Printf("前端诊断: uid=%d username=%q user_agent=%q level=%q event=%q session=%q channel=%q role=%q engine=%q endpoint=%q attempt=%d elapsed_ms=%d online=%t visibility=%q network=%q state=%q reason=%q error_name=%q error=%q",
+	log.Printf("前端诊断: uid=%d username=%q user_agent=%q level=%q event=%q session=%q channel=%q role=%q engine=%q endpoint=%q attempt=%d elapsed_ms=%d online=%t visibility=%q network=%q state=%q reason=%q error_name=%q error=%q detail=%q",
 		u.ID,
 		redactClientLogText(u.Username, 80),
 		redactClientLogText(r.UserAgent(), 300),
@@ -149,6 +151,7 @@ func (a *API) clientLog(w http.ResponseWriter, r *http.Request) {
 		redactClientLogText(in.Reason, 120),
 		redactClientLogText(in.ErrorName, 80),
 		redactClientLogText(in.ErrorMessage, 600),
+		redactClientLogText(in.Detail, 2000),
 	)
 	w.WriteHeader(http.StatusNoContent)
 }

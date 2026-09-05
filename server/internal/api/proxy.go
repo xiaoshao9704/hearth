@@ -1,6 +1,6 @@
 // 内置反向代理与接入分发：内核接入路径统一挂在 /providers/{alias}/ 下，按 alias 找到
-// 注册实例后按子路径分发——livekit 信令反代（/rtc/*，剥前缀，含 WebSocket Upgrade）、
-// WHIP 推流（/w[/*]）。上游由实例逐请求声明（配置改动即时生效）。
+// 注册实例后按子路径分发——livekit 信令反代（/rtc/*，剥前缀；WebSocket Upgrade 走
+// signalbridge.go 的手写桥）、WHIP 推流（/w[/*]）。上游由实例逐请求声明（配置改动即时生效）。
 // 部署因此不再强制需要 Caddy/nginx，TLS 由用户自选（也可裸 HTTP 内网用）。
 package api
 
@@ -53,7 +53,14 @@ func (a *API) serveProvider(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusNotFound, "该实例无信令代理")
 			return
 		}
-		a.proxyTo(w, r, p.SignalProxyUpstream(r.Context()), "/providers/"+alias)
+		// WebSocket 握手走手写桥（要逐帧改写下发给浏览器的 ICE 服务器，见 signalbridge.go）；
+		// /rtc/validate 等普通 HTTP 仍走 ReverseProxy
+		up := p.SignalProxyUpstream(r.Context())
+		if isWebSocketUpgrade(r) {
+			a.bridgeSignal(w, r, up, "/providers/"+alias)
+			return
+		}
+		a.proxyTo(w, r, up, "/providers/"+alias)
 	default:
 		writeErr(w, http.StatusNotFound, "未知路径")
 	}

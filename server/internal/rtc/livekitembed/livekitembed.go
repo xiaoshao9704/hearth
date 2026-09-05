@@ -34,7 +34,9 @@ func ConfigKeys() []rtc.ConfigKey {
 		{Name: "lkembed_udp_port", Group: "stage", Default: "47720",
 			Label: "媒体 UDP 端口", Hint: "单端口 mux，需在防火墙/安全组放行；改动重启生效"},
 		{Name: "lkembed_tcp_port", Group: "stage", Default: "0",
-			Label: "ICE-TCP 端口", Hint: "0 = 关闭；UDP 全被封的网络里才需要"},
+			Label: "ICE-TCP 端口",
+			Hint: "0 = 关闭。实测家庭网络做策略路由/分流时 UDP 常被中间设备接管、回程不通，" +
+				"建议与媒体 UDP 端口同号开启，云侧安全组该端口 udp/tcp 双放行；改动重启生效"},
 		{Name: "lkembed_log_level", Group: "stage", Default: "warn",
 			Options: []string{"debug", "info", "warn", "error"},
 			Label:   "LiveKit 日志级别", Hint: "正常运行保持 warn；排障时临时改为 debug；改动重启生效"},

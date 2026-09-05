@@ -104,6 +104,9 @@ portmap.Mapper：把 lkembed 的 UDP（与可选 TCP）端口映射到网关；v
     仍有真实 host 候选。补丁二会在每个 transport 上整体替换启动 rewrite rules，稳态候选仍由本机地址与
     `lite.Announcer` 动态外部地址组成。这样保留 full ICE 的双向检查，
     同时避免 WHIP 等默认 STUN 超时：一次 POST 从约 13 秒恢复到百毫秒内。
+  - `rtc.stun_servers` 在 LiveKit 里是**一键两用**的（既是服务端自己探测 srflx 的来源，也照原样下发给浏览器），
+    这里的空列表只解决服务端那一半。**发给浏览器的 STUN 由 hearth 在信令反代层改写下发**（全局键
+    `client_stun_servers`，剔掉上游回落的内置默认表），见 `docs/plan-client-ice.md`。
   - **两个补丁的权威副本在 `server/livekit-patches/`**（`git format-patch` 产物 + 重建 fork 的步骤），fork 上的 tag 为 `v1.13.6-hearth.1`。
     已验证：贴上两个补丁的整个服务端对上游 pion 在 darwin / linux / windows 编译通过。
 - 许可证：Apache-2.0，fork 与嵌入合法，保留 LICENSE/NOTICE。

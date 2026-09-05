@@ -120,6 +120,10 @@ docker exec hearth /app/hearth adduser <用户名> <密码>   # 首账号自动�
 
 密钥（`lkembed_api_key`/`lkembed_api_secret`）留空首启自动生成并落库，随 `/data` 卷一起备份；端口号在管理后台可改，改动后重启容器生效（选择器本身切换不需要重启，见上）。
 
+> **UDP 被接管的网络**：部分网络（做策略路由/分流的家庭线路尤其常见）会让浏览器到媒体端口的 UDP 回程不通，此时靠 ICE-TCP 回落。管理后台「舞台 → ICE-TCP 端口」填成与媒体 UDP 同号（默认即 47720），容器加 `-p 47720:47720`、云侧安全组该端口 **udp/tcp 双放行**即可。
+>
+> **浏览器 STUN 由服务端下发**：前端不再硬编码，列表在管理后台「网络 → 浏览器 STUN 服务器」（`client_stun_servers`）改，逗号分隔、保存即生效，`none` = 不下发（连通性不依赖 STUN，兜底靠上面的 ICE-TCP）。它与实例参数 `lkembed_stun_servers`（服务端自己探测公网映射用）是两码事。
+
 只有接入**独立部署**的外部 LiveKit（更大规模的舞台集群，或把舞台搬到另一台机器，见下文「远端舞台机器」）时才需要额外配置或额外容器——那是可选的高级形态，默认单容器已经是完整功能。
 
 ### 自动端口映射（UPnP / PCP / NAT-PMP）
@@ -193,7 +197,7 @@ cd deploy && cp .env.example .env && $EDITOR .env
 
 - **反代内置**：`/providers/{alias}` 下的内核信令与 WHIP、Web、API 同端口，不强制 Caddy/nginx；TLS 可用 `--profile caddy` 或接入自己的网关
 - **动态配置**：环境变量（含 .env）设置的项在后台只读（LiveKit 的 env 会合成同名锁定服务实例）；未设置的可在管理后台注册服务实例、切换内核选择器，保存即生效
-- **媒体端口**：hearth 进程内内核 `lkembed_udp_port`（默认 47720/udp）、外部 LiveKit RTC 端口需防火墙/安全组放行（媒体不经反代）；NAT 后的线路见「自动端口映射」
+- **媒体端口**：hearth 进程内内核 `lkembed_udp_port`（默认 47720/udp）、外部 LiveKit RTC 端口需防火墙/安全组放行（媒体不经反代）；开了 ICE-TCP 就同号 udp/tcp 双放行；NAT 后的线路见「自动端口映射」
 - **数据库**：默认 sqlite（`/data` 卷）；`DATABASE_URL` 可切 MySQL/Postgres
 - **ARM64**：镜像含 arm64 变体，arm64 小主机可用
 

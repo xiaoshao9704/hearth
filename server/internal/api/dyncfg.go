@@ -39,6 +39,17 @@ var portmapKeys = []rtc.ConfigKey{
 			"仅 host 网络或裸机可用（容器 bridge 网络发现不到网关）；off = 关闭并撤销已建映射"},
 }
 
+// clientICEKeys 面向浏览器的 ICE 策略：是 hearth 的全局策略而非某个实例的参数，
+// 由信令反代逐连接读取后改写下发（见 signalbridge.go / iceservers.go）。
+var clientICEKeys = []rtc.ConfigKey{
+	{Name: "client_stun_servers", Env: "CLIENT_STUN_SERVERS", Group: "network", Default: defaultClientSTUN,
+		Label: "浏览器 STUN 服务器",
+		Hint: "逗号分隔的 host:port，由信令反代改写后下发给浏览器，对所有内核实例生效、保存即生效。" +
+			"浏览器并行探测、谁先回用谁，所以按地域并列几个即可；none = 不下发任何 STUN" +
+			"（连通性不依赖它：客户端永远是主动方，服务端从收到的包学到对端地址）。" +
+			"与实例参数 lkembed_stun_servers 语义不同——那个是服务端自己探测公网映射用的"},
+}
+
 // selectorEnv 选择器对应的旧环境变量名：只供迁移 v2 一次性导入，不参与取值。
 var selectorEnv = map[string]string{
 	"voice_provider": "VOICE_PROVIDER",
@@ -71,7 +82,8 @@ func (a *API) warnLegacyConfig() {
 
 func (a *API) allConfigKeys() []rtc.ConfigKey {
 	keys := append(append([]rtc.ConfigKey{}, selectorKeys...), a.kernelKeys...)
-	return append(keys, portmapKeys...)
+	keys = append(keys, portmapKeys...)
+	return append(keys, clientICEKeys...)
 }
 
 // PortWants 当前要向网关申请的映射：HTTP 端口 + 当前选中内核里跑在本进程的媒体端口
