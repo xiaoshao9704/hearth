@@ -31,6 +31,10 @@ import { showMsgMenu } from './room/msg-menu';
 import { mergeReaction, ReactionBar } from './room/reactions';
 import { ReplyComposer, ReplyQuote } from './room/reply';
 import { openSettings } from './settings';
+import { ChatFirstBar, syncPanelWithChatFirst } from './room/chat-first';
+import { FloatingRoster, mountPipRoster } from './room/floating-roster';
+import { createPipCtl } from './room/pip';
+import { createTheaterCtl, StageViewButtons } from './room/theater';
 
 type SinkMedia = HTMLMediaElement & { setSinkId?: (id: string) => Promise<void>; sinkId?: string };
 
@@ -1157,7 +1161,19 @@ export async function renderRoom(root: HTMLElement, channel: string) {
     toast(deafened() ? '已静音全部（仍可说话）' : '已恢复收听', '', 2000);
   }
 
-  // ---- 键盘快捷键：M 切麦、D 静音全部、按住 Space 说话（Ctrl+Enter 发送在聊天输入框自己的 keydown 上）----
+  // ---- 剧场 / 画中画（第 3 批：布局）----
+  // 「有画面可看」：任一视频轨（投屏或摄像头）或推流参与者在场——三种布局的分档依据
+  const hasStageContent = () => videoEntries().length > 0 || roster().some((p) => p.sharing || p.ingest);
+  // 画中画弹出的画面：投屏优先，没有投屏就弹第一块视频
+  const screenVideo = () => (videoEntries().find((e) => e.source === 'screen') ?? videoEntries()[0])?.video ?? null;
+  const theaterCtl = createTheaterCtl({ hasStage: hasStageContent, onNotice: (m) => toast(m, '', 2600) });
+  const pipCtl = createPipCtl({
+    getVideo: screenVideo,
+    mountExtras: (host) => mountPipRoster(host, { parts: roster, speaking }),
+    onNotice: (m) => toast(m, 'bad'),
+  });
+
+  // ---- 键盘快捷键：M 切麦、D 静音全部、T 剧场、F 全屏、按住 Space 说话（Ctrl+Enter 发送在聊天输入框自己的 keydown 上）----
   const inTypingTarget = (ev: KeyboardEvent) => {
     const t = ev.target as HTMLElement | null;
     return !!t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable);
@@ -1170,6 +1186,11 @@ export async function renderRoom(root: HTMLElement, channel: string) {
       setLightbox(null);
       return;
     }
+    if (ev.key === 'Escape' && theaterCtl.on()) {
+      ev.preventDefault();
+      theaterCtl.exit();
+      return;
+    }
     if (ev.repeat || ev.ctrlKey || ev.metaKey || ev.altKey) return; // repeat 防抖；带修饰键让位浏览器快捷键
     if (inTypingTarget(ev)) return;
     const key = ev.key.toLowerCase();
@@ -1177,6 +1198,10 @@ export async function renderRoom(root: HTMLElement, channel: string) {
       void toggleMic();
     } else if (key === 'd') {
       toggleDeaf();
+    } else if (key === 't') {
+      theaterCtl.toggle();
+    } else if (key === 'f') {
+      theaterCtl.toggleFullscreen();
     } else if (ev.key === ' ') {
       ev.preventDefault(); // 阻止页面滚动与聚焦按钮被激活
       if (pttHeld || micOn()) return; // 已开麦时按住 Space 不做多余翻转
@@ -2124,6 +2149,13 @@ export async function renderRoom(root: HTMLElement, channel: string) {
     const selfGagged = createMemo(() => roster().some((p) => p.isLocal && !p.canPublish));
 
     const spotlight = createMemo(() => layoutPref() === 'spotlight');
+    // 三种布局：没有画面 → 聊天为主；有画面时按剧场开关（剧场开着但画面没了先退回聊天，
+    // 画面回来自动恢复到用户上次选的形态）
+    const layoutMode = createMemo<'chat' | 'stage' | 'theater'>(() =>
+      !hasStageContent() ? 'chat' : theaterCtl.on() ? 'theater' : 'stage',
+    );
+    // 剧场只留焦点那一块，复用聚焦布局的挑选逻辑（pin > 投屏 > 发言人），缩略轨由 CSS 收起
+    const focusOnly = createMemo(() => spotlight() || layoutMode() === 'theater');
     // 全部卡片按到达顺序（九宫格排位 = 旧版 DOM 插入顺序）
     const tileEntries = createMemo<TileEntry[]>(() => [...videoEntries(), ...audioEntries()].sort((a, b) => a.seq - b.seq));
     // 聚焦布局：pin > 投屏 > 发言人 > 第一块（fallback 顺序 = 视频优先，对齐旧版 allTiles 的遍历序）
@@ -2145,8 +2177,8 @@ export async function renderRoom(root: HTMLElement, channel: string) {
       }
       return keys[0] ?? null;
     });
-    const gridTiles = createMemo(() => (spotlight() ? tileEntries().filter((e) => e.key === focusKey()) : tileEntries()));
-    const railTiles = createMemo(() => (spotlight() ? tileEntries().filter((e) => e.key !== focusKey()) : []));
+    const gridTiles = createMemo(() => (focusOnly() ? tileEntries().filter((e) => e.key === focusKey()) : tileEntries()));
+    const railTiles = createMemo(() => (focusOnly() ? tileEntries().filter((e) => e.key !== focusKey()) : []));
 
     // 成员面板按设备维度平铺（与 tile/静音/踢出的操作粒度同构）：
     // 同人排序相邻，本机最前、推流设备靠后；人数另行统计
@@ -2178,9 +2210,9 @@ export async function renderRoom(root: HTMLElement, channel: string) {
 
     const Tile = (p: { e: TileEntry }) =>
       p.e.kind === 'video' ? (
-        <VideoTileView e={p.e} spotlight={spotlight} focusKey={focusKey} />
+        <VideoTileView e={p.e} spotlight={focusOnly} focusKey={focusKey} />
       ) : (
-        <AudioTileView e={p.e} spotlight={spotlight} focusKey={focusKey} />
+        <AudioTileView e={p.e} spotlight={focusOnly} focusKey={focusKey} />
       );
 
     // 灯箱打开时锁住背景滚动；卸载时兜底还原，避免半路离开房间留下 overflow:hidden
@@ -2191,8 +2223,28 @@ export async function renderRoom(root: HTMLElement, channel: string) {
       document.body.style.overflow = '';
     });
 
+    syncPanelWithChatFirst(layoutMode, panel, switchPanel);
+
+    // 剧场模式让外壳侧栏一起让位（房间只是 shell 的内容区，够不着它的 DOM）
+    createEffect(() => {
+      document.body.classList.toggle('theater-on', layoutMode() === 'theater');
+    });
+    onCleanup(() => document.body.classList.remove('theater-on'));
+    // 画中画期间画面没了（对方停了投屏）：收回窗口，别留一个空壳浮在桌面上
+    createEffect(() => {
+      if (pipCtl.active() && !screenVideo()) pipCtl.close();
+    });
+
     return (
-      <div class="room-frame">
+      <div
+        class="room-frame"
+        classList={{
+          'layout-chat': layoutMode() === 'chat',
+          'layout-stage': layoutMode() === 'stage',
+          'layout-theater': layoutMode() === 'theater',
+          'chrome-hidden': theaterCtl.chromeHidden(),
+        }}
+      >
         <header class="topbar">
           {el(menuButtonHtml())}
           {el(icon('volume', 17, 'var(--ember)', 1.6))}
@@ -2254,8 +2306,15 @@ export async function renderRoom(root: HTMLElement, channel: string) {
             </button>
           </div>
         </header>
-        <div style="flex-grow:1;display:flex;min-height:0">
-          <div style="flex-grow:1;display:flex;flex-direction:column;min-width:0;min-height:0">
+        <div class="room-body">
+          <Show when={layoutMode() === 'chat'}>
+            <ChatFirstBar
+              parts={roster}
+              speaking={speaking}
+              onMenu={(x, y, p) => showUserMenu(x, y, p.uid, p.username, p.identity)}
+            />
+          </Show>
+          <div class="room-main" style="flex-grow:1;display:flex;flex-direction:column;min-width:0;min-height:0">
             <div class="stage-area">
               <div class="stage-status">
                 {statusText()}
@@ -2275,7 +2334,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
               </Show>
               <div
                 class="video-grid"
-                classList={{ spotlight: spotlight() }}
+                classList={{ spotlight: focusOnly() }}
                 data-tiles={tileEntries().length}
                 onContextMenu={(ev) => {
                   // 视频/音频卡片右键走同一个操作菜单
@@ -2369,6 +2428,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
                   {el(icon('sliders', 16, 'var(--text-1)', 1.6))}
                   <span class="ctl-mobile-label">画质</span>
                 </button>
+                <StageViewButtons theater={theaterCtl} pip={pipCtl} />
               </div>
               <div class="spacer"></div>
               <div class="group">
@@ -2620,7 +2680,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
               </div>
             </div>
           </aside>
-          <aside class="side-panel chat-panel" classList={{ hidden: panel() !== 'chat' }}>
+          <aside class="side-panel chat-panel" classList={{ hidden: layoutMode() !== 'chat' && panel() !== 'chat' }}>
             <div class="panel-head">
               <span class="mono" style="font-size:17px;color:var(--text-2);line-height:1">
                 #
@@ -2730,6 +2790,13 @@ export async function renderRoom(root: HTMLElement, channel: string) {
             </div>
           </aside>
         </div>
+        <Show when={layoutMode() === 'theater'}>
+          <FloatingRoster
+            parts={roster}
+            speaking={speaking}
+            onMenu={(x, y, p) => showUserMenu(x, y, p.uid, p.username, p.identity)}
+          />
+        </Show>
         <Show when={lightbox()}>
           <div class="lightbox-scrim" onClick={() => setLightbox(null)}>
             <div class="lightbox-box" onClick={(ev) => ev.stopPropagation()}>
@@ -2793,6 +2860,8 @@ export async function renderRoom(root: HTMLElement, channel: string) {
       if (document.title.endsWith(roomTitle)) document.title = roomTitle;
       diag('info', 'room_close');
       leaving = true;
+      pipCtl.dispose();
+      theaterCtl.dispose();
       exitFs();
       afkWatch.dispose();
       clearTimeout(volSaveTimer);

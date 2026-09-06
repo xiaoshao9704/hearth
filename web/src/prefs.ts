@@ -20,6 +20,10 @@ export function autoBitrate(res: string, fps: number): number {
   return Math.round(((d.width * d.height * fps * 0.07) / 1e6) * 10) / 10;
 }
 
+// 剧场浮动名册的停靠角：左上/右上/左下/右下
+export type TheaterCorner = 'tl' | 'tr' | 'bl' | 'br';
+export const THEATER_CORNERS: TheaterCorner[] = ['tl', 'tr', 'bl', 'br'];
+
 export type DenoiseMode = 'rnnoise' | 'browser' | 'off';
 export type ScreenCodec = 'h264' | 'h265' | 'vp9' | 'av1';
 
@@ -48,6 +52,9 @@ export interface RoomPrefs {
   chatCue: boolean; // 他人实时发来聊天消息时的短提示音
   afkMinutes: number; // 无操作多少分钟后向房间广播「离开」；0 = 不广播
   mentionCue: boolean; // 被 @ 提到时的短提示音（比普通消息更醒目，且不受消息提示音节流影响）
+  theaterAutoHide: boolean; // 剧场模式无操作 3 秒后隐藏顶栏与控制栏
+  theaterCorner: TheaterCorner; // 剧场浮动名册停靠的角落
+  theaterRosterFold: boolean; // 剧场浮动名册折叠成小按钮
 }
 
 const PREFS_KEY = 'hearth_room_prefs';
@@ -78,6 +85,9 @@ export function defaultPrefs(): RoomPrefs {
     chatCue: true,
     afkMinutes: 10,
     mentionCue: true,
+    theaterAutoHide: true,
+    theaterCorner: 'tr',
+    theaterRosterFold: false,
   };
 }
 
@@ -125,6 +135,9 @@ export function loadPrefs(): RoomPrefs {
       afkMinutes:
         typeof p.afkMinutes === 'number' && p.afkMinutes >= 0 && p.afkMinutes <= 240 ? Math.round(p.afkMinutes) : def.afkMinutes,
       mentionCue: p.mentionCue !== false,
+      theaterAutoHide: p.theaterAutoHide !== false,
+      theaterCorner: THEATER_CORNERS.includes(p.theaterCorner as TheaterCorner) ? (p.theaterCorner as TheaterCorner) : def.theaterCorner,
+      theaterRosterFold: p.theaterRosterFold === true,
     };
   } catch {
     return def;
