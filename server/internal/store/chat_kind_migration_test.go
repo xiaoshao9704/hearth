@@ -50,7 +50,7 @@ func TestChatKindMigrationDefaultsLegacyRowsToText(t *testing.T) {
 	}
 
 	file := &MessageFile{Name: "shot.png", Mime: "image/png", Size: 12345}
-	m, err := s.AddMessage(ctx, 1, 1, KindFile, "", file)
+	m, err := s.AddMessage(ctx, 1, 1, KindFile, "", file, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -73,7 +73,7 @@ func TestMessagesAfterCursor(t *testing.T) {
 		}
 		var ids []int64
 		for _, text := range []string{"一", "二", "三"} {
-			m, err := s.AddMessage(ctx, c.ID, u.ID, KindText, text, nil)
+			m, err := s.AddMessage(ctx, c.ID, u.ID, KindText, text, nil, nil)
 			if err != nil {
 				t.Fatal(err)
 			}

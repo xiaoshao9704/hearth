@@ -5,12 +5,20 @@
 package api
 
 import (
+	"context"
+	"database/sql"
+	"errors"
+	"log"
 	"net/http"
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 	"unicode/utf8"
 
+	"github.com/go-chi/chi/v5"
+
+	"hearth/server/internal/perm"
 	"hearth/server/internal/store"
 )
 
@@ -55,6 +63,11 @@ func (a *API) listMessages(w http.ResponseWriter, r *http.Request) {
 	if msgs == nil {
 		msgs = []store.Message{}
 	}
+	// 反应整批一次查询：历史一屏几十条，按条查会把一次拉取放大成几十次往返
+	if err := a.st.AttachReactions(r.Context(), msgs); err != nil {
+		writeErr(w, http.StatusInternalServerError, "内部错误")
+		return
+	}
 	writeJSON(w, http.StatusOK, msgs)
 }
 
@@ -76,6 +89,7 @@ func (a *API) postMessage(w http.ResponseWriter, r *http.Request) {
 		Kind    string             `json:"kind"`
 		Content string             `json:"content"`
 		File    *store.MessageFile `json:"file"`
+		ReplyTo *int64             `json:"reply_to"`
 	}
 	if !decode(w, r, &req) {
 		return
@@ -129,7 +143,11 @@ func (a *API) postMessage(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "消息类型无效")
 		return
 	}
-	msg, err := a.st.AddMessage(r.Context(), c.ID, u.ID, kind, content, file)
+	replyTo, ok := a.resolveReplyTo(w, r, req.ReplyTo)
+	if !ok {
+		return
+	}
+	msg, err := a.st.AddMessage(r.Context(), c.ID, u.ID, kind, content, file, replyTo)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "内部错误")
 		return
@@ -150,4 +168,163 @@ func (a *API) admitChat(w http.ResponseWriter, r *http.Request) (admission, bool
 		return admission{}, false
 	}
 	return adm, true
+}
+
+// resolveReplyTo 校验引用回复的目标：必须是同频道存在且未撤回的消息，否则 400。
+// 不做"引用链"检查——被引消息自己引用了谁与本条无关，前端只渲染一层。
+func (a *API) resolveReplyTo(w http.ResponseWriter, r *http.Request, id *int64) (*int64, bool) {
+	if id == nil {
+		return nil, true
+	}
+	if *id <= 0 {
+		writeErr(w, http.StatusBadRequest, "引用的消息不存在")
+		return nil, false
+	}
+	target, err := a.st.MessageByID(r.Context(), channelFrom(r).ID, *id)
+	if errors.Is(err, sql.ErrNoRows) {
+		writeErr(w, http.StatusBadRequest, "引用的消息不存在")
+		return nil, false
+	}
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "内部错误")
+		return nil, false
+	}
+	if target.Deleted {
+		writeErr(w, http.StatusBadRequest, "引用的消息已被撤回")
+		return nil, false
+	}
+	return id, true
+}
+
+// messageIDParam 取路径里的消息 id；形状不对返回 0（调用方按 404 处理）。
+func messageIDParam(r *http.Request) int64 {
+	id, _ := strconv.ParseInt(chi.URLParam(r, "msgID"), 10, 64)
+	return id
+}
+
+// lookupMessage 取同频道的一条消息，顺带把 404/500 的响应写好（返回 nil 即已响应）。
+func (a *API) lookupMessage(w http.ResponseWriter, r *http.Request) *store.Message {
+	id := messageIDParam(r)
+	if id <= 0 {
+		writeErr(w, http.StatusNotFound, "消息不存在")
+		return nil
+	}
+	m, err := a.st.MessageByID(r.Context(), channelFrom(r).ID, id)
+	if errors.Is(err, sql.ErrNoRows) {
+		writeErr(w, http.StatusNotFound, "消息不存在")
+		return nil
+	}
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "内部错误")
+		return nil
+	}
+	return m
+}
+
+// deleteMessage DELETE /api/channels/{channel}/messages/{msgID}
+// 作者本人撤回，或频道 moderator/owner 删除；软删（内容清空、行保留）。
+// 已删的再删按成功返回：撤回是幂等动作，两端同时点不该有一边报错。
+func (a *API) deleteMessage(w http.ResponseWriter, r *http.Request) {
+	c := channelFrom(r)
+	u := userFrom(r)
+	// 禁言的人仍可撤回自己已发出的消息：禁言约束的是"发"，不是"收回"
+	if _, ok := a.admitChat(w, r); !ok {
+		return
+	}
+	m := a.lookupMessage(w, r)
+	if m == nil {
+		return
+	}
+	byMod := m.UserID != u.ID
+	if byMod {
+		cr, err := perm.ChannelRole(r.Context(), a.st, c, u)
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, "内部错误")
+			return
+		}
+		if !perm.ChannelAtLeast(cr, store.ChannelRoleModerator) {
+			writeErr(w, http.StatusForbidden, "只能撤回自己发的消息")
+			return
+		}
+	}
+	done, err := a.st.SoftDeleteMessage(r.Context(), c.ID, m.ID)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "内部错误")
+		return
+	}
+	// 审计占位：审计表属于另一批，合入后这行换成落库（见 docs/plan-product-2026-09.md）
+	if done && byMod {
+		log.Printf("审计: uid=%d 删除频道 %d 的消息 %d（作者 uid=%d）", u.ID, c.ID, m.ID, m.UserID)
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// clearMessages DELETE /api/channels/{channel}/messages
+// 清空整个频道的聊天记录（连同表情反应）；频道 owner 与系统 admin+（隐含 owner）可用。
+func (a *API) clearMessages(w http.ResponseWriter, r *http.Request) {
+	c := channelFrom(r)
+	u := userFrom(r)
+	cr, err := perm.ChannelRole(r.Context(), a.st, c, u)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "内部错误")
+		return
+	}
+	if !perm.ChannelAtLeast(cr, store.ChannelRoleOwner) {
+		writeErr(w, http.StatusForbidden, "只有频道主能清空聊天记录")
+		return
+	}
+	n, err := a.st.ClearChannelMessages(r.Context(), c.ID)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "内部错误")
+		return
+	}
+	// 审计占位：同 deleteMessage，合并后接到审计表
+	log.Printf("审计: uid=%d 清空频道 %d 的聊天记录，共 %d 条", u.ID, c.ID, n)
+	writeJSON(w, http.StatusOK, map[string]int64{"deleted": n})
+}
+
+// ---- 保留策略 ----
+
+const chatRetentionInterval = time.Hour
+
+// chatRetentionDays 保留天数；<=0（含填了非法值）= 永久保留，不清理。
+func (a *API) chatRetentionDays(ctx context.Context) int {
+	d, err := strconv.Atoi(strings.TrimSpace(a.dynVal(ctx, "chat_retention_days")))
+	if err != nil || d < 0 {
+		return 0
+	}
+	return d
+}
+
+// PurgeExpiredMessages 按当前保留天数删一次过期消息，返回删掉的条数
+// （0 = 策略关着、清理失败或没有过期的）。
+func (a *API) PurgeExpiredMessages(ctx context.Context) int64 {
+	days := a.chatRetentionDays(ctx)
+	if days <= 0 {
+		return 0
+	}
+	n, err := a.st.PurgeMessagesBefore(ctx, time.Now().Add(-time.Duration(days)*24*time.Hour))
+	if err != nil {
+		log.Printf("聊天保留策略清理失败: %v", err)
+		return 0
+	}
+	if n > 0 {
+		log.Printf("聊天保留策略: 清理超过 %d 天的消息 %d 条", days, n)
+	}
+	return n
+}
+
+// RunChatRetention 启动时清一次，之后每小时一次；保留天数改了下一轮即生效（每轮重读配置）。
+func (a *API) RunChatRetention(ctx context.Context) {
+	a.PurgeExpiredMessages(ctx)
+	t := time.NewTicker(chatRetentionInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-t.C:
+			a.PurgeExpiredMessages(ctx)
+		case <-ctx.Done():
+			return
+		}
+	}
 }

@@ -49,12 +49,25 @@ type channelRow struct {
 type messageRow struct {
 	bun.BaseModel `bun:"table:messages"`
 
-	ID        int64     `bun:",pk,autoincrement"`
-	ChannelID int64     `bun:",notnull"`
-	UserID    int64     `bun:",notnull"`
-	Content   string    `bun:",notnull,type:text"`
-	Kind      string    `bun:",notnull,default:'text',type:varchar(16)"` // text/file
-	Meta      *string   `bun:",type:text"`                               // kind=file 时的卡片 JSON {name,mime,size}；字节不入库
+	ID        int64      `bun:",pk,autoincrement"`
+	ChannelID int64      `bun:",notnull"`
+	UserID    int64      `bun:",notnull"`
+	Content   string     `bun:",notnull,type:text"`
+	Kind      string     `bun:",notnull,default:'text',type:varchar(16)"` // text/file
+	Meta      *string    `bun:",type:text"`                               // kind=file 时的卡片 JSON {name,mime,size}；字节不入库
+	ReplyTo   *int64     // 引用回复指向的同频道消息 id；不做外键（被引消息软删后仍留指向）
+	DeletedAt *time.Time // 非空 = 已撤回/被删；行保留，内容与文件卡片已清空
+	CreatedAt time.Time  `bun:",notnull,default:current_timestamp"`
+}
+
+// messageReactionRow 消息表情反应：(消息, 用户, 表情) 三元组即主键，去重靠主键冲突而非应用层查重。
+// 表情集合由接口层白名单限定（不入库校验），列宽按最长的带变体选择符表情留足。
+type messageReactionRow struct {
+	bun.BaseModel `bun:"table:message_reactions"`
+
+	MessageID int64     `bun:",pk"`
+	UserID    int64     `bun:",pk"`
+	Emoji     string    `bun:",pk,type:varchar(32)"`
 	CreatedAt time.Time `bun:",notnull,default:current_timestamp"`
 }
 

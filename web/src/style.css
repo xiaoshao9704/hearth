@@ -978,3 +978,81 @@ body {
   font-size: 12.5px; outline: 0;
 }
 .afk-min:focus { border-color: var(--ember); }
+
+/* ---- 第 2 批：聊天数据模型（撤回 / @提及 / 反应 / 引用回复） ---- */
+
+/* 消息操作入口：桌面悬停才出，触屏没有悬停一律常显（与 .tact 同一套可达性口径） */
+.chat-msg .msg-more {
+  margin-left: auto; padding: 2px 4px; border-radius: 6px; color: var(--text-3);
+  opacity: 0; transition: opacity 120ms ease;
+}
+.chat-msg:hover .msg-more, .chat-msg .msg-more:focus-visible { opacity: 1; }
+.chat-msg .msg-more:hover { background: var(--bg-3); color: var(--text-1); }
+@media (hover: none) { .chat-msg .msg-more { opacity: 1; } }
+
+/* 跳到被引用的原消息时闪一下，指明落点 */
+.chat-msg.flash { animation: msg-flash 1.2s ease; border-radius: 8px; }
+@keyframes msg-flash {
+  0%, 60% { background: var(--ember-tint); }
+  100% { background: transparent; }
+}
+
+.chat-msg .text.msg-deleted { color: var(--text-3); font-style: italic; }
+
+/* @提及：普通提及淡染，提到我自己的加重（这条消息在找我） */
+.chat-msg .mention { color: var(--ember); background: var(--ember-weak); border-radius: 4px; padding: 0 2px; }
+.chat-msg .mention.me { background: var(--ember-tint); font-weight: 600; }
+
+/* 反应条 */
+.msg-reactions { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 3px; }
+.reaction-chip {
+  display: flex; align-items: center; gap: 4px; padding: 1px 7px; border-radius: 999px;
+  background: var(--bg-3); border: 1px solid var(--line); font-size: 12px; line-height: 1.7;
+}
+.reaction-chip:hover { background: var(--bg-4); }
+.reaction-chip.on { background: var(--ember-tint); border-color: var(--ember-line); }
+.reaction-chip .re-n { font-size: 10.5px; color: var(--text-2); }
+.reaction-chip.on .re-n { color: var(--ember); }
+
+/* 消息菜单：复用 .user-menu 外壳，只加最上面那行快捷表情 */
+.msg-menu { min-width: 0; }
+.msg-menu .mm-react { display: flex; gap: 2px; padding: 2px; }
+.msg-menu .mm-emoji { padding: 3px 5px; border-radius: 7px; font-size: 15px; line-height: 1.2; }
+.msg-menu .mm-emoji:hover { background: var(--bg-2); }
+.msg-menu .mm-emoji.on { background: var(--ember-tint); }
+
+/* 引用回复：卡片顶部的被引摘要 */
+.reply-quote {
+  display: flex; align-items: baseline; gap: 6px; max-width: 100%; text-align: left;
+  padding: 2px 8px; border-left: 2px solid var(--ember-line); border-radius: 0 6px 6px 0;
+  font-size: 11.5px; color: var(--text-2); background: var(--bg-3);
+}
+.reply-quote:hover { background: var(--bg-4); }
+.reply-quote.missing { color: var(--text-3); border-left-color: var(--line); cursor: default; }
+.reply-quote .rq-who { font-weight: 600; color: var(--text-1); flex-shrink: 0; }
+.reply-quote .rq-text, .reply-bar .rq-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* 引用态：输入框上方一条，取消即退出 */
+.reply-bar {
+  display: flex; align-items: center; gap: 7px; margin-bottom: 6px;
+  padding: 5px 8px 5px 10px; border-radius: 9px;
+  background: var(--bg-3); border: 1px solid var(--line);
+  font-size: 11.5px; color: var(--text-2);
+}
+.reply-bar .rb-label { color: var(--ember); font-weight: 600; flex-shrink: 0; }
+.reply-bar .rq-who { font-weight: 600; color: var(--text-1); flex-shrink: 0; }
+.reply-bar .rq-text { flex-grow: 1; min-width: 0; }
+.reply-bar .rb-close { padding: 2px; border-radius: 6px; color: var(--text-2); flex-shrink: 0; }
+.reply-bar .rb-close:hover { background: var(--bg-4); color: var(--text-1); }
+
+/* @补全浮层：贴在输入框上方，最多几项，不遮聊天区太多 */
+.mention-pop {
+  display: flex; flex-direction: column; gap: 1px; margin-bottom: 6px; padding: 4px;
+  background: var(--bg-1); border: 1px solid var(--line); border-radius: 10px;
+  box-shadow: var(--shadow-lg); max-height: 180px; overflow-y: auto;
+}
+.mention-item {
+  padding: 6px 9px; border-radius: 7px; text-align: left; font-size: 12.5px; color: var(--text-0);
+}
+.mention-item:hover, .mention-item.on { background: var(--bg-2); }
+.mention-item.on { color: var(--ember); }

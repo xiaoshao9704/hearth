@@ -175,6 +175,9 @@ func runServer(ctx context.Context, cfg config.Config, st *store.Store) {
 	mapper.OnChange = func(portmap.Status) { go a.RefreshAnnounce(context.Background()) }
 	go mapper.Run(ctx, a.PortWants)
 
+	// 聊天保留策略：启动清一次，之后每小时一次（天数改了下一轮生效）
+	go a.RunChatRetention(ctx)
+
 	// 宣告探测周期刷新：公网 IP 变化后新会话拿到新候选，不重启、不动在途会话
 	go func() {
 		t := time.NewTicker(lite.DefaultAnnounceTTL)

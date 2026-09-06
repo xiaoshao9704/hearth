@@ -20,10 +20,11 @@ import {
   unbanUser,
 } from '../api';
 import type { ChannelRole, RoomParticipant, UserRef } from '../api';
+import { clearMessages } from '../chat';
 import { avatarHtml, confirmDialog, el, esc, icon, menuButtonHtml, timeAgo, toast, wireMenuButton } from '../ui';
 import type { ConfirmOpts } from '../ui';
 
-type Tab = 'members' | 'bans' | 'allow' | 'mods' | 'transfer';
+type Tab = 'members' | 'bans' | 'allow' | 'mods' | 'chat' | 'transfer';
 
 export function ChannelManage(p: { channel: string }) {
   const me = getUser();
@@ -38,6 +39,7 @@ export function ChannelManage(p: { channel: string }) {
   const [myRole, setMyRole] = createSignal<ChannelRole>(''); // 服务端下发的我的频道角色；owner 才有归属类操作
   const [denied, setDenied] = createSignal<string | null>(null); // 频道不存在 / 没有管理角色：服务端会拒，前端只提示
   const [busy, setBusy] = createSignal(''); // 正在执行的操作 key，空串=空闲
+  const [cleared, setCleared] = createSignal<number | null>(null); // 本次会话清空过的消息条数（回执）
   let allowInput!: HTMLInputElement;
   let transferSel!: HTMLSelectElement;
 
@@ -247,6 +249,7 @@ export function ChannelManage(p: { channel: string }) {
     if (isOwner()) {
       base.push(
         { id: 'mods', label: '管理员', n: () => mods()?.length },
+        { id: 'chat', label: '聊天记录', n: () => undefined },
         { id: 'transfer', label: '转让频道', n: () => undefined },
       );
     }
@@ -520,6 +523,43 @@ export function ChannelManage(p: { channel: string }) {
                     </div>
                   )}
                 </For>
+              </Show>
+            </div>
+          </div>
+        </Show>
+
+        <Show when={tab() === 'chat'}>
+          <div style="display:flex;flex-direction:column;gap:8px">
+            <div class="card" style="display:flex;flex-direction:column;gap:10px">
+              <div style="font-size:13.5px;font-weight:600">清空聊天记录</div>
+              <div style="font-size:11.5px;line-height:1.6;color:var(--text-2);text-wrap:pretty">
+                删掉「{p.channel}」的全部聊天消息与表情反应，不影响成员、名单与频道本身。已经在房间里的人要刷新才看不到旧消息。
+                文件字节本来就不经服务器，这里清的只有文本与文件卡片。
+              </div>
+              <div>
+                <button
+                  class="hit btn btn-danger-solid"
+                  disabled={busy() !== ''}
+                  onClick={act(
+                    'clear-chat',
+                    async () => {
+                      const r = await clearMessages(p.channel);
+                      setCleared(r.deleted);
+                    },
+                    '聊天记录已清空',
+                    {
+                      title: `清空「${p.channel}」的聊天记录？`,
+                      body: '全部消息会从服务器上删除，清掉就找不回来了。',
+                      danger: true,
+                      confirmText: '清空',
+                    },
+                  )}
+                >
+                  清空聊天记录
+                </button>
+              </div>
+              <Show when={cleared() !== null}>
+                <div style="font-size:11.5px;color:var(--text-3)">上次清掉 {cleared()} 条消息。</div>
               </Show>
             </div>
           </div>

@@ -11,9 +11,12 @@ import { startAfkWatch } from '../afk';
 import { ApiError, fetchJoinCredentials, getUser, kickUser, listChannels, muteUser, reportClientLog } from '../api';
 import type { DataLine, EngineCred } from '../api';
 import { playCue } from '../audio';
-import { fetchMessages, postMessage } from '../chat';
+import { deleteMessage, fetchMessages, postMessage, setReaction } from '../chat';
 import type { ChatMessage } from '../chat';
 import { compressImage } from '../chat/compress';
+import { applyMention, matchMentions, mentionQuery, mentionsUser, splitMentions } from '../chat/mentions';
+import type { MentionQuery, MentionUser } from '../chat/mentions';
+import { encodeDelete, encodeMessage, encodeReaction, parseEnvelope } from '../chat/protocol';
 import { createEngine } from '../engine';
 import { DATA_TOPIC_FILE, DATA_TOPIC_TEXT } from '../engine/types';
 import type { AVEngine, EPart, EngineCallbacks, TrackSource, VideoStats } from '../engine/types';
@@ -24,6 +27,9 @@ import { avatarHtml, confirmDialog, el, esc, fmtClock, icon, licon, menuButtonHt
 import { CameraFlipButton } from './room/camera-flip';
 import { IngestBadge } from './room/ingest-badge';
 import { createUnreadMarker } from './room/unread-divider';
+import { showMsgMenu } from './room/msg-menu';
+import { mergeReaction, ReactionBar } from './room/reactions';
+import { ReplyComposer, ReplyQuote } from './room/reply';
 import { openSettings } from './settings';
 
 type SinkMedia = HTMLMediaElement & { setSinkId?: (id: string) => Promise<void>; sinkId?: string };
@@ -263,6 +269,11 @@ export async function renderRoom(root: HTMLElement, channel: string) {
   const [historyLoaded, setHistoryLoaded] = createSignal(false);
   const [chatReady, setChatReady] = createSignal(false); // 输入框非空 → 发送按钮点亮
   const [chatDrag, setChatDrag] = createSignal(false); // 文件拖到聊天区上方
+  // 引用回复：只存被引消息的 id，消息本体从 msgs() 取（不留第二份副本，撤回后摘要自动跟着变）
+  const [replyToId, setReplyToId] = createSignal<number | null>(null);
+  // @补全：光标前的提及片段（null = 没在打提及），与高亮选中项
+  const [mentionQ, setMentionQ] = createSignal<MentionQuery | null>(null);
+  const [mentionIdx, setMentionIdx] = createSignal(0);
   // 文件卡片的字节状态，按消息 id 索引（消息本体在 msgs()，这里只管字节）
   const [fileStates, setFileStates] = createSignal<Map<number, FileState>>(new Map());
   // 灯箱当前展示的图片；null 表示未打开——聊天图片点击态的唯一真相源
@@ -1382,7 +1393,75 @@ export async function renderRoom(root: HTMLElement, channel: string) {
     const hidden = panel() !== 'chat' || document.visibilityState !== 'visible';
     if (hidden) setUnread((u) => u + 1);
     if (hidden) unreadMark.note(m.id);
+    // 被 @ 走单独一档提示音：它比普通消息重要，不受聊天提示音的节流与"面板开着就不响"限制
+    if (live && m.kind === 'text' && mentionsUser(m.content, mentionUsers(), myUid)) {
+      onMention(m);
+      return;
+    }
     if (live && hidden) playChatCue();
+  }
+
+  // 被 @ 的统一入口：系统通知属于另一批，这里先只出提示音，那一批接线时挂在这个钩子上
+  function onMention(_m: ChatMessage) {
+    if (loadPrefs().mentionCue) playCue('mention');
+  }
+
+  // @补全与高亮的名字来源：名册（在房的人）。不在名册里的人 @ 不出高亮——
+  // 提示不到的人不该显示成提示到了（判定按 uid，见 chat/mentions.ts）
+  const mentionUsers = createMemo<MentionUser[]>(() =>
+    roster()
+      .filter((p) => p.uid > 0 && !p.ingest)
+      .map((p) => ({ uid: p.uid, username: p.username })),
+  );
+
+  // 引用态指向的那条消息（撤回后摘要跟着变成"已撤回"，因为这里每次都从 msgs() 现取）
+  const replyTarget = createMemo(() => {
+    const id = replyToId();
+    return id ? msgs().find((m) => m.id === id) : undefined;
+  });
+  const mentionHits = createMemo(() => {
+    const q = mentionQ();
+    return q ? matchMentions(mentionUsers(), q.query) : [];
+  });
+
+  // 输入/点击后重算"光标前是不是正在打提及"；候选变了就把高亮拉回第一项
+  function syncMentionQuery() {
+    const q = mentionQuery(chatInputEl.value, chatInputEl.selectionStart ?? chatInputEl.value.length);
+    setMentionQ(q);
+    setMentionIdx(0);
+  }
+
+  function pickMention(username: string) {
+    const q = mentionQ();
+    if (!q) return;
+    const next = applyMention(chatInputEl.value, q, username);
+    chatInputEl.value = next.value;
+    chatInputEl.setSelectionRange(next.caret, next.caret);
+    setChatReady(next.value.trim().length > 0);
+    setMentionQ(null);
+    chatInputEl.focus();
+  }
+
+  // 补全打开时接管上下键/回车/Tab/Esc；返回 true = 本次按键已被补全消费，不再走发送逻辑
+  function onMentionKeyDown(ev: KeyboardEvent): boolean {
+    const hits = mentionHits();
+    if (!hits.length) return false;
+    if (ev.key === 'Escape') {
+      ev.preventDefault();
+      setMentionQ(null);
+      return true;
+    }
+    if (ev.key === 'ArrowDown' || ev.key === 'ArrowUp') {
+      ev.preventDefault();
+      setMentionIdx((i) => (i + (ev.key === 'ArrowDown' ? 1 : hits.length - 1)) % hits.length);
+      return true;
+    }
+    if (ev.key === 'Enter' || ev.key === 'Tab') {
+      ev.preventDefault();
+      pickMention(hits[Math.min(mentionIdx(), hits.length - 1)].username);
+      return true;
+    }
+    return false;
   }
 
   // 聊天提示音节流 1.5 秒：一段时间内连来多条消息只响一次
@@ -1395,32 +1474,91 @@ export async function renderRoom(root: HTMLElement, channel: string) {
     playCue('message');
   }
 
-  // 数据线到的是一整条 Message 的 JSON：解析失败就丢，重连时 after= 会补齐
+  // 数据线到的是一个信封（新消息/撤回/反应），旧版页面发的裸 Message 由 parseEnvelope 兼容；
+  // 解析失败就丢，重连时 after= 会补齐（权威始终在库里）
   function onChatBroadcast(text: string) {
-    let m: ChatMessage;
-    try {
-      m = JSON.parse(text) as ChatMessage;
-    } catch {
+    const env = parseEnvelope(text);
+    if (!env) return;
+    if (env.t === 'message') {
+      appendMessage(env.m, true);
       return;
     }
-    if (!m || typeof m.id !== 'number' || m.id <= 0) return;
-    appendMessage(m, true);
+    if (env.t === 'delete') {
+      patchMessage(env.id, { deleted: true, content: '', file: undefined, reactions: [] });
+      return;
+    }
+    patchMessage(env.id, (m) => ({ reactions: mergeReaction(m.reactions, env.emoji, env.uid, env.on) }));
+  }
+
+  // 本地改一条已在列表里的消息（撤回/反应的实时到达）；不在列表里就忽略——
+  // 那条消息本来就没显示出来，下次拉历史会带着最终状态一起来
+  function patchMessage(id: number, patch: Partial<ChatMessage> | ((m: ChatMessage) => Partial<ChatMessage>)) {
+    setMsgs((list) => {
+      const i = list.findIndex((x) => x.id === id);
+      if (i < 0) return list;
+      const next = [...list];
+      next[i] = { ...list[i], ...(typeof patch === 'function' ? patch(list[i]) : patch) };
+      return next;
+    });
   }
 
   // 数据线不在（未连上/正在重连）时只落库不广播：接收方靠 after= 补齐，发送不阻塞。
   // 发送失败换另一条已连上的线再试一次（远端实例太老、不支持 Data Streams 时靠这个兜底），
   // 只试这一次；禁言是服务端的确定拒绝，换线一样被拒，不试。两次都失败就静默——
   // 权威在库里，对端重连时 after= 会补上
-  function broadcast(m: ChatMessage) {
+  function broadcast(text: string) {
     const eng = liveDataEngine();
     if (!eng) return;
-    const text = JSON.stringify(m);
     void eng.sendText(DATA_TOPIC_TEXT, text).catch(() => {
       if (isSelfGagged()) return;
       const alt = altEngine(eng);
       if (!alt) return;
       void alt.sendText(DATA_TOPIC_TEXT, text).catch(() => {});
     });
+  }
+
+  // ---- 撤回 / 反应 / 引用（服务端落库为准，成功后广播让对端立刻看到）----
+
+  async function removeMessage(m: ChatMessage) {
+    const ok = await confirmDialog({
+      title: m.uid === myUid ? '撤回这条消息？' : `删除 ${m.username} 的这条消息？`,
+      body: '消息内容会从服务器上清掉，聊天里只留一条"已撤回"的占位。',
+      danger: true,
+      confirmText: m.uid === myUid ? '撤回' : '删除',
+    });
+    if (!ok) return;
+    try {
+      await deleteMessage(channel, m.id);
+    } catch (err) {
+      toast((err as Error).message, 'bad');
+      return;
+    }
+    patchMessage(m.id, { deleted: true, content: '', file: undefined, reactions: [] });
+    if (replyToId() === m.id) setReplyToId(null);
+    broadcast(encodeDelete(m.id, myUid));
+  }
+
+  async function toggleReaction(m: ChatMessage, emoji: string, on: boolean) {
+    // 先本地生效再落库：反应是高频轻动作，等一个往返才变色会显得迟钝；失败时回滚
+    patchMessage(m.id, (cur) => ({ reactions: mergeReaction(cur.reactions, emoji, myUid, on) }));
+    try {
+      const res = await setReaction(channel, m.id, emoji, on);
+      patchMessage(m.id, { reactions: res.reactions });
+    } catch (err) {
+      patchMessage(m.id, (cur) => ({ reactions: mergeReaction(cur.reactions, emoji, myUid, !on) }));
+      toast((err as Error).message, 'bad');
+      return;
+    }
+    broadcast(encodeReaction(m.id, emoji, myUid, on));
+  }
+
+  // 跳到被引用的原消息：滚过去并闪一下（找不到说明它不在已加载的历史里，按钮本来就不会渲染）
+  function jumpToMessage(id: number) {
+    const node = chatLogEl.querySelector<HTMLElement>(`[data-msg-id="${id}"]`);
+    if (!node) return;
+    node.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    node.classList.add('flash');
+    setTimeout(() => node.classList.remove('flash'), 1200);
   }
 
   // 进房首次取最近 50 条；重连时按最大已知 id 补断线期间漏掉的
@@ -1455,16 +1593,21 @@ export async function renderRoom(root: HTMLElement, channel: string) {
     const content = chatInputEl.value.trim();
     if (!content || sendingText) return;
     sendingText = true;
+    const quoted = replyToId();
     chatInputEl.value = '';
     setChatReady(false);
+    setMentionQ(null);
+    setReplyToId(null);
     try {
-      const m = await postMessage(channel, { content });
+      const m = await postMessage(channel, quoted ? { content, reply_to: quoted } : { content });
       appendMessage(m);
-      broadcast(m);
+      broadcast(encodeMessage(m));
     } catch (err) {
-      // 落库失败才是真失败（禁言 403、超长 400）：把内容还给输入框，让用户能重发
+      // 落库失败才是真失败（禁言 403、超长 400、被引消息没了 400）：
+      // 把内容与引用态都还回去，让用户能原样重发
       chatInputEl.value = content;
       setChatReady(true);
+      if (quoted) setReplyToId(quoted);
       toast((err as Error).message, 'bad');
     } finally {
       sendingText = false;
@@ -1496,7 +1639,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
     // 自己的卡片直接用手上的 File 预览/下载，不等字节绕一圈回来
     putFileState(m.id, { status: 'sending', progress: 0, url: URL.createObjectURL(file) });
     appendMessage(m);
-    broadcast(m);
+    broadcast(encodeMessage(m));
     const eng = liveDataEngine();
     if (!eng) {
       // 卡片已落库但字节没人收得到：如实告知，别假装发出去了
@@ -1829,27 +1972,85 @@ export async function renderRoom(root: HTMLElement, channel: string) {
     );
   };
 
+  // 文本里的 @提及高亮：分段来自 chat/mentions.ts（按名册匹配，不用通配正则）
+  const MsgText = (p: { m: ChatMessage }) => (
+    <div class="text">
+      <For each={splitMentions(p.m.content, mentionUsers())}>
+        {(seg) => (
+          <Show when={seg.uid !== undefined} fallback={seg.text}>
+            <span class="mention" classList={{ me: seg.uid === myUid }}>
+              {seg.text}
+            </span>
+          </Show>
+        )}
+      </For>
+    </div>
+  );
+
   const ChatMsgView = (p: { m: ChatMessage }) => {
     const mine = p.m.uid === myUid;
     const openMenu = (ev: MouseEvent) => showUserMenu(ev.clientX, ev.clientY, p.m.uid, p.m.username);
+    // 被引用的原消息：只在已加载的历史里找（找不到时 ReplyQuote 自己出"原消息已不在"）
+    const quoted = createMemo(() => (p.m.reply_to ? msgs().find((x) => x.id === p.m.reply_to) : undefined));
+    const myEmojis = () => (p.m.reactions ?? []).filter((r) => r.uids.includes(myUid)).map((r) => r.emoji);
+    const openMsgMenu = (x: number, y: number) =>
+      showMsgMenu({
+        x,
+        y,
+        mine,
+        canDelete: mine || canModerate(),
+        deleted: p.m.deleted === true,
+        myEmojis: myEmojis(),
+        onReply: () => {
+          setReplyToId(p.m.id);
+          chatInputEl.focus();
+        },
+        onDelete: () => void removeMessage(p.m),
+        onReact: (emoji, on) => void toggleReaction(p.m, emoji, on),
+      });
     return (
       <div
         class="chat-msg"
+        data-msg-id={p.m.id}
         onContextMenu={(ev) => {
-          if (mine) return;
           ev.preventDefault();
-          openMenu(ev);
+          openMsgMenu(ev.clientX, ev.clientY);
         }}
       >
         <Avatar name={p.m.username} onClick={mine ? undefined : openMenu} />
         <div class="body">
+          <Show when={p.m.reply_to}>
+            <ReplyQuote target={quoted()} onJump={jumpToMessage} />
+          </Show>
           <div class="meta">
             <span class="who">{p.m.username}</span>
             <span class="at">{fmtClock(p.m.created_at)}</span>
+            {/* 消息操作入口：触屏没有右键，给一个常驻的小按钮 */}
+            <button
+              type="button"
+              class="hit msg-more"
+              aria-label="消息操作"
+              onClick={(ev) => {
+                const r = ev.currentTarget.getBoundingClientRect();
+                openMsgMenu(r.left, r.bottom + 4);
+              }}
+            >
+              {el(icon('more', 14, 'currentColor'))}
+            </button>
           </div>
-          <Show when={p.m.kind === 'file'} fallback={<div class="text">{p.m.content}</div>}>
-            <FileCard m={p.m} />
+          <Show
+            when={!p.m.deleted}
+            fallback={<div class="text msg-deleted">消息已撤回</div>}
+          >
+            <Show when={p.m.kind === 'file'} fallback={<MsgText m={p.m} />}>
+              <FileCard m={p.m} />
+            </Show>
           </Show>
+          <ReactionBar
+            reactions={p.m.reactions}
+            myUid={myUid}
+            onToggle={(emoji, on) => void toggleReaction(p.m, emoji, on)}
+          />
         </div>
       </div>
     );
@@ -2469,6 +2670,27 @@ export async function renderRoom(root: HTMLElement, channel: string) {
               </button>
             </Show>
             <div class="chat-input-wrap">
+              <ReplyComposer target={replyTarget()} onCancel={() => setReplyToId(null)} />
+              <Show when={mentionHits().length > 0}>
+                <div class="mention-pop">
+                  <For each={mentionHits()}>
+                    {(u, i) => (
+                      <button
+                        type="button"
+                        class="hit mention-item"
+                        classList={{ on: i() === mentionIdx() }}
+                        // mousedown 会先让输入框失焦，preventDefault 保住焦点与光标位置
+                        onMouseDown={(ev) => {
+                          ev.preventDefault();
+                          pickMention(u.username);
+                        }}
+                      >
+                        {u.username}
+                      </button>
+                    )}
+                  </For>
+                </div>
+              </Show>
               <form class="chat-input-box" onSubmit={sendChat}>
                 <button
                   type="button"
@@ -2484,11 +2706,19 @@ export async function renderRoom(root: HTMLElement, channel: string) {
                   placeholder={`发消息到 #${channel}`}
                   maxlength="2000"
                   autocomplete="off"
-                  onInput={() => setChatReady(chatInputEl.value.trim().length > 0)}
+                  onInput={() => {
+                    setChatReady(chatInputEl.value.trim().length > 0);
+                    syncMentionQuery();
+                  }}
+                  onBlur={() => setMentionQ(null)}
                   onPaste={onChatPaste}
                   onKeyDown={(ev) => {
+                    if (onMentionKeyDown(ev)) return;
                     if ((ev.ctrlKey || ev.metaKey) && ev.key === 'Enter') void sendChat(ev);
+                    // 空输入时退格取消引用态：不用挪到鼠标去点那个小叉
+                    if (ev.key === 'Backspace' && chatInputEl.value === '' && replyToId()) setReplyToId(null);
                   }}
+                  onClick={syncMentionQuery}
                 />
                 <button type="submit" class="hit send-btn" classList={{ ready: chatReady() }}>
                   {el(icon('back', 15, 'currentColor', 1.8))}

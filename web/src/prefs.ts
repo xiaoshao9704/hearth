@@ -47,6 +47,7 @@ export interface RoomPrefs {
   joinCue: boolean; // 他人进出房间时的短提示音
   chatCue: boolean; // 他人实时发来聊天消息时的短提示音
   afkMinutes: number; // 无操作多少分钟后向房间广播「离开」；0 = 不广播
+  mentionCue: boolean; // 被 @ 提到时的短提示音（比普通消息更醒目，且不受消息提示音节流影响）
 }
 
 const PREFS_KEY = 'hearth_room_prefs';
@@ -76,6 +77,7 @@ export function defaultPrefs(): RoomPrefs {
     joinCue: true,
     chatCue: true,
     afkMinutes: 10,
+    mentionCue: true,
   };
 }
 
@@ -122,6 +124,7 @@ export function loadPrefs(): RoomPrefs {
       chatCue: p.chatCue !== false,
       afkMinutes:
         typeof p.afkMinutes === 'number' && p.afkMinutes >= 0 && p.afkMinutes <= 240 ? Math.round(p.afkMinutes) : def.afkMinutes,
+      mentionCue: p.mentionCue !== false,
     };
   } catch {
     return def;
