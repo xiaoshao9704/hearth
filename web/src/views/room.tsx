@@ -7,11 +7,13 @@
 // - 视图层（Solid）：信号驱动，引擎回调只写信号，DOM 由 JSX 派生，消灭手工 refresh* 互相调用。
 import { createEffect, createMemo, createSignal, on, onCleanup, untrack, For, Show } from 'solid-js';
 import { render } from 'solid-js/web';
+import { startAfkWatch } from '../afk';
 import { ApiError, fetchJoinCredentials, getUser, kickUser, listChannels, muteUser, reportClientLog } from '../api';
 import type { DataLine, EngineCred } from '../api';
 import { playCue } from '../audio';
 import { fetchMessages, postMessage } from '../chat';
 import type { ChatMessage } from '../chat';
+import { compressImage } from '../chat/compress';
 import { createEngine } from '../engine';
 import { DATA_TOPIC_FILE, DATA_TOPIC_TEXT } from '../engine/types';
 import type { AVEngine, EPart, EngineCallbacks, TrackSource, VideoStats } from '../engine/types';
@@ -19,6 +21,9 @@ import { clearLeaveGuard, setLeaveGuard } from '../nav';
 import { encoderIsHw, loadPrefs, prefsBus, savePrefs } from '../prefs';
 import { renderShell } from '../shell';
 import { avatarHtml, confirmDialog, el, esc, fmtClock, icon, licon, menuButtonHtml, micIcon, slashIcon, toast, wireMenuButton } from '../ui';
+import { CameraFlipButton } from './room/camera-flip';
+import { IngestBadge } from './room/ingest-badge';
+import { createUnreadMarker } from './room/unread-divider';
 import { openSettings } from './settings';
 
 type SinkMedia = HTMLMediaElement & { setSinkId?: (id: string) => Promise<void>; sinkId?: string };
@@ -275,6 +280,8 @@ export async function renderRoom(root: HTMLElement, channel: string) {
   let chatInputEl!: HTMLInputElement;
   let chatFileEl!: HTMLInputElement;
   let vuBarEl: HTMLElement | undefined; // 麦克风 VU 条（micOn 时才在 DOM 里）
+  const unreadMark = createUnreadMarker(() => chatLogEl); // 未读分割线（B6）
+  const UnreadDivider = unreadMark.Divider;
 
   // 双线参与者合并：语音线是名册权威（micOn），舞台线补充 sharing/推流标记
   function parts(): EPart[] {
@@ -941,7 +948,10 @@ export async function renderRoom(root: HTMLElement, channel: string) {
     if (document.visibilityState !== 'visible') return;
     retryNow();
     // 回到前台且聊天面板开着：未读视为已看
-    if (panel() === 'chat') setUnread(0);
+    if (panel() === 'chat') {
+      setUnread(0);
+      unreadMark.reveal();
+    }
   };
   document.addEventListener('visibilitychange', onVisible);
   document.addEventListener('fullscreenchange', onFsChange);
@@ -1297,6 +1307,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
         // 触屏聚焦会弹出键盘把面板顶掉一半，只在有指针悬停的设备上抢焦点
         if (!window.matchMedia('(hover: none)').matches) chatInputEl.focus();
       });
+      unreadMark.reveal(); // 排在滚底之后：有未读就改滚到第一条未读
     }
   }
 
@@ -1307,6 +1318,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
     const at = d <= NEAR_BOTTOM_PX;
     setAtBottom(at);
     if (at) setNewBelow(false); // 自己滚到底，新消息提示消失
+    if (at) unreadMark.atBottom();
   };
   function jumpToLatest() {
     chatLogEl.scrollTo({ top: chatLogEl.scrollHeight, behavior: 'smooth' });
@@ -1369,6 +1381,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
     // 面板关着或页面在后台都计未读（title 前缀与按钮角标共用这一个计数）
     const hidden = panel() !== 'chat' || document.visibilityState !== 'visible';
     if (hidden) setUnread((u) => u + 1);
+    if (hidden) unreadMark.note(m.id);
     if (live && hidden) playChatCue();
   }
 
@@ -1460,8 +1473,9 @@ export async function renderRoom(root: HTMLElement, channel: string) {
 
   // ---- 发文件/图片 ----
 
-  async function sendFiles(files: File[]) {
-    for (const f of files) {
+  async function sendFiles(raws: File[]) {
+    for (const raw of raws) {
+      const f = await compressImage(raw); // 图片过大先本地压缩，其它类型原样返回
       if (f.size > FILE_MAX_MB * 1024 * 1024) {
         toast(`「${f.name}」超过 ${FILE_MAX_MB} MB，发不出去`, 'bad');
         continue;
@@ -1946,6 +1960,9 @@ export async function renderRoom(root: HTMLElement, channel: string) {
       ),
     );
     const memberUserCount = createMemo(() => new Set(roster().map(groupKey)).size);
+    // 推流徽标的实测数据：借用该 identity 投屏卡片已有的 2s 轮询，名册不另开一路 getStats
+    const screenStatsOf = (identity: string) =>
+      videoEntries().find((e) => e.identity === identity && e.source === 'screen')?.liveStats() ?? null;
     // 展示层按用户分组：单设备用户平铺一行，多设备用户展开树形设备子行
     const memberGroups = createMemo(() => {
       const groups = new Map<number | string, EPart[]>();
@@ -2131,6 +2148,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
                   {el(slashIcon('camera', 17, !cameraOn(), 'currentColor'))}
                   <span class="ctl-mobile-label">{cameraOn() ? '关闭摄像头' : '摄像头'}</span>
                 </button>
+                <CameraFlipButton cameraOn={cameraOn} flip={() => stageEngine()?.flipCamera() ?? Promise.reject(new Error(stageHint()))} />
                 <button
                   class={'hit ctl-pill' + (canScreenShare ? '' : ' hidden')}
                   classList={{ on: screenOn(), disabled: !stageOk() }}
@@ -2234,6 +2252,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
                     const devBits = (p: EPart) =>
                       [
                         p.sharing ? '投屏中' : '',
+                        p.afk && !p.ingest ? '离开' : '',
                         devSpeaking(p) ? '说话中' : !p.micOn && !p.ingest ? '已静音' : '',
                         !p.canPublish && !p.ingest ? '已禁言' : '',
                         !p.isLocal && devMuted(p)
@@ -2317,6 +2336,12 @@ export async function renderRoom(root: HTMLElement, channel: string) {
                                 <Show when={isOwner}>
                                   <span class="tag tag-ember">房主</span>
                                 </Show>
+                                <Show when={p.afk && !p.ingest}>
+                                  <span class="tag tag-afk">离开</span>
+                                </Show>
+                                <Show when={p.ingest}>
+                                  <IngestBadge stats={() => screenStatsOf(p.identity)} />
+                                </Show>
                               </div>
                               <div class="m-status" classList={{ hot: devSpeaking(p) || p.sharing }}>
                                 {devName(p)}
@@ -2379,6 +2404,9 @@ export async function renderRoom(root: HTMLElement, channel: string) {
                                   {devBits(p)}
                                 </div>
                               </div>
+                              <Show when={p.ingest}>
+                                <IngestBadge stats={() => screenStatsOf(p.identity)} />
+                              </Show>
                               {muteBtn(p)}
                               {kickBtn(p)}
                             </div>
@@ -2423,7 +2451,16 @@ export async function renderRoom(root: HTMLElement, channel: string) {
                 <div class="chat-day">最近</div>
               </Show>
               <For each={chatItems()}>
-                {(it) => ('sys' in it ? <div class="chat-sys">{it.text}</div> : <ChatMsgView m={it} />)}
+                {(it) =>
+                  'sys' in it ? (
+                    <div class="chat-sys">{it.text}</div>
+                  ) : (
+                    <>
+                      <UnreadDivider id={it.id} />
+                      <ChatMsgView m={it} />
+                    </>
+                  )
+                }
               </For>
             </div>
             <Show when={newBelow()}>
@@ -2502,6 +2539,8 @@ export async function renderRoom(root: HTMLElement, channel: string) {
 
   // ---- 首次连接与清理 ----
   // 清理监听必须先于首次连接注册：连接期间用户离开时，清理块要能置 leaving 并释放已建好的部分
+  // 离开判定 → 广播成参与者属性（语音线是名册权威）；引擎不在/服务端不收都不影响本机显示
+  const afkWatch = startAfkWatch((on) => void voiceLine.engine?.setAttribute('afk', on ? '1' : '').catch(() => {}));
   const myHash = location.hash;
   const onHashChange = () => {
     if (location.hash !== myHash) {
@@ -2525,6 +2564,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
       diag('info', 'room_close');
       leaving = true;
       exitFs();
+      afkWatch.dispose();
       clearTimeout(volSaveTimer);
       saveVolumes(volumes()); // 去抖的尾触可能还没落盘
       if (gainResume) {

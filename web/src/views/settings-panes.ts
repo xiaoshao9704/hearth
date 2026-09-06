@@ -323,6 +323,11 @@ function renderAV(body: HTMLElement): () => void {
           <div class="switch ${prefs.chatCue ? 'on' : ''}" id="chat-cue-switch"><div class="knob"></div></div>
         </button>
         <div class="opt-list" id="audio-chain"></div>
+        <div class="kv-line">
+          <span class="k">离开状态</span>
+          <input class="afk-min mono" type="number" min="0" max="240" step="1" id="afk-min" value="${prefs.afkMinutes}" />
+          <span style="font-size:11.5px;color:var(--text-2)">分钟无操作后，名册里标记为「离开」；0 = 不标记</span>
+        </div>
       </div>
       <div style="display:flex;flex-direction:column;gap:9px">
         <div class="section-label">摄像头</div>
@@ -622,6 +627,14 @@ function renderAV(body: HTMLElement): () => void {
     save('chat-cue');
   });
 
+  const afkMin = body.querySelector<HTMLInputElement>('#afk-min')!;
+  afkMin.addEventListener('change', () => {
+    const n = Math.round(Number(afkMin.value));
+    prefs.afkMinutes = Number.isFinite(n) && n >= 0 && n <= 240 ? n : 10;
+    afkMin.value = String(prefs.afkMinutes);
+    save('afk');
+  });
+
   const mirrorSwitch = body.querySelector<HTMLDivElement>('#mirror-switch')!;
   body.querySelector('#mirror-row')!.addEventListener('click', () => {
     prefs.mirror = !prefs.mirror;
@@ -704,6 +717,10 @@ function renderScreen(body: HTMLElement, goStream: () => void) {
         <div class="hint-card">
           ${icon('info', 15, 'var(--text-2)')}
           <div>改这项要下次开始投屏才生效：带不带声音在选窗口时就定死了，中途改只能停下重选。另外这受浏览器限制——macOS 上的 Chrome 只有共享「标签页」才带声音，整屏和单个窗口都没有；Safari 不支持。</div>
+        </div>
+        <div class="hint-card">
+          ${icon('volume', 15, 'var(--text-2)')}
+          <div>只想带某一个页面的声音（放视频、听音乐）：在浏览器的选择窗口里选「标签页」，勾上那一栏的共享声音。若某个平台仍有回音——听到自己这边传出去的语音绕回来——把「语音与视频」里的扬声器切到与系统默认不同的输出设备，采集到的系统声音里就不再有别人的语音。</div>
         </div>
         <div class="hint-card">
           ${icon('cube', 15, 'var(--text-2)')}

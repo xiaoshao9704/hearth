@@ -46,6 +46,7 @@ export interface RoomPrefs {
   voiceBitrate: number; // bps
   joinCue: boolean; // 他人进出房间时的短提示音
   chatCue: boolean; // 他人实时发来聊天消息时的短提示音
+  afkMinutes: number; // 无操作多少分钟后向房间广播「离开」；0 = 不广播
 }
 
 const PREFS_KEY = 'hearth_room_prefs';
@@ -74,6 +75,7 @@ export function defaultPrefs(): RoomPrefs {
     voiceBitrate: 64000,
     joinCue: true,
     chatCue: true,
+    afkMinutes: 10,
   };
 }
 
@@ -118,6 +120,8 @@ export function loadPrefs(): RoomPrefs {
       voiceBitrate: VOICE_BITRATES.includes(p.voiceBitrate as number) ? (p.voiceBitrate as number) : def.voiceBitrate,
       joinCue: p.joinCue !== false,
       chatCue: p.chatCue !== false,
+      afkMinutes:
+        typeof p.afkMinutes === 'number' && p.afkMinutes >= 0 && p.afkMinutes <= 240 ? Math.round(p.afkMinutes) : def.afkMinutes,
     };
   } catch {
     return def;

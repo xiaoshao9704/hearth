@@ -9,7 +9,14 @@ import {
   RoomEvent,
   Track,
 } from 'livekit-client';
-import type { AudioCaptureOptions, LocalVideoTrack, ScreenShareCaptureOptions, TrackPublishOptions, VideoCodec } from 'livekit-client';
+import type {
+  AudioCaptureOptions,
+  LocalVideoTrack,
+  ScreenShareCaptureOptions,
+  TrackPublishOptions,
+  VideoCaptureOptions,
+  VideoCodec,
+} from 'livekit-client';
 import { RnnoisePipeline } from '../audio';
 import { RES_DIMS, loadPrefs } from '../prefs';
 import type { RoomPrefs, ScreenCodec } from '../prefs';
@@ -46,6 +53,8 @@ export class LiveKitEngine implements AVEngine {
   private disposed = false;
   private resume = () => void this.rnnoise.resume();
   private iceProbeTimer: number | undefined;
+  // 本地属性镜像：setAttribute 先写这里再尽力广播，本机名册不等服务端回执
+  private localAttrs: Record<string, string> = {};
   private snapshot: Record<'pub' | 'sub', IceTransportSnapshot | null> = { pub: null, sub: null };
 
   constructor(cbs: EngineCallbacks) {
@@ -68,17 +77,21 @@ export class LiveKitEngine implements AVEngine {
       }
     }
     const ingest = meta?.kind === 'ingest';
+    // 自己的 afk 先看本地镜像：属性广播要服务端令牌授予 canUpdateOwnMetadata，
+    // 没授予时远端收不到，但本机的名册仍应如实显示自己已被判为离开
+    const isLocal = p.identity === this.room.localParticipant.identity;
     return {
       identity: p.identity,
       uid: meta?.uid ?? 0,
       username: meta?.username ?? p.name ?? '',
       display: p.name || p.identity,
-      isLocal: p.identity === this.room.localParticipant.identity,
+      isLocal,
       micOn: !!micPub && !micPub.isMuted,
       canPublish: p.permissions?.canPublish !== false, // 服务端禁言会收走发布权限
       sharing: !!p.getTrackPublication(Track.Source.ScreenShare),
       ingest,
       tag: meta?.tag ?? '', // 浏览器参与者也有设备标签，展示设备名要用它
+      afk: isLocal ? this.localAttrs.afk === '1' : p.attributes?.afk === '1',
     };
   }
 
@@ -167,6 +180,8 @@ export class LiveKitEngine implements AVEngine {
       .on(RoomEvent.ParticipantDisconnected, () => this.cbs.onRoster())
       // 禁言/解禁（canPublish 变化）：走名册刷新，视图据此更新徽标与自我提示
       .on(RoomEvent.ParticipantPermissionsChanged, () => this.cbs.onRoster())
+      // 参与者属性（afk 等纯展示态）变化：同样只是重绘名册
+      .on(RoomEvent.ParticipantAttributesChanged, () => this.cbs.onRoster())
       // 自动播放被拦截：SDK 自己不会出提示，交给房间层弹「点击开启声音」
       .on(RoomEvent.AudioPlaybackStatusChanged, () => {
         if (!this.room.canPlaybackAudio) this.cbs.onAudioBlocked?.();
@@ -342,7 +357,7 @@ export class LiveKitEngine implements AVEngine {
   }
 
   // 实测统计：对相邻两次采样做字节差分得码率（bits/ms = kbps）
-  private lastSample = new Map<string, { bytes: number; t: number }>();
+  private lastSample = new Map<string, { bytes: number; t: number; packets: number; lost: number }>();
 
   private pickVideoStats(report: RTCStatsReport | undefined, type: 'outbound-rtp' | 'inbound-rtp', key: string): VideoStats | null {
     if (!report) return null;
@@ -351,14 +366,30 @@ export class LiveKitEngine implements AVEngine {
       const r = s as {
         type?: string; kind?: string; bytesSent?: number; bytesReceived?: number;
         timestamp?: number; frameWidth?: number; frameHeight?: number; framesPerSecond?: number;
+        packetsReceived?: number; packetsLost?: number;
       };
       if (r.type !== type || r.kind !== 'video') return;
       const bytes = r.bytesSent ?? r.bytesReceived ?? 0;
       const t = r.timestamp ?? 0;
+      const packets = r.packetsReceived ?? 0;
+      const lost = r.packetsLost ?? 0;
       const prev = this.lastSample.get(key);
-      this.lastSample.set(key, { bytes, t });
+      this.lastSample.set(key, { bytes, t, packets, lost });
       const kbps = prev && t > prev.t ? ((bytes - prev.bytes) * 8) / (t - prev.t) : 0;
-      out = { width: r.frameWidth ?? 0, height: r.frameHeight ?? 0, fps: r.framesPerSecond ?? 0, kbps: Math.max(0, Math.round(kbps)) };
+      // 丢包只对接收侧有意义，且要看区间差分——累计值会把开局那几个包一直摊到最后
+      let loss: number | undefined;
+      if (type === 'inbound-rtp' && prev) {
+        const dl = Math.max(0, lost - prev.lost);
+        const dp = Math.max(0, packets - prev.packets);
+        if (dl + dp > 0) loss = Math.round((dl / (dl + dp)) * 1000) / 10;
+      }
+      out = {
+        width: r.frameWidth ?? 0,
+        height: r.frameHeight ?? 0,
+        fps: r.framesPerSecond ?? 0,
+        kbps: Math.max(0, Math.round(kbps)),
+        loss,
+      };
     });
     return out;
   }
@@ -460,6 +491,41 @@ export class LiveKitEngine implements AVEngine {
     await this.room.switchActiveDevice('videoinput', deviceId);
   }
 
+  // 手机翻转前后摄像头。朝向以采集轨的 settings 为准，拿不到（部分安卓浏览器不报）
+  // 才退回自己记的上一次值
+  private facing: 'user' | 'environment' = 'user';
+
+  async flipCamera() {
+    const track = this.room.localParticipant.getTrackPublication(Track.Source.Camera)?.videoTrack;
+    if (!track) throw new Error('摄像头未开启');
+    const settings = track.mediaStreamTrack.getSettings();
+    const cur = settings.facingMode === 'environment' || settings.facingMode === 'user' ? settings.facingMode : this.facing;
+    const next: 'user' | 'environment' = cur === 'environment' ? 'user' : 'environment';
+    try {
+      // 必须 exact：ideal 在只报一个 facingMode 的机器上会静默返回原摄像头，按钮就成了摆设。
+      // SDK 的 VideoCaptureOptions.facingMode 只到字面量，约束对象要绕过类型
+      await track.restartTrack({ facingMode: { exact: next } } as unknown as VideoCaptureOptions);
+    } catch {
+      // 没有对应朝向的摄像头（多数桌面、部分外接摄像头）：退回按设备列表切下一个
+      const cams = await Room.getLocalDevices('videoinput');
+      const curId = settings.deviceId ?? '';
+      const idx = cams.findIndex((d) => d.deviceId === curId);
+      const nextDev = cams[(idx + 1) % Math.max(cams.length, 1)];
+      if (cams.length < 2 || !nextDev || nextDev.deviceId === curId) throw new Error('没有可切换的第二个摄像头');
+      await this.switchCamera(nextDev.deviceId);
+    }
+    this.facing = next;
+    // 采集轨换了新对象，原来挂的 ended 监听跟着走了，重挂一次
+    this.watchEnded('camera', this.room.localParticipant.getTrackPublication(Track.Source.Camera)?.track?.mediaStreamTrack);
+  }
+
+  async setAttribute(key: string, value: string) {
+    if (this.localAttrs[key] === value) return;
+    this.localAttrs[key] = value;
+    this.cbs.onRoster(); // 本机先反映，广播成不成功都不改变自己看到的状态
+    await this.room.localParticipant.setAttributes({ ...this.localAttrs });
+  }
+
   // ---- 投屏：h264 单层 / vp9·av1 SVC 分层 ----
 
   // 当前投屏轨发布时选的编码：与 prefs 对比决定热改能否就地完成。
@@ -508,13 +574,27 @@ export class LiveKitEngine implements AVEngine {
 
   private screenOptions(p: RoomPrefs): { capture: ScreenShareCaptureOptions; publish: TrackPublishOptions } {
     const d = RES_DIMS[p.res];
+    // restrictOwnAudio 还没普及：浏览器不认的约束一律不传，免得整个 getDisplayMedia 直接 TypeError
+    const supported = navigator.mediaDevices?.getSupportedConstraints?.() as
+      | (MediaTrackSupportedConstraints & { restrictOwnAudio?: boolean })
+      | undefined;
     const capture: ScreenShareCaptureOptions = {
       resolution: { width: d.width, height: d.height, frameRate: p.fps },
       contentHint: 'detail', // 屏幕内容以文字/细节为主
+      systemAudio: 'include', // 让浏览器把系统声音摆进可选源；不支持的浏览器忽略
+      selfBrowserSurface: 'exclude', // 别把 hearth 自己这个标签页列为候选（选中就成了镜中镜）
+      preferCurrentTab: false,
       // 系统声音是音乐/游戏音效，不是人声：回声消除/降噪/自动增益会把它嚼烂，
-      // 声道数也和麦克风相反——麦克风降到单声道避免单耳，这里要保住左右声场
+      // 声道数也和麦克风相反——麦克风降到单声道避免单耳，这里要保住左右声场。
+      // restrictOwnAudio 把本页面自己播放的声音（也就是别人的语音）剔出采集，避免回音
       audio: p.screenAudio
-        ? { echoCancellation: false, noiseSuppression: false, autoGainControl: false, channelCount: 2 }
+        ? {
+            echoCancellation: false,
+            noiseSuppression: false,
+            autoGainControl: false,
+            channelCount: 2,
+            ...(supported?.restrictOwnAudio ? { restrictOwnAudio: true } : {}),
+          }
         : false,
     };
     const encoding = { maxBitrate: Math.round(p.bitrate * 1e6), maxFramerate: p.fps };
