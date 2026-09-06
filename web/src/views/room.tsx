@@ -160,7 +160,6 @@ export async function renderRoom(root: HTMLElement, channel: string) {
   shell.setConn(false, '正在协商…');
 
   const myUid = getUser()?.id ?? 0;
-  const myUsername = getUser()?.username ?? ''; // 只用于「消息里有没有 @我」这一个展示层判断
 
   // ---- 连接层状态（非响应式）----
   const voiceLine: Line = { role: 'voice', engine: null, engineName: '', attempts: 0, timer: 0, inflight: false };
@@ -1422,15 +1421,14 @@ export async function renderRoom(root: HTMLElement, channel: string) {
     if (hidden) setUnread((u) => u + 1);
     if (hidden) unreadMark.note(m.id);
     // 被 @ 走单独一档提示音：它比普通消息重要，不受聊天提示音的节流与"面板开着就不响"限制
-    if (live && m.kind === 'text' && mentionsUser(m.content, mentionUsers(), myUid)) {
-      onMention(m);
-      return;
-    }
-    if (live && hidden) playChatCue();
-    if (live) notifyMessage(m, myUsername, () => switchPanel('chat'));
+    const mentioned = live && m.kind === 'text' && mentionsUser(m.content, mentionUsers(), myUid);
+    if (mentioned) onMention(m);
+    else if (live && hidden) playChatCue();
+    // 提示音与系统通知各一次：被 @ 与否都只发一条通知，档次由 mentioned 决定
+    if (live) notifyMessage(m, mentioned, () => switchPanel('chat'));
   }
 
-  // 被 @ 的统一入口：系统通知属于另一批，这里先只出提示音，那一批接线时挂在这个钩子上
+  // 被 @ 的统一入口：只管提示音；系统通知在 appendMessage 里按同一个判定发，两者各一次
   function onMention(_m: ChatMessage) {
     if (loadPrefs().mentionCue) playCue('mention');
   }

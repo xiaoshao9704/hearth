@@ -60,14 +60,6 @@ function show(tag: string, title: string, body: string, onOpen: () => void) {
   };
 }
 
-// mentionsMe 内容里是否 @ 了自己。用户名字符集是 [A-Za-z0-9_-]，
-// 因此边界只需排除紧跟的合法用户名字符（避免 @ab 命中 @abc）。
-export function mentionsMe(content: string, myUsername: string): boolean {
-  if (!myUsername) return false;
-  const re = new RegExp(`@${myUsername.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![A-Za-z0-9_-])`, 'i');
-  return re.test(content);
-}
-
 interface NotifiableMessage {
   username: string;
   content: string;
@@ -76,11 +68,12 @@ interface NotifiableMessage {
 
 // notifyMessage 实时到达的他人消息：页面在后台且对应开关开着时发通知。
 // 无论开关如何都会"备好"权限申请——第一条消息就是最合适的申请时机。
-export function notifyMessage(m: NotifiableMessage, myUsername: string, onOpen: () => void) {
+// mentioned 由调用方按 chat/mentions.ts 判定（按名册 uid，不按用户名），
+// 保证提示音与通知认的是同一件事。
+export function notifyMessage(m: NotifiableMessage, mentioned: boolean, onOpen: () => void) {
   armNotifyPermission();
   if (document.visibilityState === 'visible') return;
   const prefs = loadPrefs();
-  const mentioned = mentionsMe(m.content, myUsername);
   if (mentioned ? !prefs.notifyMentions : !prefs.notifyMessages) return;
   const who = m.username || '有人';
   const body = m.kind === 'file' ? '发来一个文件' : m.content.slice(0, 120);
