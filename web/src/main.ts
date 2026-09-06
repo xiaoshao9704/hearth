@@ -8,6 +8,7 @@ import { renderJoin } from './views/join';
 import { isLobbyHash, renderLobby } from './views/lobby';
 import { renderLogin } from './views/login';
 import { renderManage } from './views/manage';
+import { registerServiceWorker } from './sw';
 import { renderRoom } from './views/room';
 import { closeSettings } from './views/settings';
 
@@ -84,3 +85,6 @@ if (getToken()) {
 
 // 投屏编码默认值按本机能力自动选择（硬编优先；用户手选过则不动）
 void initScreenCodecAuto();
+
+// PWA：注册不缓存任何资源的最小 service worker，只为拿到「安装」入口
+registerServiceWorker();

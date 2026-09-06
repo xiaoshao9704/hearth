@@ -22,6 +22,7 @@ import { DATA_TOPIC_FILE, DATA_TOPIC_TEXT } from '../engine/types';
 import type { AVEngine, EPart, EngineCallbacks, TrackSource, VideoStats } from '../engine/types';
 import { clearLeaveGuard, setLeaveGuard } from '../nav';
 import { encoderIsHw, loadPrefs, prefsBus, savePrefs } from '../prefs';
+import { notifyJoin, notifyMessage } from '../notify';
 import { renderShell } from '../shell';
 import { avatarHtml, confirmDialog, el, esc, fmtClock, icon, licon, menuButtonHtml, micIcon, slashIcon, toast, wireMenuButton } from '../ui';
 import { CameraFlipButton } from './room/camera-flip';
@@ -159,6 +160,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
   shell.setConn(false, '正在协商…');
 
   const myUid = getUser()?.id ?? 0;
+  const myUsername = getUser()?.username ?? ''; // 只用于「消息里有没有 @我」这一个展示层判断
 
   // ---- 连接层状态（非响应式）----
   const voiceLine: Line = { role: 'voice', engine: null, engineName: '', attempts: 0, timer: 0, inflight: false };
@@ -443,6 +445,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
         if (before.has(k)) return;
         joined = true;
         pushRoomEvent(ingest ? `${name === '你' ? '你的' : `${name} 的`} OBS 开始推流` : `${name} 进入了房间`);
+        if (!ingest) notifyJoin(name, () => switchPanel('members'));
       });
       before.forEach((name, k) => {
         if (after.has(k)) return;
@@ -1424,6 +1427,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
       return;
     }
     if (live && hidden) playChatCue();
+    if (live) notifyMessage(m, myUsername, () => switchPanel('chat'));
   }
 
   // 被 @ 的统一入口：系统通知属于另一批，这里先只出提示音，那一批接线时挂在这个钩子上

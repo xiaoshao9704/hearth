@@ -1,0 +1,100 @@
+// 系统通知：页面在后台时把新消息/被@/有人进房推到桌面。
+// 两条约束决定了这里的做法：
+//  1. 不在进页面时申请权限——那是最容易被永久拒掉的时机。第一条实时消息到达时才"备好"，
+//     真正的 requestPermission 尽量落在紧接着的一次用户手势上（Firefox 只在手势里允许申请）。
+//  2. 页面可见时一律不发通知：可见时该响的是提示音（audio.ts），通知只补"人不在这一页"的场景。
+import { loadPrefs } from './prefs';
+
+// 通知的 tag：同类通知互相替换，连来十条消息桌面上只留最后一条，不堆成一摞
+const TAG_CHAT = 'hearth-chat';
+const TAG_JOIN = 'hearth-join';
+
+const supported = typeof Notification !== 'undefined';
+let armed = false; // 已经"备好"过申请（只做一次）
+let gestureWired = false;
+
+function permission(): NotificationPermission | 'unsupported' {
+  return supported ? Notification.permission : 'unsupported';
+}
+
+function request() {
+  if (!supported || Notification.permission !== 'default') return;
+  try {
+    void Notification.requestPermission();
+  } catch {
+    // 老式回调签名的浏览器：忽略，下一次手势还会再试
+  }
+}
+
+// armNotifyPermission 备好权限申请：先直接试一次（Chromium 系不要求手势），
+// 同时挂一次性的手势监听兜底（Firefox 等要求手势的浏览器靠它）。
+export function armNotifyPermission() {
+  if (!supported || armed || Notification.permission !== 'default') return;
+  armed = true;
+  request();
+  if (gestureWired) return;
+  gestureWired = true;
+  const once = () => {
+    request();
+    window.removeEventListener('pointerdown', once, true);
+    window.removeEventListener('keydown', once, true);
+  };
+  window.addEventListener('pointerdown', once, true);
+  window.addEventListener('keydown', once, true);
+}
+
+// show 发一条通知；点击聚焦本窗口并执行 onOpen（打开聊天抽屉）。
+function show(tag: string, title: string, body: string, onOpen: () => void) {
+  if (permission() !== 'granted') return;
+  let n: Notification;
+  try {
+    n = new Notification(title, { body, tag, icon: '/icons/icon-192.png' });
+  } catch {
+    // Android Chrome 里页面直接 new Notification 会抛（要求 ServiceWorkerRegistration.showNotification）
+    return;
+  }
+  n.onclick = () => {
+    window.focus();
+    onOpen();
+    n.close();
+  };
+}
+
+// mentionsMe 内容里是否 @ 了自己。用户名字符集是 [A-Za-z0-9_-]，
+// 因此边界只需排除紧跟的合法用户名字符（避免 @ab 命中 @abc）。
+export function mentionsMe(content: string, myUsername: string): boolean {
+  if (!myUsername) return false;
+  const re = new RegExp(`@${myUsername.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![A-Za-z0-9_-])`, 'i');
+  return re.test(content);
+}
+
+interface NotifiableMessage {
+  username: string;
+  content: string;
+  kind: string;
+}
+
+// notifyMessage 实时到达的他人消息：页面在后台且对应开关开着时发通知。
+// 无论开关如何都会"备好"权限申请——第一条消息就是最合适的申请时机。
+export function notifyMessage(m: NotifiableMessage, myUsername: string, onOpen: () => void) {
+  armNotifyPermission();
+  if (document.visibilityState === 'visible') return;
+  const prefs = loadPrefs();
+  const mentioned = mentionsMe(m.content, myUsername);
+  if (mentioned ? !prefs.notifyMentions : !prefs.notifyMessages) return;
+  const who = m.username || '有人';
+  const body = m.kind === 'file' ? '发来一个文件' : m.content.slice(0, 120);
+  show(TAG_CHAT, mentioned ? `${who} 提到了你` : who, body, onOpen);
+}
+
+// notifyJoin 有人进房：默认关（人来人往比消息吵得多），开了才发。
+export function notifyJoin(name: string, onOpen: () => void) {
+  if (document.visibilityState === 'visible') return;
+  if (!loadPrefs().notifyJoins) return;
+  show(TAG_JOIN, 'Hearth', `${name} 进入了房间`, onOpen);
+}
+
+// notifyState 给设置面板显示当前权限状态。
+export function notifyState(): NotificationPermission | 'unsupported' {
+  return permission();
+}

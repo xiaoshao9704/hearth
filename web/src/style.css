@@ -1200,3 +1200,21 @@ body.theater-on .sidebar { display: none; }
   .chat-first-bar { min-height: 46px; padding: 6px 10px; }
   .cf-note { display: none; }
 }
+/* ---- 第 4 批 ---- */
+/* 登录会话行（设置 → 账户）：与「我的设备」行同一形状，图标底色区分本次登录 */
+.sess-icon {
+  width: 34px; height: 34px; flex-shrink: 0; border-radius: 9px;
+  display: flex; align-items: center; justify-content: center; background: var(--bg-4);
+}
+.sess-icon.on { background: var(--ember-tint); }
+.sess-name { font-size: 13.5px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sess-meta { font-size: 11px; color: var(--text-2); margin-top: 3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 通知权限状态提示条 */
+.notify-hint { font-size: 11.5px; line-height: 1.6; color: var(--text-2); text-wrap: pretty; }
+.notify-hint.bad { color: var(--red-text); }
+/* 审计筛选下拉：与用户表里的角色下拉同款，只是高度对齐筛选行的 38px */
+.audit-select {
+  height: 38px; padding: 0 10px; border-radius: 9px;
+  border: 1px solid var(--line); background: var(--bg-2); color: var(--text-1); font-size: 12.5px;
+}
+.audit-table .table-row { align-items: center; }

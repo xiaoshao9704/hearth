@@ -32,6 +32,8 @@ import {
 import type { DenoiseMode, ScreenCodec } from '../prefs';
 import { getTheme, setTheme } from '../theme';
 import type { Theme } from '../theme';
+import { armNotifyPermission, notifyState } from '../notify';
+import { renderSessions } from './account-pane';
 import { avatarHtml, confirmDialog, copyText, esc, icon, pwBarsHtml, pwScore, slashIcon, timeAgo, toast } from '../ui';
 
 export type PersonalPane = 'av' | 'screen' | 'stream' | 'devices' | 'invites' | 'account' | 'appearance';
@@ -132,6 +134,8 @@ function renderAccount(body: HTMLElement, close: () => void) {
         </div>
       </div>
 
+      <div id="acc-sessions"></div>
+
       <button class="hit card" id="acc-logout" style="display:flex;align-items:center;gap:10px;padding:14px 18px;border-color:var(--red-line);text-align:left;width:100%">
         ${icon('leave', 16, 'var(--red)')}
         <div style="flex-grow:1">
@@ -204,10 +208,13 @@ function renderAccount(body: HTMLElement, close: () => void) {
       pwCur.value = pwNew.value = pwConf.value = '';
       syncPw();
       toast('密码已更新，其他设备上的会话已全部退出。', 'ok');
+      renderSessions(body.querySelector<HTMLElement>('#acc-sessions')!); // 会话列表跟着变，重画一次
     } catch (err) {
       toast((err as Error).message, 'bad');
     }
   });
+
+  renderSessions(body.querySelector<HTMLElement>('#acc-sessions')!);
 
   body.querySelector('#acc-logout')!.addEventListener('click', async () => {
     try {
@@ -328,6 +335,29 @@ function renderAV(body: HTMLElement): () => void {
             <div class="s-desc">有人 @ 你时播放一声更醒目的提示（不受聊天提示音的节流影响）</div>
           </div>
           <div class="switch ${prefs.mentionCue ? 'on' : ''}" id="mention-cue-switch"><div class="knob"></div></div>
+        </button>
+        <div class="section-label">系统通知</div>
+        <div class="notify-hint" id="notify-hint"></div>
+        <button class="hit switch-row" id="notify-msg-row" style="width:100%;text-align:left">
+          <div style="flex-grow:1">
+            <div class="s-title">新消息</div>
+            <div class="s-desc">页面在后台时，有人发言就弹一条系统通知</div>
+          </div>
+          <div class="switch ${prefs.notifyMessages ? 'on' : ''}" id="notify-msg-switch"><div class="knob"></div></div>
+        </button>
+        <button class="hit switch-row" id="notify-at-row" style="width:100%;text-align:left">
+          <div style="flex-grow:1">
+            <div class="s-title">被 @ 提到</div>
+            <div class="s-desc">消息里 @ 了你的用户名时单独提醒</div>
+          </div>
+          <div class="switch ${prefs.notifyMentions ? 'on' : ''}" id="notify-at-switch"><div class="knob"></div></div>
+        </button>
+        <button class="hit switch-row" id="notify-join-row" style="width:100%;text-align:left">
+          <div style="flex-grow:1">
+            <div class="s-title">有人进房</div>
+            <div class="s-desc">默认关——人来人往比消息吵</div>
+          </div>
+          <div class="switch ${prefs.notifyJoins ? 'on' : ''}" id="notify-join-switch"><div class="knob"></div></div>
         </button>
         <div class="opt-list" id="audio-chain"></div>
         <div class="kv-line">
@@ -647,6 +677,38 @@ function renderAV(body: HTMLElement): () => void {
     prefs.mentionCue = !prefs.mentionCue;
     mentionCueSwitch.classList.toggle('on', prefs.mentionCue);
     save('mention-cue');
+  });
+
+  // 系统通知的三个开关：没授权时开关照常记偏好，只是提示条说明还没授权
+  const notifyHint = body.querySelector<HTMLDivElement>('#notify-hint')!;
+  function paintNotifyHint() {
+    const state = notifyState();
+    notifyHint.textContent =
+      state === 'unsupported'
+        ? '这个浏览器不支持系统通知，开关不会生效。'
+        : state === 'denied'
+          ? '浏览器已拒绝本站的通知权限，要在地址栏的站点设置里改回「允许」。'
+          : state === 'granted'
+            ? '已获得通知权限。页面在前台时不发通知，只响提示音。'
+            : '首次收到消息时才请求通知权限，同意后才会弹。';
+    notifyHint.classList.toggle('bad', state === 'denied' || state === 'unsupported');
+  }
+  paintNotifyHint();
+  (
+    [
+      ['#notify-msg-row', '#notify-msg-switch', 'notifyMessages'],
+      ['#notify-at-row', '#notify-at-switch', 'notifyMentions'],
+      ['#notify-join-row', '#notify-join-switch', 'notifyJoins'],
+    ] as const
+  ).forEach(([row, sw, key]) => {
+    const knob = body.querySelector<HTMLDivElement>(sw)!;
+    body.querySelector(row)!.addEventListener('click', () => {
+      prefs[key] = !prefs[key];
+      knob.classList.toggle('on', prefs[key]);
+      if (prefs[key]) armNotifyPermission();
+      paintNotifyHint();
+      save(key);
+    });
   });
 
   const mirrorSwitch = body.querySelector<HTMLDivElement>('#mirror-switch')!;
@@ -1025,7 +1087,7 @@ function renderDevices(body: HTMLElement) {
                   .join('')
           }
         </div>
-        <div class="hint-card">${icon('info', 15, 'var(--text-2)')}<span>这里是设备档案（进房时记录），不是登录会话。移除档案不会把设备踢下线；要让别的设备退出登录，改一次密码即可。</span></div>
+        <div class="hint-card">${icon('info', 15, 'var(--text-2)')}<span>这里是设备档案（进房时记录），不是登录会话。移除档案不会把设备踢下线；要让别的设备退出登录，去「账户」里下线那条登录会话。</span></div>
       </div>`;
     body.querySelectorAll<HTMLButtonElement>('[data-del]').forEach((btn) => {
       btn.addEventListener('click', async () => {

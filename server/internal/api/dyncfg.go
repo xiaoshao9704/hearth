@@ -70,6 +70,14 @@ var chatKeys = []rtc.ConfigKey{
 			"0 = 永久保留。文件字节本就不在库里，这里清的只有文本与文件卡片"},
 }
 
+// adminKeys 管理面：审计日志的保留策略。
+var adminKeys = []rtc.ConfigKey{
+	{Name: "audit_retention_days", Env: "AUDIT_RETENTION_DAYS", Group: "admin", Default: "180",
+		Label: "审计日志保留天数",
+		Hint: "禁言/踢出/封禁/角色变更等管制动作的记录保留多久，超期的每小时清理一次；" +
+			"0 = 永久保留（库会一直长）"},
+}
+
 // selectorEnv 选择器对应的旧环境变量名：只供迁移 v2 一次性导入，不参与取值。
 var selectorEnv = map[string]string{
 	"voice_provider": "VOICE_PROVIDER",
@@ -104,7 +112,8 @@ func (a *API) allConfigKeys() []rtc.ConfigKey {
 	keys := append(append([]rtc.ConfigKey{}, selectorKeys...), a.kernelKeys...)
 	keys = append(keys, portmapKeys...)
 	keys = append(keys, clientICEKeys...)
-	return append(keys, chatKeys...)
+	keys = append(keys, chatKeys...)
+	return append(keys, adminKeys...)
 }
 
 // PortWants 当前要向网关申请的映射：HTTP 端口 + 当前选中内核里跑在本进程的媒体端口

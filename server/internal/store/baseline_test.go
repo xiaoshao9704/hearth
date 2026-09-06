@@ -188,10 +188,11 @@ func TestOpenUpgradesLegacyDB(t *testing.T) {
 		t.Fatalf("存量库升级失败: %v", err)
 	}
 
-	// schema 对比：只多 bun_migrations / bun_migration_locks 与 00002、00005 建的三张表
+	// schema 对比：只多 bun_migrations / bun_migration_locks、00002 的两张 ingest 表、
+	// 00005 的反应表与 00006 的审计表
 	after := tableNames(t, s.bun.DB)
 	want := append(slices.Clone(before),
-		"bun_migration_locks", "bun_migrations", "ingest_endpoints", "ingest_tokens", "message_reactions")
+		"audit_log", "bun_migration_locks", "bun_migrations", "ingest_endpoints", "ingest_tokens", "message_reactions")
 	slices.Sort(want)
 	if !slices.Equal(after, want) {
 		t.Fatalf("升级后表集合不符:\n got %v\nwant %v", after, want)
@@ -203,7 +204,7 @@ func TestOpenUpgradesLegacyDB(t *testing.T) {
 		"channels":        {"invite_only"},
 		"ingresses":       {"provider"},
 		"channel_members": {"role"},
-		"sessions":        {"device_id"},
+		"sessions":        {"device_id", "user_agent", "last_seen"},
 		"invites":         {"kind", "channel_id", "role", "guest_ttl_sec", "allow_guest"},
 	} {
 		have := columnNames(t, s.bun.DB, table)
@@ -244,8 +245,8 @@ func TestOpenUpgradesLegacyDB(t *testing.T) {
 	if len(msgs) != 1 || msgs[0].Content != "hello" || msgs[0].CreatedAt.IsZero() {
 		t.Fatalf("消息数据不符: %+v", msgs)
 	}
-	if n := migrationRows(t, s.bun.DB); n != 5 {
-		t.Fatalf("bun_migrations 应有 5 行，实际 %d", n)
+	if n := migrationRows(t, s.bun.DB); n != 6 {
+		t.Fatalf("bun_migrations 应有 6 行，实际 %d", n)
 	}
 	s.Close()
 
@@ -254,8 +255,8 @@ func TestOpenUpgradesLegacyDB(t *testing.T) {
 	if err != nil {
 		t.Fatalf("重复 Open 失败: %v", err)
 	}
-	if n := migrationRows(t, s2.bun.DB); n != 5 {
-		t.Fatalf("重复 Open 后 bun_migrations 应仍为 5 行，实际 %d", n)
+	if n := migrationRows(t, s2.bun.DB); n != 6 {
+		t.Fatalf("重复 Open 后 bun_migrations 应仍为 6 行，实际 %d", n)
 	}
 	s2.Close()
 }
@@ -269,7 +270,7 @@ func TestOpenFreshDB(t *testing.T) {
 	defer s.Close()
 
 	want := []string{
-		"bun_migration_locks", "bun_migrations",
+		"audit_log", "bun_migration_locks", "bun_migrations",
 		"channel_bans", "channel_gags", "channel_members", "channels", "devices",
 		"ingest_endpoints", "ingest_tokens", "ingresses", "invites", "message_reactions", "messages",
 		"providers", "sessions", "settings", "users",

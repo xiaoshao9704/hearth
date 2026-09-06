@@ -489,6 +489,25 @@ export function deleteMyDevice(deviceID: string): Promise<void> {
   return req(`/api/account/devices/${encodeURIComponent(deviceID)}`, { method: 'DELETE' });
 }
 
+// 登录会话（"我的登录状态"）：id 是服务端给的 token 指纹，token 本身不下发
+export interface SessionRecord {
+  id: string;
+  user_agent: string;
+  created_at: string | null;
+  last_seen: string | null;
+  expires_at: string;
+  current: boolean;
+}
+
+export async function listMySessions(): Promise<SessionRecord[]> {
+  const data = await req<{ sessions: SessionRecord[] | null }>('/api/account/sessions');
+  return data.sessions ?? [];
+}
+
+export function deleteMySession(id: string): Promise<void> {
+  return req(`/api/account/sessions/${encodeURIComponent(id)}`, { method: 'DELETE' });
+}
+
 // ---- 邀请 ----
 
 export interface InviteInfo {
@@ -624,6 +643,42 @@ export async function adminGetConfig(): Promise<ConfigItem[]> {
 
 export function adminSetConfig(values: Record<string, string>): Promise<void> {
   return req('/api/admin/config', { method: 'POST', body: { values } });
+}
+
+// ---- 审计日志 ----
+
+export interface AuditEntry {
+  id: number;
+  at: string;
+  actor_uid: number;
+  actor_name: string;
+  action: string;
+  target_uid: number; // 0 = 不针对某人
+  target_name: string;
+  channel_id: number; // 0 = 不属于某频道
+  channel_name: string;
+  detail: string;
+}
+
+export interface AuditQuery {
+  channel?: number;
+  actor?: number;
+  action?: string;
+  after?: number; // 游标：只取比这一条更早的记录
+  limit?: number;
+}
+
+// next 是继续往更早翻的游标，0 = 没有更多
+export async function adminAudit(q: AuditQuery = {}): Promise<{ entries: AuditEntry[]; next: number; actions: string[] }> {
+  const params = new URLSearchParams();
+  for (const [k, v] of Object.entries(q)) {
+    if (v !== undefined && v !== '' && v !== 0) params.set(k, String(v));
+  }
+  const qs = params.toString();
+  const data = await req<{ entries: AuditEntry[] | null; next: number; actions: string[] | null }>(
+    `/api/admin/audit${qs ? `?${qs}` : ''}`,
+  );
+  return { entries: data.entries ?? [], next: data.next ?? 0, actions: data.actions ?? [] };
 }
 
 // ---- 服务实例（内核注册表）----

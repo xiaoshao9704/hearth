@@ -55,6 +55,9 @@ export interface RoomPrefs {
   theaterAutoHide: boolean; // 剧场模式无操作 3 秒后隐藏顶栏与控制栏
   theaterCorner: TheaterCorner; // 剧场浮动名册停靠的角落
   theaterRosterFold: boolean; // 剧场浮动名册折叠成小按钮
+  notifyMessages: boolean; // 页面在后台时，新消息发系统通知
+  notifyMentions: boolean; // 页面在后台时，被 @ 发系统通知
+  notifyJoins: boolean; // 页面在后台时，有人进房发系统通知
 }
 
 const PREFS_KEY = 'hearth_room_prefs';
@@ -88,6 +91,9 @@ export function defaultPrefs(): RoomPrefs {
     theaterAutoHide: true,
     theaterCorner: 'tr',
     theaterRosterFold: false,
+    notifyMessages: true,
+    notifyMentions: true,
+    notifyJoins: false,
   };
 }
 
@@ -138,6 +144,9 @@ export function loadPrefs(): RoomPrefs {
       theaterAutoHide: p.theaterAutoHide !== false,
       theaterCorner: THEATER_CORNERS.includes(p.theaterCorner as TheaterCorner) ? (p.theaterCorner as TheaterCorner) : def.theaterCorner,
       theaterRosterFold: p.theaterRosterFold === true,
+      notifyMessages: p.notifyMessages !== false,
+      notifyMentions: p.notifyMentions !== false,
+      notifyJoins: p.notifyJoins === true,
     };
   } catch {
     return def;

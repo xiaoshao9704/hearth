@@ -34,6 +34,24 @@ type sessionRow struct {
 	ExpiresAt time.Time `bun:",notnull"`
 	DeviceID  string    `bun:",notnull,default:'',type:varchar(32)"` // 非空 = 绑定设备（访客会话）；普通会话留空不绑定
 	CreatedAt time.Time `bun:",notnull,default:current_timestamp"`
+	UserAgent string    `bun:",notnull,default:'',type:varchar(255)"` // 登录时的 UA 原文，只做「我的登录设备」列表展示
+	// 存量库补列只能加可空列（sqlite 不接受 NOT NULL DEFAULT CURRENT_TIMESTAMP 的 ALTER），
+	// 读取侧一律把空值当作「没记录过」，见 sessions.go
+	LastSeen *time.Time
+}
+
+// auditRow 管制动作的审计事实（00006 迁移建表）。actor 是动作发起者，
+// target_uid / channel_id 允许为空（不针对某人、或不属于某频道的动作）。
+type auditRow struct {
+	bun.BaseModel `bun:"table:audit_log"`
+
+	ID        int64     `bun:",pk,autoincrement"`
+	At        time.Time `bun:",notnull,default:current_timestamp"`
+	ActorUID  int64     `bun:",notnull"`
+	Action    string    `bun:",notnull,type:varchar(32)"`
+	TargetUID *int64
+	ChannelID *int64
+	Detail    string `bun:",notnull,type:text"` // mysql 的 TEXT 列不能带 DEFAULT，写入侧一律给值
 }
 
 type channelRow struct {

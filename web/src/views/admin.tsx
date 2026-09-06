@@ -23,15 +23,17 @@ import {
 } from '../api';
 import type { AdminOverview, AdminUser, Channel, ConfigItem, ProviderField, ProviderInstance, ProviderType } from '../api';
 import { avatarHtml, confirmDialog, el, icon, menuButtonHtml, timeAgo, toast, wireMenuButton } from '../ui';
+import { AuditTab } from './admin-audit';
 import { openSettings } from './settings';
 
-type Tab = 'status' | 'config' | 'users' | 'rooms';
+type Tab = 'status' | 'config' | 'users' | 'rooms' | 'audit';
 
 const NAV: { id: Tab; label: string; icon: string; sub: string }[] = [
   { id: 'status', label: '服务状态', icon: 'pulse', sub: '常驻进程与宿主资源' },
   { id: 'config', label: '服务参数', icon: 'gear', sub: '组件地址与注册策略' },
   { id: 'users', label: '用户', icon: 'users', sub: '账号、角色与启停' },
   { id: 'rooms', label: '房间', icon: 'volume', sub: '频道、房主与可见性' },
+  { id: 'audit', label: '审计', icon: 'shield', sub: '管制动作的流水记录' },
 ];
 
 // 各 tab 共用的「加载中 / 出错」占位
@@ -159,6 +161,8 @@ export async function renderAdmin(root: HTMLElement, tab: Tab) {
             <ConfigTab onDirty={setDirtyGroups} />
           ) : tab === 'users' ? (
             <UsersTab />
+          ) : tab === 'audit' ? (
+            <AuditTab />
           ) : (
             <RoomsTab />
           )}
@@ -375,6 +379,7 @@ const GROUP_META: Record<string, [string, string]> = {
   stage: ['进程内 LiveKit（舞台）', '舞台选 lkembed 时才启动，信令只监听回环'],
   network: ['网络', '向默认网关申请端口映射，仅 host 网络或裸机可用'],
   chat: ['聊天', '消息经内核数据通道扇出，hearth 只落库卡片、不经手文件字节'],
+  admin: ['管理', '审计流水的保留策略'],
 };
 const POLICIES = [
   { id: 'closed', label: '关闭注册', desc: '只能用 CLI 在服务器上开通' },

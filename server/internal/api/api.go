@@ -115,6 +115,7 @@ func (a *API) Router() *chi.Mux {
 	// 需登录
 	r.Group(func(r chi.Router) {
 		r.Use(a.auth)
+		r.Use(a.touchSession) // 节流刷新会话最近活跃时间（会话列表用，见 account.go）
 		r.Post("/api/logout", a.logout)
 		r.Get("/api/me", a.me)
 		r.Post("/api/client-log", a.clientLog)
@@ -135,6 +136,8 @@ func (a *API) Router() *chi.Mux {
 		r.Post("/api/account/password", a.updatePassword)
 		r.Get("/api/account/devices", a.listMyDevices)
 		r.Delete("/api/account/devices/{deviceID}", a.deleteMyDevice)
+		r.Get("/api/account/sessions", a.listMySessions)
+		r.Delete("/api/account/sessions/{id}", a.deleteMySession)
 
 		// 推流令牌（每用户一把，房间在 WHIP URL 里）
 		r.Get("/api/ingest/token", a.ingestTokenGet)
@@ -183,6 +186,7 @@ func (a *API) Router() *chi.Mux {
 		r.Route("/api/admin", func(r chi.Router) {
 			r.Use(a.requireAdmin)
 			r.Get("/overview", a.adminOverview)
+			r.Get("/audit", a.adminAudit)
 			r.Get("/policy", a.adminGetPolicy)
 			r.Post("/policy", a.adminSetPolicy)
 			r.Get("/config", a.adminGetConfig)
@@ -395,7 +399,7 @@ func (a *API) login(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) issueSession(w http.ResponseWriter, r *http.Request, u *store.User) {
-	token, err := a.st.CreateSession(r.Context(), u.ID)
+	token, err := a.st.CreateSessionWithUA(r.Context(), u.ID, r.UserAgent())
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "内部错误")
 		return
@@ -732,6 +736,13 @@ func (a *API) kick(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadGateway, "踢出失败（内核不可达）")
 		return
 	}
+	if req.UserID != u.ID { // 踢自己的设备是自助操作，不进审计
+		detail := "全部设备"
+		if req.Identity != "" {
+			detail = "设备 " + req.Identity
+		}
+		a.auditAct(r, store.AuditKick, t, c.ID, detail)
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"kicked": n})
 }
 
@@ -751,6 +762,7 @@ func (a *API) ban(w http.ResponseWriter, r *http.Request) {
 	}
 	// 封禁立即生效：踢出现场（LiveKit 失败不阻塞，token/WS 入口已拦死）
 	a.evict(r, c, t, "")
+	a.auditAct(r, store.AuditBan, t, c.ID, "")
 	writeJSON(w, http.StatusOK, map[string]string{"banned": t.Username})
 }
 
@@ -768,6 +780,7 @@ func (a *API) unban(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "内部错误")
 		return
 	}
+	a.auditAct(r, store.AuditUnban, t, c.ID, "")
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -806,10 +819,11 @@ func (a *API) setGag(w http.ResponseWriter, r *http.Request, muted bool) {
 			log.Printf("内核(%s)禁言传播 uid=%d 失败: %v", p.Name(), t.ID, err)
 		}
 	}
-	key := "unmuted"
+	key, action := "unmuted", store.AuditUnmute
 	if muted {
-		key = "muted"
+		key, action = "muted", store.AuditMute
 	}
+	a.auditAct(r, action, t, c.ID, "")
 	writeJSON(w, http.StatusOK, map[string]string{key: t.Username})
 }
 
@@ -927,6 +941,7 @@ func (a *API) transferChannel(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "内部错误")
 		return
 	}
+	a.auditAct(r, store.AuditChannelRole, t, c.ID, "转让频道（对方成为频道主，原频道主降为频道管理员）")
 	writeJSON(w, http.StatusOK, map[string]string{"owner": t.Username})
 }
 
@@ -958,6 +973,7 @@ func (a *API) addModerator(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "内部错误")
 		return
 	}
+	a.auditAct(r, store.AuditChannelRole, t, c.ID, "授予频道管理员")
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -979,6 +995,7 @@ func (a *API) removeModerator(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "内部错误")
 		return
 	}
+	a.auditAct(r, store.AuditChannelRole, t, c.ID, "收回频道管理员")
 	w.WriteHeader(http.StatusNoContent)
 }
 
