@@ -36,5 +36,9 @@ func TestSignDataPublishFollowsCanPublish(t *testing.T) {
 		if g.CanSubscribe == nil || !*g.CanSubscribe {
 			t.Fatalf("被禁言也应能订阅: %+v", g.CanSubscribe)
 		}
+		// 离开状态走参与者属性，被禁言者也要能改自己的属性
+		if g.CanUpdateOwnMetadata == nil || !*g.CanUpdateOwnMetadata {
+			t.Fatalf("应允许更新自身属性: %+v", g.CanUpdateOwnMetadata)
+		}
 	}
 }

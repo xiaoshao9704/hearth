@@ -32,6 +32,9 @@ func Sign(key, secret, room string, meta rtc.Meta, canPublish bool) (string, err
 		CanPublish:     boolPtr(canPublish),
 		CanSubscribe:   boolPtr(true),
 		CanPublishData: boolPtr(canPublish),
+		// 离开状态靠参与者属性广播，内核没有这一位会拒掉 setAttributes；
+		// 它只改自己的属性，与禁言无关，因此不跟 canPublish 同源。
+		CanUpdateOwnMetadata: boolPtr(true),
 	}
 	at := auth.NewAccessToken(key, secret)
 	at.SetVideoGrant(grant).
