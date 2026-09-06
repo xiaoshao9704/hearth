@@ -947,3 +947,148 @@ body {
   background: var(--ember); color: var(--on-ember);
   font-size: 12px; font-weight: 600; white-space: nowrap; box-shadow: var(--glow);
 }
+
+/* ---- 第 3 批：剧场模式与布局 ---- */
+
+/* 房间主体行（三种布局共用的骨架，原先是内联样式） */
+.room-body { flex-grow: 1; display: flex; min-height: 0; }
+
+/* --- 剧场模式：画面占满，顶栏与控制栏改浮层 --- */
+/* 外壳侧栏也一起让位（房间只是 shell 的内容区，够不着它的 DOM） */
+body.theater-on .sidebar { display: none; }
+.room-frame.layout-theater { position: relative; background: var(--stage); }
+.room-frame.layout-theater > .topbar {
+  position: absolute; left: 0; right: 0; top: 0; z-index: 270;
+  transition: opacity 0.22s ease;
+}
+.room-frame.layout-theater .room-main { position: relative; }
+.room-frame.layout-theater .control-bar {
+  position: absolute; left: 0; right: 0; bottom: 0; z-index: 270;
+  transition: opacity 0.22s ease;
+}
+.room-frame.layout-theater .stage-area { padding: 0; background: var(--stage); }
+.room-frame.layout-theater .video-grid.spotlight { gap: 0; }
+/* 缩略轨与其余卡片让位：剧场里只留焦点画面，谁在房间看浮动名册 */
+.room-frame.layout-theater .video-grid.spotlight .rail { display: none; }
+.room-frame.layout-theater .tile.featured { border-radius: 0; border: 0; box-shadow: none; }
+/* 侧栏不再占布局：要看成员/聊天时浮在画面上（控件仍然可达，不是被砍掉） */
+.room-frame.layout-theater .side-panel {
+  position: fixed; top: 0; right: 0; bottom: 0; z-index: 280;
+  box-shadow: var(--shadow-lg);
+}
+/* 侧栏浮起来后顶栏/控制栏往左让出它的宽度，两边都完整可点（同时只会开一个侧栏） */
+.room-frame.layout-theater:has(> .room-body > .side-panel:not(.chat-panel):not(.hidden)) > .topbar,
+.room-frame.layout-theater:has(> .room-body > .side-panel:not(.chat-panel):not(.hidden)) .control-bar { right: 262px; }
+.room-frame.layout-theater:has(> .room-body > .side-panel.chat-panel:not(.hidden)) > .topbar,
+.room-frame.layout-theater:has(> .room-body > .side-panel.chat-panel:not(.hidden)) .control-bar { right: 348px; }
+/* 自动隐藏只淡出、不卸载 DOM：动一下鼠标/手指就全回来 */
+.room-frame.layout-theater.chrome-hidden > .topbar,
+.room-frame.layout-theater.chrome-hidden .control-bar { opacity: 0; pointer-events: none; }
+.room-frame.layout-theater.chrome-hidden { cursor: none; }
+
+/* --- 剧场浮动名册 --- */
+.float-roster {
+  position: fixed; z-index: 265; width: 206px; max-height: min(56vh, 420px);
+  display: flex; flex-direction: column; overflow: hidden;
+  border-radius: 12px; border: 1px solid var(--stage-line);
+  background: rgba(16, 13, 12, 0.75); backdrop-filter: blur(10px);
+  color: var(--on-stage); box-shadow: var(--shadow-lg);
+}
+.float-roster.fr-tl { top: 74px; left: 16px; }
+.float-roster.fr-tr { top: 74px; right: 16px; }
+.float-roster.fr-bl { bottom: 96px; left: 16px; }
+.float-roster.fr-br { bottom: 96px; right: 16px; }
+.float-roster.dragging { opacity: 0.9; }
+.float-roster.folded { width: auto; border: 0; background: none; backdrop-filter: none; box-shadow: none; overflow: visible; }
+.fr-unfold {
+  display: flex; align-items: center; gap: 6px; padding: 7px 11px; border-radius: 10px;
+  background: var(--scrim); border: 1px solid var(--stage-line); color: var(--on-stage);
+  font-size: 12px; backdrop-filter: blur(8px);
+}
+.fr-head {
+  display: flex; align-items: center; gap: 6px; padding: 7px 9px;
+  border-bottom: 1px solid var(--stage-line); font-size: 11.5px; color: var(--on-stage);
+  cursor: grab; user-select: none; touch-action: none;
+}
+.float-roster.dragging .fr-head { cursor: grabbing; }
+.fr-count { opacity: 0.8; }
+.fr-btn { width: 22px; height: 22px; border-radius: 6px; display: flex; align-items: center; justify-content: center; color: var(--on-stage); opacity: 0.7; }
+.fr-btn:hover { opacity: 1; }
+.fr-list { flex-grow: 1; min-height: 0; overflow-y: auto; padding: 5px; display: flex; flex-direction: column; gap: 2px; }
+.fr-row { display: flex; align-items: center; gap: 8px; padding: 4px 6px; border-radius: 7px; font-size: 12px; }
+.fr-row.speaking { background: rgba(232, 112, 58, 0.22); color: var(--ember-soft); }
+.fr-name { flex-grow: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fr-tag, .fr-mute { display: flex; flex-shrink: 0; opacity: 0.65; }
+/* 画中画窗口里的那份：位置由窗口决定，铺在画面下方 */
+.float-roster.fr-pip {
+  position: static; width: 100%; max-height: 38vh; border: 0; border-radius: 0;
+  border-top: 1px solid var(--stage-line); background: rgba(16, 13, 12, 0.92);
+  backdrop-filter: none; box-shadow: none;
+}
+.float-roster.fr-pip .fr-head { cursor: default; }
+
+/* --- 画中画窗口 --- */
+.pip-body { margin: 0; height: 100vh; display: flex; flex-direction: column; background: var(--stage); overflow: hidden; }
+.pip-stage { position: relative; flex-grow: 1; min-height: 0; }
+.pip-stage video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; background: var(--stage); }
+.pip-extras { flex-shrink: 0; }
+/* 画面被搬走期间，原卡片里留的占位 */
+.pip-away {
+  position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+  background: var(--stage); color: var(--on-stage); font-size: 12.5px; opacity: 0.7;
+}
+
+/* --- 无投屏时「聊天为主」 --- */
+.room-frame.layout-chat .room-body {
+  display: grid; min-height: 0;
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  grid-template-areas: 'bar side' 'chat side' 'main main';
+}
+.room-frame.layout-chat .chat-first-bar { grid-area: bar; }
+.room-frame.layout-chat .side-panel.chat-panel {
+  grid-area: chat; width: auto; min-width: 0; border-left: 0;
+}
+.room-frame.layout-chat .side-panel:not(.chat-panel) { grid-area: side; }
+.room-frame.layout-chat .room-main { grid-area: main; }
+/* 舞台区没有任何画面可看：整块收起，卡片与引擎产的元素仍留在 DOM 里不重建 */
+.room-frame.layout-chat .stage-area { display: none; }
+/* 聊天是主体，不再是可关的抽屉：关闭按钮收起（成员面板照旧可开可关）。
+   !important 是必须的：那个按钮的尺寸走内联 style，display 也在内联里 */
+.room-frame.layout-chat .side-panel.chat-panel .panel-head .mini-btn { display: none !important; }
+
+.chat-first-bar {
+  display: flex; align-items: center; gap: 8px; min-height: 52px; padding: 8px 16px;
+  border-bottom: 1px solid var(--line-soft); background: var(--bg-1);
+  overflow-x: auto; overflow-y: hidden;
+}
+.cf-chip {
+  display: flex; align-items: center; gap: 7px; flex-shrink: 0;
+  padding: 4px 11px 4px 4px; border-radius: 999px;
+  border: 1px solid var(--line); background: var(--bg-3); font-size: 12.5px;
+}
+.cf-chip.speaking { border-color: var(--ember-line); background: var(--ember-tint); color: var(--ember); }
+.cf-name { max-width: 110px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cf-mute { display: flex; color: var(--text-2); }
+.cf-empty { font-size: 12.5px; color: var(--text-2); }
+.cf-note { display: flex; align-items: center; gap: 6px; flex-shrink: 0; font-size: 12px; color: var(--text-2); }
+
+@media (max-width: 860px) {
+  /* 剧场里的侧栏在窄屏仍是整屏浮层，顶栏/控制栏不必再让位（侧栏盖住它们） */
+  .room-frame.layout-theater .side-panel,
+  .room-frame.layout-theater .side-panel.chat-panel { inset: 0; width: 100%; }
+  .room-frame.layout-theater > .topbar, .room-frame.layout-theater .control-bar { right: 0 !important; }
+  /* 聊天为主：聊天面板回到文档流当主体，成员面板保持整屏浮层 */
+  .room-frame.layout-chat .side-panel.chat-panel {
+    position: relative; inset: auto; width: auto; z-index: auto;
+  }
+  .float-roster { width: 168px; max-height: 44vh; }
+  .float-roster.fr-tl, .float-roster.fr-tr { top: 66px; }
+  /* 窄屏控制栏会折行变高：名册停在下两角时层级低于它，控制栏淡出后才完整露出（控件优先） */
+  .float-roster.fr-bl, .float-roster.fr-br { bottom: calc(96px + env(safe-area-inset-bottom)); }
+}
+
+@media (max-width: 560px) {
+  .chat-first-bar { min-height: 46px; padding: 6px 10px; }
+  .cf-note { display: none; }
+}
