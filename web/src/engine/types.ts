@@ -10,6 +10,7 @@ export interface VideoStats {
   height: number;
   fps: number;
   kbps: number;
+  loss?: number; // 丢包率 %（接收侧两次采样的差分；发送侧无此项）
 }
 
 // 参与者快照（identity 粒度 = 账号的一台设备；username 用于按账号聚合展示）
@@ -24,6 +25,7 @@ export interface EPart {
   sharing: boolean; // 有投屏轨
   ingest: boolean; // 推流参与者（参与者元数据 kind=ingest，不再解析 identity 后缀）
   tag: string; // 推流设备标签（identity = {username}-{tag}）；非推流参与者为空
+  afk: boolean; // 对方自己广播的「离开」（参与者属性 afk=1）；纯展示，不参与任何判定
 }
 
 // 数据通道话题：文本走 TEXT，文件字节走 FILE。引擎只按 topic 注册/透传，
@@ -84,6 +86,10 @@ export interface AVEngine {
   // 远端视频轨的本端实测接收数据（SVC 下反映本端实际拿到的层）；无该轨或引擎无视频返回 null
   remoteVideoStats(identity: string, source: TrackSource): Promise<VideoStats | null>;
   switchCamera(deviceId: string): Promise<void>;
+  // 前后摄像头对调（手机）：未开摄像头或本机只有一个摄像头时抛错，由调用方提示
+  flipCamera(): Promise<void>;
+  // 广播一条自己的参与者属性（值为空串 = 清除）；只用于展示态（如 afk），不承载任何权限语义
+  setAttribute(key: string, value: string): Promise<void>;
   resumeAudio(): Promise<void>; // 用户手势后重放被拦截的音频元素
   // 数据通道发送：未连接时抛错，调用方先看 connected()
   sendText(topic: string, text: string): Promise<void>;
