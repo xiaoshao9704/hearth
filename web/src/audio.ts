@@ -97,9 +97,10 @@ function messageNote(ctx: AudioContext, at: number) {
   osc.stop(at + 0.08);
 }
 
-// playCue 播放进入（两个上行音）/ 离开（两个下行音）/ 消息（一声轻音）提示；
+// playCue 播放进入（两个上行音）/ 离开（两个下行音）/ 被@（两个更高的上行音，
+// 与进入音区分开）/ 消息（一声轻音）提示；
 // 自动播放策略下上下文可能是 suspended，恢复失败就静默跳过（提示音不值得打扰用户）
-export function playCue(kind: 'join' | 'leave' | 'message') {
+export function playCue(kind: 'join' | 'leave' | 'message' | 'mention') {
   try {
     if (!cueCtx) cueCtx = new AudioContext();
     const ctx = cueCtx;
@@ -108,7 +109,7 @@ export function playCue(kind: 'join' | 'leave' | 'message') {
         messageNote(ctx, ctx.currentTime);
         return;
       }
-      const [a, b] = kind === 'join' ? [660, 880] : [660, 440];
+      const [a, b] = kind === 'join' ? [660, 880] : kind === 'mention' ? [880, 1320] : [660, 440];
       cueNote(ctx, a, ctx.currentTime);
       cueNote(ctx, b, ctx.currentTime + 0.09);
     };

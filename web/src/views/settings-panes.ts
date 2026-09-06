@@ -322,6 +322,13 @@ function renderAV(body: HTMLElement): () => void {
           </div>
           <div class="switch ${prefs.chatCue ? 'on' : ''}" id="chat-cue-switch"><div class="knob"></div></div>
         </button>
+        <button class="hit switch-row" id="mention-cue-row" style="width:100%;text-align:left">
+          <div style="flex-grow:1">
+            <div class="s-title">被 @ 提示音</div>
+            <div class="s-desc">有人 @ 你时播放一声更醒目的提示（不受聊天提示音的节流影响）</div>
+          </div>
+          <div class="switch ${prefs.mentionCue ? 'on' : ''}" id="mention-cue-switch"><div class="knob"></div></div>
+        </button>
         <div class="opt-list" id="audio-chain"></div>
       </div>
       <div style="display:flex;flex-direction:column;gap:9px">
@@ -620,6 +627,13 @@ function renderAV(body: HTMLElement): () => void {
     prefs.chatCue = !prefs.chatCue;
     chatCueSwitch.classList.toggle('on', prefs.chatCue);
     save('chat-cue');
+  });
+
+  const mentionCueSwitch = body.querySelector<HTMLDivElement>('#mention-cue-switch')!;
+  body.querySelector('#mention-cue-row')!.addEventListener('click', () => {
+    prefs.mentionCue = !prefs.mentionCue;
+    mentionCueSwitch.classList.toggle('on', prefs.mentionCue);
+    save('mention-cue');
   });
 
   const mirrorSwitch = body.querySelector<HTMLDivElement>('#mirror-switch')!;
