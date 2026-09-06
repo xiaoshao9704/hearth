@@ -428,3 +428,34 @@ func TestClearChannelMessages(t *testing.T) {
 		t.Fatalf("别的频道不该受影响: %+v (%v)", left, err)
 	}
 }
+
+// 版主删他人消息落一条审计；作者自己撤回不落（撤回不是管制动作）。
+func TestDeleteMessageWritesAudit(t *testing.T) {
+	e := newChatEnv(t)
+	r := e.a.Router()
+	ctx := context.Background()
+
+	mine := e.postText(t, e.member, "我自己发的")
+	if rec := doReq(t, r, http.MethodDelete, e.idPath(mine.ID), e.member, nil); rec.Code != http.StatusNoContent {
+		t.Fatalf("作者撤回状态码=%d: %s", rec.Code, rec.Body.String())
+	}
+	entries, err := e.a.st.ListAudit(ctx, store.AuditFilter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("自己撤回不该落审计: %+v", entries)
+	}
+
+	victim := e.postText(t, e.other, "别人发的")
+	if rec := doReq(t, r, http.MethodDelete, e.idPath(victim.ID), e.mod, nil); rec.Code != http.StatusNoContent {
+		t.Fatalf("管理员删他人消息状态码=%d: %s", rec.Code, rec.Body.String())
+	}
+	entries, err = e.a.st.ListAudit(ctx, store.AuditFilter{Action: store.AuditMessageDel})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].TargetUID != victim.UserID || entries[0].ChannelID == 0 {
+		t.Fatalf("版主删他人消息应落一条 message_delete: %+v", entries)
+	}
+}

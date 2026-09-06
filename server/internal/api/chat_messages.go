@@ -252,9 +252,10 @@ func (a *API) deleteMessage(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "内部错误")
 		return
 	}
-	// 审计占位：审计表属于另一批，合入后这行换成落库（见 docs/plan-product-2026-09.md）
+	// 只记版主删他人消息：自己撤回自己的不是管制动作
 	if done && byMod {
-		log.Printf("审计: uid=%d 删除频道 %d 的消息 %d（作者 uid=%d）", u.ID, c.ID, m.ID, m.UserID)
+		a.audit(r.Context(), u.ID, store.AuditMessageDel, m.UserID, c.ID,
+			"删除消息 #"+strconv.FormatInt(m.ID, 10))
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -278,8 +279,8 @@ func (a *API) clearMessages(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "内部错误")
 		return
 	}
-	// 审计占位：同 deleteMessage，合并后接到审计表
-	log.Printf("审计: uid=%d 清空频道 %d 的聊天记录，共 %d 条", u.ID, c.ID, n)
+	a.audit(r.Context(), u.ID, store.AuditChannelClear, 0, c.ID,
+		"清空聊天记录 "+strconv.FormatInt(n, 10)+" 条")
 	writeJSON(w, http.StatusOK, map[string]int64{"deleted": n})
 }
 
