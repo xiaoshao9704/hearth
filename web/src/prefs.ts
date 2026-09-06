@@ -46,6 +46,9 @@ export interface RoomPrefs {
   voiceBitrate: number; // bps
   joinCue: boolean; // 他人进出房间时的短提示音
   chatCue: boolean; // 他人实时发来聊天消息时的短提示音
+  notifyMessages: boolean; // 页面在后台时，新消息发系统通知
+  notifyMentions: boolean; // 页面在后台时，被 @ 发系统通知
+  notifyJoins: boolean; // 页面在后台时，有人进房发系统通知
 }
 
 const PREFS_KEY = 'hearth_room_prefs';
@@ -74,6 +77,9 @@ export function defaultPrefs(): RoomPrefs {
     voiceBitrate: 64000,
     joinCue: true,
     chatCue: true,
+    notifyMessages: true,
+    notifyMentions: true,
+    notifyJoins: false,
   };
 }
 
@@ -118,6 +124,9 @@ export function loadPrefs(): RoomPrefs {
       voiceBitrate: VOICE_BITRATES.includes(p.voiceBitrate as number) ? (p.voiceBitrate as number) : def.voiceBitrate,
       joinCue: p.joinCue !== false,
       chatCue: p.chatCue !== false,
+      notifyMessages: p.notifyMessages !== false,
+      notifyMentions: p.notifyMentions !== false,
+      notifyJoins: p.notifyJoins === true,
     };
   } catch {
     return def;
