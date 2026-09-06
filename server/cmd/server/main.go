@@ -170,6 +170,9 @@ func runServer(ctx context.Context, cfg config.Config, st *store.Store) {
 		r.Head("/*", fs.ServeHTTP)
 	}
 
+	// 审计日志的保留策略清理：启动清一次，之后每小时一次
+	go a.RunAuditRetention(ctx)
+
 	// 映射建立/变化后立刻刷新宣告，让新会话拿到映射出的外部地址。
 	// 回调不得阻塞 Mapper 的申请轮次（RefreshAnnounce 里是最长 2s 的 STUN 探测），另起协程。
 	mapper.OnChange = func(portmap.Status) { go a.RefreshAnnounce(context.Background()) }

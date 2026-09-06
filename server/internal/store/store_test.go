@@ -424,8 +424,8 @@ func TestBaselineReopenNoop(t *testing.T) {
 		if err != nil {
 			t.Fatalf("重复 Open 失败: %v", err)
 		}
-		if n := remoteMigrationRows(t, s2.bun.DB); n != 4 {
-			t.Fatalf("重复 Open 后 bun_migrations 应仍为 4 行，实际 %d", n)
+		if n := remoteMigrationRows(t, s2.bun.DB); n != 5 {
+			t.Fatalf("重复 Open 后 bun_migrations 应仍为 5 行，实际 %d", n)
 		}
 		// 数据无损
 		if _, _, err := s2.UserByName(ctx, "alice"); err != nil {
