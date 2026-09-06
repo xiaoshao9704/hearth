@@ -6,11 +6,17 @@ package webui
 import (
 	"embed"
 	"io/fs"
+	"mime"
 	"net/http"
 )
 
 //go:embed all:dist
 var dist embed.FS
+
+func init() {
+	// Go 标准库 mime 表没有 .webmanifest，默认会被当成 text/plain 送出；PWA 清单需要 application/manifest+json。
+	_ = mime.AddExtensionType(".webmanifest", "application/manifest+json")
+}
 
 // Handler 返回内嵌前端的静态托管；dist 里没有产物（未拷入）时返回 nil。
 func Handler() http.Handler {
