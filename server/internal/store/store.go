@@ -156,6 +156,8 @@ type Channel struct {
 	MyRole     string    `bun:"-" json:"my_role"` // 对当前请求用户的频道角色（接口层填充，owner/moderator/member/""）
 	Online     int       `bun:"-" json:"online"`  // 当前在房人数（接口层从内核填充）
 	OwnerID    int64     `bun:"-" json:"-"`       // 房主用户 ID（内部用；权威是 channel_members 的 owner 行）
+	Banned     bool      `bun:"-" json:"banned"`  // 当前用户是否被该频道封禁（接口层填充，大厅列表用）
+	Hidden     bool      `bun:"-" json:"hidden"`  // 仅 super 能看到的、非成员邀请制频道（普通人看不到，接口层填充）
 }
 
 type Message struct {
@@ -379,6 +381,25 @@ func (s *Store) ListBans(ctx context.Context, channelID int64) ([]UserRef, error
 	return s.listUserRefs(ctx, "channel_bans", channelID)
 }
 
+// BansOf 该用户被封禁的全部频道 id 集合（大厅列表批量填充 banned 用，避免逐频道查询）。
+func (s *Store) BansOf(ctx context.Context, userID int64) (map[int64]bool, error) {
+	out := map[int64]bool{}
+	rows, err := s.bun.QueryContext(ctx,
+		"SELECT channel_id FROM channel_bans WHERE user_id = ?", userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int64
+		if err := rows.Scan(&cid); err != nil {
+			return nil, err
+		}
+		out[cid] = true
+	}
+	return out, rows.Err()
+}
+
 // ---- 禁言 ----
 
 // IsGagged 用户是否被该频道禁言。
@@ -413,6 +434,25 @@ func (s *Store) IsMember(ctx context.Context, channelID, userID int64) (bool, er
 	err := s.bun.NewRaw(
 		"SELECT COUNT(1) FROM channel_members WHERE channel_id = ? AND user_id = ?", channelID, userID).Scan(ctx, &n)
 	return n > 0, err
+}
+
+// MembershipsOf 该用户在的全部频道 id 集合（大厅列表批量填充可见性用，避免逐频道查询）。
+func (s *Store) MembershipsOf(ctx context.Context, userID int64) (map[int64]bool, error) {
+	out := map[int64]bool{}
+	rows, err := s.bun.QueryContext(ctx,
+		"SELECT channel_id FROM channel_members WHERE user_id = ?", userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int64
+		if err := rows.Scan(&cid); err != nil {
+			return nil, err
+		}
+		out[cid] = true
+	}
+	return out, rows.Err()
 }
 
 func (s *Store) AddMember(ctx context.Context, channelID, userID int64) error {

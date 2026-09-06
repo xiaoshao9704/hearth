@@ -30,6 +30,8 @@ export interface Channel {
   invite_only: boolean;
   my_role: ChannelRole; // 当前用户在该频道的角色（服务端下发）
   online: number;
+  banned?: boolean; // 当前用户是否被该频道封禁（服务端下发，封禁不影响是否出现在列表里）
+  hidden?: boolean; // 仅 super 能看到的非成员邀请制频道（普通人根本收不到这条，服务端下发）
 }
 
 // 能不能发注册邀请（建频道同此档）：power 及以上

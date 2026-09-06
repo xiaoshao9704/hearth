@@ -29,30 +29,39 @@ function statusOf(online: number, inviteOnly: boolean): string {
 }
 
 function cardHtml(c: Channel): string {
+  const banned = !!c.banned;
   const busy = c.online > 0;
   const roleTag =
     c.my_role === 'owner' ? '<span class="tag">我的频道</span>' : c.my_role === 'moderator' ? '<span class="tag">我管理的</span>' : '';
+  const hiddenTag = c.hidden ? '<span class="tag tag-red">隐藏中</span>' : '';
   const canManage = c.my_role === 'owner' || c.my_role === 'moderator';
+  // 被封禁：卡片不可进入（用 div 而非 a，不给出可点的 href），状态与按钮都改成封禁提示
+  const tag = banned ? 'div' : 'a';
+  const hrefAttr = banned ? '' : ` href="#/room/${encodeURIComponent(c.name)}"`;
+  const statusHtml = banned
+    ? '<span style="color:var(--red-text)">已被封禁</span>'
+    : statusOf(c.online, c.invite_only);
   return `
     <div class="channel-card-wrap">
-      <a class="hit channel-card" href="#/room/${encodeURIComponent(c.name)}">
+      <${tag} class="hit channel-card${banned ? ' disabled' : ''}"${hrefAttr}${banned ? ' aria-disabled="true"' : ''}>
         <div class="head">
           <div class="icon-wrap">${icon('volume', 18, busy ? 'var(--ember)' : 'var(--text-1)', 1.7)}</div>
           <div style="flex-grow:1;min-width:0">
             <div style="display:flex;align-items:center;gap:8px">
               <span class="name">${esc(c.name)}</span>
               ${c.invite_only ? '<span class="tag tag-ember">邀请制</span>' : ''}
+              ${hiddenTag}
               ${roleTag}
             </div>
-            <div class="status ${busy ? 'busy' : ''}">${statusOf(c.online, c.invite_only)}</div>
+            <div class="status ${busy ? 'busy' : ''}">${statusHtml}</div>
           </div>
         </div>
         <div class="foot">
-          ${busy ? `<span class="mono" style="font-size:11px;color:var(--ember)">${c.online} 人在线</span>` : ''}
+          ${busy && !banned ? `<span class="mono" style="font-size:11px;color:var(--ember)">${c.online} 人在线</span>` : ''}
           <div class="spacer"></div>
-          <div class="join-btn">${icon('back', 15, 'var(--on-ember)', 1.8)}<span>加入</span></div>
+          <div class="join-btn">${icon('back', 15, 'var(--on-ember)', 1.8)}<span>${banned ? '无法进入' : '加入'}</span></div>
         </div>
-      </a>
+      </${tag}>
       ${canManage ? `<button type="button" class="hit btn btn-icon btn-sm card-gear" data-gear="${esc(c.name)}" title="频道管理" aria-label="频道管理">${icon('gear', 14, 'var(--text-1)', 1.7)}</button>` : ''}
     </div>`;
 }

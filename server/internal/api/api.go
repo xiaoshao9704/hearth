@@ -420,6 +420,9 @@ func (a *API) me(w http.ResponseWriter, r *http.Request) {
 
 var channelNameRe = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,64}$`)
 
+// listChannels 大厅列表可见性：邀请制频道对非成员不可见（唯一例外是 super，
+// 看得到但标 hidden，提示普通人看不到）；被封禁不影响可见性（banned 标记，进入按钮由前端禁用）
+// ——封禁是"能不能进"，不是"看不看得见"。
 func (a *API) listChannels(w http.ResponseWriter, r *http.Request) {
 	u := userFrom(r)
 	chs, err := a.st.ListChannels(r.Context())
@@ -432,20 +435,42 @@ func (a *API) listChannels(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "内部错误")
 		return
 	}
+	memberships, err := a.st.MembershipsOf(r.Context(), u.ID)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "内部错误")
+		return
+	}
+	bans, err := a.st.BansOf(r.Context(), u.ID)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "内部错误")
+		return
+	}
+	isSuper := perm.SysAtLeast(u, store.RoleSuper)
 	// 系统 admin+ 在任何频道隐含频道主（与 perm.ChannelRole 同口径，批量填充免逐频道查询）
 	implicit := ""
 	if perm.SysAtLeast(u, store.RoleAdmin) {
 		implicit = string(store.ChannelRoleOwner)
 	}
 	counts, _ := a.roomCounts(r.Context()) // LiveKit 不可达时在线数保持 0
+	visible := chs[:0]
 	for i := range chs {
-		chs[i].MyRole = implicit
-		if chs[i].MyRole == "" {
-			chs[i].MyRole = string(roles[chs[i].ID])
+		c := &chs[i]
+		member := memberships[c.ID]
+		if c.InviteOnly && !member {
+			if !isSuper {
+				continue // 非成员看不到邀请制频道，唯一例外是 super
+			}
+			c.Hidden = true // super 能看到，但标出来提示普通人看不到
 		}
-		chs[i].Online = counts[chs[i].Name]
+		c.MyRole = implicit
+		if c.MyRole == "" {
+			c.MyRole = string(roles[c.ID])
+		}
+		c.Online = counts[c.Name]
+		c.Banned = bans[c.ID]
+		visible = append(visible, *c)
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"channels": chs})
+	writeJSON(w, http.StatusOK, map[string]any{"channels": visible})
 }
 
 func (a *API) createChannel(w http.ResponseWriter, r *http.Request) {
