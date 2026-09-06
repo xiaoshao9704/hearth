@@ -152,6 +152,10 @@ func (a *API) Router() *chi.Mux {
 				// 聊天：权限按入场判定（封禁/邀请制/禁言），在 handler 内判，不需要频道管理权限
 				r.Get("/messages", a.listMessages)
 				r.Post("/messages", a.postMessage)
+				r.Delete("/messages", a.clearMessages)
+				r.Delete("/messages/{msgID}", a.deleteMessage)
+				r.Put("/messages/{msgID}/reactions/{emoji}", a.putReaction)
+				r.Delete("/messages/{msgID}/reactions/{emoji}", a.deleteReaction)
 			})
 			r.Group(func(r chi.Router) {
 				r.Use(a.requireModerator)

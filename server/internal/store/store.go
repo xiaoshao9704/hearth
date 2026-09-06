@@ -168,6 +168,9 @@ type Message struct {
 	Kind      string       `json:"kind"`             // text/file
 	Content   string       `json:"content"`
 	File      *MessageFile `bun:"-" json:"file,omitempty"` // kind=file 才有；由 meta 列的 JSON 解出
+	ReplyTo   *int64       `json:"reply_to"`              // 引用回复指向的同频道消息 id
+	Deleted   bool         `bun:"-" json:"deleted"`       // 由 deleted_at 派生；true 时 Content/File 已清空
+	Reactions []Reaction   `bun:"-" json:"reactions"`     // 表情反应聚合（AttachReactions 填充，见 chat.go）
 	CreatedAt time.Time    `json:"created_at"`
 }
 
@@ -507,15 +510,26 @@ const (
 	KindFile = "file"
 )
 
-const messageCols = `m.id, m.channel_id, m.user_id, u.username, m.kind, m.content, m.meta, m.created_at`
+// deleted 用 CASE 而非直接取 deleted_at：三方言对布尔表达式与 NULL 时间的返回类型各不相同，
+// 折成 0/1 整数最省事——业务只关心"删没删"，删除时刻不出现在任何接口上。
+const messageCols = `m.id, m.channel_id, m.user_id, u.username, m.kind, m.content, m.meta, m.reply_to,
+CASE WHEN m.deleted_at IS NULL THEN 0 ELSE 1 END, m.created_at`
 
 // scanMessage 按 messageCols 的列序读一行，并把 meta 列的 JSON 解成 File。
 func scanMessage(sc interface{ Scan(...any) error }) (Message, error) {
 	var m Message
 	var meta sql.NullString
-	if err := sc.Scan(&m.ID, &m.ChannelID, &m.UserID, &m.Username, &m.Kind, &m.Content, &meta, &m.CreatedAt); err != nil {
+	var replyTo sql.NullInt64
+	var deleted int64
+	if err := sc.Scan(&m.ID, &m.ChannelID, &m.UserID, &m.Username, &m.Kind, &m.Content, &meta,
+		&replyTo, &deleted, &m.CreatedAt); err != nil {
 		return Message{}, err
 	}
+	if replyTo.Valid {
+		m.ReplyTo = &replyTo.Int64
+	}
+	m.Deleted = deleted != 0
+	m.Reactions = []Reaction{} // 没有反应时也要是空数组：前端按数组渲染，null 会多一层判空
 	if m.Kind == KindFile && meta.Valid && meta.String != "" {
 		var f MessageFile
 		if json.Unmarshal([]byte(meta.String), &f) == nil {
@@ -526,9 +540,10 @@ func scanMessage(sc interface{ Scan(...any) error }) (Message, error) {
 }
 
 // AddMessage 落一条消息。kind=text 时 file 传 nil；kind=file 时 file 是卡片元数据
-// （字节不入库，由发送方经内核数据通道扇出）。
-func (s *Store) AddMessage(ctx context.Context, channelID, userID int64, kind, content string, file *MessageFile) (*Message, error) {
-	row := &messageRow{ChannelID: channelID, UserID: userID, Kind: kind, Content: content}
+// （字节不入库，由发送方经内核数据通道扇出）。replyTo 非 nil 时是引用回复的目标 id
+// （同频道存在且未删由接口层校验，见 api/chat_messages.go）。
+func (s *Store) AddMessage(ctx context.Context, channelID, userID int64, kind, content string, file *MessageFile, replyTo *int64) (*Message, error) {
+	row := &messageRow{ChannelID: channelID, UserID: userID, Kind: kind, Content: content, ReplyTo: replyTo}
 	if file != nil {
 		raw, err := json.Marshal(file)
 		if err != nil {

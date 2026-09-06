@@ -174,7 +174,7 @@ func TestDialectAutoincrementBackfill(t *testing.T) {
 		if tk.ID <= 0 {
 			t.Fatalf("推流令牌 ID 未回填: %+v", tk)
 		}
-		m, err := s.AddMessage(ctx, c.ID, u.ID, KindText, "hello", nil)
+		m, err := s.AddMessage(ctx, c.ID, u.ID, KindText, "hello", nil, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -351,7 +351,7 @@ func TestDialectTimeRoundTrip(t *testing.T) {
 		if c.CreatedAt.IsZero() {
 			t.Fatalf("频道 created_at 往返为零: %+v", c)
 		}
-		m, _ := s.AddMessage(ctx, c.ID, u.ID, KindText, "hi", nil)
+		m, _ := s.AddMessage(ctx, c.ID, u.ID, KindText, "hi", nil, nil)
 		if m.CreatedAt.IsZero() {
 			t.Fatalf("消息 created_at 往返为零: %+v", m)
 		}
@@ -424,8 +424,8 @@ func TestBaselineReopenNoop(t *testing.T) {
 		if err != nil {
 			t.Fatalf("重复 Open 失败: %v", err)
 		}
-		if n := remoteMigrationRows(t, s2.bun.DB); n != 4 {
-			t.Fatalf("重复 Open 后 bun_migrations 应仍为 4 行，实际 %d", n)
+		if n := remoteMigrationRows(t, s2.bun.DB); n != 5 {
+			t.Fatalf("重复 Open 后 bun_migrations 应仍为 5 行，实际 %d", n)
 		}
 		// 数据无损
 		if _, _, err := s2.UserByName(ctx, "alice"); err != nil {
@@ -688,7 +688,7 @@ func TestLegacyUpgradeRemote(t *testing.T) {
 
 			after := remoteTableNames(t, s.bun.DB, tc.name)
 			want := append(slices.Clone(before),
-				"bun_migration_locks", "bun_migrations", "ingest_endpoints", "ingest_tokens")
+				"bun_migration_locks", "bun_migrations", "ingest_endpoints", "ingest_tokens", "message_reactions")
 			slices.Sort(want)
 			if !slices.Equal(after, want) {
 				t.Fatalf("升级后表集合不符:\n got %v\nwant %v", after, want)
