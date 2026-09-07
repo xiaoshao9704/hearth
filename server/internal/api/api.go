@@ -297,9 +297,9 @@ func (a *API) auth(next http.Handler) http.Handler {
 	})
 }
 
-// channelOf 解析 {channel} 频道；已写错误响应时返回 nil。
+// channelOf 解析 {channel} 频道（id 优先、名字兜底，见 channelByRef）；已写错误响应时返回 nil。
 func (a *API) channelOf(w http.ResponseWriter, r *http.Request) *store.Channel {
-	c, err := a.st.ChannelByName(r.Context(), chi.URLParam(r, "channel"))
+	c, err := a.channelByRef(r.Context(), chi.URLParam(r, "channel"))
 	if errors.Is(err, store.ErrNotFound) {
 		writeErr(w, http.StatusNotFound, "频道不存在")
 		return nil
@@ -529,6 +529,11 @@ func (a *API) createChannel(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "频道名仅限 1-64 位字母数字、-、_")
 		return
 	}
+	// 纯数字名会与「路径段先按频道 id 解析」歧义（见 channelByRef）
+	if numericRe.MatchString(req.Name) {
+		writeErr(w, http.StatusBadRequest, "频道名不能是纯数字")
+		return
+	}
 	// WHIP 路径保留字：/w/sessions/{rid} 会话收尾与 /w/revoke/{token} 远端撤销
 	if req.Name == "sessions" || req.Name == "revoke" {
 		writeErr(w, http.StatusBadRequest, "该频道名为保留字")
@@ -552,13 +557,24 @@ func (a *API) createChannel(w http.ResponseWriter, r *http.Request) {
 func (a *API) joinToken(w http.ResponseWriter, r *http.Request) {
 	u := userFrom(r)
 	var req struct {
-		Channel  string `json:"channel"`
-		DeviceID string `json:"device_id"` // 前端 localStorage 持久化的设备 ID
+		Channel   string `json:"channel"`
+		ChannelID int64  `json:"channel_id"` // 频道寻址往 id 靠：>0 时优先，名字继续接受
+		DeviceID  string `json:"device_id"`  // 前端 localStorage 持久化的设备 ID
 	}
 	if !decode(w, r, &req) {
 		return
 	}
-	c, err := a.st.ChannelByName(r.Context(), req.Channel)
+	if req.ChannelID <= 0 && req.Channel == "" {
+		writeErr(w, http.StatusBadRequest, "缺少频道")
+		return
+	}
+	var c *store.Channel
+	var err error
+	if req.ChannelID > 0 {
+		c, err = a.st.ChannelByID(r.Context(), req.ChannelID)
+	} else {
+		c, err = a.channelByRef(r.Context(), req.Channel)
+	}
 	if errors.Is(err, store.ErrNotFound) {
 		writeErr(w, http.StatusNotFound, "频道不存在")
 		return

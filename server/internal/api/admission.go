@@ -122,7 +122,7 @@ func (a *API) admitIngest(ctx context.Context, w http.ResponseWriter, alias, cha
 	if err != nil {
 		return fail(err)
 	}
-	c, err := a.st.ChannelByName(ctx, channel)
+	c, err := a.channelByRef(ctx, channel) // 新地址用频道 id，OBS 里已存的名字地址继续有效
 	if errors.Is(err, store.ErrNotFound) {
 		writeErr(w, http.StatusNotFound, "频道不存在")
 		return ingestAdmission{}, false
