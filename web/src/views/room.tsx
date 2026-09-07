@@ -27,6 +27,7 @@ import { renderShell } from '../shell';
 import { avatarHtml, confirmDialog, el, esc, fmtClock, icon, licon, menuButtonHtml, micIcon, slashIcon, toast, wireMenuButton } from '../ui';
 import { CameraFlipButton } from './room/camera-flip';
 import { IngestBadge } from './room/ingest-badge';
+import { IngestPanel } from './room/ingest-panel';
 import { createUnreadMarker } from './room/unread-divider';
 import { showMsgMenu } from './room/msg-menu';
 import { mergeReaction, ReactionBar } from './room/reactions';
@@ -294,6 +295,8 @@ export async function renderRoom(root: HTMLElement, channel: string) {
   const [myRoleSig, setMyRoleSig] = createSignal(''); // 服务端下发的我在本频道的角色（owner/moderator/member/""）
   const settingsCtx = { backLabel: `返回 ${channel}`, channel }; // 浮层按频道自查管理角色（owner/moderator），决定是否出「频道」分区
   const [ownerName, setOwnerName] = createSignal('');
+  const [channelId, setChannelId] = createSignal(0); // 本频道 id（频道列表回来才有）：进房凭证与 WHIP 地址都用它
+  const [ingestOpen, setIngestOpen] = createSignal(false); // 顶栏「OBS 推流」面板
 
   // DOM ref（引擎产的命令式元素挂载点等）
   let audioBinEl!: HTMLDivElement;
@@ -818,7 +821,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
     const started = performance.now();
     diag('info', 'credentials_start', only, { attempt: lineFor(only ?? 'voice')?.attempts ?? 0 });
     try {
-      creds = await fetchJoinCredentials(channel);
+      creds = await fetchJoinCredentials(channel, channelId() || undefined);
     } catch (err) {
       diag('error', 'credentials_failed', only, { elapsed_ms: performance.now() - started, error: err });
       handleCredsError(err, first);
@@ -1188,6 +1191,11 @@ export async function renderRoom(root: HTMLElement, channel: string) {
   // 按住说话只在本轮按下期间开麦：失焦/松开都要能复位，否则麦克风会一直开着
   let pttHeld = false;
   const onHotkeyDown = (ev: KeyboardEvent) => {
+    if (ev.key === 'Escape' && ingestOpen()) {
+      ev.preventDefault();
+      setIngestOpen(false);
+      return;
+    }
     if (ev.key === 'Escape' && lightbox()) {
       ev.preventDefault();
       setLightbox(null);
@@ -2293,6 +2301,16 @@ export async function renderRoom(root: HTMLElement, channel: string) {
           >
             {el(icon('shield', 15, 'var(--text-1)', 1.6))}
           </button>
+          {/* 访客不显示：服务端也拒发推流令牌。访客身份只来自 getUser()，转正后 guestLeft 一并归零 */}
+          <button
+            id="ingest-entry"
+            class="hit btn btn-icon"
+            classList={{ hidden: !!guestLeft(), on: ingestOpen() }}
+            title="OBS 推流"
+            onClick={() => setIngestOpen((o) => !o)}
+          >
+            {el(icon('stream', 15, 'var(--text-1)', 1.6))}
+          </button>
           <div class="seg-group" style="padding:3px;background:var(--bg-3)">
             <button
               class="hit seg"
@@ -2815,6 +2833,17 @@ export async function renderRoom(root: HTMLElement, channel: string) {
             onMenu={(x, y, p) => showUserMenu(x, y, p.uid, p.username, p.identity)}
           />
         </Show>
+        <Show when={ingestOpen()}>
+          <IngestPanel
+            channel={channel}
+            channelId={channelId}
+            onClose={() => setIngestOpen(false)}
+            onOpenSettings={() => {
+              setIngestOpen(false);
+              openSettings('stream', settingsCtx);
+            }}
+          />
+        </Show>
         <Show when={lightbox()}>
           <div class="lightbox-scrim" onClick={() => setLightbox(null)}>
             <div class="lightbox-box" onClick={(ev) => ev.stopPropagation()}>
@@ -2847,6 +2876,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
   void listChannels()
     .then((chs) => {
       const ch = chs.find((c) => c.name === channel);
+      setChannelId(ch?.id ?? 0);
       setMyRoleSig(ch?.my_role ?? '');
       setOwnerName(ch?.created_by ?? '');
     })

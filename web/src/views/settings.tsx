@@ -119,7 +119,7 @@ function SettingsOverlay(p: { pane: Pane; ctx: SettingsContext }) {
             {el(icon('close', 16, 'var(--text-1)', 1.8))}
           </button>
         </header>
-        <Show when={pane() === 'channel'} fallback={<PersonalHost pane={pane() as PersonalPane} go={setPane} />}>
+        <Show when={pane() === 'channel'} fallback={<PersonalHost pane={pane() as PersonalPane} go={setPane} channel={p.ctx.channel} />}>
           <div class="settings-body" style="padding:0;gap:0">
             <ChannelManage channel={p.ctx.channel!} />
           </div>
@@ -130,12 +130,12 @@ function SettingsOverlay(p: { pane: Pane; ctx: SettingsContext }) {
 }
 
 // 个人 pane 的命令式内容挂载点：切 pane 先跑上一个的清理再重画
-function PersonalHost(p: { pane: PersonalPane; go: (pane: PersonalPane) => void }) {
+function PersonalHost(p: { pane: PersonalPane; go: (pane: PersonalPane) => void; channel?: string }) {
   let body!: HTMLDivElement;
   createEffect(() => {
     const pane = p.pane;
     body.innerHTML = '';
-    const cleanup = renderPane(body, pane, { close: closeSettings, go: p.go });
+    const cleanup = renderPane(body, pane, { close: closeSettings, go: p.go, channel: p.channel });
     onCleanup(() => cleanup?.());
   });
   return <div class="settings-body" ref={body} />;

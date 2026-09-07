@@ -54,6 +54,7 @@ export const PERSONAL_PANES: { id: PersonalPane; label: string; icon: string; su
 export interface PaneHost {
   close(): void; // 退出登录等需要关掉整个浮层
   go(pane: PersonalPane): void; // pane 间跳转（投屏画质 → 推流）
+  channel?: string; // 从房间打开设置时的当前频道：推流页据此顺手给出该频道的完整地址
 }
 
 // 把 pane 渲染进 body，返回清理函数（没有后台资源的 pane 返回 undefined）
@@ -71,7 +72,7 @@ export function renderPane(body: HTMLElement, pane: PersonalPane, host: PaneHost
       renderScreen(body, () => host.go('stream'));
       return;
     case 'stream':
-      renderStream(body);
+      renderStream(body, host.channel);
       return;
     case 'devices':
       renderDevices(body);
@@ -973,10 +974,11 @@ function renderScreen(body: HTMLElement, goStream: () => void) {
 
 // ---- 推流 ----
 
-function renderStream(body: HTMLElement) {
-  let channels: string[] = [];
-  let current = '';
-  let base = ''; // WHIP 基地址（…/providers/{alias}/w/），拼上频道名即完整服务器地址
+// 推流页只管账号级的东西：令牌查看/复制/重置、设备标签、OBS 填法。
+// 「哪个频道的地址」属于频道级，归房间顶栏的「OBS 推流」面板；从房间打开设置时这里顺手兜一份。
+function renderStream(body: HTMLElement, channel?: string) {
+  let channelID = 0; // 当前频道 id（只有带着频道上下文打开时才查得到）
+  let base = ''; // WHIP 基地址（…/providers/{alias}/w/），拼上频道 id 即完整服务器地址
   let token = ''; // 推流令牌（每用户一把，不区分频道和设备）
   let tag = ''; // 已保存的设备标签（identity = {用户名}-{标签}）
   let enabled = true; // 推流入口是否可用（false 时地址照给，但推起来会被拒）
@@ -986,9 +988,9 @@ function renderStream(body: HTMLElement) {
 
   body.innerHTML = '<div class="muted">加载推流信息…</div>';
 
-  // 与服务端 ingestTagRe 一致；频道名只含字母数字 - _（channelNameRe），直接拼路径段
+  // 与服务端 ingestTagRe 一致
   const TAG_RE = /^[a-z0-9][a-z0-9-]{0,31}$/;
-  const serverAddr = () => (base && current ? `${base}${current}` : '在大厅建一个频道后生成');
+  const serverAddr = () => (base && channelID ? `${base}${channelID}` : '');
 
   const paint = () => {
     if (!token) return; // 首屏等加载
@@ -1000,20 +1002,20 @@ function renderStream(body: HTMLElement) {
             ? ''
             : `<div class="notice-bad"><span style="font-size:12px;line-height:1.55">推流进当前舞台内核：舞台内核未启用或缺配置时推流不可用。地址和令牌照常可用，但现在推会被拒。</span></div>`
         }
-        <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap">
-          <div style="font-size:12.5px;color:var(--text-1)">频道</div>
-          <div class="seg-group">
-            ${channels.map((c) => `<button class="hit seg ${c === current ? 'on' : ''}" data-ch="${esc(c)}">${esc(c)}</button>`).join('')}
-          </div>
-          ${channels.length === 0 ? '<div style="font-size:12px;color:var(--text-2)">还没有频道，先在大厅建一个</div>' : ''}
-        </div>
-        <div style="display:flex;flex-direction:column;gap:7px">
-          <div class="section-label" style="letter-spacing:0.1em">服务器地址（已含房间名）</div>
-          <div class="copy-line">
-            <span class="val mono">${esc(serverAddr())}</span>
-            ${current ? `<button class="hit btn btn-sm" data-copy="url">${icon('copy', 13)} 复制</button>` : ''}
-          </div>
-        </div>
+        ${
+          serverAddr()
+            ? `<div style="display:flex;flex-direction:column;gap:7px">
+                 <div class="section-label" style="letter-spacing:0.1em">服务器地址 · ${esc(channel ?? '')}</div>
+                 <div class="copy-line">
+                   <span class="val mono">${esc(serverAddr())}</span>
+                   <button class="hit btn btn-sm" data-copy="url">${icon('copy', 13)} 复制</button>
+                 </div>
+               </div>`
+            : `<div class="hint-card" style="border-color:var(--line-soft)">
+                 ${icon('stream', 16, 'var(--ember)')}
+                 <div style="font-size:12px;line-height:1.7">服务器地址含频道，在房间顶栏的「OBS 推流」里复制；令牌全频道通用，就是下面这把。</div>
+               </div>`
+        }
         <div style="display:flex;flex-direction:column;gap:7px">
           <div class="section-label" style="letter-spacing:0.1em">推流令牌 · 全频道通用</div>
           <div class="copy-line">
@@ -1045,20 +1047,14 @@ function renderStream(body: HTMLElement) {
           ${icon('check', 16, 'var(--sage)')}
           <div style="display:flex;flex-direction:column;gap:6px">
             <div style="font-size:12.5px;font-weight:600;color:var(--text-0)">OBS 里怎么填</div>
-            <div style="font-size:12px;line-height:1.7">设置 → 直播 → 服务选 <span class="mono" style="color:var(--text-1)">WHIP</span>，服务器填上面那行（换房间在上面切换频道后重新复制即可，令牌不变），Bearer Token 填推流令牌。编码器 H.264 / HEVC / AV1 均可，服务端直通不转码，<span style="color:var(--sage)">2K / 4K / 120fps 原样透传</span>。ffmpeg 等不支持 Bearer 的工具用路径模式：服务器地址末尾再拼一段 <span class="mono" style="color:var(--text-1)">/令牌</span>。</div>
+            <div style="font-size:12px;line-height:1.7">设置 → 直播 → 服务选 <span class="mono" style="color:var(--text-1)">WHIP</span>，服务器填频道的完整地址（房间顶栏「OBS 推流」里复制，换频道换地址、令牌不变），Bearer Token 填推流令牌。编码器 H.264 / HEVC / AV1 均可，服务端直通不转码，<span style="color:var(--sage)">2K / 4K / 120fps 原样透传</span>。ffmpeg 等不支持 Bearer 的工具用路径模式：服务器地址末尾再拼一段 <span class="mono" style="color:var(--text-1)">/令牌</span>。</div>
           </div>
         </div>
       </div>`;
 
-    body.querySelectorAll<HTMLButtonElement>('[data-ch]').forEach((btn) => {
-      btn.addEventListener('click', () => {
-        current = btn.dataset.ch!;
-        paint();
-      });
-    });
     body.querySelectorAll<HTMLButtonElement>('[data-copy]').forEach((btn) => {
       btn.addEventListener('click', async () => {
-        const text = btn.dataset.copy === 'url' ? (current ? serverAddr() : '') : token;
+        const text = btn.dataset.copy === 'url' ? serverAddr() : token;
         if (!text) return;
         if (await copyText(text)) toast('已复制', 'ok', 1400);
       });
@@ -1130,8 +1126,9 @@ function renderStream(body: HTMLElement) {
 
   void (async () => {
     try {
-      const [chs, info] = await Promise.all([listChannels(), getIngestToken()]);
-      channels = chs.map((c) => c.name);
+      // 只有带着频道上下文打开才去查列表：地址要的是 id，名字换 id 得问服务端
+      const [chs, info] = await Promise.all([channel ? listChannels() : Promise.resolve([]), getIngestToken()]);
+      channelID = chs.find((c) => c.name === channel)?.id ?? 0;
       token = info.token;
       tag = info.tag;
       base = info.base;
@@ -1140,7 +1137,6 @@ function renderStream(body: HTMLElement) {
       toast((err as Error).message, 'bad');
       return;
     }
-    current = channels[0] ?? '';
     paint();
   })();
 }

@@ -244,10 +244,11 @@ export function deviceId(): string {
   return id;
 }
 
-export function fetchJoinCredentials(channel: string): Promise<JoinCredentials> {
+// channelID 是频道寻址往 id 靠的一环：给了就按 id 判定，拿不到（频道列表还没回来）服务端按名字兜底
+export function fetchJoinCredentials(channel: string, channelID?: number): Promise<JoinCredentials> {
   return req<JoinCredentials>('/api/token', {
     method: 'POST',
-    body: { channel, device_id: deviceId() },
+    body: { channel, ...(channelID ? { channel_id: channelID } : {}), device_id: deviceId() },
   });
 }
 

@@ -1242,3 +1242,43 @@ body.theater-on .sidebar { display: none; }
 /* 通行密钥行内改名：套用 .field 但压到与行高相称 */
 .pk-edit { height: 32px; padding: 0 10px; flex-grow: 1; min-width: 0; max-width: 260px; background: var(--bg-2); }
 .pk-edit input { font-size: 13px; }
+
+/* ---- 房间顶栏的「OBS 推流」面板 ---- */
+/* 顶栏入口按钮的按下态：与频道管理同一枚 btn-icon，只在面板开着时点亮 */
+.topbar .btn-icon.on { background: var(--ember-tint); border-color: var(--ember-line); }
+.ingest-scrim {
+  position: fixed; inset: 0; z-index: 300; display: flex; align-items: flex-start; justify-content: center;
+  background: var(--scrim); padding: 72px 20px 20px; overflow-y: auto;
+}
+.ingest-panel {
+  display: flex; flex-direction: column; gap: 14px;
+  width: 100%; max-width: 520px; padding: 18px 20px 20px;
+}
+.ingest-panel .ig-head { display: flex; align-items: center; gap: 9px; }
+.ingest-panel .ig-title { flex-grow: 1; font-size: 13.5px; font-weight: 600; color: var(--text-0); }
+.ingest-panel .ig-note { font-size: 12px; line-height: 1.55; }
+.ingest-panel .ig-field { display: flex; flex-direction: column; gap: 7px; }
+.ingest-panel .ig-eye {
+  width: 30px; height: 30px; flex-shrink: 0; border-radius: 7px;
+  display: flex; align-items: center; justify-content: center;
+}
+.ingest-panel .ig-eye:hover { background: var(--bg-3); }
+.ingest-panel .ig-steps { display: flex; flex-direction: column; gap: 8px; }
+.ingest-panel .ig-step { display: flex; align-items: center; gap: 9px; font-size: 12.5px; color: var(--text-1); }
+.ingest-panel .ig-step .n {
+  width: 18px; height: 18px; flex-shrink: 0; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--bg-3); font-size: 10.5px; color: var(--text-2);
+}
+.ingest-panel .ig-em { color: var(--ember); }
+.ingest-panel .ig-tip { font-size: 11.5px; line-height: 1.65; color: var(--text-2); text-wrap: pretty; }
+.ingest-panel .ig-link {
+  display: flex; align-items: center; gap: 6px; align-self: flex-start;
+  font-size: 11.5px; color: var(--text-2);
+}
+.ingest-panel .ig-link:hover { color: var(--ember); }
+.ingest-panel .ig-link .ig-arrow { font-size: 12px; }
+@media (max-width: 560px) {
+  .ingest-scrim { padding: 56px 12px 12px; }
+  .ingest-panel { padding: 16px; }
+}
