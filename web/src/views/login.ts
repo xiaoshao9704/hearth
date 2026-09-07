@@ -1,11 +1,14 @@
 // 登录页：注册入口按 /api/site 的 policy 显隐（closed 不出；invite 提示要邀请链接；open 出自助注册表单）。
 // 站点名（site.name）用于品牌位与按钮文案，拉取失败按 closed + 默认名处理。
 import { login, register, siteInfo } from '../api';
+import { hasConditionalMediation, isSupported, loginWithPasskey, passkeyErrorText } from '../passkey';
 import { wireThemeButton } from '../theme';
 import { esc, flameLogo, icon } from '../ui';
 
 const LAST_USER_KEY = 'hearth_last_user';
 const NEXT_KEY = 'hearth_next';
+// 密码登录成功的一次性标记：大厅据此决定要不要弹通行密钥推荐（通行密钥登录不记）
+const VIA_KEY = 'hearth_login_via';
 
 const USER_RE = /^[a-zA-Z0-9_-]{2,32}$/;
 
@@ -29,13 +32,13 @@ export function renderLogin(root: HTMLElement) {
           <div style="display:flex;flex-direction:column;gap:7px">
             <label class="field-label" for="lg-user">用户名</label>
             <div class="field" id="lg-user-field">
-              <input id="lg-user" placeholder="你的账号" autocapitalize="off" autocomplete="username" enterkeyhint="next" value="${esc(lastUser)}" />
+              <input id="lg-user" placeholder="你的账号" autocapitalize="off" autocomplete="username webauthn" enterkeyhint="next" value="${esc(lastUser)}" />
             </div>
           </div>
           <div style="display:flex;flex-direction:column;gap:7px">
             <label class="field-label" for="lg-pass">密码</label>
             <div class="field" id="lg-pass-field">
-              <input id="lg-pass" type="password" placeholder="••••••••" autocomplete="current-password" enterkeyhint="go" />
+              <input id="lg-pass" type="password" placeholder="••••••••" autocomplete="current-password webauthn" enterkeyhint="go" />
               <button type="button" class="hit mini-btn" id="lg-reveal" style="width:28px;height:28px;border-radius:7px;display:flex;align-items:center;justify-content:center">${icon('eyeOff', 17, 'var(--text-2)', 1.6)}</button>
             </div>
           </div>
@@ -47,6 +50,10 @@ export function renderLogin(root: HTMLElement) {
           </div>
           <p class="error-text" id="lg-error" style="margin:0;min-height:1em"></p>
           <button type="submit" class="hit btn btn-primary btn-lg disabled" id="lg-btn" disabled>进入 Hearth</button>
+          <div class="auth-passkey" id="lg-passkey-wrap" hidden>
+            <div class="auth-or"><span>或</span></div>
+            <button type="button" class="hit btn btn-lg" id="lg-passkey">${icon('key', 16, 'var(--text-1)', 1.7)}使用通行密钥登录</button>
+          </div>
           <div style="text-align:center;font-size:12px" id="lg-switch" hidden><a href="" id="lg-switch-a">已有账号？去登录</a></div>
         </form>
         <div class="auth-note card" style="display:none;gap:12px" id="lg-note"></div>
@@ -157,17 +164,59 @@ export function renderLogin(root: HTMLElement) {
   confInput.addEventListener('input', syncBtn);
   syncBtn();
 
-  const afterAuth = () => {
-    localStorage.setItem(LAST_USER_KEY, userInput.value.trim());
+  // 进大厅；rememberUser 只在密码/注册路径为真（通行密钥登录时输入框是空的，别把它覆盖掉）
+  const afterAuth = (rememberUser: boolean) => {
+    if (rememberUser) localStorage.setItem(LAST_USER_KEY, userInput.value.trim());
     const next = sessionStorage.getItem(NEXT_KEY);
     sessionStorage.removeItem(NEXT_KEY);
     location.hash = next && next.startsWith('#/') ? next : '#/lobby';
   };
 
+  // ---- 通行密钥 ----
+  // 两条入口：页面加载时静默发起一次 conditional（凭证出现在账号框的 autofill 里，
+  // 用户点了才走完；失败一律静默——不支持/没凭证都不该打扰要输密码的人），
+  // 以及下面这个按钮（点之前先 abort 掉那次 conditional，同时只能有一个 get 在飞）。
+  const passkeyWrap = root.querySelector<HTMLDivElement>('#lg-passkey-wrap')!;
+  const passkeyBtn = root.querySelector<HTMLButtonElement>('#lg-passkey')!;
+  let conditional: AbortController | null = null;
+
+  if (isSupported()) {
+    passkeyWrap.hidden = false;
+    void hasConditionalMediation().then((ok) => {
+      if (!ok || busy) return;
+      conditional = new AbortController();
+      loginWithPasskey({ mediation: 'conditional', signal: conditional.signal })
+        .then(() => afterAuth(false))
+        .catch(() => {}); // 静默：用户没选、没凭证、被 abort 都走这里
+    });
+  }
+
+  passkeyBtn.addEventListener('click', async () => {
+    if (busy) return;
+    conditional?.abort();
+    conditional = null;
+    busy = true;
+    errEl.textContent = '';
+    passkeyBtn.classList.add('loading');
+    syncBtn();
+    try {
+      await loginWithPasskey();
+      afterAuth(false);
+    } catch (err) {
+      const msg = passkeyErrorText(err);
+      if (msg) errEl.textContent = msg;
+      busy = false;
+      passkeyBtn.classList.remove('loading');
+      syncBtn();
+    }
+  });
+
   form.addEventListener('submit', async (ev) => {
     ev.preventDefault();
     if (!ready() || busy) return;
     busy = true;
+    conditional?.abort(); // 密码走通了，别让 autofill 里那次 get 还挂着
+    conditional = null;
     errEl.textContent = '';
     btn.textContent = '正在连接…';
     syncBtn();
@@ -176,8 +225,11 @@ export function renderLogin(root: HTMLElement) {
         await register(userInput.value.trim(), passInput.value);
       } else {
         await login(userInput.value.trim(), passInput.value);
+        // 只有密码登录才记标记：大厅据此在这一次之后弹通行密钥推荐
+        // （刚注册完的人正在建账号，别在那时再塞一个选择）
+        sessionStorage.setItem(VIA_KEY, 'password');
       }
-      afterAuth();
+      afterAuth(true);
     } catch (err) {
       errEl.textContent = (err as Error).message;
       userField.classList.add('bad');

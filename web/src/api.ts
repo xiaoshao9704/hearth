@@ -20,6 +20,7 @@ export interface User {
   role: Role;
   expires_at: string | null; // 仅访客有值
   is_admin: boolean; // 派生只读（role ≥ admin），过渡一个版本后删
+  passkey_count?: number; // 只有 /api/me 带；登录后推荐卡片据此判断「还没有通行密钥」
 }
 
 export interface Channel {
@@ -525,6 +526,64 @@ export async function listMySessions(): Promise<SessionRecord[]> {
 
 export function deleteMySession(id: string): Promise<void> {
   return req(`/api/account/sessions/${encodeURIComponent(id)}`, { method: 'DELETE' });
+}
+
+// ---- 通行密钥（WebAuthn）----
+// 这里只负责收发；挑战与凭证的格式转换在 passkey.ts。
+// options 是服务端直出的 PublicKeyCredential*OptionsJSON，前端不改字段，只做 base64url 解码。
+
+export interface PasskeyRecord {
+  id: number;
+  name: string;
+  created_at: string;
+  last_used_at: string | null;
+  backup_eligible: boolean;
+  backup_state: boolean; // 已同步/已备份到账号（换设备也还在）
+}
+
+export type PasskeyOptions = Record<string, unknown>;
+
+export interface PasskeyCeremony {
+  ceremony_id: string;
+  options: PasskeyOptions;
+}
+
+export function passkeyLoginBegin(): Promise<PasskeyCeremony> {
+  return req<PasskeyCeremony>('/api/auth/passkey/login/begin', { method: 'POST' });
+}
+
+// 与密码登录同一条签发路径，成功后本地会话按同样方式落地
+export async function passkeyLoginFinish(ceremonyId: string, credential: unknown): Promise<User> {
+  const data = await req<{ token: string; user: User }>('/api/auth/passkey/login/finish', {
+    method: 'POST',
+    body: { ceremony_id: ceremonyId, credential },
+  });
+  saveSession(data.token, data.user);
+  return data.user;
+}
+
+export async function listPasskeys(): Promise<PasskeyRecord[]> {
+  const data = await req<{ passkeys: PasskeyRecord[] | null }>('/api/account/passkeys');
+  return data.passkeys ?? [];
+}
+
+export function passkeyRegisterBegin(): Promise<PasskeyCeremony> {
+  return req<PasskeyCeremony>('/api/account/passkeys/begin', { method: 'POST' });
+}
+
+export function passkeyRegisterFinish(ceremonyId: string, credential: unknown, name?: string): Promise<PasskeyRecord> {
+  return req<PasskeyRecord>('/api/account/passkeys/finish', {
+    method: 'POST',
+    body: { ceremony_id: ceremonyId, credential, name },
+  });
+}
+
+export function renamePasskey(id: number, name: string): Promise<void> {
+  return req(`/api/account/passkeys/${id}`, { method: 'PATCH', body: { name } });
+}
+
+export function deletePasskey(id: number): Promise<void> {
+  return req(`/api/account/passkeys/${id}`, { method: 'DELETE' });
 }
 
 // ---- 邀请 ----

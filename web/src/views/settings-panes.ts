@@ -36,7 +36,7 @@ import type { DenoiseMode, ScreenCodec } from '../prefs';
 import { getTheme, setTheme } from '../theme';
 import type { Theme } from '../theme';
 import { armNotifyPermission, notifyState } from '../notify';
-import { renderSessions } from './account-pane';
+import { renderPasskeys, renderSessions } from './account-pane';
 import { avatarHtml, confirmDialog, copyText, esc, icon, pwBarsHtml, pwScore, slashIcon, timeAgo, toast } from '../ui';
 
 export type PersonalPane = 'av' | 'screen' | 'stream' | 'devices' | 'invites' | 'account' | 'appearance';
@@ -172,6 +172,8 @@ function renderAccount(body: HTMLElement, close: () => void) {
 
       <div id="acc-sessions"></div>
 
+      ${guest ? '' : '<div id="acc-passkeys"></div>'}
+
       <button class="hit card" id="acc-logout" style="display:flex;align-items:center;gap:10px;padding:14px 18px;border-color:var(--red-line);text-align:left;width:100%">
         ${icon('leave', 16, 'var(--red)')}
         <div style="flex-grow:1">
@@ -213,6 +215,8 @@ function renderAccount(body: HTMLElement, close: () => void) {
   else wirePassword(body);
 
   renderSessions(body.querySelector<HTMLElement>('#acc-sessions')!);
+  // 访客看不到通行密钥卡片（服务端也拒，见 api.requirePasskeyAccount）
+  if (!guest) renderPasskeys(body.querySelector<HTMLElement>('#acc-passkeys')!);
 
   body.querySelector('#acc-logout')!.addEventListener('click', async () => {
     try {

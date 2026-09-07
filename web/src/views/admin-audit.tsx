@@ -17,6 +17,9 @@ const ACTION_META: Record<string, [string, string]> = {
   channel_role: ['频道角色', ''],
   message_delete: ['删消息', 'tag-ember'],
   channel_clear: ['清空聊天', 'tag-red'],
+  passkey_add: ['加通行密钥', 'tag-sage'],
+  passkey_remove: ['删通行密钥', 'tag-ember'],
+  passkey_replay: ['通行密钥异常', 'tag-red'],
 };
 
 function actionLabel(action: string): string {

@@ -1,12 +1,18 @@
 // 大厅：频道卡片、创建频道、设备提示。
-import { canInvite, createChannel, getUser, guestTimeLeft, isGuest, listChannels } from '../api';
+import { canInvite, createChannel, fetchMe, getUser, guestTimeLeft, isGuest, listChannels } from '../api';
 import type { Channel } from '../api';
+import { isSupported, passkeyErrorText, registerPasskey } from '../passkey';
 import { renderShell } from '../shell';
 import { esc, icon, menuButtonHtml, toast, wireMenuButton } from '../ui';
 import { openSettings } from './settings';
 
 const NAME_RE = /^[A-Za-z0-9_-]{1,64}$/;
 const POLL_MS = 15000;
+
+// 通行密钥推荐：登录页留下的一次性标记 + 本设备的「稍后 / 不再提示」记录
+const VIA_KEY = 'hearth_login_via';
+const NUDGE_KEY = 'hearth_passkey_nudge';
+const NUDGE_SNOOZE_MS = 7 * 24 * 3600_000;
 
 function greeting(): string {
   const h = new Date().getHours();
@@ -66,6 +72,82 @@ function cardHtml(c: Channel): string {
     </div>`;
 }
 
+// nudgeAllowed 本设备是否还愿意看这张推荐卡：never = 永久关掉，时间戳 = 7 天内不再提。
+function nudgeAllowed(): boolean {
+  let mark: string | null = null;
+  try {
+    mark = localStorage.getItem(NUDGE_KEY);
+  } catch {
+    return false; // 存不住偏好就别弹——否则每次登录都弹，反而更烦
+  }
+  if (mark === 'never') return false;
+  const at = Number(mark);
+  return !mark || !Number.isFinite(at) || Date.now() - at >= NUDGE_SNOOZE_MS;
+}
+
+function setNudge(v: string) {
+  try {
+    localStorage.setItem(NUDGE_KEY, v);
+  } catch {
+    /* 隐私模式下存不住，下次再问一遍 */
+  }
+}
+
+// maybeNudgePasskey 密码登录后的一次性推荐卡（非模态，挂在大厅顶部）。
+// 四个条件都满足才画：这次是密码登录（标记读后即删，保证只在登录后那一次）、
+// 账号还没有通行密钥、不是访客、这台浏览器支持且没被关掉过。
+async function maybeNudgePasskey(host: HTMLElement, alive: () => boolean) {
+  const via = sessionStorage.getItem(VIA_KEY);
+  sessionStorage.removeItem(VIA_KEY);
+  if (via !== 'password' || !isSupported() || !nudgeAllowed()) return;
+  let me;
+  try {
+    me = await fetchMe(); // passkey_count 只有 /api/me 带
+  } catch {
+    return;
+  }
+  if (!alive() || isGuest(me) || (me.passkey_count ?? 0) > 0) return;
+
+  host.innerHTML = `
+    <div class="card passkey-nudge">
+      <span class="nudge-icon">${icon('key', 17, 'var(--ember)', 1.7)}</span>
+      <div style="flex-grow:1;min-width:0">
+        <div style="font-size:13px;font-weight:600">下次一键登录</div>
+        <div style="font-size:11.5px;line-height:1.6;color:var(--text-2);margin-top:3px;text-wrap:pretty">
+          给这个账号加一枚通行密钥：以后用指纹/面容/设备密码就能进，不用再输密码。密码仍然保留。
+        </div>
+      </div>
+      <div class="nudge-acts">
+        <button type="button" class="hit btn btn-primary btn-sm" id="nudge-add">立即添加</button>
+        <button type="button" class="hit btn btn-sm" id="nudge-later">稍后</button>
+        <button type="button" class="hit btn btn-sm" id="nudge-never">不再提示</button>
+      </div>
+    </div>`;
+
+  const addBtn = host.querySelector<HTMLButtonElement>('#nudge-add')!;
+  addBtn.addEventListener('click', async () => {
+    if (addBtn.classList.contains('loading')) return;
+    addBtn.classList.add('loading');
+    try {
+      await registerPasskey();
+      toast('通行密钥已添加，下次登录一键就进。', 'ok');
+      host.innerHTML = '';
+    } catch (err) {
+      const msg = passkeyErrorText(err);
+      if (msg) toast(msg, 'bad');
+      addBtn.classList.remove('loading');
+    }
+  });
+  host.querySelector('#nudge-later')!.addEventListener('click', () => {
+    setNudge(String(Date.now()));
+    host.innerHTML = '';
+  });
+  host.querySelector('#nudge-never')!.addEventListener('click', () => {
+    setNudge('never');
+    host.innerHTML = '';
+  });
+}
+
 export async function renderLobby(root: HTMLElement, alive: () => boolean) {
   const user = getUser();
   // 创建频道需 power 及以上（服务端 POST /api/channels 也会拒，这里只做显隐）
@@ -82,6 +164,7 @@ export async function renderLobby(root: HTMLElement, alive: () => boolean) {
       <div class="status-chip mono" id="status-chip"><span style="display:flex;align-items:center;gap:5px"><span class="ok-dot" id="status-dot"></span><span id="status-text">服务器在线</span></span></div>
     </header>
     <div class="lobby-body">
+      <div id="passkey-nudge"></div>
       ${
         isGuest(user)
           ? `<button type="button" class="hit card" id="guest-bar" style="display:flex;align-items:center;gap:11px;padding:12px 16px;border-color:var(--ember-line);text-align:left;width:100%">
@@ -140,6 +223,8 @@ export async function renderLobby(root: HTMLElement, alive: () => boolean) {
     unwireMenu();
   };
   window.addEventListener('hashchange', onLeave, { once: true });
+
+  void maybeNudgePasskey(root.querySelector<HTMLElement>('#passkey-nudge')!, alive);
 
   root.querySelector('#tune-av')!.addEventListener('click', () => openSettings('av'));
   root.querySelector('#guest-bar')?.addEventListener('click', () => openSettings('account'));
