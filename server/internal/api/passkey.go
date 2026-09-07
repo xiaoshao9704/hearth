@@ -17,6 +17,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"log"
 	"net"
 	"net/http"
 	"strconv"
@@ -95,7 +96,7 @@ func (a *API) passkeyRP(r *http.Request) (*webauthn.WebAuthn, error) {
 	if w, ok := a.passkey.rps[key]; ok {
 		return w, nil
 	}
-	w, err := webauthn.New(&webauthn.Config{
+	wa, err := webauthn.New(&webauthn.Config{
 		RPID:                  rpID,
 		RPDisplayName:         name,
 		RPOrigins:             origins,
@@ -106,6 +107,9 @@ func (a *API) passkeyRP(r *http.Request) (*webauthn.WebAuthn, error) {
 		},
 	})
 	if err != nil {
+		// 走到这里几乎只有一种原因：RP ID 不是合法域名（裸 IP 访问，或后台填错）。
+		// 请求侧已限频，直接打日志给管理员看，不额外做去重。
+		log.Printf("通行密钥配置无效: rp_id=%q origins=%v: %v", rpID, origins, err)
 		return nil, err
 	}
 	if a.passkey.rps == nil {
@@ -115,8 +119,8 @@ func (a *API) passkeyRP(r *http.Request) (*webauthn.WebAuthn, error) {
 	if len(a.passkey.rps) > 16 {
 		a.passkey.rps = make(map[string]*webauthn.WebAuthn)
 	}
-	a.passkey.rps[key] = w
-	return w, nil
+	a.passkey.rps[key] = wa
+	return wa, nil
 }
 
 // ---- ceremony 表 ----
@@ -282,7 +286,7 @@ func (a *API) passkeyLoginBegin(w http.ResponseWriter, r *http.Request) {
 	}
 	wa, err := a.passkeyRP(r)
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "通行密钥未正确配置")
+		writeErr(w, http.StatusInternalServerError, "通行密钥不可用：当前站点地址不能作为 RP ID（需要域名或 localhost，不能是裸 IP），或后台的 passkey_rp_id 填错了")
 		return
 	}
 	assertion, session, err := wa.BeginDiscoverableLogin()
@@ -309,7 +313,7 @@ func (a *API) passkeyLoginFinish(w http.ResponseWriter, r *http.Request) {
 	}
 	wa, err := a.passkeyRP(r)
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "通行密钥未正确配置")
+		writeErr(w, http.StatusInternalServerError, "通行密钥不可用：当前站点地址不能作为 RP ID（需要域名或 localhost，不能是裸 IP），或后台的 passkey_rp_id 填错了")
 		return
 	}
 	c, ok := a.takeCeremony(req.CeremonyID, "login")
@@ -389,7 +393,7 @@ func (a *API) passkeyRegisterBegin(w http.ResponseWriter, r *http.Request) {
 	u := userFrom(r)
 	wa, err := a.passkeyRP(r)
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "通行密钥未正确配置")
+		writeErr(w, http.StatusInternalServerError, "通行密钥不可用：当前站点地址不能作为 RP ID（需要域名或 localhost，不能是裸 IP），或后台的 passkey_rp_id 填错了")
 		return
 	}
 	pu, err := a.passkeyUserOf(r, u)
@@ -419,7 +423,7 @@ func (a *API) passkeyRegisterFinish(w http.ResponseWriter, r *http.Request) {
 	}
 	wa, err := a.passkeyRP(r)
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "通行密钥未正确配置")
+		writeErr(w, http.StatusInternalServerError, "通行密钥不可用：当前站点地址不能作为 RP ID（需要域名或 localhost，不能是裸 IP），或后台的 passkey_rp_id 填错了")
 		return
 	}
 	c, ok := a.takeCeremony(req.CeremonyID, "register")
