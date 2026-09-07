@@ -65,6 +65,7 @@ flowchart LR
 - 文字聊天与文件：消息经 LiveKit 数据通道实时扇出，历史由 `/api/channels/{channel}/messages` 落库回放；文件字节同走数据通道，hearth 不经手
 - 管理：踢出、封禁、**服务端禁言**（落库持久、离房也可操作、全内核生效、推流入口同步拦截）、邀请制白名单；右键用户卡片直达操作
 - 注册：默认邀请制（管理员发有时效链接），首个账号自动管理员
+- 通行密钥（Passkey）：一次触摸/面容/指纹即登录，不用输用户名（可发现凭证）；设置「账户」里可加多枚、改名、删除，密码始终保留作兜底
 - 管理后台：内核切换（选服务实例）、**服务实例注册**（外部 LiveKit——远端 `cmd/stage` 或官方 LiveKit，alias 命名、同类型可多个；env 配置的合成同名锁定实例、后台只读）、用户/频道/邀请管理、宿主资源监控
 
 ## 技术选型
@@ -124,6 +125,24 @@ docker exec hearth /app/hearth adduser <用户名> <密码>   # 首账号自动�
 > **浏览器 STUN 由服务端下发**：前端不再硬编码，列表在管理后台「网络 → 浏览器 STUN 服务器」（`client_stun_servers`）改，逗号分隔、保存即生效，`none` = 不下发（连通性不依赖 STUN，兜底靠上面的 ICE-TCP）。它与实例参数 `lkembed_stun_servers`（服务端自己探测公网映射用）是两码事。
 
 只有接入**独立部署**的外部 LiveKit（更大规模的舞台集群，或把舞台搬到另一台机器，见下文「远端舞台机器」）时才需要额外配置或额外容器——那是可选的高级形态，默认单容器已经是完整功能。
+
+### 通行密钥（Passkey）登录
+
+单域名部署**不用配**：RP ID 与允许的 origin 都留空即按请求现推导——RP ID 取请求 `Host` 去端口（反代下就是公开域名，本地就是 `localhost`），origin 取 `scheme://Host`（scheme 尊重 `X-Forwarded-Proto`，所以 nginx/Caddy 终止 TLS 的部署推出来的是 `https://…`）。
+
+需要显式配置的只有两种情况，键在管理后台「管理」分组（也可用 `PASSKEY_RP_ID`/`PASSKEY_ORIGINS` 环境变量锁定）：
+
+| 键 | 什么时候要填 |
+|---|---|
+| `passkey_rp_id` | 想让凭证绑在主域名上（如站点跑在 `hearth.example.com` 但希望 RP ID 是 `example.com`），或前端与 API 不同源 |
+| `passkey_origins` | 多个域名/多个前端源都要能用时，逗号分隔列全（如 `https://example.com,https://app.example.com`） |
+
+两条硬约束：
+
+- **必须 https**，唯一例外是 `localhost`（浏览器规定，与 hearth 无关）。裸 IP 不能当 RP ID。
+- **RP ID 一旦改变，已注册的通行密钥全部失效**——浏览器把凭证按 RP ID 绑定，`hearth.example.com` 与 `example.com` 是两个不同的 RP ID，不能互换。换域名前先告知用户，换完让他们重新添加一枚（密码登录不受影响，随时是兜底）。
+
+改名不影响已有凭证的可用性，只是认证器里显示的还是旧名字。
 
 ### 自动端口映射（UPnP / PCP / NAT-PMP）
 
