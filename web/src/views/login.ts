@@ -182,12 +182,25 @@ export function renderLogin(root: HTMLElement) {
 
   if (isSupported()) {
     passkeyWrap.hidden = false;
-    void hasConditionalMediation().then((ok) => {
-      if (!ok || busy) return;
-      conditional = new AbortController();
-      loginWithPasskey({ mediation: 'conditional', signal: conditional.signal })
+    // 用户在 autofill 里选了凭证但服务端拒了（ceremony 过期、校验失败）不能静默：
+    // 显示原因并重新武装一次，让再选一次能成。没选 / 没凭证 / 被 abort 才是真正的静默。
+    const armConditional = () => {
+      if (busy) return;
+      const ctl = new AbortController();
+      conditional = ctl;
+      loginWithPasskey({ mediation: 'conditional', signal: ctl.signal })
         .then(() => afterAuth(false))
-        .catch(() => {}); // 静默：用户没选、没凭证、被 abort 都走这里
+        .catch((err) => {
+          if (conditional !== ctl) return;
+          conditional = null;
+          const msg = passkeyErrorText(err);
+          if (!msg) return;
+          errEl.textContent = msg;
+          armConditional();
+        });
+    };
+    void hasConditionalMediation().then((ok) => {
+      if (ok) armConditional();
     });
   }
 

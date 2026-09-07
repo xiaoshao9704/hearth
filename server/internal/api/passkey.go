@@ -34,7 +34,9 @@ import (
 )
 
 const (
-	passkeyCeremonyTTL = 2 * time.Minute
+	// 登录页加载时就会静默发起一次 conditional 登录，用户在页面上停留多久这次 ceremony 就要活多久；
+	// 太短会让 autofill 里选通行密钥的人撞上「已失效」。
+	passkeyCeremonyTTL = 10 * time.Minute
 	passkeyLoginPerMin = 20 // 每个来源 IP 每分钟允许的登录 begin/finish 次数
 	passkeyNameMax     = 40 // 凭证名字长度上限（rune）
 	passkeyBodyLimit   = 16 << 10

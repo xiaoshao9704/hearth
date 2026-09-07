@@ -32,7 +32,7 @@
 表 `passkeys`：`id`、`user_id`、`credential_id BLOB/VARBINARY 唯一`、`public_key BLOB`、`sign_count`、`aaguid`、`transports`（逗号分隔）、`backup_eligible`、`backup_state`、`name`（用户可改，默认按创建时的 UA 生成如「Chrome · macOS」）、`created_at`、`last_used_at`。
 
 ### 挑战态
-注册与登录的 `SessionData` 存在**服务端内存**的短时表（TTL 2 分钟，随机 `ceremony_id` 作键，用后即删；进程重启即失效，可接受——用户重来一次）。登录 begin 是未鉴权公开接口，要**限流**（复用 `clientLog` 的按 IP/账号限频思路，如每 IP 每分钟 20 次）。
+注册与登录的 `SessionData` 存在**服务端内存**的短时表（TTL 10 分钟——登录页加载即静默发起 conditional 登录，ceremony 要撑过用户在页面上的停留；随机 `ceremony_id` 作键，用后即删；进程重启即失效，可接受——用户重来一次）。登录 begin 是未鉴权公开接口，要**限流**（复用 `clientLog` 的按 IP/账号限频思路，如每 IP 每分钟 20 次）。
 
 ### 端点
 | 方法/路径 | 鉴权 | 说明 |
