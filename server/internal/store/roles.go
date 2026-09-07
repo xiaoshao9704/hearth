@@ -263,3 +263,66 @@ func scanUserParts(u *User, role string, expiresAt *time.Time) {
 	u.IsAdmin = u.Role.Rank() >= RoleAdmin.Rank()
 	u.ExpiresAt = expiresAt
 }
+
+// ---- 访客生命周期 ----
+
+// CreateGuest 建一个访客账号：无密码、role=guest、到期即被清理，并记下来源邀请。
+// 不走 CreateUserWithRole——那条路会把首个账号无条件提成 super，访客不该有这种可能。
+func (s *Store) CreateGuest(ctx context.Context, username string, expiresAt time.Time, inviteID int64) (*User, error) {
+	row := &userRow{Username: username, PasswordHash: "", Role: string(RoleGuest), ExpiresAt: &expiresAt}
+	if inviteID > 0 {
+		row.InviteID = &inviteID
+	}
+	if _, err := s.bun.NewInsert().Model(row).Exec(ctx); err != nil {
+		return nil, err
+	}
+	u := &User{ID: row.ID, Username: username}
+	scanUserParts(u, string(RoleGuest), &expiresAt)
+	return u, nil
+}
+
+// ClaimGuest 访客转正：user_id 不变，落用户名与密码、改档、清过期时间，并解除会话的设备绑定
+// （凭证仍有效，那台设备继续用同一个 token）。来源邀请（invite_id）保留作审计。
+func (s *Store) ClaimGuest(ctx context.Context, userID int64, username, passwordHash string, role Role) error {
+	return s.bun.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+		if _, err := tx.NewRaw(`
+UPDATE users SET username = ?, password_hash = ?, role = ?, expires_at = NULL
+WHERE id = ? AND role = ?`, username, passwordHash, string(role), userID, string(RoleGuest)).Exec(ctx); err != nil {
+			return err
+		}
+		_, err := tx.NewRaw("UPDATE sessions SET device_id = '' WHERE user_id = ?", userID).Exec(ctx)
+		return err
+	})
+}
+
+// GuestSourceInvite 访客的来源邀请（users.invite_id 指向的那条）；没有来源或邀请已删返回
+// ErrNotFound。入场判定据它的 channel_id 区分两种访客的可进范围（见 api/admission.go），
+// 转正据它的 role 定产出档。
+func (s *Store) GuestSourceInvite(ctx context.Context, userID int64) (*Invite, error) {
+	var inviteID *int64
+	err := s.bun.NewRaw("SELECT invite_id FROM users WHERE id = ?", userID).Scan(ctx, &inviteID)
+	if errors.Is(err, sql.ErrNoRows) || (err == nil && inviteID == nil) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	return s.InviteByID(ctx, *inviteID)
+}
+
+// PurgeExpiredGuests 删除已过期的访客（连同会话、设备档案、成员/封禁/禁言行）；
+// 历史消息保留，读取侧对已删用户兜底展示。返回删除的账号数。
+func (s *Store) PurgeExpiredGuests(ctx context.Context, now time.Time) (int, error) {
+	var ids []int64
+	if err := s.bun.NewRaw(
+		"SELECT id FROM users WHERE role = ? AND expires_at IS NOT NULL AND expires_at <= ?",
+		string(RoleGuest), now).Scan(ctx, &ids); err != nil {
+		return 0, err
+	}
+	for _, id := range ids {
+		if err := s.deleteUserRows(ctx, id); err != nil {
+			return 0, err
+		}
+	}
+	return len(ids), nil
+}

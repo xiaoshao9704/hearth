@@ -105,7 +105,7 @@ func TestPostMessageGaggedForbidden(t *testing.T) {
 	a, ch, token := chatFixture(t)
 	r := a.Router()
 	ctx := context.Background()
-	u, err := a.st.UserByToken(ctx, token)
+	u, _, err := a.st.UserByToken(ctx, token)
 	if err != nil {
 		t.Fatal(err)
 	}

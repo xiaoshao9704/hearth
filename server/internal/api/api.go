@@ -107,6 +107,7 @@ func (a *API) Router() *chi.Mux {
 	r.Post("/api/register", a.registerWithPolicy)
 	r.Post("/api/login", a.login)
 	r.Get("/api/invites/{code}", a.inviteInfo)
+	r.Post("/api/invites/{code}/guest", a.guestEntry)
 	r.Get("/api/site", a.site)
 
 	// 健康检查：只表示进程活着（宣告探测的刷新由进程内周期任务触发，不挂在这里）
@@ -133,16 +134,21 @@ func (a *API) Router() *chi.Mux {
 
 		// 账户设置
 		r.Post("/api/account/username", a.updateUsername)
+		r.Post("/api/account/claim", a.claimGuest)
 		r.Post("/api/account/password", a.updatePassword)
 		r.Get("/api/account/devices", a.listMyDevices)
 		r.Delete("/api/account/devices/{deviceID}", a.deleteMyDevice)
 		r.Get("/api/account/sessions", a.listMySessions)
 		r.Delete("/api/account/sessions/{id}", a.deleteMySession)
 
-		// 推流令牌（每用户一把，房间在 WHIP URL 里）
-		r.Get("/api/ingest/token", a.ingestTokenGet)
-		r.Post("/api/ingest/token/reset", a.ingestTokenReset)
-		r.Put("/api/ingest/token", a.ingestTokenTag)
+		// 推流令牌（每用户一把，房间在 WHIP URL 里）；
+		// 访客拿不到：令牌不绑设备、跨会话有效，与「跟浏览器走、到期即删」的访客性质冲突
+		r.Route("/api/ingest/token", func(r chi.Router) {
+			r.Use(a.requireRole(store.RoleUser))
+			r.Get("/", a.ingestTokenGet)
+			r.Post("/reset", a.ingestTokenReset)
+			r.Put("/", a.ingestTokenTag)
+		})
 
 		// 频道管理：频道解析与权限校验收敛到子路由中间件
 		// （现场管制与白名单 = 频道管理员及以上，归属变更与邀请制开关 = 仅频道主）
@@ -171,6 +177,9 @@ func (a *API) Router() *chi.Mux {
 				r.Post("/members", a.addMember)
 				r.Delete("/members", a.removeMember)
 				r.Get("/participants", a.channelParticipants)
+				r.Post("/invites", a.createGuestInvite)
+				r.Get("/invites", a.listGuestInvites)
+				r.Delete("/invites/{id}", a.deleteGuestInvite)
 			})
 			r.Group(func(r chi.Router) {
 				r.Use(a.requireOwner)
@@ -245,6 +254,9 @@ func channelFrom(r *http.Request) *store.Channel {
 }
 
 // auth 认证中间件：Bearer token → 当前用户注入 context。
+// 访客的两条额外约束在此执行（入场判定的第三条「频道范围」在 admission.go）：
+// 会话绑定的设备必须与请求头 X-Device-Id 一致，且账号未到期——都按 401 处理，
+// 让前端走统一的「登录已失效」路径。普通会话不绑定设备，请求头带不带都无所谓。
 func (a *API) auth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
@@ -252,9 +264,17 @@ func (a *API) auth(next http.Handler) http.Handler {
 			writeErr(w, http.StatusUnauthorized, "缺少登录凭证")
 			return
 		}
-		u, err := a.st.UserByToken(r.Context(), token)
+		u, deviceID, err := a.st.UserByToken(r.Context(), token)
 		if err != nil {
 			writeErr(w, http.StatusUnauthorized, "登录已失效")
+			return
+		}
+		if deviceID != "" && r.Header.Get("X-Device-Id") != deviceID {
+			writeErr(w, http.StatusUnauthorized, "这条访客链接绑定在原来的浏览器上，请用原设备打开或另拿一条")
+			return
+		}
+		if u.ExpiresAt != nil && !time.Now().Before(*u.ExpiresAt) {
+			writeErr(w, http.StatusUnauthorized, "访客身份已到期")
 			return
 		}
 		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), ctxUser, u)))
@@ -278,6 +298,7 @@ func (a *API) channelOf(w http.ResponseWriter, r *http.Request) *store.Channel {
 // requireRole 系统角色门槛中间件：低于该档一律 403（挂在 auth 之后）。
 func (a *API) requireRole(role store.Role) func(http.Handler) http.Handler {
 	label := map[store.Role]string{
+		store.RoleUser:  "访客不能使用这个功能，注册一个账号即可",
 		store.RolePower: "需要高级用户权限",
 		store.RoleAdmin: "需要管理员权限",
 	}[role]
@@ -341,7 +362,7 @@ func (a *API) cors(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", a.cfg.CORSOrigin)
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Device-Id")
 		w.Header().Set("Access-Control-Expose-Headers", "X-Hearth-Version")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)

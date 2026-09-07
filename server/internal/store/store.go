@@ -259,19 +259,21 @@ func (s *Store) CreateSession(ctx context.Context, userID int64) (string, error)
 }
 
 // UserByToken 校验会话 token，过期、不存在或账号已停用返回 ErrNotFound。
-func (s *Store) UserByToken(ctx context.Context, token string) (*User, error) {
+// 第二个返回值是该会话绑定的设备 ID（空 = 不绑定），设备一致性由 api.auth 判定。
+func (s *Store) UserByToken(ctx context.Context, token string) (*User, string, error) {
 	var u User
-	var role string
+	var role, deviceID string
 	var expiresAt *time.Time
 	err := s.bun.NewRaw(`
-SELECT u.id, u.username, u.role, u.expires_at FROM sessions s JOIN users u ON u.id = s.user_id
+SELECT u.id, u.username, u.role, u.expires_at, COALESCE(s.device_id, '')
+FROM sessions s JOIN users u ON u.id = s.user_id
 WHERE s.token = ? AND s.expires_at > ? AND u.disabled = 0`, token, time.Now()).
-		Scan(ctx, &u.ID, &u.Username, &role, &expiresAt)
+		Scan(ctx, &u.ID, &u.Username, &role, &expiresAt, &deviceID)
 	if errors.Is(err, sql.ErrNoRows) {
-		return nil, ErrNotFound
+		return nil, "", ErrNotFound
 	}
 	scanUserParts(&u, role, expiresAt)
-	return &u, err
+	return &u, deviceID, err
 }
 
 func (s *Store) DeleteSession(ctx context.Context, token string) error {
@@ -552,7 +554,8 @@ const (
 
 // deleted 用 CASE 而非直接取 deleted_at：三方言对布尔表达式与 NULL 时间的返回类型各不相同，
 // 折成 0/1 整数最省事——业务只关心"删没删"，删除时刻不出现在任何接口上。
-const messageCols = `m.id, m.channel_id, m.user_id, u.username, m.kind, m.content, m.meta, m.reply_to,
+// 用户名走 LEFT JOIN + 兜底文案：访客过期被清理后消息行仍在，JOIN 落空不该让整条消息消失。
+const messageCols = `m.id, m.channel_id, m.user_id, COALESCE(u.username, '已离开的访客'), m.kind, m.content, m.meta, m.reply_to,
 CASE WHEN m.deleted_at IS NULL THEN 0 ELSE 1 END, m.created_at`
 
 // scanMessage 按 messageCols 的列序读一行，并把 meta 列的 JSON 解成 File。
@@ -596,7 +599,7 @@ func (s *Store) AddMessage(ctx context.Context, channelID, userID int64, kind, c
 		return nil, err
 	}
 	m, err := scanMessage(s.bun.QueryRowContext(ctx, `SELECT `+messageCols+`
-FROM messages m JOIN users u ON u.id = m.user_id WHERE m.id = ?`, row.ID))
+FROM messages m LEFT JOIN users u ON u.id = m.user_id WHERE m.id = ?`, row.ID))
 	if err != nil {
 		return nil, err
 	}
@@ -606,7 +609,7 @@ FROM messages m JOIN users u ON u.id = m.user_id WHERE m.id = ?`, row.ID))
 // RecentMessages 返回频道最近 limit 条消息（按时间正序）。
 func (s *Store) RecentMessages(ctx context.Context, channelID int64, limit int) ([]Message, error) {
 	rows, err := s.bun.QueryContext(ctx, `SELECT `+messageCols+`
-FROM messages m JOIN users u ON u.id = m.user_id
+FROM messages m LEFT JOIN users u ON u.id = m.user_id
 WHERE m.channel_id = ? ORDER BY m.id DESC LIMIT ?`, channelID, limit)
 	if err != nil {
 		return nil, err
@@ -634,7 +637,7 @@ func (s *Store) MessagesAfter(ctx context.Context, channelID, afterID int64, lim
 		return s.RecentMessages(ctx, channelID, limit)
 	}
 	rows, err := s.bun.QueryContext(ctx, `SELECT `+messageCols+`
-FROM messages m JOIN users u ON u.id = m.user_id
+FROM messages m LEFT JOIN users u ON u.id = m.user_id
 WHERE m.channel_id = ? AND m.id > ? ORDER BY m.id ASC LIMIT ?`, channelID, afterID, limit)
 	if err != nil {
 		return nil, err

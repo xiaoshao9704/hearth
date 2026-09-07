@@ -29,6 +29,12 @@ func SessionID(token string) string {
 
 // CreateSessionWithUA 签发会话并记下登录时的 UA 与时间（会话列表要展示这三项）。
 func (s *Store) CreateSessionWithUA(ctx context.Context, userID int64, userAgent string) (string, error) {
+	return s.CreateSessionWithDevice(ctx, userID, userAgent, "")
+}
+
+// CreateSessionWithDevice 签发会话并绑定设备：deviceID 非空的会话此后只认带同一个
+// X-Device-Id 的请求（访客的「跟浏览器走」语义，见 api.auth）；普通登录传空串不绑定。
+func (s *Store) CreateSessionWithDevice(ctx context.Context, userID int64, userAgent, deviceID string) (string, error) {
 	buf := make([]byte, 32)
 	if _, err := rand.Read(buf); err != nil {
 		return "", err
@@ -39,8 +45,8 @@ func (s *Store) CreateSessionWithUA(ctx context.Context, userID int64, userAgent
 	}
 	now := time.Now()
 	_, err := s.bun.NewRaw(
-		"INSERT INTO sessions (token, user_id, expires_at, user_agent, created_at, last_seen) VALUES (?, ?, ?, ?, ?, ?)",
-		token, userID, now.Add(sessionTTL), userAgent, now, now).Exec(ctx)
+		"INSERT INTO sessions (token, user_id, expires_at, user_agent, created_at, last_seen, device_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
+		token, userID, now.Add(sessionTTL), userAgent, now, now, deviceID).Exec(ctx)
 	return token, err
 }
 

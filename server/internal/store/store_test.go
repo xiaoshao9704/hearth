@@ -181,7 +181,7 @@ func TestDialectAutoincrementBackfill(t *testing.T) {
 		if m.ID <= 0 || m.Username != "alice" {
 			t.Fatalf("消息 ID 未回填或 JOIN 异常: %+v", m)
 		}
-		inv, err := s.CreateInvite(ctx, u.ID, "n", 3, time.Hour, "")
+		inv, err := s.CreateInvite(ctx, u.ID, InviteSpec{Note: "n", MaxUses: 3, TTL: time.Hour})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -355,7 +355,7 @@ func TestDialectTimeRoundTrip(t *testing.T) {
 		if m.CreatedAt.IsZero() {
 			t.Fatalf("消息 created_at 往返为零: %+v", m)
 		}
-		inv, _ := s.CreateInvite(ctx, u.ID, "", 1, time.Hour, "")
+		inv, _ := s.CreateInvite(ctx, u.ID, InviteSpec{MaxUses: 1, TTL: time.Hour})
 		got, err := s.InviteByCode(ctx, inv.Code)
 		if err != nil {
 			t.Fatal(err)
@@ -371,7 +371,7 @@ func TestDialectTimeRoundTrip(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := s.UserByToken(ctx, tok); err != nil {
+		if _, _, err := s.UserByToken(ctx, tok); err != nil {
 			t.Fatalf("有效会话应通过校验: %v", err)
 		}
 	})
@@ -384,7 +384,7 @@ func TestDialectCreateInviteMaxUsesZero(t *testing.T) {
 		ctx := context.Background()
 		u, _ := s.CreateUser(ctx, "alice", "h")
 
-		inv0, err := s.CreateInvite(ctx, u.ID, "unlimited", 0, time.Hour, "")
+		inv0, err := s.CreateInvite(ctx, u.ID, InviteSpec{Note: "unlimited", MaxUses: 0, TTL: time.Hour})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -396,7 +396,7 @@ func TestDialectCreateInviteMaxUsesZero(t *testing.T) {
 			t.Fatalf("max_uses=0 应原样落库（而非 DEFAULT 1），实际 %d", got.MaxUses)
 		}
 
-		inv2, err := s.CreateInvite(ctx, u.ID, "two", 2, time.Hour, "")
+		inv2, err := s.CreateInvite(ctx, u.ID, InviteSpec{Note: "two", MaxUses: 2, TTL: time.Hour})
 		if err != nil {
 			t.Fatal(err)
 		}
