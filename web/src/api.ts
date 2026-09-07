@@ -39,6 +39,21 @@ export function canInvite(u: User | null): boolean {
   return u?.role === 'power' || u?.role === 'admin' || u?.role === 'super';
 }
 
+// 访客身份：无密码、有过期时间、会话绑定这台浏览器；能力显隐按服务端下发的 role
+export function isGuest(u: User | null): boolean {
+  return u?.role === 'guest';
+}
+
+// 访客还剩多久（提示条与账号 pane 共用的说法）：粗到天/小时/分钟就够，不做秒级倒计时
+export function guestTimeLeft(u: User | null): string {
+  const ms = u?.expires_at ? new Date(u.expires_at).getTime() - Date.now() : 0;
+  if (ms <= 0) return '即将过期';
+  const min = Math.round(ms / 60000);
+  if (min >= 1440) return `${Math.floor(min / 1440)} 天后过期`;
+  if (min >= 60) return `${Math.floor(min / 60)} 小时后过期`;
+  return `${Math.max(1, min)} 分钟后过期`;
+}
+
 export function getToken(): string | null {
   return localStorage.getItem(TOKEN_KEY);
 }
@@ -112,6 +127,8 @@ async function req<T>(path: string, options: { method?: string; body?: unknown }
   const headers: Record<string, string> = {};
   const token = getToken();
   if (token) headers['Authorization'] = `Bearer ${token}`;
+  // 设备头对普通会话无害（服务端只在会话绑定了设备时校验，即访客）
+  headers['X-Device-Id'] = deviceId();
   if (options.body !== undefined) headers['Content-Type'] = 'application/json';
   let res: Response;
   try {
@@ -516,10 +533,33 @@ export interface InviteInfo {
   inviter: string;
   expires_at: string;
   alive: boolean;
+  kind: string; // register / guest
+  channel_name: string; // guest 类授予的频道
+  allow_guest: boolean; // register 类是否允许「先以访客进入」
+  guest_ttl_sec: number; // guest 类产出访客的寿命
+  role: string; // register 类产出档（空 = 跟随注册默认档）
 }
 
 export function inviteInfo(code: string): Promise<InviteInfo> {
   return req(`/api/invites/${encodeURIComponent(code)}`);
+}
+
+// 访客入场：产出的会话绑定这台浏览器的 device_id，返回目标频道（guest 类才有）
+export async function guestEntry(code: string, username: string): Promise<{ user: User; channel: string }> {
+  const data = await req<{ token: string; user: User; channel: string }>(
+    `/api/invites/${encodeURIComponent(code)}/guest`,
+    { method: 'POST', body: { username, device_id: deviceId() } },
+  );
+  saveSession(data.token, data.user);
+  return { user: data.user, channel: data.channel };
+}
+
+// 访客转正：user_id 不变，当前会话继续有效（服务端解除设备绑定），本地用户信息换成新角色
+export async function claimAccount(username: string, password: string): Promise<User> {
+  const u = await req<User>('/api/account/claim', { method: 'POST', body: { username, password } });
+  localStorage.setItem(USER_KEY, JSON.stringify(u));
+  window.dispatchEvent(new CustomEvent('hearth:user'));
+  return u;
 }
 
 // 注册邀请管理（power+）：发链接、列自己发的（admin+ 列全部）、撤销
@@ -546,9 +586,39 @@ export async function listInvites(): Promise<{ invites: Invite[]; base: string }
   return { invites: data.invites ?? [], base: data.base };
 }
 
-// role 仅 admin+ 可指定（user/power）；空 = 跟随注册默认档
-export function createInvite(note: string, maxUses: number, ttl: string, role = ''): Promise<{ invite: Invite; url: string }> {
-  return req('/api/invites', { method: 'POST', body: { note, max_uses: maxUses, ttl, role } });
+// role 仅 admin+ 可指定（user/power）；空 = 跟随注册默认档。
+// allowGuest = 对方可以「先以访客进入」再注册转正
+export function createInvite(
+  note: string,
+  maxUses: number,
+  ttl: string,
+  role = '',
+  allowGuest = false,
+): Promise<{ invite: Invite; url: string }> {
+  return req('/api/invites', { method: 'POST', body: { note, max_uses: maxUses, ttl, role, allow_guest: allowGuest } });
+}
+
+// 频道访客邀请（频道主与频道管理员）：产出绑在本频道的访客，不产出注册账号
+export function createGuestInvite(
+  channel: string,
+  ttl: string,
+  guestTTL: string,
+  maxUses: number,
+  note = '',
+): Promise<{ invite: Invite; url: string }> {
+  return req(`/api/channels/${encodeURIComponent(channel)}/invites`, {
+    method: 'POST',
+    body: { ttl, guest_ttl: guestTTL, max_uses: maxUses, note },
+  });
+}
+
+export async function listGuestInvites(channel: string): Promise<{ invites: Invite[]; base: string }> {
+  const data = await req<{ invites: Invite[] | null; base: string }>(`/api/channels/${encodeURIComponent(channel)}/invites`);
+  return { invites: data.invites ?? [], base: data.base };
+}
+
+export function deleteGuestInvite(channel: string, id: number): Promise<void> {
+  return req(`/api/channels/${encodeURIComponent(channel)}/invites/${id}`, { method: 'DELETE' });
 }
 
 export function deleteInvite(id: number): Promise<void> {

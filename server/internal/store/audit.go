@@ -18,12 +18,13 @@ const (
 	AuditChannelRole  = "channel_role"   // 频道角色变更（授予/收回管理员、转让频道）
 	AuditMessageDel   = "message_delete" // 删他人消息
 	AuditChannelClear = "channel_clear"  // 清空频道聊天记录
+	AuditGuestClaim   = "guest_claim"    // 访客转正为注册账号（user_id 不变）
 )
 
 // AuditActions 全部合法动作名（管理后台筛选下拉的取值来源）。
 var AuditActions = []string{
 	AuditMute, AuditUnmute, AuditKick, AuditBan, AuditUnban,
-	AuditChannelRole, AuditMessageDel, AuditChannelClear,
+	AuditChannelRole, AuditMessageDel, AuditChannelClear, AuditGuestClaim,
 }
 
 // AuditRecord 一条待写入的审计记录。TargetUID/ChannelID 为 0 表示不适用（落库为 NULL）。

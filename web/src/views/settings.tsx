@@ -3,7 +3,7 @@
 // 这里只管导航、上下文与生命周期；频道分区直接复用 manage.tsx 的组件。
 import { createEffect, createResource, createSignal, onCleanup, For, Show } from 'solid-js';
 import { render } from 'solid-js/web';
-import { canInvite, getUser, listChannels } from '../api';
+import { canInvite, getUser, isGuest, listChannels } from '../api';
 import { el, icon } from '../ui';
 import { ChannelManage } from './manage';
 import { PERSONAL_PANES, renderPane } from './settings-panes';
@@ -50,12 +50,15 @@ function SettingsOverlay(p: { pane: Pane; ctx: SettingsContext }) {
     return r === 'owner' || r === 'moderator' ? p.ctx.channel : null;
   });
   const isAdmin = getUser()?.is_admin === true;
-  // 「邀请」pane 只对 power 及以上出现；直接以它打开但权限不够时回落个人首页
-  const panes = () => PERSONAL_PANES.filter((x) => x.id !== 'invites' || canInvite(getUser()));
+  // 「邀请」pane 只对 power 及以上出现，「推流」对访客不出现（服务端也拒发令牌）；
+  // 直接以它们打开但权限不够时回落个人首页
+  const paneAllowed = (id: PersonalPane) =>
+    (id !== 'invites' || canInvite(getUser())) && (id !== 'stream' || !isGuest(getUser()));
+  const panes = () => PERSONAL_PANES.filter((x) => paneAllowed(x.id));
   createEffect(() => {
     // 直接以频道分区打开、查出来却没有管理角色：回落个人首页
     if (pane() === 'channel' && managedChannel.state === 'ready' && !managedChannel()) setPane('av');
-    if (pane() === 'invites' && !canInvite(getUser())) setPane('av');
+    if (pane() !== 'channel' && !paneAllowed(pane() as PersonalPane)) setPane('av');
   });
   const meta = () =>
     pane() === 'channel'

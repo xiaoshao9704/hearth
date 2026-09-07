@@ -30,11 +30,41 @@ func (a *API) admitUser(ctx context.Context, c *store.Channel, u *store.User) (a
 	if !ok {
 		return admission{}, false, reason, nil
 	}
+	if ok, reason, err := a.admitGuestScope(ctx, c, u); err != nil {
+		return admission{}, false, "", err
+	} else if !ok {
+		return admission{}, false, reason, nil
+	}
 	gagged, err := a.st.IsGagged(ctx, c.ID, u.ID)
 	if err != nil {
 		return admission{}, false, "", err
 	}
 	return admission{UID: u.ID, Username: u.Username, CanPublish: !gagged}, true, "", nil
+}
+
+// admitGuestScope 访客的频道范围约束（入场判定的第三条，另两条「未过期」「设备匹配」在 api.auth）：
+// 频道访客邀请（kind=guest，带 channel_id）产出的访客只能进被授予的频道——开放频道对这类访客
+// 同样不开放，否则「只能访问指定频道」不成立；注册邀请的「先以访客进入」（allow_guest，不绑频道）
+// 是唯一例外，可进范围与普通用户一致。非访客直接放过，不多查一次库。
+func (a *API) admitGuestScope(ctx context.Context, c *store.Channel, u *store.User) (bool, string, error) {
+	if u.Role != store.RoleGuest {
+		return true, "", nil
+	}
+	inv, err := a.st.GuestSourceInvite(ctx, u.ID)
+	if errors.Is(err, store.ErrNotFound) || (err == nil && inv.ChannelID == nil) {
+		return true, "", nil // 不绑频道的访客
+	}
+	if err != nil {
+		return false, "", err
+	}
+	member, err := a.st.IsMember(ctx, c.ID, u.ID)
+	if err != nil {
+		return false, "", err
+	}
+	if !member {
+		return false, "访客只能进入邀请链接指定的频道", nil
+	}
+	return true, "", nil
 }
 
 // ---- 推流入场判定（/w POST）----

@@ -70,7 +70,7 @@ func TestClientLogValidatesSizeAndRate(t *testing.T) {
 		t.Fatalf("超大正文状态码=%d, want %d", rec.Code, http.StatusRequestEntityTooLarge)
 	}
 
-	u, err := a.st.UserByToken(t.Context(), token)
+	u, _, err := a.st.UserByToken(t.Context(), token)
 	if err != nil {
 		t.Fatal(err)
 	}

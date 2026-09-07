@@ -22,7 +22,7 @@ type Reaction struct {
 // MessageByID 取同频道内的一条消息（含 deleted 派生列）；不存在返回 sql.ErrNoRows。
 func (s *Store) MessageByID(ctx context.Context, channelID, id int64) (*Message, error) {
 	m, err := scanMessage(s.bun.QueryRowContext(ctx, `SELECT `+messageCols+`
-FROM messages m JOIN users u ON u.id = m.user_id WHERE m.id = ? AND m.channel_id = ?`, id, channelID))
+FROM messages m LEFT JOIN users u ON u.id = m.user_id WHERE m.id = ? AND m.channel_id = ?`, id, channelID))
 	if err != nil {
 		return nil, err
 	}

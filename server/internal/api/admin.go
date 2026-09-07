@@ -143,10 +143,16 @@ func (a *API) inviteInfo(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "内部错误")
 		return
 	}
+	// 加入页据 kind / allow_guest 决定给哪些入口（注册表单、访客入口或两者）
 	writeJSON(w, http.StatusOK, map[string]any{
-		"inviter":    inv.CreatedBy,
-		"expires_at": inv.ExpiresAt,
-		"alive":      inv.Alive(time.Now()),
+		"inviter":       inv.CreatedBy,
+		"expires_at":    inv.ExpiresAt,
+		"alive":         inv.Alive(time.Now()),
+		"kind":          inv.Kind,
+		"channel_name":  inv.ChannelName,
+		"allow_guest":   inv.AllowGuest,
+		"guest_ttl_sec": inv.GuestTTLSec,
+		"role":          inv.Role,
 	})
 }
 
@@ -175,6 +181,11 @@ func (a *API) registerWithPolicy(w http.ResponseWriter, r *http.Request) {
 		inv, err = a.st.InviteByCode(r.Context(), req.Invite)
 		if err != nil || !inv.Alive(time.Now()) {
 			writeErr(w, http.StatusForbidden, "邀请链接无效或已过期")
+			return
+		}
+		if inv.Kind == "guest" {
+			// 频道访客邀请不产出注册账号：这条链接只有访客入口
+			writeErr(w, http.StatusForbidden, "这是一条访客邀请，请用「以访客进入」")
 			return
 		}
 	}
@@ -462,6 +473,8 @@ func (a *API) createInvite(w http.ResponseWriter, r *http.Request) {
 		MaxUses int    `json:"max_uses"` // 0 = 不限
 		TTL     string `json:"ttl"`      // 1h / 24h / 7d
 		Role    string `json:"role"`     // 产出档：user/power，仅 admin+ 可指定（空 = 跟随注册默认档）
+		// AllowGuest 允许对方「先以访客进入」再注册转正（访客寿命取站点默认 guest_ttl_sec）
+		AllowGuest bool `json:"allow_guest"`
 	}
 	if !decode(w, r, &req) {
 		return
@@ -487,7 +500,10 @@ func (a *API) createInvite(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	inv, err := a.st.CreateInvite(r.Context(), u.ID, strings.TrimSpace(req.Note), req.MaxUses, ttl, role)
+	inv, err := a.st.CreateInvite(r.Context(), u.ID, store.InviteSpec{
+		Kind: "register", Note: strings.TrimSpace(req.Note), MaxUses: req.MaxUses, TTL: ttl,
+		Role: role, AllowGuest: req.AllowGuest,
+	})
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "内部错误")
 		return

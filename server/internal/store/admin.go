@@ -160,8 +160,22 @@ func (i *Invite) Alive(now time.Time) bool {
 
 const inviteAlphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789" // 去掉易混淆字符
 
-// CreateInvite 创建注册类邀请；role 为空表示跟随注册默认档（消费时按 cfg_reg_default_role 解析）。
-func (s *Store) CreateInvite(ctx context.Context, createdBy int64, note string, maxUses int, ttl time.Duration, role Role) (*Invite, error) {
+// InviteSpec 创建邀请的入参。两类邀请共用一张表，各只用其中一部分字段：
+// register 类看 Role（空 = 跟随注册默认档，消费时按 cfg_reg_default_role 解析）与 AllowGuest；
+// guest 类看 ChannelID（必填）与 GuestTTL（产出访客的寿命）。
+type InviteSpec struct {
+	Kind       string // register / guest
+	Note       string
+	MaxUses    int // 0 = 不限
+	TTL        time.Duration
+	Role       Role          // register 类产出档
+	AllowGuest bool          // register 类是否允许「先以访客进入」
+	ChannelID  int64         // guest 类授予的频道
+	GuestTTL   time.Duration // guest 类产出访客的寿命
+}
+
+// CreateInvite 创建邀请（register / guest 两类，见 InviteSpec）。
+func (s *Store) CreateInvite(ctx context.Context, createdBy int64, spec InviteSpec) (*Invite, error) {
 	buf := make([]byte, 8)
 	if _, err := rand.Read(buf); err != nil {
 		return nil, err
@@ -170,17 +184,36 @@ func (s *Store) CreateInvite(ctx context.Context, createdBy int64, note string, 
 	for i, b := range buf {
 		code[i] = inviteAlphabet[int(b)%len(inviteAlphabet)]
 	}
-	inv := &Invite{Code: string(code), Kind: "register", Role: string(role),
-		Note: note, MaxUses: maxUses, ExpiresAt: time.Now().Add(ttl)}
-	row := &inviteRow{Code: inv.Code, Note: note, MaxUses: maxUses, CreatedBy: createdBy,
-		ExpiresAt: inv.ExpiresAt, Role: string(role)}
-	// max_uses = 0 是合法值（不限次数），而模型带 default:1 时零值会被写成 DEFAULT，
-	// 用 Column + Value 强制按实参写入；显式 Column 后自增 id 不进自动 RETURNING 列表，
-	// 需显式 Returning("id") 才能回填主键（mysql 不支持 RETURNING，自动回落 LastInsertId）。
+	kind := spec.Kind
+	if kind == "" {
+		kind = "register"
+	}
+	allowGuest := int64(0)
+	if spec.AllowGuest {
+		allowGuest = 1
+	}
+	guestTTLSec := int(spec.GuestTTL / time.Second)
+	inv := &Invite{Code: string(code), Kind: kind, Role: string(spec.Role),
+		GuestTTLSec: guestTTLSec, AllowGuest: spec.AllowGuest,
+		Note: spec.Note, MaxUses: spec.MaxUses, ExpiresAt: time.Now().Add(spec.TTL)}
+	row := &inviteRow{Code: inv.Code, Kind: kind, Note: spec.Note, MaxUses: spec.MaxUses,
+		CreatedBy: createdBy, ExpiresAt: inv.ExpiresAt, Role: string(spec.Role),
+		GuestTTL: guestTTLSec, AllowGuest: allowGuest}
+	if spec.ChannelID > 0 {
+		cid := spec.ChannelID
+		row.ChannelID = &cid
+		inv.ChannelID = &cid
+	}
+	// max_uses = 0 与 allow_guest = 0 都是合法值（不限次数 / 不允许访客），而模型带 default 时
+	// 零值会被写成 DEFAULT，用 Column + Value 强制按实参写入；显式 Column 后自增 id 不进自动
+	// RETURNING 列表，需显式 Returning("id") 才能回填主键（mysql 不支持 RETURNING，自动回落 LastInsertId）。
 	_, err := s.bun.NewInsert().Model(row).
-		Column("code", "note", "max_uses", "expires_at", "created_by", "role").
-		Value("max_uses", "?", maxUses).
-		Value("role", "?", string(role)).
+		Column("code", "kind", "channel_id", "note", "max_uses", "expires_at", "created_by",
+			"role", "guest_ttl_sec", "allow_guest").
+		Value("max_uses", "?", spec.MaxUses).
+		Value("role", "?", string(spec.Role)).
+		Value("guest_ttl_sec", "?", guestTTLSec).
+		Value("allow_guest", "?", allowGuest).
 		Returning("id").
 		Exec(ctx)
 	if err != nil {
@@ -214,6 +247,11 @@ func (s *Store) ListInvites(ctx context.Context) ([]Invite, error) {
 // ListInvitesByCreator 某个用户发的邀请。
 func (s *Store) ListInvitesByCreator(ctx context.Context, createdBy int64) ([]Invite, error) {
 	return s.listInvites(ctx, " WHERE i.created_by = ?", createdBy)
+}
+
+// ListInvitesByChannel 某个频道的访客邀请（频道管理视角）。
+func (s *Store) ListInvitesByChannel(ctx context.Context, channelID int64) ([]Invite, error) {
+	return s.listInvites(ctx, " WHERE i.channel_id = ? AND i.kind = 'guest'", channelID)
 }
 
 func (s *Store) listInvites(ctx context.Context, where string, args ...any) ([]Invite, error) {
@@ -419,21 +457,32 @@ func (s *Store) DeleteUser(ctx context.Context, id, adoptTo int64) (int, error) 
 			return 0, err
 		}
 	}
-	for _, q := range []string{
-		"DELETE FROM sessions WHERE user_id = ?",
-		"DELETE FROM devices WHERE user_id = ?",
-		"DELETE FROM ingest_endpoints WHERE token_id IN (SELECT id FROM ingest_tokens WHERE user_id = ?)",
-		"DELETE FROM ingest_tokens WHERE user_id = ?",
-		"DELETE FROM channel_members WHERE user_id = ?",
-		"DELETE FROM channel_bans WHERE user_id = ?",
-		"DELETE FROM channel_gags WHERE user_id = ?",
-		"DELETE FROM users WHERE id = ?",
-	} {
-		if _, err := s.bun.NewRaw(q, id).Exec(ctx); err != nil {
-			return 0, err
-		}
+	if err := s.deleteUserRows(ctx, id); err != nil {
+		return 0, err
 	}
 	return len(chans), nil
+}
+
+// userCascadeDeletes 一个用户的全部附属行（不含 owner 频道过户，那是 DeleteUser 的事）。
+// 历史消息不在其列：读取侧对已删用户走 LEFT JOIN 兜底展示（见 messageCols）。
+var userCascadeDeletes = []string{
+	"DELETE FROM sessions WHERE user_id = ?",
+	"DELETE FROM devices WHERE user_id = ?",
+	"DELETE FROM ingest_endpoints WHERE token_id IN (SELECT id FROM ingest_tokens WHERE user_id = ?)",
+	"DELETE FROM ingest_tokens WHERE user_id = ?",
+	"DELETE FROM channel_members WHERE user_id = ?",
+	"DELETE FROM channel_bans WHERE user_id = ?",
+	"DELETE FROM channel_gags WHERE user_id = ?",
+	"DELETE FROM users WHERE id = ?",
+}
+
+func (s *Store) deleteUserRows(ctx context.Context, id int64) error {
+	for _, q := range userCascadeDeletes {
+		if _, err := s.bun.NewRaw(q, id).Exec(ctx); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // ---- 管理后台：频道 ----
