@@ -1,7 +1,7 @@
 // 登录页：注册入口按 /api/site 的 policy 显隐（closed 不出；invite 提示要邀请链接；open 出自助注册表单）。
 // 站点名（site.name）用于品牌位与按钮文案，拉取失败按 closed + 默认名处理。
 import { login, register, siteInfo } from '../api';
-import { hasConditionalMediation, isSupported, loginWithPasskey, passkeyErrorText } from '../passkey';
+import { hasConditionalMediation, isSupported, loginWithPasskey, passkeyErrorDetail, passkeyErrorText } from '../passkey';
 import { wireThemeButton } from '../theme';
 import { esc, flameLogo, icon } from '../ui';
 
@@ -217,10 +217,7 @@ export function renderLogin(root: HTMLElement) {
       afterAuth(false);
     } catch (err) {
       // 用户明确点了按钮，连「没完成」也要有回音：密码管理器里没有这个站点凭证的人否则只看到按钮弹回
-      const aborted = (err as { name?: string } | null)?.name === 'AbortError';
-      errEl.textContent =
-        passkeyErrorText(err) ||
-        (aborted ? '' : '没有完成通行密钥验证。若用的是密码管理器（如 Bitwarden），请确认它里面已有这个站点的通行密钥');
+      errEl.textContent = passkeyErrorDetail(err);
       busy = false;
       passkeyBtn.classList.remove('loading');
       syncBtn();

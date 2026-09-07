@@ -3,7 +3,7 @@
 // 这里是真的登录凭证——下线即刻生效，那台设备下一个请求就 401。
 import { clearSession, deleteMySession, listMySessions } from '../api';
 import type { SessionRecord } from '../api';
-import { deletePasskey, isSupported, listPasskeys, passkeyErrorText, registerPasskey, renamePasskey } from '../passkey';
+import { deletePasskey, isSupported, listPasskeys, passkeyErrorDetail, registerPasskey, renamePasskey } from '../passkey';
 import type { PasskeyRecord } from '../passkey';
 import { confirmDialog, esc, icon, timeAgo, toast } from '../ui';
 
@@ -200,7 +200,7 @@ export function renderPasskeys(host: HTMLElement) {
         void paint();
         return;
       } catch (err) {
-        const msg = passkeyErrorText(err); // 用户取消返回空串，不弹 toast
+        const msg = passkeyErrorDetail(err); // 明确点了「添加」：连没完成也说清原因
         if (msg) toast(msg, 'bad');
       }
       busy = false;

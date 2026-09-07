@@ -325,7 +325,7 @@ func (a *API) passkeyLoginFinish(w http.ResponseWriter, r *http.Request) {
 	}
 	parsed, err := protocol.ParseCredentialRequestResponseBytes(req.Credential)
 	if err != nil {
-		writeErr(w, http.StatusBadRequest, "通行密钥响应无法解析")
+		writeErr(w, http.StatusBadRequest, "通行密钥响应无法解析："+passkeyErrDetail(err))
 		return
 	}
 
@@ -351,7 +351,14 @@ func (a *API) passkeyLoginFinish(w http.ResponseWriter, r *http.Request) {
 
 	cred, err := wa.ValidateDiscoverableLogin(handler, c.Session, parsed)
 	if err != nil {
-		writeErr(w, http.StatusUnauthorized, "通行密钥校验失败，请重试")
+		if errors.Is(err, store.ErrNotFound) {
+			log.Printf("通行密钥登录: 服务器上没有这枚凭证")
+			writeErr(w, http.StatusUnauthorized, "服务器上没有这枚通行密钥：可能已被删除，或它是在别的站点地址（RP ID）下注册的")
+			return
+		}
+		detail := passkeyErrDetail(err)
+		log.Printf("通行密钥登录校验失败: %s", detail)
+		writeErr(w, http.StatusUnauthorized, "通行密钥校验失败："+detail)
 		return
 	}
 	// sign_count 回退（新值 ≤ 旧值且不都为 0）= 疑似克隆/重放：拒登并留审计。
@@ -435,7 +442,7 @@ func (a *API) passkeyRegisterFinish(w http.ResponseWriter, r *http.Request) {
 	}
 	parsed, err := protocol.ParseCredentialCreationResponseBytes(req.Credential)
 	if err != nil {
-		writeErr(w, http.StatusBadRequest, "通行密钥响应无法解析")
+		writeErr(w, http.StatusBadRequest, "通行密钥响应无法解析："+passkeyErrDetail(err))
 		return
 	}
 	pu, err := a.passkeyUserOf(r, u)
@@ -445,7 +452,9 @@ func (a *API) passkeyRegisterFinish(w http.ResponseWriter, r *http.Request) {
 	}
 	cred, err := wa.CreateCredential(pu, c.Session, parsed)
 	if err != nil {
-		writeErr(w, http.StatusBadRequest, "通行密钥校验失败，请重试")
+		detail := passkeyErrDetail(err)
+		log.Printf("通行密钥注册校验失败: uid=%d %s", u.ID, detail)
+		writeErr(w, http.StatusBadRequest, "通行密钥校验失败："+detail)
 		return
 	}
 	var transports []string
@@ -534,6 +543,23 @@ func (a *API) deletePasskey(w http.ResponseWriter, r *http.Request) {
 // ---- 小工具 ----
 
 // decodePasskeyFinish 读 finish 的请求体（带大小上限：凭证 JSON 是外来内容）。
+// passkeyErrDetail 把 go-webauthn 的错误压成一句可给用户看的原因（Details + DevInfo）。
+// 里面只有校验步骤的描述（origin/RP ID/挑战/签名/计数等），不含凭证 ID、公钥或签名本身。
+func passkeyErrDetail(err error) string {
+	var pe *protocol.Error
+	s := err.Error()
+	if errors.As(err, &pe) {
+		s = pe.Details
+		if pe.DevInfo != "" && pe.DevInfo != pe.Details {
+			s += "（" + pe.DevInfo + "）"
+		}
+	}
+	if r := []rune(s); len(r) > 240 {
+		s = string(r[:240]) + "…"
+	}
+	return s
+}
+
 func decodePasskeyFinish(w http.ResponseWriter, r *http.Request) (passkeyFinishReq, bool) {
 	r.Body = http.MaxBytesReader(w, r.Body, passkeyBodyLimit)
 	var req passkeyFinishReq

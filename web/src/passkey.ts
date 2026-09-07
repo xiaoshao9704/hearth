@@ -167,6 +167,17 @@ export async function registerPasskey(name?: string): Promise<PasskeyRecord> {
 export function passkeyErrorText(err: unknown): string {
   const name = (err as { name?: string } | null)?.name;
   if (name === 'NotAllowedError' || name === 'AbortError') return '';
+  return passkeyErrorDetail(err);
+}
+
+// passkeyErrorDetail 连取消/未完成也翻出来（名字 + 浏览器给的原文）：用户明确点了按钮就该有回音。
+export function passkeyErrorDetail(err: unknown): string {
+  const name = (err as { name?: string } | null)?.name;
+  if (name === 'NotAllowedError') {
+    const raw = (err as Error).message;
+    return `没有完成通行密钥验证（NotAllowedError${raw ? '：' + raw : ''}）。若用的是密码管理器（如 Bitwarden），请确认它里面已有这个站点的通行密钥`;
+  }
+  if (name === 'AbortError') return '';
   if (name === 'InvalidStateError') return '这台设备上已经有这个账号的通行密钥了';
   if (name === 'SecurityError') return '当前地址不满足通行密钥的要求（需要 https，localhost 例外）';
   return (err as Error | null)?.message || '通行密钥操作失败';

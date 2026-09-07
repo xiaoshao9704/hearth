@@ -1,7 +1,7 @@
 // 大厅：频道卡片、创建频道、设备提示。
 import { canInvite, createChannel, fetchMe, getUser, guestTimeLeft, isGuest, listChannels } from '../api';
 import type { Channel } from '../api';
-import { isSupported, passkeyErrorText, registerPasskey } from '../passkey';
+import { isSupported, passkeyErrorDetail, registerPasskey } from '../passkey';
 import { renderShell } from '../shell';
 import { esc, icon, menuButtonHtml, toast, wireMenuButton } from '../ui';
 import { openSettings } from './settings';
@@ -147,7 +147,7 @@ async function maybeNudgePasskey(host: HTMLElement, alive: () => boolean) {
       toast('通行密钥已添加，下次登录一键就进。', 'ok');
       host.innerHTML = '';
     } catch (err) {
-      const msg = passkeyErrorText(err);
+      const msg = passkeyErrorDetail(err); // 明确点了「立即添加」：连没完成也说清原因
       if (msg) toast(msg, 'bad');
       addBtn.classList.remove('loading');
     }
