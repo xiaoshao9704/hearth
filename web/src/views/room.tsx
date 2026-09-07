@@ -8,7 +8,7 @@
 import { createEffect, createMemo, createSignal, on, onCleanup, untrack, For, Show } from 'solid-js';
 import { render } from 'solid-js/web';
 import { startAfkWatch } from '../afk';
-import { ApiError, fetchJoinCredentials, getUser, kickUser, listChannels, muteUser, reportClientLog } from '../api';
+import { ApiError, fetchJoinCredentials, getUser, guestTimeLeft, isGuest, kickUser, listChannels, muteUser, reportClientLog } from '../api';
 import type { DataLine, EngineCred } from '../api';
 import { playCue } from '../audio';
 import { deleteMessage, fetchMessages, postMessage, setReaction } from '../chat';
@@ -160,6 +160,11 @@ export async function renderRoom(root: HTMLElement, channel: string) {
   shell.setConn(false, '正在协商…');
 
   const myUid = getUser()?.id ?? 0;
+
+  // 访客提示条：转正后（浮层里派 hearth:user）自己消失
+  const [guestLeft, setGuestLeft] = createSignal(isGuest(getUser()) ? guestTimeLeft(getUser()) : '');
+  const onUserChanged = () => setGuestLeft(isGuest(getUser()) ? guestTimeLeft(getUser()) : '');
+  window.addEventListener('hearth:user', onUserChanged);
 
   // ---- 连接层状态（非响应式）----
   const voiceLine: Line = { role: 'voice', engine: null, engineName: '', attempts: 0, timer: 0, inflight: false };
@@ -2269,6 +2274,17 @@ export async function renderRoom(root: HTMLElement, channel: string) {
             </span>
           </span>
           <div class="spacer"></div>
+          <Show when={guestLeft()}>
+            <button
+              class="hit btn btn-sm"
+              style="border-color:var(--ember-line);color:var(--ember)"
+              title={`你正以访客身份使用，${guestLeft()}。注册以保留身份：user_id 不变，聊天记录和频道里的位置都留下。`}
+              onClick={() => openSettings('account', settingsCtx)}
+            >
+              {el(icon('user', 13, 'var(--ember)', 1.7))}
+              <span class="pill-label">访客 · {guestLeft()} · 注册保留</span>
+            </button>
+          </Show>
           <button
             class="hit btn btn-icon"
             classList={{ hidden: !canModerate() }}
@@ -2855,6 +2871,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
       window.removeEventListener('online', onOnline);
       window.removeEventListener('offline', onOffline);
       window.removeEventListener('pagehide', onPageHide);
+      window.removeEventListener('hearth:user', onUserChanged);
       clearLeavePrompt();
       window.removeEventListener('error', onWindowError);
       window.removeEventListener('unhandledrejection', onUnhandledRejection);

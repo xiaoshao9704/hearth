@@ -44,6 +44,16 @@ export function isGuest(u: User | null): boolean {
   return u?.role === 'guest';
 }
 
+// 访客还剩多久（提示条与账号 pane 共用的说法）：粗到天/小时/分钟就够，不做秒级倒计时
+export function guestTimeLeft(u: User | null): string {
+  const ms = u?.expires_at ? new Date(u.expires_at).getTime() - Date.now() : 0;
+  if (ms <= 0) return '即将过期';
+  const min = Math.round(ms / 60000);
+  if (min >= 1440) return `${Math.floor(min / 1440)} 天后过期`;
+  if (min >= 60) return `${Math.floor(min / 60)} 小时后过期`;
+  return `${Math.max(1, min)} 分钟后过期`;
+}
+
 export function getToken(): string | null {
   return localStorage.getItem(TOKEN_KEY);
 }
@@ -548,6 +558,7 @@ export async function guestEntry(code: string, username: string): Promise<{ user
 export async function claimAccount(username: string, password: string): Promise<User> {
   const u = await req<User>('/api/account/claim', { method: 'POST', body: { username, password } });
   localStorage.setItem(USER_KEY, JSON.stringify(u));
+  window.dispatchEvent(new CustomEvent('hearth:user'));
   return u;
 }
 

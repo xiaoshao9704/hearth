@@ -1,5 +1,5 @@
 // 大厅：频道卡片、创建频道、设备提示。
-import { canInvite, createChannel, getUser, listChannels } from '../api';
+import { canInvite, createChannel, getUser, guestTimeLeft, isGuest, listChannels } from '../api';
 import type { Channel } from '../api';
 import { renderShell } from '../shell';
 import { esc, icon, menuButtonHtml, toast, wireMenuButton } from '../ui';
@@ -82,6 +82,14 @@ export async function renderLobby(root: HTMLElement, alive: () => boolean) {
       <div class="status-chip mono" id="status-chip"><span style="display:flex;align-items:center;gap:5px"><span class="ok-dot" id="status-dot"></span><span id="status-text">服务器在线</span></span></div>
     </header>
     <div class="lobby-body">
+      ${
+        isGuest(user)
+          ? `<button type="button" class="hit card" id="guest-bar" style="display:flex;align-items:center;gap:11px;padding:12px 16px;border-color:var(--ember-line);text-align:left;width:100%">
+        <span style="flex-shrink:0">${icon('user', 16, 'var(--ember)', 1.7)}</span>
+        <span style="flex-grow:1;font-size:12.5px;line-height:1.6;color:var(--text-1);text-wrap:pretty">你正以访客身份使用，${esc(guestTimeLeft(user))}。<span style="color:var(--ember)">注册以保留身份</span>——user_id 不变，聊天记录和频道里的位置都留下。</span>
+      </button>`
+          : ''
+      }
       <div class="lobby-title">
         <div class="big">还没进频道</div>
         <div class="sub">挑一个进去，或者等人来找你</div>
@@ -109,7 +117,11 @@ export async function renderLobby(root: HTMLElement, alive: () => boolean) {
 
   const greetEl = root.querySelector<HTMLHeadingElement>('#greet')!;
   const onUser = () => {
-    greetEl.textContent = `${greeting()}，${getUser()?.username ?? ''}`;
+    const u = getUser();
+    greetEl.textContent = `${greeting()}，${u?.username ?? ''}`;
+    // 转正后提示条要立刻消失（浮层里改完就派了 hearth:user）
+    const bar = root.querySelector<HTMLElement>('#guest-bar');
+    if (bar && !isGuest(u)) bar.remove();
   };
   window.addEventListener('hearth:user', onUser);
 
@@ -130,6 +142,7 @@ export async function renderLobby(root: HTMLElement, alive: () => boolean) {
   window.addEventListener('hashchange', onLeave, { once: true });
 
   root.querySelector('#tune-av')!.addEventListener('click', () => openSettings('av'));
+  root.querySelector('#guest-bar')?.addEventListener('click', () => openSettings('account'));
 
   const statusDot = root.querySelector<HTMLSpanElement>('#status-dot')!;
   const statusText = root.querySelector<HTMLSpanElement>('#status-text')!;

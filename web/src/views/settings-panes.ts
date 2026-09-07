@@ -3,6 +3,7 @@
 // 有后台资源的 pane（语音与视频的电平表/预览）返回清理函数，切页时由骨架调用。
 // 「邀请」只对 power 及以上出现（骨架按 getUser().role 过滤导航，这里不再自查）。
 import {
+  claimAccount,
   clearSession,
   createInvite,
   deleteInvite,
@@ -10,6 +11,8 @@ import {
   deviceId,
   getIngestToken,
   getUser,
+  guestTimeLeft,
+  isGuest,
   listChannels,
   listInvites,
   listMyDevices,
@@ -83,6 +86,38 @@ export function renderPane(body: HTMLElement, pane: PersonalPane, host: PaneHost
 
 function renderAccount(body: HTMLElement, close: () => void) {
   const user = getUser();
+  // 访客没有密码可改，取而代之的是「注册保留身份」（转正：user_id 不变）
+  const guest = isGuest(user);
+  const guestClaimCard = `
+      <div class="card" style="border-color:var(--ember-line)">
+        <div style="font-size:13.5px;font-weight:600">注册保留身份</div>
+        <div style="font-size:11.5px;line-height:1.6;color:var(--text-2);margin-top:4px;text-wrap:pretty">
+          你现在是访客，${esc(guestTimeLeft(user))}，到期账号会被清理。设一个密码就转成正式账号：
+          user_id 不变，聊天记录、频道里的位置都跟着留下，也不再绑这台浏览器。
+        </div>
+        <div style="display:flex;flex-direction:column;gap:11px;margin-top:13px">
+          <div>
+            <div style="font-size:11px;color:var(--text-2);margin-bottom:6px">用户名</div>
+            <div class="field" style="height:42px;background:var(--bg-2)"><input id="cl-user" value="${esc(user?.username ?? '')}" autocapitalize="off" autocomplete="username" /></div>
+          </div>
+          <div style="display:flex;gap:11px;flex-wrap:wrap">
+            <div style="flex-grow:1;min-width:180px">
+              <div style="font-size:11px;color:var(--text-2);margin-bottom:6px">密码</div>
+              <div class="field" style="height:42px;background:var(--bg-2)"><input id="cl-new" type="password" placeholder="至少 8 位" autocomplete="new-password" /></div>
+            </div>
+            <div style="flex-grow:1;min-width:180px">
+              <div style="font-size:11px;color:var(--text-2);margin-bottom:6px">确认密码</div>
+              <div class="field" style="height:42px;background:var(--bg-2)"><input id="cl-conf" type="password" placeholder="再输一次" autocomplete="new-password" /></div>
+            </div>
+          </div>
+          <div class="pw-bars" id="cl-pw-bars">${pwBarsHtml(0)}</div>
+          <div style="display:flex;align-items:center;gap:12px">
+            <div id="cl-hint" style="font-size:11.5px;color:var(--text-2)"></div>
+            <div class="spacer"></div>
+            <button class="hit btn btn-primary disabled" id="cl-save">注册保留身份</button>
+          </div>
+        </div>
+      </div>`;
   body.innerHTML = `
     <div class="pane-col pane-narrow">
       <div class="card">
@@ -92,6 +127,7 @@ function renderAccount(body: HTMLElement, close: () => void) {
             <div style="font-size:14px;font-weight:600" id="acc-name">${esc(user?.username ?? '')}</div>
             <div class="mono" style="font-size:11px;color:var(--text-2);margin-top:3px">user_id · ${user?.id ?? '?'}</div>
           </div>
+          ${guest ? `<span class="tag" style="font-size:10.5px;padding:4px 9px">访客 · ${esc(guestTimeLeft(user))}</span>` : ''}
           ${user?.is_admin ? '<span class="tag tag-ember" style="font-size:10.5px;padding:4px 9px">管理员</span>' : ''}
         </div>
         <div style="margin-top:13px;padding-top:13px;border-top:1px solid var(--line-soft);font-size:11.5px;line-height:1.65;color:var(--text-2);text-wrap:pretty">系统内部一律按 <span class="mono" style="color:var(--text-1)">user_id</span> 认人：改用户名不会动它，历史消息、设备档案、推流令牌都还挂在同一个 id 上。</div>
@@ -107,7 +143,7 @@ function renderAccount(body: HTMLElement, close: () => void) {
         <div id="name-hint" style="margin-top:9px;font-size:11.5px;color:var(--text-2)">和当前用户名相同</div>
       </div>
 
-      <div class="card">
+      ${guest ? guestClaimCard : `<div class="card">
         <div style="font-size:13.5px;font-weight:600">修改密码</div>
         <div style="font-size:11.5px;color:var(--text-2);margin-top:4px">改完其他设备上的会话会全部退出，需要重新登录</div>
         <div style="display:flex;flex-direction:column;gap:11px;margin-top:13px">
@@ -132,7 +168,7 @@ function renderAccount(body: HTMLElement, close: () => void) {
             <button class="hit btn btn-primary disabled" id="pw-save">修改密码</button>
           </div>
         </div>
-      </div>
+      </div>`}
 
       <div id="acc-sessions"></div>
 
@@ -173,6 +209,79 @@ function renderAccount(body: HTMLElement, close: () => void) {
     }
   });
 
+  if (guest) wireClaim(body, close);
+  else wirePassword(body);
+
+  renderSessions(body.querySelector<HTMLElement>('#acc-sessions')!);
+
+  body.querySelector('#acc-logout')!.addEventListener('click', async () => {
+    try {
+      await logout();
+    } catch {
+      clearSession();
+    }
+    close();
+    location.hash = '#/login';
+  });
+}
+
+// wireClaim 访客转正表单：成功后当前会话继续有效（服务端解除设备绑定），
+// 整个 pane 重画一次——身份变了，用户名卡片、访客标签、下面的会话列表都要跟着变。
+function wireClaim(body: HTMLElement, close: () => void) {
+  const userInput = body.querySelector<HTMLInputElement>('#cl-user')!;
+  const pwNew = body.querySelector<HTMLInputElement>('#cl-new')!;
+  const pwConf = body.querySelector<HTMLInputElement>('#cl-conf')!;
+  const save = body.querySelector<HTMLButtonElement>('#cl-save')!;
+  const hintEl = body.querySelector<HTMLDivElement>('#cl-hint')!;
+  const NAME_RE = /^[a-zA-Z0-9_-]{2,32}$/;
+  let busy = false;
+
+  function sync() {
+    body.querySelector('#cl-pw-bars')!.innerHTML = pwBarsHtml(pwScore(pwNew.value));
+    const nameOk = NAME_RE.test(userInput.value.trim());
+    const ready = nameOk && pwNew.value.length >= 8 && pwNew.value === pwConf.value;
+    let hint = '';
+    let tone = 'var(--text-2)';
+    if (userInput.value && !nameOk) {
+      hint = '用户名需 2–32 位字母数字 - _';
+      tone = 'var(--red-text)';
+    } else if (pwNew.value && pwNew.value.length < 8) {
+      hint = `密码还差 ${8 - pwNew.value.length} 位`;
+      tone = 'var(--red-text)';
+    } else if (pwConf.value && pwNew.value !== pwConf.value) {
+      hint = '两次输入不一样';
+      tone = 'var(--red-text)';
+    } else if (ready) {
+      hint = '转正后不再有过期时间';
+      tone = 'var(--sage)';
+    }
+    hintEl.textContent = hint;
+    hintEl.style.color = tone;
+    save.classList.toggle('disabled', !ready || busy);
+  }
+  [userInput, pwNew, pwConf].forEach((el) => el.addEventListener('input', sync));
+
+  save.addEventListener('click', async () => {
+    if (save.classList.contains('disabled') || busy) return;
+    busy = true;
+    save.classList.add('loading');
+    try {
+      const u = await claimAccount(userInput.value.trim(), pwNew.value);
+      toast(`已注册为「${u.username}」，user_id 没变，身份保留下来了。`, 'ok');
+      renderAccount(body, close); // 身份变了，整个 pane 重画
+      return;
+    } catch (err) {
+      toast((err as Error).message, 'bad');
+    } finally {
+      busy = false;
+      save.classList.remove('loading');
+      sync();
+    }
+  });
+  sync();
+}
+
+function wirePassword(body: HTMLElement) {
   const pwCur = body.querySelector<HTMLInputElement>('#pw-cur')!;
   const pwNew = body.querySelector<HTMLInputElement>('#pw-new')!;
   const pwConf = body.querySelector<HTMLInputElement>('#pw-conf')!;
@@ -212,18 +321,6 @@ function renderAccount(body: HTMLElement, close: () => void) {
     } catch (err) {
       toast((err as Error).message, 'bad');
     }
-  });
-
-  renderSessions(body.querySelector<HTMLElement>('#acc-sessions')!);
-
-  body.querySelector('#acc-logout')!.addEventListener('click', async () => {
-    try {
-      await logout();
-    } catch {
-      clearSession();
-    }
-    close();
-    location.hash = '#/login';
   });
 }
 
@@ -1105,7 +1202,8 @@ function renderDevices(body: HTMLElement) {
 
 // ---- 邀请（power+；admin+ 可指定产出档、可见全部邀请）----
 
-function inviteState(iv: Invite): { label: string; cls: string; dead: boolean } {
+// 邀请链接的存活态（注册邀请与频道访客邀请同一套判定，manage.tsx 也用）
+export function inviteState(iv: Invite): { label: string; cls: string; dead: boolean } {
   const now = Date.now();
   const exp = new Date(iv.expires_at).getTime();
   if (iv.revoked) return { label: '已撤销', cls: 'tag-red', dead: true };
@@ -1127,6 +1225,7 @@ function renderInvites(body: HTMLElement) {
   let uses = '1';
   let note = '';
   let role = ''; // 产出档：空 = 跟随注册默认档
+  let allowGuest = '0'; // 允许对方「先以访客进入」再注册转正
   let fresh = '';
   let making = false;
   let revokeBusy = 0; // 正在撤销/删除的邀请 id，0=空闲
@@ -1144,7 +1243,7 @@ function renderInvites(body: HTMLElement) {
       <div class="pane-col pane-wide">
         <div class="card" style="padding:18px 20px">
           <div style="font-size:13.5px;font-weight:600">生成邀请链接</div>
-          <div style="font-size:11.5px;color:var(--text-2);margin-top:4px">链接在有效期内可用，点开就能自己设账号密码</div>
+          <div style="font-size:11.5px;color:var(--text-2);margin-top:4px">链接在有效期内可用，点开就能自己设账号密码；允许「先以访客进入」的话，对方也可以先不注册进来看看</div>
           <form style="display:flex;gap:20px;margin-top:16px;align-items:flex-end;flex-wrap:wrap" id="iv-form">
             <div>
               <div style="font-size:11px;color:var(--text-2);margin-bottom:7px">有效期</div>
@@ -1162,6 +1261,10 @@ function renderInvites(body: HTMLElement) {
             </div>`
                 : ''
             }
+            <div>
+              <div style="font-size:11px;color:var(--text-2);margin-bottom:7px">先以访客进入</div>
+              ${seg(allowGuest, [['0', '不允许'], ['1', '允许']], 'allowguest')}
+            </div>
             <div style="flex-grow:1;min-width:160px">
               <div style="font-size:11px;color:var(--text-2);margin-bottom:7px">备注（给谁）</div>
               <div class="field" style="height:38px;background:var(--bg-2)">
@@ -1189,7 +1292,12 @@ function renderInvites(body: HTMLElement) {
               : invites
                   .map((iv) => {
                     const st = inviteState(iv);
-                    const meta = [iv.note || '（无备注）', `${iv.used} / ${iv.max_uses === 0 ? '∞' : iv.max_uses} 次`, admin ? `by ${iv.created_by}` : '']
+                    const meta = [
+                      iv.note || '（无备注）',
+                      `${iv.used} / ${iv.max_uses === 0 ? '∞' : iv.max_uses} 次`,
+                      iv.allow_guest ? '可先以访客进入' : '',
+                      admin ? `by ${iv.created_by}` : '',
+                    ]
                       .filter(Boolean)
                       .join(' · ');
                     return `
@@ -1225,6 +1333,12 @@ function renderInvites(body: HTMLElement) {
     body.querySelectorAll<HTMLButtonElement>('[data-role]').forEach((b) =>
       b.addEventListener('click', () => {
         role = b.dataset.role!;
+        paint();
+      }),
+    );
+    body.querySelectorAll<HTMLButtonElement>('[data-allowguest]').forEach((b) =>
+      b.addEventListener('click', () => {
+        allowGuest = b.dataset.allowguest!;
         paint();
       }),
     );
@@ -1265,7 +1379,7 @@ function renderInvites(body: HTMLElement) {
       making = true;
       paint();
       try {
-        const r = await createInvite(note, Number(uses), ttl, role);
+        const r = await createInvite(note, Number(uses), ttl, role, allowGuest === '1');
         fresh = r.url;
         note = '';
         toast('邀请链接已生成', 'ok');
