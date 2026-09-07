@@ -221,8 +221,8 @@ export function ChannelManage(p: { channel: string }) {
         <div style="font-size:13.5px;font-weight:600">邀请制（白名单）</div>
         <div style="font-size:11.5px;line-height:1.6;color:var(--text-2);margin-top:4px;text-wrap:pretty">
           {inviteOnly()
-            ? `已开启：只有白名单里的人能进「${p.channel}」，其他人看得到、进不去。`
-            : `打开后这个频道只有白名单里的人能进，其他人看得到、进不去。适合把「${p.channel}」留给固定几个人。`}
+            ? `已开启：只有白名单里的人能看到并进入「${p.channel}」，其他人在大厅看不到它（超级管理员除外）。`
+            : `打开后这个频道只有白名单里的人能看到并进入，其他人在大厅看不到它（超级管理员除外）。适合把「${p.channel}」留给固定几个人。`}
         </div>
       </div>
       <button
