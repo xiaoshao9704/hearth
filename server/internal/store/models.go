@@ -54,6 +54,27 @@ type auditRow struct {
 	Detail    string `bun:",notnull,type:text"` // mysql 的 TEXT 列不能带 DEFAULT，写入侧一律给值
 }
 
+// passkeyRow 一枚通行密钥凭证（00007 迁移建表）。credential_id / public_key / aaguid
+// 存 base64url 文本（见迁移文件的理由）；sign_count 与 backup_state 每次成功断言后更新，
+// user_verified 是规范里的 uvInitialized（只从 false 变 true，不回退）。
+type passkeyRow struct {
+	bun.BaseModel `bun:"table:passkeys"`
+
+	ID             int64      `bun:",pk,autoincrement"`
+	UserID         int64      `bun:",notnull"`
+	CredentialID   string     `bun:",notnull,unique,type:varchar(512)"`
+	PublicKey      string     `bun:",notnull,type:text"`
+	SignCount      int64      `bun:",notnull,default:0"`
+	AAGUID         string     `bun:"aaguid,notnull,default:'',type:varchar(64)"`
+	Transports     string     `bun:",notnull,default:'',type:varchar(128)"` // 逗号分隔的 AuthenticatorTransport
+	BackupEligible int64      `bun:",notnull,default:0"`
+	BackupState    int64      `bun:",notnull,default:0"`
+	UserVerified   int64      `bun:",notnull,default:0"`
+	Name           string     `bun:",notnull,default:'',type:varchar(64)"` // 用户可改，默认按注册时的 UA 生成
+	CreatedAt      time.Time  `bun:",notnull,default:current_timestamp"`
+	LastUsedAt     *time.Time // 从未用过为空
+}
+
 type channelRow struct {
 	bun.BaseModel `bun:"table:channels"`
 

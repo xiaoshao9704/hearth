@@ -468,6 +468,7 @@ func (s *Store) DeleteUser(ctx context.Context, id, adoptTo int64) (int, error) 
 var userCascadeDeletes = []string{
 	"DELETE FROM sessions WHERE user_id = ?",
 	"DELETE FROM devices WHERE user_id = ?",
+	"DELETE FROM passkeys WHERE user_id = ?",
 	"DELETE FROM ingest_endpoints WHERE token_id IN (SELECT id FROM ingest_tokens WHERE user_id = ?)",
 	"DELETE FROM ingest_tokens WHERE user_id = ?",
 	"DELETE FROM channel_members WHERE user_id = ?",

@@ -52,6 +52,9 @@ type API struct {
 	clientLogMu    sync.Mutex
 	clientLogRates map[int64]clientLogRate
 
+	// 通行密钥：进行中的握手、按 (RP ID, origin) 缓存的 WebAuthn 实例、登录限频（见 passkey.go）
+	passkey passkeyState
+
 	// announcer 进程内唯一的宣告探测器（STUN/显式公网 IP + 端口映射 → 宣告候选）：
 	// lkembed 的 ExternalIPs 回调从它的快照取外部地址（见 lkembed.go）
 	announcer *lite.Announcer
@@ -109,6 +112,9 @@ func (a *API) Router() *chi.Mux {
 	r.Get("/api/invites/{code}", a.inviteInfo)
 	r.Post("/api/invites/{code}/guest", a.guestEntry)
 	r.Get("/api/site", a.site)
+	// 通行密钥登录：可发现凭证，未鉴权（还不知道是谁），按来源 IP 限频（见 passkey.go）
+	r.Post("/api/auth/passkey/login/begin", a.passkeyLoginBegin)
+	r.Post("/api/auth/passkey/login/finish", a.passkeyLoginFinish)
 
 	// 健康检查：只表示进程活着（宣告探测的刷新由进程内周期任务触发，不挂在这里）
 	r.Get("/healthz", a.healthz)
@@ -140,6 +146,16 @@ func (a *API) Router() *chi.Mux {
 		r.Delete("/api/account/devices/{deviceID}", a.deleteMyDevice)
 		r.Get("/api/account/sessions", a.listMySessions)
 		r.Delete("/api/account/sessions/{id}", a.deleteMySession)
+
+		// 通行密钥管理：访客不参与（账号会过期、又绑浏览器，挂长期凭证没有意义）
+		r.Route("/api/account/passkeys", func(r chi.Router) {
+			r.Use(a.requirePasskeyAccount)
+			r.Get("/", a.listPasskeys)
+			r.Post("/begin", a.passkeyRegisterBegin)
+			r.Post("/finish", a.passkeyRegisterFinish)
+			r.Patch("/{id}", a.renamePasskey)
+			r.Delete("/{id}", a.deletePasskey)
+		})
 
 		// 推流令牌（每用户一把，房间在 WHIP URL 里）；
 		// 访客拿不到：令牌不绑设备、跨会话有效，与「跟浏览器走、到期即删」的访客性质冲突
@@ -361,7 +377,7 @@ func (a *API) requireChannelRole(need store.ChannelRole, msg string) func(http.H
 func (a *API) cors(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", a.cfg.CORSOrigin)
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Device-Id")
 		w.Header().Set("Access-Control-Expose-Headers", "X-Hearth-Version")
 		if r.Method == http.MethodOptions {
@@ -433,8 +449,15 @@ func (a *API) logout(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// me 当前用户 + passkey_count（登录后推荐卡片据此判断「这个账号还没有通行密钥」，
+// 免得前端为一个计数再打一次列表接口）。计数查不到按 0 处理，不让 /api/me 因此失败。
 func (a *API) me(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, userFrom(r))
+	u := userFrom(r)
+	n, _ := a.st.CountPasskeys(r.Context(), u.ID)
+	writeJSON(w, http.StatusOK, struct {
+		*store.User
+		PasskeyCount int `json:"passkey_count"`
+	}{u, n})
 }
 
 // ---- 频道 ----

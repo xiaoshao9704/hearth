@@ -189,10 +189,11 @@ func TestOpenUpgradesLegacyDB(t *testing.T) {
 	}
 
 	// schema 对比：只多 bun_migrations / bun_migration_locks、00002 的两张 ingest 表、
-	// 00005 的反应表与 00006 的审计表
+	// 00005 的反应表、00006 的审计表与 00007 的通行密钥表
 	after := tableNames(t, s.bun.DB)
 	want := append(slices.Clone(before),
-		"audit_log", "bun_migration_locks", "bun_migrations", "ingest_endpoints", "ingest_tokens", "message_reactions")
+		"audit_log", "bun_migration_locks", "bun_migrations", "ingest_endpoints", "ingest_tokens",
+		"message_reactions", "passkeys")
 	slices.Sort(want)
 	if !slices.Equal(after, want) {
 		t.Fatalf("升级后表集合不符:\n got %v\nwant %v", after, want)
@@ -245,8 +246,8 @@ func TestOpenUpgradesLegacyDB(t *testing.T) {
 	if len(msgs) != 1 || msgs[0].Content != "hello" || msgs[0].CreatedAt.IsZero() {
 		t.Fatalf("消息数据不符: %+v", msgs)
 	}
-	if n := migrationRows(t, s.bun.DB); n != 6 {
-		t.Fatalf("bun_migrations 应有 6 行，实际 %d", n)
+	if n := migrationRows(t, s.bun.DB); n != 7 {
+		t.Fatalf("bun_migrations 应有 7 行，实际 %d", n)
 	}
 	s.Close()
 
@@ -255,8 +256,8 @@ func TestOpenUpgradesLegacyDB(t *testing.T) {
 	if err != nil {
 		t.Fatalf("重复 Open 失败: %v", err)
 	}
-	if n := migrationRows(t, s2.bun.DB); n != 6 {
-		t.Fatalf("重复 Open 后 bun_migrations 应仍为 6 行，实际 %d", n)
+	if n := migrationRows(t, s2.bun.DB); n != 7 {
+		t.Fatalf("重复 Open 后 bun_migrations 应仍为 7 行，实际 %d", n)
 	}
 	s2.Close()
 }
@@ -273,7 +274,7 @@ func TestOpenFreshDB(t *testing.T) {
 		"audit_log", "bun_migration_locks", "bun_migrations",
 		"channel_bans", "channel_gags", "channel_members", "channels", "devices",
 		"ingest_endpoints", "ingest_tokens", "ingresses", "invites", "message_reactions", "messages",
-		"providers", "sessions", "settings", "users",
+		"passkeys", "providers", "sessions", "settings", "users",
 	}
 	if got := tableNames(t, s.bun.DB); !slices.Equal(got, want) {
 		t.Fatalf("新库表集合不符:\n got %v\nwant %v", got, want)

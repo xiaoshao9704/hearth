@@ -10,21 +10,25 @@ import (
 
 // 审计动作名：审计表里的 action 列取值，前端筛选下拉与后端写入共用这一份。
 const (
-	AuditMute         = "mute"           // 禁言
-	AuditUnmute       = "unmute"         // 解禁
-	AuditKick         = "kick"           // 踢出现场
-	AuditBan          = "ban"            // 频道封禁
-	AuditUnban        = "unban"          // 解除封禁
-	AuditChannelRole  = "channel_role"   // 频道角色变更（授予/收回管理员、转让频道）
-	AuditMessageDel   = "message_delete" // 删他人消息
-	AuditChannelClear = "channel_clear"  // 清空频道聊天记录
-	AuditGuestClaim   = "guest_claim"    // 访客转正为注册账号（user_id 不变）
+	AuditMute          = "mute"           // 禁言
+	AuditUnmute        = "unmute"         // 解禁
+	AuditKick          = "kick"           // 踢出现场
+	AuditBan           = "ban"            // 频道封禁
+	AuditUnban         = "unban"          // 解除封禁
+	AuditChannelRole   = "channel_role"   // 频道角色变更（授予/收回管理员、转让频道）
+	AuditMessageDel    = "message_delete" // 删他人消息
+	AuditChannelClear  = "channel_clear"  // 清空频道聊天记录
+	AuditGuestClaim    = "guest_claim"    // 访客转正为注册账号（user_id 不变）
+	AuditPasskeyAdd    = "passkey_add"    // 添加通行密钥
+	AuditPasskeyRemove = "passkey_remove" // 删除通行密钥
+	AuditPasskeyReplay = "passkey_replay" // 通行密钥签名计数回退（疑似克隆/重放），登录已被拒
 )
 
 // AuditActions 全部合法动作名（管理后台筛选下拉的取值来源）。
 var AuditActions = []string{
 	AuditMute, AuditUnmute, AuditKick, AuditBan, AuditUnban,
 	AuditChannelRole, AuditMessageDel, AuditChannelClear, AuditGuestClaim,
+	AuditPasskeyAdd, AuditPasskeyRemove, AuditPasskeyReplay,
 }
 
 // AuditRecord 一条待写入的审计记录。TargetUID/ChannelID 为 0 表示不适用（落库为 NULL）。

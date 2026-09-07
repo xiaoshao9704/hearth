@@ -82,6 +82,21 @@ var adminKeys = []rtc.ConfigKey{
 			"频道访客邀请自带寿命（生成链接时选），不看这个值。过期的访客账号每小时清理一次"},
 }
 
+// passkeyKeys 通行密钥（WebAuthn）的 RP 身份：两项都留空时按请求现推导（见 api/passkey.go），
+// 单域名部署不用填。它们是站点级身份而不是某个内核实例的参数，所以是全局键。
+var passkeyKeys = []rtc.ConfigKey{
+	{Name: "passkey_rp_id", Env: "PASSKEY_RP_ID", Group: "admin",
+		Label: "通行密钥 RP ID",
+		Hint: "浏览器把凭证绑定在这个域名上。留空 = 取请求 Host 去端口（反代下即公开域名，本地即 localhost）。" +
+			"改动会让已注册的通行密钥全部失效——凭证按 RP ID 绑定，" +
+			"且 hearth.example.com 与 example.com 是两个不同的 RP ID，不能互换。" +
+			"通行密钥要求 https（localhost 例外）"},
+	{Name: "passkey_origins", Env: "PASSKEY_ORIGINS", Group: "admin",
+		Label: "通行密钥允许的 origin",
+		Hint: "逗号分隔的完整 origin（如 https://example.com）。留空 = 只允许当前请求的 origin" +
+			"（scheme 尊重 X-Forwarded-Proto）。前端与 API 不同源、或有多个域名时在这里列全"},
+}
+
 // selectorEnv 选择器对应的旧环境变量名：只供迁移 v2 一次性导入，不参与取值。
 var selectorEnv = map[string]string{
 	"voice_provider": "VOICE_PROVIDER",
@@ -117,6 +132,7 @@ func (a *API) allConfigKeys() []rtc.ConfigKey {
 	keys = append(keys, portmapKeys...)
 	keys = append(keys, clientICEKeys...)
 	keys = append(keys, chatKeys...)
+	keys = append(keys, passkeyKeys...)
 	return append(keys, adminKeys...)
 }
 

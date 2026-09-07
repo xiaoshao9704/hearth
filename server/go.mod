@@ -5,15 +5,13 @@ go 1.27.0
 require (
 	github.com/go-chi/chi/v5 v5.3.2
 	github.com/go-sql-driver/mysql v1.10.0
+	github.com/go-webauthn/webauthn v0.18.0
 	github.com/huin/goupnp v1.3.0
 	github.com/jackc/pgx/v5 v5.10.0
 	github.com/livekit/livekit-server v1.13.6
 	github.com/livekit/protocol v1.51.1-0.20260903060125-0cf5ba018b8e
 	github.com/livekit/server-sdk-go/v2 v2.18.2-0.20260903135950-af5ddd69d657
 	github.com/pion/ice/v4 v4.4.0
-	github.com/pion/rtcp v1.2.17
-	github.com/pion/rtp v1.10.5
-	github.com/pion/sdp/v3 v3.0.19
 	github.com/pion/stun/v3 v3.1.7
 	github.com/pion/webrtc/v4 v4.2.19
 	github.com/uptrace/bun v1.2.18
@@ -46,13 +44,17 @@ require (
 	github.com/florianl/go-tc v0.4.8 // indirect
 	github.com/frostbyte73/core v0.1.1 // indirect
 	github.com/fsnotify/fsnotify v1.10.1 // indirect
+	github.com/fxamacker/cbor/v2 v2.9.3 // indirect
 	github.com/gammazero/deque v1.2.1 // indirect
 	github.com/gammazero/workerpool v1.2.1 // indirect
 	github.com/go-logr/logr v1.4.4 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
+	github.com/go-viper/mapstructure/v2 v2.5.0 // indirect
+	github.com/go-webauthn/x v0.3.0 // indirect
 	github.com/golang-jwt/jwt/v5 v5.3.1 // indirect
 	github.com/google/cel-go v0.30.0 // indirect
 	github.com/google/go-cmp v0.7.0 // indirect
+	github.com/google/go-tpm v0.9.8 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/google/wire v0.7.0 // indirect
 	github.com/gorilla/websocket v1.5.4-0.20250319132907-e064f32e3674 // indirect
@@ -87,13 +89,17 @@ require (
 	github.com/ncruces/go-strftime v1.0.0 // indirect
 	github.com/nyaruka/phonenumbers v1.8.1 // indirect
 	github.com/petermattis/goid v0.0.0-20260725062400-500c67a39b75 // indirect
+	github.com/philhofer/fwd v1.2.0 // indirect
 	github.com/pion/datachannel v1.6.2 // indirect
 	github.com/pion/dtls/v3 v3.1.5 // indirect
 	github.com/pion/interceptor v0.1.47 // indirect
 	github.com/pion/logging v0.2.4 // indirect
 	github.com/pion/mdns/v2 v2.1.0 // indirect
 	github.com/pion/randutil v0.1.0 // indirect
+	github.com/pion/rtcp v1.2.17 // indirect
+	github.com/pion/rtp v1.10.5 // indirect
 	github.com/pion/sctp v1.11.1 // indirect
+	github.com/pion/sdp/v3 v3.0.19 // indirect
 	github.com/pion/srtp/v3 v3.0.13 // indirect
 	github.com/pion/transport/v4 v4.1.0 // indirect
 	github.com/pion/turn/v5 v5.0.13 // indirect
@@ -108,6 +114,7 @@ require (
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
 	github.com/rs/cors v1.11.1 // indirect
 	github.com/thoas/go-funk v0.9.3 // indirect
+	github.com/tinylib/msgp v1.6.4 // indirect
 	github.com/tmthrgd/go-hex v0.0.0-20190904060850-447a3041c3bc // indirect
 	github.com/tomnomnom/linkheader v0.0.0-20250811210735-e5fe3b51442e // indirect
 	github.com/twitchtv/twirp v8.1.3+incompatible // indirect
@@ -117,6 +124,7 @@ require (
 	github.com/vmihailenco/msgpack/v5 v5.4.1 // indirect
 	github.com/vmihailenco/tagparser/v2 v2.0.0 // indirect
 	github.com/wlynxg/anet v0.0.5 // indirect
+	github.com/x448/float16 v0.8.4 // indirect
 	github.com/zeebo/xxh3 v1.1.0 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
 	go.opentelemetry.io/otel v1.45.0 // indirect
