@@ -314,7 +314,7 @@ func TestIngestTokenReportsEnabled(t *testing.T) {
 		}
 		return body
 	}
-	// 默认 stage=lkembed 但进程内 LiveKit 未启动（测试不拉内核）：地址照给，enabled=false
+	// 默认 stage=lkembed 但 lkembed 未启动（测试不拉内核）：地址照给，enabled=false
 	body := get()
 	if body["base"] != "http://example.com/providers/lkembed/w/" {
 		t.Fatalf("base 应为 lkembed 的推流基地址，实际 %q", body["base"])

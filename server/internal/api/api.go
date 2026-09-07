@@ -62,7 +62,7 @@ type API struct {
 	// mapped 端口映射结果查询，透传给进程内 ICE-Lite 内核做宣告（无映射来源时为 nil）
 	mapped lite.MappedFunc
 
-	// 进程内 LiveKit（内建实例 lkembed，见 lkembed.go）：实例对象常在，服务端只在
+	// lkembed（见 lkembed.go）：实例对象常在，服务端只在
 	// stage_provider 选中它时才跑。lkembedWHIP 是同一实例的推流面（反代到 LiveKit
 	// 自带的 WHIP 入口），与 Stage 面共用 embedCfg
 	lkembed     *livekitrtc.Provider
@@ -74,7 +74,7 @@ type API struct {
 func New(st *store.Store, cfg config.Config, mapped lite.MappedFunc, version string) *API {
 	a := &API{st: st, cfg: cfg, mapped: mapped, version: version,
 		providers: map[string]*ProviderInstance{}}
-	// 内建实例只有 lkembed（进程内 LiveKit，语音/舞台/推流三面齐全，见 providers.go）
+	// 内建实例只有 lkembed（语音/舞台/推流三面齐全，见 providers.go）
 	a.announcer = lite.NewAnnouncer(
 		func(ctx context.Context) string { return a.dynVal(ctx, "lkembed_public_ip") },
 		func(ctx context.Context) string { return a.dynVal(ctx, "lkembed_stun_servers") },

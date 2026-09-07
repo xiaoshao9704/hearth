@@ -8,7 +8,7 @@
 - **高码率投屏**：1080p60 · 8Mbps+，VP9/AV1 SVC 分层（弱网观众自动降层不拖累全场），H.264 硬编档可选
 - **语音优先**：语音与投屏可拆成两条独立媒体线（双线模式），投屏挤爆上行时语音不陪葬
 - **纯浏览器**：推流与观看无需插件；OBS 走标准 WHIP 协议接入
-- **一体化**：单二进制 = API + 进程内 LiveKit（语音 + 舞台 + WHIP 推流一个内核）+ 信令/WHIP 反代 + 静态托管
+- **一体化**：单二进制 = API + lkembed（进程内的 LiveKit 补丁 fork，语音 + 舞台 + WHIP 推流一个内核）+ 信令/WHIP 反代 + 静态托管
 
 ## 架构：双线内核插槽
 
@@ -33,7 +33,7 @@ flowchart LR
     API["REST · 静态托管"]
     ADM["入场判定 admitUser<br/>封禁 / 邀请制 / 禁言 · 唯一决策点"]
     DB[("SQLite / MySQL / Postgres")]
-    LKE["lkembed · 进程内 LiveKit<br/>语音 / 投屏 / 摄像头 / SVC 分层 / WHIP 推流"]
+    LKE["lkembed<br/>语音 / 投屏 / 摄像头 / SVC 分层 / WHIP 推流"]
     PRX["同源反代 /providers/{alias}"]
   end
 
@@ -146,7 +146,7 @@ docker exec hearth /app/hearth adduser <用户名> <密码>   # 首账号自动�
 
 ### 自动端口映射（UPnP / PCP / NAT-PMP）
 
-NAT 后的宽带线路上，hearth **默认自动向本机默认网关申请端口映射**，不必手工进路由器后台做端口转发：映射的是 HTTP 端口（`ADDR`，默认 8080/tcp）与**当前选中内核**跑在本进程的媒体端口（进程内 LiveKit `lkembed_udp_port`）——选的是外部实例时那些端口不在本机，不申请。协议按快慢依次尝试 PCP、NAT-PMP、UPnP IGD（v1/v2 都支持），租约到期前自动续租，网关重启丢了映射下一轮自愈，进程退出时撤销。
+NAT 后的宽带线路上，hearth **默认自动向本机默认网关申请端口映射**，不必手工进路由器后台做端口转发：映射的是 HTTP 端口（`ADDR`，默认 8080/tcp）与**当前选中内核**跑在本进程的媒体端口（lkembed 的 `lkembed_udp_port`）——选的是外部实例时那些端口不在本机，不申请。协议按快慢依次尝试 PCP、NAT-PMP、UPnP IGD（v1/v2 都支持），租约到期前自动续租，网关重启丢了映射下一轮自愈，进程退出时撤销。
 
 - **仅 `network_mode: host` 或裸机可用**：bridge 容器里 SSDP 多播出不了网桥、默认网关是网桥地址，发现不到真正的网关；这不是能靠配置绕开的（网关只允许客户端给自己的源地址开洞），要自动映射就用 host 网络。
 - **关闭**：管理后台「网络 → 自动端口映射」选「关闭」，或部署侧设 `PORTMAP_MODE=off`（环境变量优先，设了后台只读）。关闭时会撤销已建的映射，且启动不产生任何额外延迟。
@@ -165,7 +165,7 @@ NAT 后的宽带线路上，hearth **默认自动向本机默认网关申请端�
 
 ### 舞台内核放到局域网（远端舞台机器）
 
-hearth 所在服务器上行有限时，投屏与 OBS 推流的视频不该绕它一圈。舞台内核（进程内 LiveKit）可以整台搬到另一台机器上：那里跑**一个** `stage` 容器就够了——它自己申请端口映射、自己探测并宣告外部地址，浏览器观众与 OBS 走同一个打洞出来的 UDP 端口，不需要 redis、ingress，也不需要单独的推流网关。镜像 `ghcr.io/xiaoshao9704/hearth-stage`，Release 里也有单文件 `stage-linux-{amd64,arm64}`（arm64 小主机可用）：
+hearth 所在服务器上行有限时，投屏与 OBS 推流的视频不该绕它一圈。舞台内核（lkembed）可以整台搬到另一台机器上：那里跑**一个** `stage` 容器就够了——它自己申请端口映射、自己探测并宣告外部地址，浏览器观众与 OBS 走同一个打洞出来的 UDP 端口，不需要 redis、ingress，也不需要单独的推流网关。镜像 `ghcr.io/xiaoshao9704/hearth-stage`，Release 里也有单文件 `stage-linux-{amd64,arm64}`（arm64 小主机可用）：
 
 ```yaml
 # 舞台机器上单独一个 compose，host 网络：端口即宿主端口
@@ -231,7 +231,7 @@ go run ./cmd/server   # :8080
 cd web && npm install && npm run dev                          # :5173
 ```
 
-投屏/OBS 链路默认就可用（内建 `lkembed` 进程内 LiveKit），要接一套独立部署的外部 LiveKit 才需要 `deploy/` 那套并在后台或 .env 配置。开发规范见 [CLAUDE.md](CLAUDE.md)。
+投屏/OBS 链路默认就可用（内建 `lkembed`），要接一套独立部署的外部 LiveKit 才需要 `deploy/` 那套并在后台或 .env 配置。开发规范见 [CLAUDE.md](CLAUDE.md)。
 
 发布：打 `v*` tag 触发 CI（原生交叉编译双架构 + 纯装配镜像推 ghcr，全程无 QEMU）。
 

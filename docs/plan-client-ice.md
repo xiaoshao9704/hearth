@@ -109,7 +109,7 @@
 | `server/internal/api/dyncfg.go` | 全局键 `client_stun_servers`（Group `network`，Env `CLIENT_STUN_SERVERS`，默认常量） |
 | `server/internal/rtc/livekitembed/livekitembed.go` | 只改 `lkembed_tcp_port` 的 Hint |
 | `server/livekit-patches/0003-*.patch`、`README.md` | 补齐既有 darwin nocgo 提交的权威副本；README 备注 hearth.3/hearth.4 不在序列内 |
-| `server/internal/api/*_test.go` | 改写规则单测（剔 stun 留 turn / `none` 只剔 / 默认追加）；WS 桥集成测试：起进程内 LiveKit，经 hearth 反代握手，断言首帧 `Join.IceServers` |
+| `server/internal/api/*_test.go` | 改写规则单测（剔 stun 留 turn / `none` 只剔 / 默认追加）；WS 桥集成测试：起 lkembed，经 hearth 反代握手，断言首帧 `Join.IceServers` |
 | `server/internal/api/clientlog.go`、`clientlog_test.go` | `Detail` 字段与上限；测试补 `Detail` 脱敏/截断；**提交** |
 | `web/src/engine/livekit.ts` | 删 `rtcConfig` 硬编码；ICE 采集改结果驱动；**提交** |
 | `web/src/api.ts`、`web/src/views/room.tsx` | `ClientLogEntry` 加 `detail`；**提交** |

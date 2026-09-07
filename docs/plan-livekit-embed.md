@@ -12,7 +12,7 @@
 - **自打洞**：LiveKit 的媒体端口进 `portmap.Mapper` 的 wants，v4 映射、向上游级联、v6 pinhole 全部自动。
 - **自宣告不重启**：LiveKit 的候选宣告改为每建新 PC 时向 hearth 的 `lite.Announcer` 取当前外部地址，公网 IP 或映射变化
   只影响新会话，在途会话不动，watchdog 退役。
-- **进程内推流**：OBS 的 WHIP 经 hearth 反代直达进程内 LiveKit 自带的 WHIP 入口（`/whip/v1`），推流不出进程、
+- **进程内推流**：OBS 的 WHIP 经 hearth 反代直达 lkembed（进程内的 LiveKit 补丁 fork）自带的 WHIP 入口（`/whip/v1`），推流不出进程、
   也不多绕一条回环 PeerConnection。外部 LiveKit 与远端形态同样走各自实例自带的 `/whip/v1`；Bellows 只剩「进程内直通」
   这一种形态（`cmd/bellows` 远端进程标注废弃、下一版本移除）。
 - **零重写**：不碰协商、订阅、层选择、拥塞控制、重连，也不碰 livekit-client。LiveKit 多年修掉的 bug 原样继承。
@@ -63,9 +63,9 @@ livekit-server 用 `replace` 把三个 pion 模块换成自家 `-warp.1` 分叉�
 ## 架构
 
 ```
-浏览器 ──舞台信令 /providers/{alias}/rtc/*（hearth 反代）──▶ 回环 127.0.0.1:<lkembed_port> 的进程内 LiveKit
+浏览器 ──舞台信令 /providers/{alias}/rtc/*（hearth 反代）──▶ 回环 127.0.0.1:<lkembed_port> 的 lkembed
                                     ▲ 媒体直连：LAN host + 映射/STUN 外部地址（LiveKit 按补丁二从 lite.Announcer 取）
-OBS ──WHIP /providers/lkembed/w（hearth 判定 + 换票反代）──▶ 同一个进程内 LiveKit 的 /whip/v1
+OBS ──WHIP /providers/lkembed/w（hearth 判定 + 换票反代）──▶ 同一个 lkembed 的 /whip/v1
 portmap.Mapper：把 lkembed 的 UDP（与可选 TCP）端口映射到网关；v6 pinhole 同步；OnChange 触发宣告刷新
 ```
 
@@ -140,7 +140,7 @@ portmap.Mapper：把 lkembed 的 UDP（与可选 TCP）端口映射到网关；v
 
 ## 禁言与推流设备
 
-实测（进程内 LiveKit + pion WHIP 推流 + lksdk 订阅）：对推流参与者 `UpdateParticipant(CanPublish=false)`
+实测（lkembed + pion WHIP 推流 + lksdk 订阅）：对推流参与者 `UpdateParticipant(CanPublish=false)`
 会下架它已发布的全部轨道、订阅端立刻停收，但改回 `true` 后参与者仍在房间且 `tracks=0`，订阅端再也收不到包——
 推流端没有信令通道，不会也无从重新发布，表现为推流软件一路显示正常而观众永久黑屏。
 
@@ -180,7 +180,7 @@ func (s *Server) Stop()                                       // service.Livekit
 - **注册表**：`providers.go` 内建列表加 `{Alias: "lkembed", Type: "livekit-embedded", Builtin: true, Stage: livekitrtc.New(embedCfg)}`；
   `embedCfg` 把 `livekit_api_url` 映射为 `http://127.0.0.1:<lkembed_port>`、`livekit_api_key/secret` 映射到 `lkembed_*`。
   选择器 `stage_provider` 的合法性校验按「实例存在 + 能力匹配」照旧通过。**只有 `stage_provider == lkembed` 时才 `Start`**，
-  否则不起进程内 LiveKit（纯语音部署零额外开销）；选择器切换到/离开 `lkembed` 时启动/停止（先做「改了重启生效」也可，后续再热切）。
+  否则不起 lkembed（纯语音部署零额外开销）；选择器切换到/离开 `lkembed` 时启动/停止（先做「改了重启生效」也可，后续再热切）。
 - **宣告回调**：`ExternalIPs` 返回 `announcer.Snapshot()` 里的外部 **IP**（映射结果取 IP 部分排最前，其次 STUN 公网 IP，去重）。
   这里复用 Ember 那一个 `Announcer` 即可（同一台机器公网地址只有一个），不新建第二个探测器。
 - **端口映射**：`api.PortWants` 在 `stage_provider == lkembed` 时追加 `{Proto: "udp", Port: lkembed_udp_port, Desc: "hearth stage",
@@ -197,7 +197,7 @@ func (s *Server) Stop()                                       // service.Livekit
   移出（LiveKit 只保证房间内 identity 唯一，跨房间会两个会话并存，而推流令牌的语义是一台设备同时只推一个房间）。
 - **推流入口的默认值不联动**：`ingest_provider` 的回落仍是内建 `bellows`（选中 `lkembed` 舞台时 Bellows 本来就能跑，
   只是多一跳回环 PC），要用原生 WHIP 就在管理后台把 `ingest_provider` 也选成 `lkembed`。回落值保持固定可预期，
-  与「未知 alias 回落内建默认」一致。`lkembed` 推流面的 `Enabled` 会看进程内 LiveKit 是否真的在跑
+  与「未知 alias 回落内建默认」一致。`lkembed` 推流面的 `Enabled` 会看它是否真的在跑
   （舞台线没选中它时服务端根本没起）。
 - **禁言**：推流参与者（元数据 `kind=ingest`）的禁言实现为把它移出房间，见下节「禁言与推流设备」。
 - **`cmd/stage`**（远端形态，替代远端机器上的两个容器）：`livekitembed.Start` + `portmap.New` + 自己的 `lite.Announcer` + 周期刷新，
@@ -237,7 +237,7 @@ func (s *Server) Stop()                                       // service.Livekit
 - `cd server && go build ./... && go vet ./... && go test ./...`；`GOOS=linux`/`GOOS=windows` 交叉编译。
 - 纯语音部署（`stage_provider=none`）：启动无任何 LiveKit 相关日志与端口，行为与今天完全一致。
 - `stage_provider=lkembed`：单进程内投屏/摄像头/OBS 三路都通；无 redis、无 ingress、无 watchdog。
-- `ingest_provider=lkembed`：推流经 `/providers/lkembed/w` 直达进程内 LiveKit 的 `/whip/v1`——201 与不透明会话地址、
+- `ingest_provider=lkembed`：推流经 `/providers/lkembed/w` 直达 lkembed 的 `/whip/v1`——201 与不透明会话地址、
   观众可见、`kind=ingest` 入名册、换频道重推顶掉旧房间、DELETE 即下线、禁言即移出、解禁重推恢复
   （这几条已有端到端测试，`server/internal/api/lkembed_whip_test.go`）。真机还要验 OBS 与 HEVC 实推。
 - 打洞与宣告：见第 4 步；`PORTMAP_MODE=off` 时无映射且 LiveKit 只宣告 host + STUN 公网 IP。

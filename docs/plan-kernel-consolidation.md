@@ -1,4 +1,4 @@
-# 计划：内核收敛（Ember / Bellows / livekit-ingress 退场，进程内 LiveKit 成为唯一内核）
+# 计划：内核收敛（Ember / Bellows / livekit-ingress 退场，lkembed（进程内的 LiveKit 补丁 fork）成为唯一内核）
 
 状态：**六步全部实施完成（2026-09-04）**，发布说明在 `docs/release-notes-v0.9.0.md`；待办：第六节两项实测（弱网语音 A/B、常驻内存）回填发布说明、`v0.9.0` tag（由维护者打）。下一个大版本（v0.9.0）的第一步；`plan-onebox.md` 与 `plan-roles-guests.md` 在它之后。
 取代 `plan-stage-kernel.md`（路线 A，Ember 补视频）与 `plan-pionwhip.md`/`plan-bellows-grant.md` 的后续；三份文档保留作历史，状态行改为「已退役」。
@@ -97,7 +97,7 @@ api 层游标迁移 v3，启动时一次性执行：
 5. `ingest_endpoints` 表内容清空（不删表）。
 
 启动告警（`warnLegacyConfig` 本版本内容）：
-- 环境变量 `EMBER_UDP_PORT`/`EMBER_PUBLIC_IP`/`EMBER_STUN_SERVERS`/`BELLOWS_*`/`INGRESS_UPSTREAM_URL`/`BELLOWS_REMOTE_URL`/`BELLOWS_SINK` 存在 → 各打一行「已不再读取，语音/推流已并入进程内 LiveKit（lkembed），请从部署侧删除」。
+- 环境变量 `EMBER_UDP_PORT`/`EMBER_PUBLIC_IP`/`EMBER_STUN_SERVERS`/`BELLOWS_*`/`INGRESS_UPSTREAM_URL`/`BELLOWS_REMOTE_URL`/`BELLOWS_SINK` 存在 → 各打一行「已不再读取，语音/推流已并入 lkembed，请从部署侧删除」。
 - 容器仍发布着 47700/47710 端口不会报错，只是空放行；README 提示可以收掉。
 
 下个版本删除这组告警与 `ingest_endpoints` 表。

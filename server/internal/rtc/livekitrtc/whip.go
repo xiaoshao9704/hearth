@@ -64,7 +64,7 @@ type whipSession struct {
 type WHIP struct {
 	cfg     rtc.ConfigFunc
 	resolve ResolveFunc
-	// ready 推流出口当前是否真的在跑（进程内 LiveKit 只在被选作舞台线时才启动）；
+	// ready 推流出口当前是否真的在跑（lkembed 只在被选作舞台线时才启动）；
 	// nil = 只看配置齐不齐。
 	ready func(ctx context.Context) bool
 	hc    *http.Client

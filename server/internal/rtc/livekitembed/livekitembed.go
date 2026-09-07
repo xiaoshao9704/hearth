@@ -106,7 +106,7 @@ type Server struct {
 	stopOnce sync.Once
 }
 
-// Start 拉起进程内 LiveKit。失败原样返回错误（端口占用等），由调用方决定是否致命——
+// Start 拉起 lkembed。失败原样返回错误（端口占用等），由调用方决定是否致命——
 // 舞台线起不来不该拖垮语音线。
 func Start(ctx context.Context, o Options) (*Server, error) {
 	if o.APIKey == "" || o.APISecret == "" {
@@ -163,12 +163,12 @@ func Start(ctx context.Context, o Options) (*Server, error) {
 		s.Stop()
 		return nil, err
 	}
-	s.logf("进程内 LiveKit 就绪: http=%s udp=%d tcp=%d",
+	s.logf("lkembed 就绪: http=%s udp=%d tcp=%d",
 		net.JoinHostPort(bindOr(o.Bind), strconv.Itoa(o.HTTPPort)), o.UDPPort, o.TCPPort)
 	return s, nil
 }
 
-// Stop 停掉进程内 LiveKit 并等端口释放，可重复调用。
+// Stop 停掉 lkembed 并等端口释放，可重复调用。
 // 整个停止过程有硬上限：LiveKit 的 Stop 与 Start 都要等它自己的关闭序列走完
 // （roomManager/signalServer/ioService 逐个收尾），客户端没断干净时那一步可能迟迟不返回——
 // 宿主的 SIGTERM 路径不能被它拖住，超时就放手，剩下的交给进程退出。
@@ -183,9 +183,9 @@ func (s *Server) Stop() {
 		select {
 		case <-done:
 			s.waitPortsReleased()
-			s.logf("进程内 LiveKit 已停止")
+			s.logf("lkembed 已停止")
 		case <-time.After(stopTimeout):
-			s.logf("进程内 LiveKit 停止超时（%s），端口 %d/%d 可能仍被占用", stopTimeout, s.opts.HTTPPort, s.opts.UDPPort)
+			s.logf("lkembed 停止超时（%s），端口 %d/%d 可能仍被占用", stopTimeout, s.opts.HTTPPort, s.opts.UDPPort)
 		}
 	})
 }
@@ -229,7 +229,7 @@ func (s *Server) waitPortsReleased() {
 			return
 		}
 		if time.Now().After(deadline) {
-			s.logf("进程内 LiveKit 端口 %d/%d 超时仍未释放", s.opts.HTTPPort, s.opts.UDPPort)
+			s.logf("lkembed 端口 %d/%d 超时仍未释放", s.opts.HTTPPort, s.opts.UDPPort)
 			return
 		}
 		time.Sleep(20 * time.Millisecond)

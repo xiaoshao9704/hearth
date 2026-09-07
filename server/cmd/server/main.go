@@ -152,7 +152,7 @@ func runServer(ctx context.Context, cfg config.Config, st *store.Store) {
 	mapper := portmap.New()
 	a := api.New(st, cfg, lite.MappedFunc(mapper.UDPExternal), version)
 
-	// 语音线或舞台线选中 lkembed 时拉起进程内 LiveKit（默认两线同选，即默认常驻；
+	// 语音线或舞台线选中 lkembed（进程内的 LiveKit 补丁 fork）时拉起它（默认两线同选，即默认常驻；
 	// 两线都切走——语音选外部实例、舞台选 none——时什么都不起）
 	a.EnsureStageKernel(context.Background())
 

@@ -1,4 +1,4 @@
-// lkembed 推流面的端到端测试：起真实的进程内 LiveKit，用 pion 写的 WHIP 客户端经
+// lkembed 推流面的端到端测试：起真实的 lkembed，用 pion 写的 WHIP 客户端经
 // hearth 的 /providers/lkembed/w 推流，lksdk 订阅端验证轨与参与者元数据，
 // 再验换频道重推顶替、DELETE 收尾与被禁言用户 403。
 package api
@@ -26,8 +26,8 @@ import (
 	"hearth/server/internal/rtc"
 )
 
-// stageAPI 造一个选中 lkembed 舞台线的 API，并把进程内 LiveKit 真的拉起来。
-// 返回 API、hearth 的 httptest 服务地址与进程内 LiveKit 的回环端口。
+// stageAPI 造一个选中 lkembed 舞台线的 API，并把 lkembed 真的拉起来。
+// 返回 API、hearth 的 httptest 服务地址与 lkembed 的回环端口。
 func stageAPI(t *testing.T) (*API, string, int) {
 	t.Helper()
 	maskProviderEnv(t)
@@ -46,7 +46,7 @@ func stageAPI(t *testing.T) (*API, string, int) {
 	a.EnsureStageKernel(ctx)
 	t.Cleanup(a.StopStageKernel)
 	if !a.stageKernelRunning(ctx) {
-		t.Fatal("进程内 LiveKit 未启动")
+		t.Fatal("lkembed 未启动")
 	}
 	r := a.Router()
 	a.RegisterProxies(r)
@@ -168,7 +168,7 @@ func whipPush(t *testing.T, base, path string) *whipTestClient {
 	return c
 }
 
-// whipSubscriber 用 lksdk 直连进程内 LiveKit 订阅房间，统计收到的 RTP 与推流参与者元数据。
+// whipSubscriber 用 lksdk 直连 lkembed 订阅房间，统计收到的 RTP 与推流参与者元数据。
 type whipSubscriber struct {
 	room     *lksdk.Room
 	audio    atomic.Int64
@@ -181,7 +181,7 @@ func subscribeStage(t *testing.T, a *API, lkPort int, channel string) *whipSubsc
 	ctx := context.Background()
 	key, secret := a.dynVal(ctx, "lkembed_api_key"), a.dynVal(ctx, "lkembed_api_secret")
 	if key == "" || secret == "" {
-		t.Fatal("进程内 LiveKit 密钥未生成")
+		t.Fatal("lkembed 密钥未生成")
 	}
 	s := &whipSubscriber{}
 	cb := lksdk.NewRoomCallback()
@@ -399,7 +399,7 @@ func TestLkembedCapabilities(t *testing.T) {
 	if msg := a.checkSelector(ctx, "stage_provider", AliasLkembed); msg != "" {
 		t.Fatalf("stage_provider=lkembed 应合法: %s", msg)
 	}
-	// 舞台线没选中 lkembed 时进程内 LiveKit 没起，推流入口按不可用回显
+	// 舞台线没选中 lkembed 时 lkembed 没起，推流入口按不可用回显
 	if inst.Ingest.Enabled(ctx) {
 		t.Fatal("舞台线未选中 lkembed 时推流入口应为不可用")
 	}

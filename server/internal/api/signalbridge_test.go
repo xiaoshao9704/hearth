@@ -1,4 +1,4 @@
-// 信令桥的端到端测试：起真实的进程内 LiveKit，经 hearth 的 /providers/lkembed/rtc
+// 信令桥的端到端测试：起真实的 lkembed（进程内的 LiveKit 补丁 fork），经 hearth 的 /providers/lkembed/rtc
 // 建立 WebSocket，断言首帧 Join 里下发给浏览器的 ICE 服务器已按 client_stun_servers 改写。
 package api
 
@@ -24,7 +24,7 @@ func signalJoin(t *testing.T, a *API, base, channel, tag string) *livekit.JoinRe
 	ctx := context.Background()
 	key, secret := a.dynVal(ctx, "lkembed_api_key"), a.dynVal(ctx, "lkembed_api_secret")
 	if key == "" || secret == "" {
-		t.Fatal("进程内 LiveKit 密钥未生成")
+		t.Fatal("lkembed 密钥未生成")
 	}
 	tok, err := lktoken.Sign(key, secret, channel, rtc.Meta{UID: 4242, Username: "ice", Tag: tag}, true)
 	if err != nil {

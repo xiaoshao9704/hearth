@@ -1,4 +1,4 @@
-// 进程内 LiveKit（内建实例 lkembed）的接线：配置映射、密钥生成、按舞台选择器启停。
+// lkembed 的接线：配置映射、密钥生成、按舞台选择器启停。
 // 实例对象本身复用 livekitrtc.New——舞台槽位、令牌签发、/providers/lkembed/rtc 反代
 // 零改动，只是把 livekit_api_url 指向回环。
 package api
@@ -46,7 +46,7 @@ func (a *API) ensureEmbedKeys(ctx context.Context) (key, secret string, err erro
 	return key, secret, nil
 }
 
-// stageExternalIPs 补丁二的回调：进程内 LiveKit 每建一个 PeerConnection 取一次当前外部
+// stageExternalIPs 补丁二的回调：lkembed 每建一个 PeerConnection 取一次当前外部
 // 地址并追加为候选。Announcer 提供端口映射/STUN 结果；extra_ips 用于容器无法枚举宿主
 // 网卡的部署，把宿主的 IPv6、局域网或覆盖网络地址一并交给 ICE 逐条探测。
 func (a *API) stageExternalIPs() []string {
@@ -57,8 +57,8 @@ func (a *API) stageExternalIPs() []string {
 	return lite.ExternalIPs(externals)
 }
 
-// EnsureStageKernel 按当前选择器启停进程内 LiveKit：语音线或舞台线任一选中 lkembed
-// 才起（默认两线同选 lkembed，进程内 LiveKit 默认常驻），都切走就停。幂等，可重复调用；
+// EnsureStageKernel 按当前选择器启停 lkembed：语音线或舞台线任一选中 lkembed
+// 才起（默认两线同选 lkembed，lkembed 默认常驻），都切走就停。幂等，可重复调用；
 // 启动失败只记日志，内核起不来不拖垮其余线路。
 func (a *API) EnsureStageKernel(ctx context.Context) {
 	a.embedMu.Lock()
@@ -77,7 +77,7 @@ func (a *API) EnsureStageKernel(ctx context.Context) {
 	}
 	key, secret, err := a.ensureEmbedKeys(ctx)
 	if err != nil {
-		log.Printf("进程内 LiveKit 密钥落库失败，舞台线未启动: %v", err)
+		log.Printf("lkembed 密钥落库失败，舞台线未启动: %v", err)
 		return
 	}
 	udpPort := dynPort(a.dynVal(ctx, "lkembed_udp_port"))
@@ -92,7 +92,7 @@ func (a *API) EnsureStageKernel(ctx context.Context) {
 		LogSink:     log.Printf,
 	})
 	if err != nil {
-		log.Printf("进程内 LiveKit 启动失败（舞台线不可用，语音线照常）: %v", err)
+		log.Printf("lkembed 启动失败（舞台线不可用，语音线照常）: %v", err)
 		return
 	}
 	a.embedSrv = srv
@@ -101,7 +101,7 @@ func (a *API) EnsureStageKernel(ctx context.Context) {
 	// 的 registered 字段注释），stageExternalIPs 就少一条候选。
 	a.registerStageAnnouncePort(udpPort)
 	// 启动即探测一次：Announcer 的周期刷新最长要等一个 TTL（5 分钟）才轮到，而
-	// use_external_ip: false 的进程内 LiveKit 对外地址全靠 stageExternalIPs 读快照——
+	// use_external_ip: false 的 lkembed 对外地址全靠 stageExternalIPs 读快照——
 	// 快照空着的那几分钟里建起来的 PeerConnection 只有本机/容器内网的 host 候选，
 	// 跨网络进房必然 ICE 失败。异步是因为 STUN 探测会等不可达服务器超时，
 	// 不能卡在 embedMu 里拖住启动与切选择器的请求；ctx 去掉取消是因为 handler
@@ -126,7 +126,7 @@ func (a *API) StopStageKernel() {
 	}
 }
 
-// stageKernelRunning 进程内 LiveKit 当前是否在跑（推流面 lkembed 的 Enabled 据此判断：
+// stageKernelRunning lkembed 当前是否在跑（推流面 lkembed 的 Enabled 据此判断：
 // 舞台线没选中 lkembed 时服务端根本没起，推过来只会撞连接失败）。
 func (a *API) stageKernelRunning(context.Context) bool {
 	a.embedMu.Lock()

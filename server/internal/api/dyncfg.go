@@ -105,7 +105,7 @@ var selectorEnv = map[string]string{
 
 // warnLegacyConfig 启动时检查已废弃/不再读取的旧环境变量，各打一行日志提示管理员从
 // 部署侧删除。本版本（内核收敛）的告警集：Ember/Bellows/livekit-ingress 退场，
-// 语音/推流已并入进程内 LiveKit（内建实例 lkembed），下列 env 一律不再读取
+// 语音/推流已并入 lkembed，下列 env 一律不再读取
 // （LIVEKIT_API_URL 仍是合法的 env 锁定实例来源，不在其列）。
 // 比照 pion_* 先例只保留一个版本，下个版本删除本函数。
 func (a *API) warnLegacyConfig() {
@@ -123,7 +123,7 @@ func (a *API) warnLegacyConfig() {
 		}
 	}
 	for _, name := range names {
-		log.Printf("配置告警: %s 已不再读取（语音/推流已并入进程内 LiveKit（lkembed）），请从部署侧删除该环境变量", name)
+		log.Printf("配置告警: %s 已不再读取（语音/推流已并入 lkembed），请从部署侧删除该环境变量", name)
 	}
 }
 
@@ -153,7 +153,7 @@ func (a *API) PortWants(ctx context.Context) []portmap.Want {
 			ws = append(ws, portmap.Want{Proto: "tcp", Port: p, Desc: "hearth http"})
 		}
 	}
-	// lkembed（进程内 LiveKit）的媒体端口必须 StrictPort：LiveKit 的候选地址改写（补丁二）只换
+	// lkembed 的媒体端口必须 StrictPort：LiveKit 的候选地址改写（补丁二）只换
 	// IP 不换端口，与 pion 的 SDP 宣告同源限制一致；网关若把外部端口改派成别的号，宣告出去的
 	// 候选端口就是错的，宁可让 Mapper 判定失败、走 port_conflict 诊断，也不能假装映射成功。
 	// 语音线与舞台线任一选中 lkembed 都需要该端口（语音默认即 lkembed）。
@@ -188,7 +188,7 @@ func (a *API) findDynKey(name string) *rtc.ConfigKey {
 func envFixed(k *rtc.ConfigKey) bool { return k.Env != "" && os.Getenv(k.Env) != "" }
 
 // dynVal 取生效值：环境变量（选择器除外） > 数据库 > 实现声明的兜底默认。
-// 选择器默认：voice→lkembed、stage→lkembed（进程内 LiveKit，语音舞台同选即 combined
+// 选择器默认：voice→lkembed、stage→lkembed（语音舞台同选即 combined
 // 单连接）；选择器取到未注册或无对应能力的 alias 时由各 *Instance 取值函数回落（见 providers.go）。
 func (a *API) dynVal(ctx context.Context, name string) string {
 	k := a.findDynKey(name)
@@ -334,7 +334,7 @@ func (a *API) adminSetConfig(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	// 语音/舞台选择器切到/切走 lkembed：立即启停进程内 LiveKit（另起协程，启动要 1 秒级）
+	// 语音/舞台选择器切到/切走 lkembed：立即启停它（另起协程，启动要 1 秒级）
 	if _, ok := req.Values["stage_provider"]; ok {
 		go a.EnsureStageKernel(context.Background())
 	} else if _, ok := req.Values["voice_provider"]; ok {

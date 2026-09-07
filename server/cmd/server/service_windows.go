@@ -1,7 +1,7 @@
 //go:build windows
 
 // Windows 服务化：x/sys/windows/svc + svc/mgr 注册服务（自动启动）；install 时同时用
-// netsh 放行 HTTP 与进程内 LiveKit 媒体端口（卸载时删规则）——非服务模式
+// netsh 放行 HTTP 与 lkembed（进程内的 LiveKit 补丁 fork）媒体端口（卸载时删规则）——非服务模式
 // 首次监听时系统弹一次防火墙询问即可，服务账号弹不出对话框，所以规则在安装时写好。
 // 进程被 SCM 拉起时（IsWindowsService）走 svc.Run 包住主循环并响应停止事件。
 package main

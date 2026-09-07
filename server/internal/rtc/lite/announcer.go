@@ -50,7 +50,7 @@ type Announcer struct {
 	// Announcer 的 Announce() 出过 SDP 才会有值。
 	mediaPort int
 	// registered 显式登记的媒体端口（见 RegisterMediaPort）：调用方自己知道端口号、不需要
-	// 等第一条 SDP 才能登记——用于 lkembed，它的 PeerConnection 由内嵌的 LiveKit 自己建，
+	// 等第一条 SDP 才能登记——用于 lkembed，它的 PeerConnection 由 lkembed 自己建，
 	// 走 ExternalIPs 回调而不经过这个 Announcer 的 Announce()，mediaPort 恒为 0，
 	// Snapshot 就靠这里的登记查到舞台端口的映射。key 是登记名，同名后写覆盖
 	// 前写，端口配置变化或选择器切走时调用方用同一个名字覆盖/清除。

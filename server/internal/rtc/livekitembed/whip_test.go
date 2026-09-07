@@ -18,7 +18,7 @@ import (
 )
 
 // whipLatencyBudget 是「多网卡环境下 WHIP POST 应该多快拿到 201」的验收线，见
-// docs 里对进程内 LiveKit 的 WHIP 时延排查记录：修复前实测稳定 13s（回落到内置
+// docs 里对 lkembed（进程内的 LiveKit 补丁 fork）的 WHIP 时延排查记录：修复前实测稳定 13s（回落到内置
 // google/twilio STUN、真机不可达，等 gathering 超时才应答），修复后本地在 1s 内。
 const whipLatencyBudget = 2 * time.Second
 
@@ -52,7 +52,7 @@ func newWhipTestClient(t *testing.T) *webrtc.PeerConnection {
 	return pc
 }
 
-// whipPublish 用 pc 生成 offer、POST 到进程内 LiveKit 的 WHIP 端点、把 answer 灌回 pc，
+// whipPublish 用 pc 生成 offer、POST 到 lkembed 的 WHIP 端点、把 answer 灌回 pc，
 // 返回 HTTP 响应、answer SDP 正文与 POST 耗时。room 各自独立，identity 相同也不会互踢。
 func whipPublish(t *testing.T, httpPort int, room string, pc *webrtc.PeerConnection) (*http.Response, string, time.Duration) {
 	t.Helper()
@@ -127,7 +127,7 @@ func sdpCandidateLines(sdp string) []string {
 	return out
 }
 
-// TestWhipLatency 是 buildYAML 里显式 node_ip 修复的验收：进程内 LiveKit 的 WHIP
+// TestWhipLatency 是 buildYAML 里显式 node_ip 修复的验收：lkembed 的 WHIP
 // 一次性信令曾经因为「stun_servers: [] 被上游回落成内置 google/twilio STUN，
 // GetAnswer 等 gathering 完成时卡在不可达的 STUN 超时上」稳定卡 13s（见 buildYAML
 // 上方注释），本地环境应在 whipLatencyBudget 内拿到 201。

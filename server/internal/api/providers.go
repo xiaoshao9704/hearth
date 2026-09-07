@@ -1,5 +1,5 @@
 // 内核实例注册表：实例即对象，每条注册构造独立的 rtc 接口对象，api 持 map[alias]实例。
-// 实例来源三类：内建（lkembed 进程内 LiveKit）、env 锁定（环境变量合成，只读）、
+// 实例来源三类：内建（lkembed）、env 锁定（环境变量合成，只读）、
 // DB 注册（providers 表，params 即旧命名空间键名，rtc 实现零改动）。
 // 选择器（voice_provider/stage_provider）的值是实例 alias；推流无选择器，一律随舞台实例。
 package api
@@ -28,7 +28,7 @@ const (
 	TypeLivekitEmbedded = "livekit-embedded"
 )
 
-// AliasLkembed 内建进程内 LiveKit 实例的 alias（不能叫 livekit，那个留给 env 锁定实例）。
+// AliasLkembed 内建实例 lkembed 的 alias（不能叫 livekit，那个留给 env 锁定实例）。
 const AliasLkembed = "lkembed"
 
 // alias 规则：单段小写，出现在 URL 路径里；类型同名的 alias 保留给 env 锁定实例
@@ -91,7 +91,7 @@ func paramsCfg(params map[string]string, fields []rtc.ConfigKey) rtc.ConfigFunc 
 	}
 }
 
-// builtinInstances 内建实例：lkembed 进程内 LiveKit，语音/舞台/推流三面齐全
+// builtinInstances 内建实例：lkembed，语音/舞台/推流三面齐全
 // （语音舞台同选它即 combined 单连接，也是默认形态）。
 func (a *API) builtinInstances() []*ProviderInstance {
 	return []*ProviderInstance{
@@ -419,7 +419,7 @@ func (a *API) migrateEndpointIdentity(ctx context.Context) error {
 }
 
 // migrateKernelConsolidation v6：内核收敛——Ember/Bellows/livekit-ingress 退场，
-// 进程内 LiveKit（lkembed）成为默认内核。选择器默认值已改为 lkembed，空值由新默认
+// lkembed 成为默认内核。选择器默认值已改为 lkembed，空值由新默认
 // 自然覆盖（不落库，管理员之后清空恢复默认不被撤销）；本步只处理显式落库过的旧值：
 //  1. 选择器改写：voice 为 ember/pion/bellows/任何不存在的 alias → lkembed；
 //     stage 显式 none 保持 none，指向已删类型实例或不存在的 alias → lkembed。
@@ -459,7 +459,7 @@ func (a *API) migrateKernelConsolidation(ctx context.Context) error {
 		if err := a.st.SetSetting(ctx, "cfg_voice_provider", AliasLkembed); err != nil {
 			return err
 		}
-		log.Printf("迁移 v6: 语音内核选择器 %q 已不可用，改写为 lkembed（语音并入进程内 LiveKit）", v)
+		log.Printf("迁移 v6: 语音内核选择器 %q 已不可用，改写为 lkembed（语音并入 lkembed）", v)
 	}
 	v, _ = a.st.GetSetting(ctx, "cfg_stage_provider")
 	if v = strings.TrimSpace(v); v != "" && v != "none" && !valid[v] {

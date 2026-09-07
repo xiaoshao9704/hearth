@@ -172,7 +172,7 @@ func TestYAMLUsesFullICEWithoutDefaultServerSTUN(t *testing.T) {
 		"  stun_servers: []\n",
 	} {
 		if !strings.Contains(yaml, want) {
-			t.Fatalf("内嵌 LiveKit ICE 配置缺少 %q:\n%s", want, yaml)
+			t.Fatalf("lkembed（进程内的 LiveKit 补丁 fork）ICE 配置缺少 %q:\n%s", want, yaml)
 		}
 	}
 }

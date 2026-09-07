@@ -59,7 +59,7 @@
 - 舞台内核不再靠「拉外部子进程」自包含：`stage_provider` 选中内建实例 `lkembed`（补丁式 fork 的 LiveKit，进程内跑，见 `rtc/livekitembed`）即在 hearth 自己的进程里热启动/热停止（`API.EnsureStageKernel`），没有第二个进程、没有 redis、没有 ingress。`Dockerfile.release`（CI 装配）与根 `Dockerfile`（本地构建）这一个镜像就是完整形态，不再需要 `-livekit`/`-full` 两档（两个过渡别名 tag 只保留了一个版本，已随内核收敛删掉）。
 - aioinit 因此整体退役：它唯一的职责——按 `EMBED_LIVEKIT`/`EMBED_INGRESS` 拉起外部 livekit-server/redis/ingress、生成 `livekit.yaml`/`ingress.yaml`、把接入地址注入 hearth 环境——随内嵌形态消失而消失，不是「简化保留」，是没有职责剩下；`Dockerfile.aio` 与 `server/cmd/aioinit` 已删除。
 - 残留的 `EMBER_*`/`BELLOWS_*`/`INGRESS_UPSTREAM_URL` 是已删内核的痕迹：一律不再读取，检测到就打一次启动告警（`warnLegacyConfig`，`server/internal/api/dyncfg.go`）提示从部署侧删除。告警集只保留一个版本（比照 `pion_*` 先例），下个版本删除。
-- `/data` 仍是唯一的持久化边界，但只剩数据库：内嵌 LiveKit 的密钥不走 `/data/aio/keys.env`，是 `lkembed_api_key`/`lkembed_api_secret` 两个 DB settings 键，留空时首启生成并落库，随数据库一起备份（见上条「rtc 内核插件模型」）。
+- `/data` 仍是唯一的持久化边界，但只剩数据库：lkembed 的密钥不走 `/data/aio/keys.env`，是 `lkembed_api_key`/`lkembed_api_secret` 两个 DB settings 键，留空时首启生成并落库，随数据库一起备份（见上条「rtc 内核插件模型」）。
 - 前端产物经 `server/internal/webui`（`//go:embed all:dist`）编进二进制，单文件分发成立：CI/Dockerfile 在 `go build` 前把 `web/dist` 拷入该目录（gitignore，只留 `.keep`）；目录为空时 `Handler()` 返回 nil，`main.go` 回落 `STATIC_DIR`（开发期 vite dev 不受影响）。裸机单文件的数据目录：`--data`/`HEARTH_DATA` → 可执行文件旁的 `data/`（便携优先）→ 系统用户目录回落；`DB_PATH` 默认 `<data>/hearth.db`，`.env` 先读工作目录再读 `<data>/.env`（后者不覆盖前者）。
 - 服务化属于单文件三系统的部署能力：`hearth service install|uninstall|start|stop|status`（macOS 用户级 LaunchAgent、Linux systemd 用户级或 `--system` 系统级、Windows SCM）。安装单元固定带 `--data <当前数据目录> --service`；服务日志落 `<data>/hearth.log`，由 `internal/logrot` 按 10MB、5 份备份轮转。Windows 安装时只放行 HTTP 与当前 `lkembed` 媒体端口，不引入 HTTPS/TLS 配置。
 
@@ -76,5 +76,5 @@
 
 - 服务端：`cd server && go build ./... && go vet ./...` 必须通过。
 - 前端：`cd web && npx tsc --noEmit && npm run build` 必须通过。
-- 行为改动尽量本地起服务验证：`go run ./cmd/server` 零外部依赖（选择器默认 voice/stage 均 lkembed，语音 + 投屏开箱可用，浏览器进房说话与投屏可见即通过）。注意 `.env` 里有 `LIVEKIT_*` 时迁移会把选择器落库成 livekit，本地验证要用干净 DB 或先改 settings 里的 `cfg_voice_provider`/`cfg_stage_provider`；lkembed 的媒体端口（默认 47720/udp）被别的 hearth 进程占着时进程内 LiveKit 起不来，管理后台改 `lkembed_udp_port` 即可。
+- 行为改动尽量本地起服务验证：`go run ./cmd/server` 零外部依赖（选择器默认 voice/stage 均 lkembed，语音 + 投屏开箱可用，浏览器进房说话与投屏可见即通过）。注意 `.env` 里有 `LIVEKIT_*` 时迁移会把选择器落库成 livekit，本地验证要用干净 DB 或先改 settings 里的 `cfg_voice_provider`/`cfg_stage_provider`；lkembed 的媒体端口（默认 47720/udp）被别的 hearth 进程占着时 lkembed 起不来，管理后台改 `lkembed_udp_port` 即可。
 - 发布：打 `v*` tag 触发 CI（`.github/workflows/release.yml`，原生交叉编译 + 纯装配镜像，无 QEMU）。

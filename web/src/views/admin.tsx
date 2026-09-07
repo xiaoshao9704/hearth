@@ -376,7 +376,7 @@ const KERNEL_LABELS: Record<string, string> = {
 const GROUP_META: Record<string, [string, string]> = {
   core: ['内核选择', '语音 / 舞台（投屏）分别选服务实例；OBS 推流一律进当前舞台内核'],
   livekit: ['LiveKit', '信令与令牌签发'],
-  stage: ['进程内 LiveKit（舞台）', '舞台选 lkembed 时才启动，信令只监听回环'],
+  stage: ['lkembed（舞台）', '舞台选 lkembed 时才启动，信令只监听回环'],
   network: ['网络', '向默认网关申请端口映射，仅 host 网络或裸机可用'],
   chat: ['聊天', '消息经内核数据通道扇出，hearth 只落库卡片、不经手文件字节'],
   admin: ['管理', '审计流水的保留策略'],
