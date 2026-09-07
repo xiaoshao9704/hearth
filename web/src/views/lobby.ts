@@ -9,8 +9,9 @@ import { openSettings } from './settings';
 const NAME_RE = /^[A-Za-z0-9_-]{1,64}$/;
 const POLL_MS = 15000;
 
-// 通行密钥推荐：登录页留下的一次性标记 + 本设备的「稍后 / 不再提示」记录
+// 通行密钥推荐：登录页留下的一次性标记（register = 刚注册，这次跳过）+ 本会话已弹过 + 本设备的「稍后 / 不再提示」记录
 const VIA_KEY = 'hearth_login_via';
+const NUDGED_KEY = 'hearth_passkey_nudged';
 const NUDGE_KEY = 'hearth_passkey_nudge';
 const NUDGE_SNOOZE_MS = 7 * 24 * 3600_000;
 
@@ -93,13 +94,21 @@ function setNudge(v: string) {
   }
 }
 
-// maybeNudgePasskey 密码登录后的一次性推荐卡（非模态，挂在大厅顶部）。
-// 四个条件都满足才画：这次是密码登录（标记读后即删，保证只在登录后那一次）、
-// 账号还没有通行密钥、不是访客、这台浏览器支持且没被关掉过。
+// maybeNudgePasskey 进大厅时的推荐卡（非模态，挂在大厅顶部）。
+// 不绑定「刚刚密码登录」：升级前就已登录、会话一直存着的人从没触发过登录事件，也该被提醒一次。
+// 每个浏览器会话最多弹一次；刚注册完的人正在建账号，那一次跳过；账号已有通行密钥、访客、
+// 浏览器不支持、本设备关掉过（稍后 7 天 / 不再提示）都不画。
 async function maybeNudgePasskey(host: HTMLElement, alive: () => boolean) {
   const via = sessionStorage.getItem(VIA_KEY);
   sessionStorage.removeItem(VIA_KEY);
-  if (via !== 'password' || !isSupported() || !nudgeAllowed()) return;
+  if (via === 'register') return;
+  let shown = false;
+  try {
+    shown = sessionStorage.getItem(NUDGED_KEY) === '1';
+  } catch {
+    return;
+  }
+  if (shown || !isSupported() || !nudgeAllowed()) return;
   let me;
   try {
     me = await fetchMe(); // passkey_count 只有 /api/me 带
@@ -107,6 +116,11 @@ async function maybeNudgePasskey(host: HTMLElement, alive: () => boolean) {
     return;
   }
   if (!alive() || isGuest(me) || (me.passkey_count ?? 0) > 0) return;
+  try {
+    sessionStorage.setItem(NUDGED_KEY, '1');
+  } catch {
+    /* 存不住就可能下次再弹一次，可接受 */
+  }
 
   host.innerHTML = `
     <div class="card passkey-nudge">

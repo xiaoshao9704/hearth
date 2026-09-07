@@ -7,7 +7,7 @@ import { esc, flameLogo, icon } from '../ui';
 
 const LAST_USER_KEY = 'hearth_last_user';
 const NEXT_KEY = 'hearth_next';
-// 密码登录成功的一次性标记：大厅据此决定要不要弹通行密钥推荐（通行密钥登录不记）
+// 刚注册成功的一次性标记：大厅据此跳过这一次的通行密钥推荐（刚建完账号别再塞一个选择）
 const VIA_KEY = 'hearth_login_via';
 
 const USER_RE = /^[a-zA-Z0-9_-]{2,32}$/;
@@ -216,8 +216,11 @@ export function renderLogin(root: HTMLElement) {
       await loginWithPasskey();
       afterAuth(false);
     } catch (err) {
-      const msg = passkeyErrorText(err);
-      if (msg) errEl.textContent = msg;
+      // 用户明确点了按钮，连「没完成」也要有回音：密码管理器里没有这个站点凭证的人否则只看到按钮弹回
+      const aborted = (err as { name?: string } | null)?.name === 'AbortError';
+      errEl.textContent =
+        passkeyErrorText(err) ||
+        (aborted ? '' : '没有完成通行密钥验证。若用的是密码管理器（如 Bitwarden），请确认它里面已有这个站点的通行密钥');
       busy = false;
       passkeyBtn.classList.remove('loading');
       syncBtn();
@@ -236,11 +239,9 @@ export function renderLogin(root: HTMLElement) {
     try {
       if (mode === 'register') {
         await register(userInput.value.trim(), passInput.value);
+        sessionStorage.setItem(VIA_KEY, 'register');
       } else {
         await login(userInput.value.trim(), passInput.value);
-        // 只有密码登录才记标记：大厅据此在这一次之后弹通行密钥推荐
-        // （刚注册完的人正在建账号，别在那时再塞一个选择）
-        sessionStorage.setItem(VIA_KEY, 'password');
       }
       afterAuth(true);
     } catch (err) {
