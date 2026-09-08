@@ -96,7 +96,7 @@ function ChannelMenu(p: { anchor: HTMLElement; channel: string; opts: ChannelMen
   const copyLink = async () => {
     closeChannelMenu();
     const url = `${location.origin}${location.pathname}#/room/${encodeURIComponent(p.channel)}`;
-    if (await copyText(url)) toast('已复制频道链接', 'ok', 1400);
+    if (await copyText(url)) toast('已复制房间链接', 'ok', 1400);
     else toast('复制失败，请手动复制地址栏', 'bad');
   };
 
@@ -125,7 +125,7 @@ function ChannelMenu(p: { anchor: HTMLElement; channel: string; opts: ChannelMen
       <Show when={!guest}>
         <button type="button" class="hit um-item" role="menuitem" data-act="invite" onClick={() => void copyLink()}>
           {el(icon('copy', 14, 'currentColor'))}
-          <span>复制邀请链接</span>
+          <span>复制房间链接</span>
         </button>
       </Show>
       <Show when={canManage}>
