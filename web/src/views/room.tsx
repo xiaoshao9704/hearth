@@ -126,6 +126,8 @@ function fmtSize(n: number): string {
 
 // ---- 每设备本地音量持久化（0~100，按 identity）----
 const VOLS_KEY = 'hearth_room_volumes';
+// 频道菜单一次性提示：本机进过房就不再出
+const MENU_HINT_KEY = 'hearth_channel_menu_hint';
 
 function loadVolumes(): Map<string, number> {
   try {
@@ -2356,6 +2358,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
             id="channel-menu-trigger"
             class="hit channel-title"
             aria-haspopup="menu"
+            aria-expanded="false"
             title="频道菜单"
             onClick={(ev) =>
               openChannelMenu(ev.currentTarget, channel, {
@@ -2366,9 +2369,9 @@ export async function renderRoom(root: HTMLElement, channel: string) {
               })
             }
           >
-            {el(icon('volume', 17, 'var(--ember)', 1.6))}
+            <span class="ct-hash" aria-hidden="true">#</span>
             <h1>{channel}</h1>
-            {el(icon('chevDown', 13, 'var(--text-2)', 1.9))}
+            <span class="ct-chev">{el(icon('chevDown', 13, 'currentColor', 1.9))}</span>
           </button>
           <div class="vline"></div>
           <span class="sub">{metaText()}</span>
@@ -2998,6 +3001,16 @@ export async function renderRoom(root: HTMLElement, channel: string) {
 
   const dispose = render(App, shell.content);
   const unwireMenu = wireMenuButton(root);
+
+  // 本机第一次进房把频道菜单的存在说一次：频道名看着像标题，不提示没人会去点它
+  try {
+    if (!localStorage.getItem(MENU_HINT_KEY)) {
+      localStorage.setItem(MENU_HINT_KEY, '1');
+      toast('频道操作（推流地址、静音、管理）都在这里 ↑', '', 3000);
+    }
+  } catch {
+    // 隐私模式下 localStorage 不可用：提示不出也不影响进房
+  }
 
   // ---- 频道角色与静音探测 ----
   function syncChannelInfo() {

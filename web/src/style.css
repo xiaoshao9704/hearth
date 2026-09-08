@@ -1338,13 +1338,22 @@ body.theater-on .sidebar { display: none; }
 
 /* ---- 入口整理：频道菜单 ---- */
 
-/* 房间顶栏的频道名就是频道菜单的触发器：看着还是标题，摸着是个按钮 */
+/* 房间顶栏的频道名就是频道菜单的触发器：按钮形（药丸 + 边框 + 常显 chevron）优先于标题感，
+   否则用户找不到「我在本频道」那一层的入口。展开态只读 aria-expanded，不另加类名。 */
 .channel-title {
-  display: flex; align-items: center; gap: 8px; min-width: 0;
-  padding: 5px 8px; margin-left: -4px; border-radius: 8px; color: inherit;
+  display: flex; align-items: center; gap: 7px; min-width: 0;
+  padding: 5px 11px 5px 10px; border-radius: 999px;
+  border: 1px solid var(--line); background: var(--bg-2); color: inherit;
 }
-.channel-title:hover, .channel-title:focus-visible { background: var(--bg-3); }
+.channel-title:hover, .channel-title:focus-visible, .channel-title[aria-expanded='true'] {
+  border-color: var(--ember-line); background: var(--bg-3);
+}
+.channel-title .ct-hash { flex-shrink: 0; font-size: 15px; font-weight: 600; color: var(--ember); }
 .channel-title h1 { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.channel-title .ct-chev {
+  flex-shrink: 0; display: flex; color: var(--text-2); transition: transform 140ms ease;
+}
+.channel-title[aria-expanded='true'] .ct-chev { transform: rotate(180deg); }
 .channel-menu { min-width: 190px; }
 /* 菜单里的分组分隔线（频道管理、离开各自成组） */
 .user-menu .um-sep { height: 1px; margin: 4px 6px; background: var(--line-soft); }

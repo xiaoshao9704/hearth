@@ -19,9 +19,15 @@ export interface ChannelMenuOpts {
 let dispose: (() => void) | null = null;
 let openAnchor: HTMLElement | null = null;
 
+// 触发器的展开态只反映本模块的 openAnchor，不另记一份：房间顶栏的 chevron 靠 aria-expanded 转向
+function markExpanded(anchor: HTMLElement | null, open: boolean) {
+  if (anchor?.hasAttribute('aria-expanded')) anchor.setAttribute('aria-expanded', String(open));
+}
+
 export function closeChannelMenu() {
   dispose?.();
   dispose = null;
+  markExpanded(openAnchor, false);
   openAnchor = null;
 }
 
@@ -37,6 +43,7 @@ export function openChannelMenu(anchor: HTMLElement, channel: string, opts: Chan
   document.body.appendChild(host);
   const d = render(() => <ChannelMenu anchor={anchor} channel={channel} opts={opts} />, host);
   openAnchor = anchor;
+  markExpanded(anchor, true);
   dispose = () => {
     d();
     host.remove();
