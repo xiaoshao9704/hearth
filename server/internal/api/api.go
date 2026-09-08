@@ -55,6 +55,11 @@ type API struct {
 	// 通行密钥：进行中的握手、按 (RP ID, origin) 缓存的 WebAuthn 实例、登录限频（见 passkey.go）
 	passkey passkeyState
 
+	// 离线推送（见 push.go）：VAPID 密钥的生成串行化；pushHTTP 非 nil 时替换投递用的
+	// HTTP 客户端（测试注入假推送网关）
+	webpushMu sync.Mutex
+	pushHTTP  *http.Client
+
 	// announcer 进程内唯一的宣告探测器（STUN/显式公网 IP + 端口映射 → 宣告候选）：
 	// lkembed 的 ExternalIPs 回调从它的快照取外部地址（见 lkembed.go）
 	announcer *lite.Announcer
@@ -127,6 +132,10 @@ func (a *API) Router() *chi.Mux {
 		r.Get("/api/me", a.me)
 		r.Post("/api/client-log", a.clientLog)
 		r.Get("/api/channels", a.listChannels)
+		// 离线推送订阅（见 push.go）：公钥、订阅、退订
+		r.Get("/api/push/vapid", a.pushVAPID)
+		r.Post("/api/push/subscribe", a.pushSubscribe)
+		r.Delete("/api/push/subscribe", a.pushUnsubscribe)
 		r.With(a.requireRole(store.RolePower)).Post("/api/channels", a.createChannel)
 		r.Post("/api/token", a.joinToken)
 
@@ -181,6 +190,10 @@ func (a *API) Router() *chi.Mux {
 				r.Delete("/messages/{msgID}", a.deleteMessage)
 				r.Put("/messages/{msgID}/reactions/{emoji}", a.putReaction)
 				r.Delete("/messages/{msgID}/reactions/{emoji}", a.deleteReaction)
+				// 频道通知静音：本人视角的提醒开关（PUT/DELETE），与上面 requireModerator
+				// 组里对别人施加的禁言（POST /mute）同路径不同方法，互不相干
+				r.Put("/mute", a.muteChannel)
+				r.Delete("/mute", a.unmuteChannel)
 			})
 			r.Group(func(r chi.Router) {
 				r.Use(a.requireModerator)
@@ -489,6 +502,12 @@ func (a *API) listChannels(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "内部错误")
 		return
 	}
+	// 静音是每人每频道的提醒开关（见 push.go）：批量取一次，逐频道填 muted
+	mutes, err := a.st.MutedChannelIDs(r.Context(), u.ID)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "内部错误")
+		return
+	}
 	isSuper := perm.SysAtLeast(u, store.RoleSuper)
 	// 系统 admin+ 在任何频道隐含频道主（与 perm.ChannelRole 同口径，批量填充免逐频道查询）
 	implicit := ""
@@ -512,6 +531,7 @@ func (a *API) listChannels(w http.ResponseWriter, r *http.Request) {
 		}
 		c.Online = counts[c.Name]
 		c.Banned = bans[c.ID]
+		c.Muted = mutes[c.ID]
 		visible = append(visible, *c)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"channels": visible})

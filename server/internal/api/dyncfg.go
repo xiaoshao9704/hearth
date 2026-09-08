@@ -133,6 +133,7 @@ func (a *API) allConfigKeys() []rtc.ConfigKey {
 	keys = append(keys, clientICEKeys...)
 	keys = append(keys, chatKeys...)
 	keys = append(keys, passkeyKeys...)
+	keys = append(keys, webpushKeys...)
 	return append(keys, adminKeys...)
 }
 

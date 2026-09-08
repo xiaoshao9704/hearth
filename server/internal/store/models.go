@@ -219,3 +219,30 @@ type providerRow struct {
 	CreatedAt time.Time `bun:",notnull,default:current_timestamp"`
 	UpdatedAt time.Time `bun:",notnull,default:current_timestamp"`
 }
+
+// pushSubscriptionRow 一条浏览器推送订阅（00008 迁移建表）。endpoint 唯一：同一地址只留
+// 一条（浏览器轮换地址后的旧行由失败计数淘汰）。session_id 是会话指纹（SessionID），
+// 会话下线即删该会话留下的订阅。fail_count 是连续失败计数，达到上限的订阅由接口层删除。
+type pushSubscriptionRow struct {
+	bun.BaseModel `bun:"table:push_subscriptions"`
+
+	ID        int64      `bun:",pk,autoincrement"`
+	UserID    int64      `bun:",notnull"`
+	SessionID string     `bun:",notnull,default:'',type:varchar(64)"`
+	Endpoint  string     `bun:",notnull,unique,type:varchar(512)"` // 列宽的取舍见 00008 迁移
+	P256dh    string     `bun:",notnull,type:varchar(255)"`
+	Auth      string     `bun:",notnull,type:varchar(128)"`
+	UserAgent string     `bun:",notnull,default:'',type:varchar(255)"`
+	CreatedAt time.Time  `bun:",notnull,default:current_timestamp"`
+	LastOkAt  *time.Time // 从未成功送达为空
+	FailCount int64      `bun:",notnull,default:0"`
+}
+
+// channelMuteRow 每用户每频道的通知静音（00008 迁移建表）：有行 = 静音。
+type channelMuteRow struct {
+	bun.BaseModel `bun:"table:channel_mutes"`
+
+	ChannelID int64     `bun:",notnull,unique:uk_channel_mutes"`
+	UserID    int64     `bun:",notnull,unique:uk_channel_mutes"`
+	CreatedAt time.Time `bun:",notnull,default:current_timestamp"`
+}

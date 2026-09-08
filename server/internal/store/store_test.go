@@ -424,8 +424,8 @@ func TestBaselineReopenNoop(t *testing.T) {
 		if err != nil {
 			t.Fatalf("重复 Open 失败: %v", err)
 		}
-		if n := remoteMigrationRows(t, s2.bun.DB); n != 7 {
-			t.Fatalf("重复 Open 后 bun_migrations 应仍为 7 行，实际 %d", n)
+		if n := remoteMigrationRows(t, s2.bun.DB); n != 8 {
+			t.Fatalf("重复 Open 后 bun_migrations 应仍为 8 行，实际 %d", n)
 		}
 		// 数据无损
 		if _, _, err := s2.UserByName(ctx, "alice"); err != nil {
@@ -688,14 +688,14 @@ func TestLegacyUpgradeRemote(t *testing.T) {
 
 			after := remoteTableNames(t, s.bun.DB, tc.name)
 			want := append(slices.Clone(before),
-				"audit_log", "bun_migration_locks", "bun_migrations", "ingest_endpoints", "ingest_tokens",
-				"message_reactions", "passkeys")
+				"audit_log", "bun_migration_locks", "bun_migrations", "channel_mutes", "ingest_endpoints",
+				"ingest_tokens", "message_reactions", "passkeys", "push_subscriptions")
 			slices.Sort(want)
 			if !slices.Equal(after, want) {
 				t.Fatalf("升级后表集合不符:\n got %v\nwant %v", after, want)
 			}
-			if n := remoteMigrationRows(t, s.bun.DB); n != 7 {
-				t.Fatalf("bun_migrations 应有 7 行，实际 %d", n)
+			if n := remoteMigrationRows(t, s.bun.DB); n != 8 {
+				t.Fatalf("bun_migrations 应有 8 行，实际 %d", n)
 			}
 
 			// compat 加列生效：旧库 users 无 is_admin/disabled（baseline ALTER 补齐），

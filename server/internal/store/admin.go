@@ -418,6 +418,10 @@ func (s *Store) SetUserDisabled(ctx context.Context, id int64, disabled bool) er
 		return err
 	}
 	if disabled {
+		// 会话没了，它们留下的推送订阅也不该再收到东西
+		if err := s.DeletePushSubscriptionsOf(ctx, id); err != nil {
+			return err
+		}
 		_, err := s.bun.NewRaw("DELETE FROM sessions WHERE user_id = ?", id).Exec(ctx)
 		return err
 	}
@@ -474,6 +478,8 @@ var userCascadeDeletes = []string{
 	"DELETE FROM channel_members WHERE user_id = ?",
 	"DELETE FROM channel_bans WHERE user_id = ?",
 	"DELETE FROM channel_gags WHERE user_id = ?",
+	"DELETE FROM channel_mutes WHERE user_id = ?",
+	"DELETE FROM push_subscriptions WHERE user_id = ?",
 	"DELETE FROM users WHERE id = ?",
 }
 

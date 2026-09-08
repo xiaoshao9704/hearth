@@ -90,6 +90,8 @@ func (a *API) postMessage(w http.ResponseWriter, r *http.Request) {
 		Content string             `json:"content"`
 		File    *store.MessageFile `json:"file"`
 		ReplyTo *int64             `json:"reply_to"`
+		// 客户端按名册算出的被@用户；只是线索，服务端逐个校验（见 push.go 的 validMentions）
+		Mentions []int64 `json:"mentions"`
 	}
 	if !decode(w, r, &req) {
 		return
@@ -147,12 +149,15 @@ func (a *API) postMessage(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	msg, err := a.st.AddMessage(r.Context(), c.ID, u.ID, kind, content, file, replyTo)
+	mentions := a.validMentions(r.Context(), content, req.Mentions)
+	msg, err := a.st.AddMessage(r.Context(), c.ID, u.ID, kind, content, file, replyTo, mentions...)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "内部错误")
 		return
 	}
 	writeJSON(w, http.StatusCreated, msg)
+	// 被@与被回复的人若开了离线推送，页面关着也该收到；投递不阻塞本次响应
+	a.pushNotifyAsync(r, c.Name, msg, mentions)
 }
 
 // admitChat 聊天读写共用的入场判定（封禁/邀请制/禁言，与进房同一套规则）。

@@ -157,6 +157,7 @@ type Channel struct {
 	Online     int       `bun:"-" json:"online"`  // 当前在房人数（接口层从内核填充）
 	OwnerID    int64     `bun:"-" json:"-"`       // 房主用户 ID（内部用；权威是 channel_members 的 owner 行）
 	Banned     bool      `bun:"-" json:"banned"`  // 当前用户是否被该频道封禁（接口层填充，大厅列表用）
+	Muted      bool      `bun:"-" json:"muted"`   // 当前用户是否静音了该频道的提醒（接口层填充）
 	Hidden     bool      `bun:"-" json:"hidden"`  // 仅 super 能看到的、非成员邀请制频道（普通人看不到，接口层填充）
 }
 
@@ -276,7 +277,12 @@ WHERE s.token = ? AND s.expires_at > ? AND u.disabled = 0`, token, time.Now()).
 	return &u, deviceID, err
 }
 
+// DeleteSession 下线一条会话。推送订阅绑在会话上（session_id 是它的指纹）：
+// 会话没了就不该再往那台设备推，所以两者一起删——退出登录与远程下线走的都是这里。
 func (s *Store) DeleteSession(ctx context.Context, token string) error {
+	if err := s.DeletePushSubscriptionsBySession(ctx, SessionID(token)); err != nil {
+		return err
+	}
 	_, err := s.bun.NewRaw("DELETE FROM sessions WHERE token = ?", token).Exec(ctx)
 	return err
 }
@@ -585,15 +591,24 @@ func scanMessage(sc interface{ Scan(...any) error }) (Message, error) {
 // AddMessage 落一条消息。kind=text 时 file 传 nil；kind=file 时 file 是卡片元数据
 // （字节不入库，由发送方经内核数据通道扇出）。replyTo 非 nil 时是引用回复的目标 id
 // （同频道存在且未删由接口层校验，见 api/chat_messages.go）。
-func (s *Store) AddMessage(ctx context.Context, channelID, userID int64, kind, content string, file *MessageFile, replyTo *int64) (*Message, error) {
+// mentions 是服务端校验过的被@用户（见 api/push.go 的 validMentions），与文件卡片共用
+// meta 列的同一个 JSON 对象；变参而非必填参数，是为了让不关心提及的调用方原样不动。
+func (s *Store) AddMessage(ctx context.Context, channelID, userID int64, kind, content string, file *MessageFile, replyTo *int64, mentions ...int64) (*Message, error) {
 	row := &messageRow{ChannelID: channelID, UserID: userID, Kind: kind, Content: content, ReplyTo: replyTo}
+	meta := map[string]any{}
 	if file != nil {
-		raw, err := json.Marshal(file)
+		meta["name"], meta["mime"], meta["size"] = file.Name, file.Mime, file.Size
+	}
+	if len(mentions) > 0 {
+		meta["mentions"] = mentions
+	}
+	if len(meta) > 0 {
+		raw, err := json.Marshal(meta)
 		if err != nil {
 			return nil, err
 		}
-		meta := string(raw)
-		row.Meta = &meta
+		encoded := string(raw)
+		row.Meta = &encoded
 	}
 	if _, err := s.bun.NewInsert().Model(row).Exec(ctx); err != nil {
 		return nil, err
