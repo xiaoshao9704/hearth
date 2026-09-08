@@ -2,7 +2,7 @@
 import { getUser, listChannels, logout } from './api';
 import type { Channel } from './api';
 import { loadPrefs, savePrefs, notifyPrefsChanged, prefsBus } from './prefs';
-import { avatarHtml, confirmDialog, esc, flameLogo, icon, micIcon } from './ui';
+import { avatarHtml, confirmDialog, esc, flameLogo, icon, micIcon, slashIcon } from './ui';
 import { wireThemeButton } from './theme';
 import { openSettings } from './views/settings';
 
@@ -105,6 +105,10 @@ export function renderShell(root: HTMLElement, opts: ShellOptions = {}): Shell {
   const onPrefs = () => paintMic();
   prefsBus.addEventListener('prefs', onPrefs);
 
+  // 静音开关在别处改完会派这个事件：侧栏立刻重取，不等 15 秒轮询
+  const onChannelsChanged = () => void refreshChannels();
+  window.addEventListener('hearth:channels', onChannelsChanged);
+
   root.querySelector('#side-gear')!.addEventListener('click', () => {
     openSettings('av', { channel: opts.activeChannel });
   });
@@ -175,6 +179,7 @@ export function renderShell(root: HTMLElement, opts: ShellOptions = {}): Shell {
             ${icon('volume', 16, on ? 'var(--ember)' : 'var(--text-2)', 1.6)}
             <span style="flex-grow:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(c.name)}</span>
             ${c.invite_only ? `<span title="邀请制">${icon('shield', 12, 'var(--text-3)', 1.6)}</span>` : ''}
+            ${c.muted ? `<span title="已静音">${slashIcon('bell', 12, true, 'var(--text-3)')}</span>` : ''}
             <span class="count mono">${c.online > 0 ? c.online : ''}</span>
           </a>`;
       })
@@ -224,6 +229,7 @@ export function renderShell(root: HTMLElement, opts: ShellOptions = {}): Shell {
       document.removeEventListener('visibilitychange', onVisible);
       prefsBus.removeEventListener('prefs', onPrefs);
       window.removeEventListener('hearth:user', onUser);
+      window.removeEventListener('hearth:channels', onChannelsChanged);
       closeAcctMenu();
     },
   };

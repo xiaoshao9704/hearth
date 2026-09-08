@@ -40,7 +40,11 @@ export async function fetchMessages(channel: string, after = 0, limit = 50): Pro
   return list ?? [];
 }
 
-export type PostBody = ({ content: string } | { kind: 'file'; file: ChatFileMeta }) & { reply_to?: number };
+// mentions：客户端按名册算出的被@用户 uid（服务端逐个校验后用于离线推送，见 api/push.go）
+export type PostBody = ({ content: string } | { kind: 'file'; file: ChatFileMeta }) & {
+  reply_to?: number;
+  mentions?: number[];
+};
 
 // 发消息：落库成功才算发出（禁言 403、文件超限 413、文本超长 400），返回带 id 的整条消息
 export function postMessage(channel: string, body: PostBody): Promise<ChatMessage> {

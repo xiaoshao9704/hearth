@@ -32,6 +32,7 @@ export interface Channel {
   my_role: ChannelRole; // 当前用户在该频道的角色（服务端下发）
   online: number;
   banned?: boolean; // 当前用户是否被该频道封禁（服务端下发，封禁不影响是否出现在列表里）
+  muted?: boolean; // 当前用户是否静音了该频道的提醒（服务端下发，每人每频道一个开关）
   hidden?: boolean; // 仅 super 能看到的非成员邀请制频道（普通人根本收不到这条，服务端下发）
 }
 
@@ -206,6 +207,13 @@ export async function listChannels(): Promise<Channel[]> {
 
 export async function createChannel(name: string): Promise<Channel> {
   return req<Channel>('/api/channels', { method: 'POST', body: { name } });
+}
+
+// 静音/取消静音一个频道的提醒（每人每频道一个开关，落库即生效）。
+// 改完派 hearth:channels：房间页与大厅重取频道列表，不各存一份布尔
+export async function setChannelMuted(channel: string, muted: boolean): Promise<void> {
+  await req<void>(`/api/channels/${encodeURIComponent(channel)}/mute`, { method: muted ? 'PUT' : 'DELETE' });
+  window.dispatchEvent(new Event('hearth:channels'));
 }
 
 export interface EngineCred {

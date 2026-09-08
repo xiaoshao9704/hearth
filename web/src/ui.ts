@@ -60,6 +60,8 @@ const PATHS: Record<string, string> = {
   more: 'M3.4 10a1.1 1.1 0 102.2 0 1.1 1.1 0 10-2.2 0M8.9 10a1.1 1.1 0 102.2 0 1.1 1.1 0 10-2.2 0M14.4 10a1.1 1.1 0 102.2 0 1.1 1.1 0 10-2.2 0',
   clip: 'M15 9.5l-5.4 5.4a3.2 3.2 0 01-4.5-4.5l6.8-6.8a2.1 2.1 0 013 3l-6.8 6.8a1 1 0 01-1.4-1.4l6-6',
   file: 'M5 2.5h6l4 4v11H5zM11 2.5V7h4',
+  // 铃铛（通知）：静音态复用 slashIcon 加斜杠，不另画一个 bellOff
+  bell: 'M10 3.2a4 4 0 00-4 4v2.6L4.5 13h11L14 9.8V7.2a4 4 0 00-4-4M8.2 15.4a1.9 1.9 0 003.6 0',
 };
 
 export function icon(name: string, size = 16, color = 'currentColor', strokeWidth = 1.7): string {

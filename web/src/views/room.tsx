@@ -14,7 +14,7 @@ import { playCue } from '../audio';
 import { deleteMessage, fetchMessages, postMessage, setReaction } from '../chat';
 import type { ChatMessage } from '../chat';
 import { compressImage } from '../chat/compress';
-import { applyMention, matchMentions, mentionQuery, mentionsUser, splitMentions } from '../chat/mentions';
+import { applyMention, matchMentions, mentionQuery, mentionedUids, mentionsUser, splitMentions } from '../chat/mentions';
 import type { MentionQuery, MentionUser } from '../chat/mentions';
 import { encodeDelete, encodeMessage, encodeReaction, parseEnvelope } from '../chat/protocol';
 import { createEngine } from '../engine';
@@ -296,6 +296,9 @@ export async function renderRoom(root: HTMLElement, channel: string) {
   const settingsCtx = { backLabel: `返回 ${channel}`, channel }; // 浮层按频道自查管理角色（owner/moderator），决定是否出「频道」分区
   const [ownerName, setOwnerName] = createSignal('');
   const [channelId, setChannelId] = createSignal(0); // 本频道 id（频道列表回来才有）：进房凭证与 WHIP 地址都用它
+  // 本频道是否被我静音（服务端下发，见 GET /api/channels 的 muted）：静音 = 不响不弹不推。
+  // 只从频道列表来，页面自己不记第二份——设置浮层里改完会派 hearth:channels，这里重取
+  const [muted, setMuted] = createSignal(false);
   const [ingestOpen, setIngestOpen] = createSignal(false); // 顶栏「OBS 推流」面板
 
   // DOM ref（引擎产的命令式元素挂载点等）
@@ -452,7 +455,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
         if (before.has(k)) return;
         joined = true;
         pushRoomEvent(ingest ? `${name === '你' ? '你的' : `${name} 的`} OBS 开始推流` : `${name} 进入了房间`);
-        if (!ingest) notifyJoin(name, () => switchPanel('members'));
+        if (!ingest && !muted()) notifyJoin(name, channel, () => switchPanel('members'));
       });
       before.forEach((name, k) => {
         if (after.has(k)) return;
@@ -460,7 +463,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
         pushRoomEvent(ingest ? `${name === '你' ? '你的' : `${name} 的`} OBS 停止推流` : `${name} 离开了房间`);
       });
     }
-    if (!loadPrefs().joinCue) return;
+    if (muted() || !loadPrefs().joinCue) return;
     if (joined) playCue('join');
     if (left) playCue('leave');
   }
@@ -968,9 +971,24 @@ export async function renderRoom(root: HTMLElement, channel: string) {
       }
     });
   };
+  // 图标角标：只在支持的平台有效果（未安装的桌面浏览器多数没有），失败不影响任何逻辑
+  function setAppBadge(n: number) {
+    const nav = navigator as Navigator & {
+      setAppBadge?: (n?: number) => Promise<void>;
+      clearAppBadge?: () => Promise<void>;
+    };
+    try {
+      if (n > 0) void nav.setAppBadge?.(n)?.catch(() => {});
+      else void nav.clearAppBadge?.()?.catch(() => {});
+    } catch {
+      /* 不支持角标：忽略 */
+    }
+  }
+
   const onVisible = () => {
     diag('info', 'visibility_changed', undefined, { state: document.visibilityState });
     if (document.visibilityState !== 'visible') return;
+    setAppBadge(0); // 人回来了：角标先清零（未读计数由下面按面板状态处置）
     retryNow();
     // 回到前台且聊天面板开着：未读视为已看
     if (panel() === 'chat') {
@@ -1433,12 +1451,21 @@ export async function renderRoom(root: HTMLElement, channel: string) {
     const hidden = panel() !== 'chat' || document.visibilityState !== 'visible';
     if (hidden) setUnread((u) => u + 1);
     if (hidden) unreadMark.note(m.id);
-    // 被 @ 走单独一档提示音：它比普通消息重要，不受聊天提示音的节流与"面板开着就不响"限制
-    const mentioned = live && m.kind === 'text' && mentionsUser(m.content, mentionUsers(), myUid);
+    // 静音这个频道 = 不响不弹（未读计数照算，视觉上还看得见）：@ 与回复也不例外
+    if (muted()) return;
+    // 被 @ 与被回复同一档：都是"有人点名找我"，比普通消息重要，
+    // 不受聊天提示音的节流与"面板开着就不响"限制
+    const mentioned = live && m.kind === 'text' && (mentionsUser(m.content, mentionUsers(), myUid) || replyToMe(m));
     if (mentioned) onMention(m);
     else if (live && hidden) playChatCue();
     // 提示音与系统通知各一次：被 @ 与否都只发一条通知，档次由 mentioned 决定
-    if (live) notifyMessage(m, mentioned, () => switchPanel('chat'));
+    if (live) notifyMessage(m, mentioned, channel, () => switchPanel('chat'));
+  }
+
+  // 回复我的消息视同被 @：被引的那条在手上的列表里找，找不到（历史还没补齐）按不是
+  function replyToMe(m: ChatMessage): boolean {
+    if (!m.reply_to) return false;
+    return msgs().find((x) => x.id === m.reply_to)?.uid === myUid;
   }
 
   // 被 @ 的统一入口：只管提示音；系统通知在 appendMessage 里按同一个判定发，两者各一次
@@ -1639,7 +1666,9 @@ export async function renderRoom(root: HTMLElement, channel: string) {
     setMentionQ(null);
     setReplyToId(null);
     try {
-      const m = await postMessage(channel, quoted ? { content, reply_to: quoted } : { content });
+      // mentions 是给服务端的线索（离线推送的目标）：它会逐个校验，不认的丢掉
+      const mentions = mentionedUids(content, mentionUsers());
+      const m = await postMessage(channel, quoted ? { content, reply_to: quoted, mentions } : { content, mentions });
       appendMessage(m);
       broadcast(encodeMessage(m));
     } catch (err) {
@@ -2154,10 +2183,12 @@ export async function renderRoom(root: HTMLElement, channel: string) {
       if (last && !('sys' in last) && last.uid !== myUid) setNewBelow(true);
     });
 
-    // 未读计数上标题；离开房间由路由重写 title，清理块再做兜底还原
+    // 未读计数上标题与图标角标（角标只在装成 PWA / 支持的桌面浏览器上看得见）；
+    // 离开房间由路由重写 title，清理块再做兜底还原
     createEffect(() => {
       const n = unread();
       document.title = n > 0 ? `(${n > 99 ? '99+' : n}) ${roomTitle}` : roomTitle;
+      setAppBadge(n);
     });
 
     // 被禁言：按钮状态从名册派生（checkSelfGag 的影子变量只管跳变 toast）
@@ -2872,15 +2903,22 @@ export async function renderRoom(root: HTMLElement, channel: string) {
   const dispose = render(App, shell.content);
   const unwireMenu = wireMenuButton(root);
 
-  // ---- 频道角色探测 ----
-  void listChannels()
-    .then((chs) => {
-      const ch = chs.find((c) => c.name === channel);
-      setChannelId(ch?.id ?? 0);
-      setMyRoleSig(ch?.my_role ?? '');
-      setOwnerName(ch?.created_by ?? '');
-    })
-    .catch(() => {});
+  // ---- 频道角色与静音探测 ----
+  function syncChannelInfo() {
+    void listChannels()
+      .then((chs) => {
+        const ch = chs.find((c) => c.name === channel);
+        setChannelId(ch?.id ?? 0);
+        setMyRoleSig(ch?.my_role ?? '');
+        setOwnerName(ch?.created_by ?? '');
+        setMuted(ch?.muted === true);
+      })
+      .catch(() => {});
+  }
+  syncChannelInfo();
+  // 静音开关在设置浮层/大厅卡片上，改完派这个事件；房间重取列表而不是自己记一份
+  const onChannelsChanged = () => syncChannelInfo();
+  window.addEventListener('hearth:channels', onChannelsChanged);
 
   // ---- 首次连接与清理 ----
   // 清理监听必须先于首次连接注册：连接期间用户离开时，清理块要能置 leaving 并释放已建好的部分
@@ -2902,11 +2940,13 @@ export async function renderRoom(root: HTMLElement, channel: string) {
       window.removeEventListener('offline', onOffline);
       window.removeEventListener('pagehide', onPageHide);
       window.removeEventListener('hearth:user', onUserChanged);
+      window.removeEventListener('hearth:channels', onChannelsChanged);
       clearLeavePrompt();
       window.removeEventListener('error', onWindowError);
       window.removeEventListener('unhandledrejection', onUnhandledRejection);
       // title 兜底还原：正常已由 route() 换成新页面标题，只在 title 仍属本房间时去掉未读前缀
       if (document.title.endsWith(roomTitle)) document.title = roomTitle;
+      setAppBadge(0);
       diag('info', 'room_close');
       leaving = true;
       pipCtl.dispose();

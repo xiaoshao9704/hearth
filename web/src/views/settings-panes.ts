@@ -18,6 +18,7 @@ import {
   listMyDevices,
   logout,
   resetIngestToken,
+  setChannelMuted,
   setIngestTag,
   updatePassword,
   updateUsername,
@@ -36,6 +37,7 @@ import type { DenoiseMode, ScreenCodec } from '../prefs';
 import { getTheme, setTheme } from '../theme';
 import type { Theme } from '../theme';
 import { armNotifyPermission, notifyState } from '../notify';
+import { state as pushState, subscribe as pushSubscribe, unsubscribe as pushUnsubscribe, unsupportedReason } from '../push';
 import { renderPasskeys, renderSessions } from './account-pane';
 import { avatarHtml, confirmDialog, copyText, esc, icon, pwBarsHtml, pwScore, slashIcon, timeAgo, toast } from '../ui';
 
@@ -67,7 +69,7 @@ export function renderPane(body: HTMLElement, pane: PersonalPane, host: PaneHost
       renderAppearance(body);
       return;
     case 'av':
-      return renderAV(body);
+      return renderAV(body, host.channel);
     case 'screen':
       renderScreen(body, () => host.go('stream'));
       return;
@@ -380,7 +382,8 @@ async function enumerate(kind: MediaDeviceKind): Promise<MediaDeviceOpt[]> {
   }
 }
 
-function renderAV(body: HTMLElement): () => void {
+// channel 非空 = 从某个频道里打开的设置：通知区块多一个「静音这个频道」开关
+function renderAV(body: HTMLElement, channel?: string): () => void {
   const prefs = loadPrefs();
   let openPicker = '';
   let micStream: MediaStream | null = null;
@@ -461,6 +464,24 @@ function renderAV(body: HTMLElement): () => void {
           </div>
           <div class="switch ${prefs.notifyJoins ? 'on' : ''}" id="notify-join-switch"><div class="knob"></div></div>
         </button>
+        <button class="hit switch-row" id="notify-push-row" style="width:100%;text-align:left">
+          <div style="flex-grow:1">
+            <div class="s-title">离线推送（被 @ 和回复）</div>
+            <div class="s-desc" id="notify-push-desc">页面关着也能收到别人 @ 你或回复你的消息；普通消息不推</div>
+          </div>
+          <div class="switch" id="notify-push-switch"><div class="knob"></div></div>
+        </button>
+        ${
+          channel
+            ? `<button class="hit switch-row" id="notify-mute-row" style="width:100%;text-align:left">
+          <div style="flex-grow:1">
+            <div class="s-title">静音「${esc(channel)}」</div>
+            <div class="s-desc">这个频道不再响提示音、不弹通知、不发离线推送（被 @ 和回复也不例外）</div>
+          </div>
+          <div class="switch" id="notify-mute-switch"><div class="knob"></div></div>
+        </button>`
+            : ''
+        }
         <div class="opt-list" id="audio-chain"></div>
         <div class="kv-line">
           <span class="k">离开状态</span>
@@ -812,6 +833,62 @@ function renderAV(body: HTMLElement): () => void {
       save(key);
     });
   });
+
+  // 离线推送开关：状态以浏览器里的订阅为准（见 push.ts），本地不存副本
+  const pushSwitch = body.querySelector<HTMLDivElement>('#notify-push-switch')!;
+  const pushDesc = body.querySelector<HTMLDivElement>('#notify-push-desc')!;
+  const pushRow = body.querySelector<HTMLButtonElement>('#notify-push-row')!;
+  const pushBlocked = unsupportedReason();
+  if (pushBlocked) {
+    pushDesc.textContent = pushBlocked;
+    pushDesc.classList.add('bad');
+    pushRow.disabled = true;
+  } else {
+    void pushState().then((on) => pushSwitch.classList.toggle('on', on));
+  }
+  let pushBusy = false;
+  pushRow.addEventListener('click', async () => {
+    if (pushBlocked || pushBusy) return;
+    pushBusy = true;
+    const on = pushSwitch.classList.contains('on');
+    try {
+      if (on) await pushUnsubscribe();
+      else await pushSubscribe();
+      toast(on ? '已关闭离线推送' : '已开启离线推送', 'ok');
+    } catch (err) {
+      toast((err as Error).message, 'bad');
+    } finally {
+      pushBusy = false;
+      pushSwitch.classList.toggle('on', await pushState()); // 一律以浏览器的实际订阅收尾
+    }
+  });
+
+  // 频道静音开关（只在从房间里打开设置时出现）：落库即生效，每次操作 toast
+  const muteRow = body.querySelector<HTMLButtonElement>('#notify-mute-row');
+  const muteSwitch = body.querySelector<HTMLDivElement>('#notify-mute-switch');
+  if (channel && muteRow && muteSwitch) {
+    const paintMute = () =>
+      void listChannels()
+        .then((chs) => muteSwitch.classList.toggle('on', chs.find((c) => c.name === channel)?.muted === true))
+        .catch(() => {});
+    paintMute();
+    let muteBusy = false;
+    muteRow.addEventListener('click', async () => {
+      if (muteBusy) return;
+      muteBusy = true;
+      const on = muteSwitch.classList.contains('on');
+      try {
+        await setChannelMuted(channel, !on);
+        muteSwitch.classList.toggle('on', !on);
+        toast(on ? `已恢复「${channel}」的提醒` : `已静音「${channel}」`, 'ok');
+      } catch (err) {
+        toast((err as Error).message, 'bad');
+        paintMute();
+      } finally {
+        muteBusy = false;
+      }
+    });
+  }
 
   const mirrorSwitch = body.querySelector<HTMLDivElement>('#mirror-switch')!;
   body.querySelector('#mirror-row')!.addEventListener('click', () => {

@@ -786,6 +786,9 @@ body {
 .channel-card-wrap { position: relative; height: 100%; }
 .channel-card { height: 100%; color: var(--text-0); text-decoration: none; }
 .channel-card-wrap .card-gear { position: absolute; top: 12px; right: 12px; }
+/* 静音开关与齿轮并列（有管理权限时排在齿轮左边，没有就占齿轮的位置） */
+.channel-card-wrap .card-bell { position: absolute; top: 12px; right: 46px; }
+.channel-card-wrap .card-bell.solo { right: 12px; }
 /* 创建频道输入框校验失败：不占用 .field（这里没有该容器），直接标红输入框本身 */
 .input-bad { box-shadow: inset 0 0 0 1.5px var(--red); border-radius: 6px; }
 /* 「服务器在线」chip 的离线态，尺寸对齐既有 .ok-dot */

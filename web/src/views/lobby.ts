@@ -1,9 +1,9 @@
 // 大厅：频道卡片、创建频道、设备提示。
-import { canInvite, createChannel, fetchMe, getUser, guestTimeLeft, isGuest, listChannels } from '../api';
+import { canInvite, createChannel, fetchMe, getUser, guestTimeLeft, isGuest, listChannels, setChannelMuted } from '../api';
 import type { Channel } from '../api';
 import { isSupported, passkeyErrorDetail, registerPasskey } from '../passkey';
 import { renderShell } from '../shell';
-import { esc, icon, menuButtonHtml, toast, wireMenuButton } from '../ui';
+import { esc, icon, menuButtonHtml, slashIcon, toast, wireMenuButton } from '../ui';
 import { openSettings } from './settings';
 
 const NAME_RE = /^[A-Za-z0-9_-]{1,64}$/;
@@ -41,6 +41,7 @@ function cardHtml(c: Channel): string {
   const roleTag =
     c.my_role === 'owner' ? '<span class="tag">我的频道</span>' : c.my_role === 'moderator' ? '<span class="tag">我管理的</span>' : '';
   const hiddenTag = c.hidden ? '<span class="tag tag-red">隐藏中</span>' : '';
+  const mutedTag = c.muted ? `<span class="tag" title="已静音">${slashIcon('bell', 11, true, 'currentColor')}静音</span>` : '';
   const canManage = c.my_role === 'owner' || c.my_role === 'moderator';
   // 被封禁：卡片不可进入（用 div 而非 a，不给出可点的 href），状态与按钮都改成封禁提示
   const tag = banned ? 'div' : 'a';
@@ -58,6 +59,7 @@ function cardHtml(c: Channel): string {
               <span class="name">${esc(c.name)}</span>
               ${c.invite_only ? '<span class="tag tag-ember">邀请制</span>' : ''}
               ${hiddenTag}
+              ${mutedTag}
               ${roleTag}
             </div>
             <div class="status ${busy ? 'busy' : ''}">${statusHtml}</div>
@@ -69,6 +71,8 @@ function cardHtml(c: Channel): string {
           <div class="join-btn">${icon('back', 15, 'var(--on-ember)', 1.8)}<span>${banned ? '无法进入' : '加入'}</span></div>
         </div>
       </${tag}>
+      <button type="button" class="hit btn btn-icon btn-sm card-bell${canManage ? '' : ' solo'}" data-bell="${esc(c.name)}"
+        title="${c.muted ? '取消静音' : '静音这个频道的提醒'}" aria-label="${c.muted ? '取消静音' : '静音'}">${slashIcon('bell', 14, !!c.muted, c.muted ? 'var(--text-3)' : 'var(--text-1)')}</button>
       ${canManage ? `<button type="button" class="hit btn btn-icon btn-sm card-gear" data-gear="${esc(c.name)}" title="频道管理" aria-label="频道管理">${icon('gear', 14, 'var(--text-1)', 1.7)}</button>` : ''}
     </div>`;
 }
@@ -287,6 +291,22 @@ export async function renderLobby(root: HTMLElement, alive: () => boolean) {
       btn.addEventListener('click', (ev) => {
         ev.stopPropagation();
         openSettings('channel', { channel: btn.dataset.gear! });
+      });
+    });
+    // 静音开关：落库即生效，成功后重画卡片（状态只从服务端来）
+    cardsEl.querySelectorAll<HTMLButtonElement>('[data-bell]').forEach((btn) => {
+      btn.addEventListener('click', async (ev) => {
+        ev.stopPropagation();
+        ev.preventDefault();
+        const name = btn.dataset.bell!;
+        const on = channels.find((c) => c.name === name)?.muted === true;
+        try {
+          await setChannelMuted(name, !on);
+          toast(on ? `已恢复「${name}」的提醒` : `已静音「${name}」`, 'ok');
+          await paint();
+        } catch (err) {
+          toast((err as Error).message, 'bad');
+        }
       });
     });
   }

@@ -43,14 +43,29 @@ export function armNotifyPermission() {
   window.addEventListener('keydown', once, true);
 }
 
-// show 发一条通知；点击聚焦本窗口并执行 onOpen（打开聊天抽屉）。
-function show(tag: string, title: string, body: string, onOpen: () => void) {
+// show 发一条通知。优先走 Service Worker 的 showNotification：Android Chrome 只认这条路
+// （页面里直接 new Notification 会抛），而且点通知的处置在 worker 侧统一（见
+// public/service-worker.js 的 notificationclick：聚焦已有窗口并让它切到该频道）。
+// 没有 worker（未注册成功、http 非 localhost）才回落页面通知，点击时执行 onOpen。
+function show(tag: string, title: string, body: string, channel: string, onOpen: () => void) {
   if (permission() !== 'granted') return;
+  const opts: NotificationOptions = { body, tag, icon: '/icons/icon-192.png', data: { channel } };
+  const reg = navigator.serviceWorker?.ready;
+  if (reg) {
+    void reg
+      .then((r) => r.showNotification(title, opts))
+      .catch(() => showInPage(tag, title, body, onOpen));
+    return;
+  }
+  showInPage(tag, title, body, onOpen);
+}
+
+function showInPage(tag: string, title: string, body: string, onOpen: () => void) {
   let n: Notification;
   try {
     n = new Notification(title, { body, tag, icon: '/icons/icon-192.png' });
   } catch {
-    // Android Chrome 里页面直接 new Notification 会抛（要求 ServiceWorkerRegistration.showNotification）
+    // 老 Android Chrome 等要求 ServiceWorkerRegistration.showNotification 的浏览器：放弃
     return;
   }
   n.onclick = () => {
@@ -68,23 +83,24 @@ interface NotifiableMessage {
 
 // notifyMessage 实时到达的他人消息：页面在后台且对应开关开着时发通知。
 // 无论开关如何都会"备好"权限申请——第一条消息就是最合适的申请时机。
-// mentioned 由调用方按 chat/mentions.ts 判定（按名册 uid，不按用户名），
-// 保证提示音与通知认的是同一件事。
-export function notifyMessage(m: NotifiableMessage, mentioned: boolean, onOpen: () => void) {
+// mentioned 由调用方按 chat/mentions.ts 判定（按名册 uid，不按用户名）并把"回复我的"
+// 也算进去，保证提示音、通知与离线推送认的是同一件事。
+// channel 随通知带上：点通知由 Service Worker 直达该频道。
+export function notifyMessage(m: NotifiableMessage, mentioned: boolean, channel: string, onOpen: () => void) {
   armNotifyPermission();
   if (document.visibilityState === 'visible') return;
   const prefs = loadPrefs();
   if (mentioned ? !prefs.notifyMentions : !prefs.notifyMessages) return;
   const who = m.username || '有人';
   const body = m.kind === 'file' ? '发来一个文件' : m.content.slice(0, 120);
-  show(TAG_CHAT, mentioned ? `${who} 提到了你` : who, body, onOpen);
+  show(TAG_CHAT, mentioned ? `${who} 提到了你` : who, body, channel, onOpen);
 }
 
 // notifyJoin 有人进房：默认关（人来人往比消息吵得多），开了才发。
-export function notifyJoin(name: string, onOpen: () => void) {
+export function notifyJoin(name: string, channel: string, onOpen: () => void) {
   if (document.visibilityState === 'visible') return;
   if (!loadPrefs().notifyJoins) return;
-  show(TAG_JOIN, 'Hearth', `${name} 进入了房间`, onOpen);
+  show(TAG_JOIN, 'Hearth', `${name} 进入了房间`, channel, onOpen);
 }
 
 // notifyState 给设置面板显示当前权限状态。
