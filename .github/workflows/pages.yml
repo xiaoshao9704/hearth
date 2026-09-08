@@ -1,0 +1,39 @@
+# 宣传页发布：site/ 是纯静态单文件（零外链），原样上传成 Pages artifact，没有构建步骤。
+# 仓库侧要先在 Settings → Pages 把来源选成 GitHub Actions，否则 deploy 一步会失败。
+name: pages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "site/**"
+      - ".github/workflows/pages.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write # deploy-pages 用 OIDC 换部署凭证
+
+# 同时只跑一个部署；排队而不取消在途的那次，避免半上传的产物成为线上版本
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/configure-pages@v6
+
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: site
+
+      - uses: actions/deploy-pages@v5
+        id: deploy
