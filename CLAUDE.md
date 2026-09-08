@@ -50,7 +50,9 @@
 
 - 房间页是 Solid（`views/room.tsx`）：状态一律走信号/派生 memo，**禁止**引入第二真相源（手工同步的布尔副本）；引擎产的媒体元素是命令式节点，用 ref 挂载不重建。
 - 设置浮层骨架（`views/settings.tsx`）、频道管理（`views/manage.tsx`）、管理后台（`views/admin.tsx`）也是 Solid；设置的个人 pane 暂留命令式渲染（`settings-panes.ts`，由骨架挂进容器、切页调清理函数），逐个迁移即可。一次性渲染的轻页面（shell/lobby/login/join）保持 vanilla TS；vite-plugin-solid 只处理 `.tsx`。
-- 设置的三个维度：个人（跟账号/本机走，即改即存）、频道（房主与频道管理员视角，落库即生效、每次操作 toast）、服务器（管理后台 `#/admin`，浮层里只放跳转）。所有齿轮入口都开同一个浮层，只是落点不同；浮层按 `channel` 上下文自查 `my_role`（owner/moderator）决定是否出「频道」分区，入口不必区分谁是房主。
+- 入口分四层，边界不许混：**个人**（设备、投屏画质、外观、通知、账号、推流令牌与设备标签——设置浮层，内容不随打开位置变）、**我在本频道**（静音、OBS 推流地址、复制邀请链接、离开——频道菜单 `views/room/channel-menu.tsx`，房间顶栏频道名与大厅卡片「…」共用同一份）、**频道管理**（成员/名单/管理员/转让/邀请制——频道菜单的「频道管理…」进设置浮层的「频道」分区，owner/moderator 可见）、**服务器**（管理后台 `#/admin`——账户菜单 `account-menu.ts` 的「管理后台」，admin+ 可见）。
+- 设置浮层里落频道级内容即为混入：个人 pane 不接频道上下文（`PaneHost` 无 `channel`），「频道」分区仍按 `ctx.channel` 自查 `my_role`（owner/moderator），入口不必区分谁是房主。菜单项显隐一律按服务端返回的 `role`/`my_role`，前端不推导权限。
+- 右键菜单必配长按与触屏可见入口：`onContextMenu` 旁一律接 `longpress.ts` 的 `wireLongPress`（列表类在容器上委托一次、按 `closest` 找行），并保证 `(hover: none)` 下有常显的按钮入口；触屏没有右键，也不该只靠手势。
 - CSS 统一在 `src/style.css`，类名复用既有设计系统（ember 主题、三态明暗），选择器注意特异性（button 重置用零特异性 `:where`）。
 - 引擎抽象 `engine/types.ts`：注册表只剩 `livekit` 一个实现（`engine/index.ts` 动态导入，保持代码分割）；新内核实现 `AVEngine` 即可挂回注册表。
 
