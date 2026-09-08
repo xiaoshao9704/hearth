@@ -28,6 +28,8 @@ import { avatarHtml, confirmDialog, el, esc, fmtClock, icon, licon, menuButtonHt
 import { CameraFlipButton } from './room/camera-flip';
 import { ConnPanel, QualityMark } from './room/conn-panel';
 import type { ConnRow } from './room/conn-panel';
+import { LatencyResult, measureTile, showTileMenu } from './room/latency-result';
+import type { LatencyState } from './room/latency-result';
 import { IngestBadge } from './room/ingest-badge';
 import { IngestPanel } from './room/ingest-panel';
 import { createUnreadMarker } from './room/unread-divider';
@@ -306,6 +308,8 @@ export async function renderRoom(root: HTMLElement, channel: string) {
   const [muted, setMuted] = createSignal(false);
   const [ingestOpen, setIngestOpen] = createSignal(false); // 顶栏「OBS 推流」面板
   const [connOpen, setConnOpen] = createSignal(false); // 顶栏 conn-chip 点开的连接读数面板
+  // 端到端延迟测量：同一时刻只测一路，结果面板贴在被测卡片上（key 决定是哪张）
+  const [latency, setLatency] = createSignal<LatencyState | null>(null);
   let connAnchor: HTMLElement | null = null; // 面板的定位锚（点开那一下的 chip 元素）
 
   // 面板行：合并形态两种角色同一条连接，只出一行
@@ -1949,7 +1953,23 @@ export async function renderRoom(root: HTMLElement, channel: string) {
           >
             {el(icon('fullscreen', 15))}
           </button>
+          {/* 本机预览没经过服务器，测不出全程延迟：菜单只给远端画面（浏览器投屏与 OBS 推流都适用） */}
+          <Show when={!e.isLocal}>
+            <button
+              class="hit tact tact-more"
+              title="更多操作"
+              onClick={(ev) => {
+                ev.stopPropagation();
+                showTileMenu(ev.clientX, ev.clientY, () => void measureTile(e.key, e.video, setLatency));
+              }}
+            >
+              {el(icon('more', 15))}
+            </button>
+          </Show>
         </div>
+        <Show when={latency()?.key === e.key}>
+          <LatencyResult state={() => latency()!} onClose={() => setLatency(null)} />
+        </Show>
         {/* 全屏控制条：远端卡片给音量滑条（本机卡片没有可调的声音）；退出全屏在右上角 */}
         <Show when={isFs() && !e.isLocal}>
           <div class="fs-bar" onClick={(ev) => ev.stopPropagation()}>

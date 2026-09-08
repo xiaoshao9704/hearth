@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
+    "test": "tsc src/latency/code.ts --outDir test/tmp --target es2022 --module esnext --strict --skipLibCheck && node --test test/*.test.mjs",
     "preview": "vite preview"
   },
   "dependencies": {

@@ -123,6 +123,8 @@ func (a *API) Router() *chi.Mux {
 
 	// 健康检查：只表示进程活着（宣告探测的刷新由进程内周期任务触发，不挂在这里）
 	r.Get("/healthz", a.healthz)
+	// 延迟标尺的时钟对齐（见 docs/plan-latency.md）：与 healthz 同档，匿名可达、无副作用
+	r.Get("/api/time", a.serverTime)
 
 	// 需登录
 	r.Group(func(r chi.Router) {

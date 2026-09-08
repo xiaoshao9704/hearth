@@ -872,3 +872,13 @@ export function adminGetPolicy(): Promise<{ policy: string; default_role: string
 export function adminSetPolicy(policy: string, defaultRole: string): Promise<{ policy: string; default_role: string }> {
   return req('/api/admin/policy', { method: 'POST', body: { policy, default_role: defaultRole } });
 }
+
+// 延迟标尺的时钟源（`GET /api/time`，无需登录）：不走 req()，标尺页可能根本没有会话，
+// 也不该让一次时钟校准触发 401 的清会话跳转
+export async function fetchServerTime(): Promise<number> {
+  const res = await fetch(`${SERVER_URL}/api/time`, { signal: AbortSignal.timeout(5000) });
+  if (!res.ok) throw new ApiError(res.status, statusMessage(res.status));
+  const data = (await res.json()) as { now_ms?: number };
+  if (typeof data.now_ms !== 'number') throw new ApiError(0, '服务器时间格式错误');
+  return data.now_ms;
+}

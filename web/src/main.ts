@@ -5,6 +5,7 @@ import { fetchMe, getToken } from './api';
 import { allowLeave } from './nav';
 import { renderAdmin } from './views/admin';
 import { renderJoin } from './views/join';
+import { renderLatency } from './views/latency';
 import { isLobbyHash, renderLobby } from './views/lobby';
 import { renderLogin } from './views/login';
 import { renderManage } from './views/manage';
@@ -37,6 +38,13 @@ function route() {
   if (hash.startsWith('#/join/')) {
     document.title = '加入 Hearth';
     void renderJoin(app, decodeURIComponent(hash.slice('#/join/'.length)), alive);
+    return;
+  }
+
+  // 延迟标尺：全屏一页，不需要登录（只读 /api/time），与 #/join/ 同档排在登录判定之前
+  if (hash.startsWith('#/latency')) {
+    document.title = '延迟标尺 · Hearth';
+    void renderLatency(app, alive);
     return;
   }
 
