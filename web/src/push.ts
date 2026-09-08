@@ -7,6 +7,28 @@
 //     普通 Safari 标签页里连 PushManager 都没有，这时该给出理由而不是让开关静默失效。
 import { apiRequest } from './api';
 
+// 用户在设置里主动关过离线推送时写 '1'：自动订阅路径（授权瞬间、页面启动补订阅）看到就不再打扰。
+// 手动打开时清掉——这两个是本模块唯一的写点，键名不对外暴露。
+const OFF_KEY = 'hearth_push_off';
+
+function isOptedOut(): boolean {
+  try {
+    return localStorage.getItem(OFF_KEY) === '1';
+  } catch {
+    return false; // 存储不可用（隐私模式等）时退化为"每次都可自动订阅"
+  }
+}
+
+// setPushOptOut 手动开关的落点：关闭时 off=true，打开时 off=false。
+export function setPushOptOut(off: boolean): void {
+  try {
+    if (off) localStorage.setItem(OFF_KEY, '1');
+    else localStorage.removeItem(OFF_KEY);
+  } catch {
+    // 忽略：存储不可用不影响当次订阅/退订本身
+  }
+}
+
 // urlBase64ToUint8Array VAPID 公钥（base64url）转 applicationServerKey 要的字节
 function urlBase64ToUint8Array(base64: string): Uint8Array {
   const padded = base64.replace(/-/g, '+').replace(/_/g, '/') + '='.repeat((4 - (base64.length % 4)) % 4);
@@ -111,5 +133,19 @@ export async function syncSubscription(): Promise<void> {
     if (sub) await report(sub);
   } catch {
     // 对账失败不影响任何功能：下次启动或用户手动开关时再来
+  }
+}
+
+// autoSubscribeIfAllowed 两处调用的自动订阅：通知权限刚变 granted 的那一刻、
+// 以及页面启动时补一次（覆盖已授权但还没订阅的老用户）。失败静默——
+// 自动路径不该弹错误打扰用户，手动开关那条路径才提示。
+export async function autoSubscribeIfAllowed(): Promise<void> {
+  if (!isSupported() || isOptedOut()) return;
+  if (Notification.permission !== 'granted') return;
+  if (await state()) return; // 已订阅：不重复走一遍
+  try {
+    await subscribe();
+  } catch {
+    // 静默
   }
 }

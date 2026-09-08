@@ -4,6 +4,7 @@
 //     真正的 requestPermission 尽量落在紧接着的一次用户手势上（Firefox 只在手势里允许申请）。
 //  2. 页面可见时一律不发通知：可见时该响的是提示音（audio.ts），通知只补"人不在这一页"的场景。
 import { loadPrefs } from './prefs';
+import { autoSubscribeIfAllowed } from './push';
 
 // 通知的 tag：同类通知互相替换，连来十条消息桌面上只留最后一条，不堆成一摞
 const TAG_CHAT = 'hearth-chat';
@@ -20,7 +21,10 @@ function permission(): NotificationPermission | 'unsupported' {
 function request() {
   if (!supported || Notification.permission !== 'default') return;
   try {
-    void Notification.requestPermission();
+    // 权限从 default 变成 granted 的这一刻顺手订阅离线推送：默认开，用户不用再进设置打开一次
+    void Notification.requestPermission().then((perm) => {
+      if (perm === 'granted') void autoSubscribeIfAllowed();
+    });
   } catch {
     // 老式回调签名的浏览器：忽略，下一次手势还会再试
   }

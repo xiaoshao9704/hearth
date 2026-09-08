@@ -35,7 +35,13 @@ import type { DenoiseMode, ScreenCodec } from '../prefs';
 import { getTheme, setTheme } from '../theme';
 import type { Theme } from '../theme';
 import { armNotifyPermission, notifyState } from '../notify';
-import { state as pushState, subscribe as pushSubscribe, unsubscribe as pushUnsubscribe, unsupportedReason } from '../push';
+import {
+  setPushOptOut,
+  state as pushState,
+  subscribe as pushSubscribe,
+  unsubscribe as pushUnsubscribe,
+  unsupportedReason,
+} from '../push';
 import { installMode, isStandalone, onInstallAvailable, promptInstall } from '../install';
 import { renderPasskeys, renderSessions } from './account-pane';
 import { avatarHtml, confirmDialog, copyText, esc, icon, pwBarsHtml, pwScore, slashIcon, timeAgo, toast } from '../ui';
@@ -501,7 +507,7 @@ function renderAV(body: HTMLElement): () => void {
         <button class="hit switch-row" id="notify-push-row" style="width:100%;text-align:left">
           <div style="flex-grow:1">
             <div class="s-title">离线推送（被 @ 和回复）</div>
-            <div class="s-desc" id="notify-push-desc">页面关着也能收到别人 @ 你或回复你的消息；普通消息不推</div>
+            <div class="s-desc" id="notify-push-desc">授权通知后自动开启；页面关着也能收到别人 @ 你或回复你的消息，普通消息不推。关掉后这台设备不再收离线推送</div>
           </div>
           <div class="switch" id="notify-push-switch"><div class="knob"></div></div>
         </button>
@@ -875,8 +881,15 @@ function renderAV(body: HTMLElement): () => void {
     pushBusy = true;
     const on = pushSwitch.classList.contains('on');
     try {
-      if (on) await pushUnsubscribe();
-      else await pushSubscribe();
+      if (on) {
+        await pushUnsubscribe();
+        setPushOptOut(true); // 用户主动关：自动订阅路径（授权瞬间/启动补订阅）以后不再打扰
+      } else if (Notification.permission === 'denied') {
+        throw new Error('浏览器已拒绝通知，需在浏览器站点设置里恢复');
+      } else {
+        setPushOptOut(false); // 重新打开：清掉"关过"的标记
+        await pushSubscribe(); // 权限是 default 时会顺带触发浏览器的授权申请
+      }
       toast(on ? '已关闭离线推送' : '已开启离线推送', 'ok');
     } catch (err) {
       toast((err as Error).message, 'bad');

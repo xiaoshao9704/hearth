@@ -3,7 +3,9 @@ import './style.css';
 import './install'; // beforeinstallprompt 在加载早期触发，必须尽早 import 才接得住
 import { initScreenCodecAuto } from './prefs';
 import { fetchMe, getToken } from './api';
+import { isStandalone } from './install';
 import { allowLeave } from './nav';
+import { armNotifyPermission } from './notify';
 import { renderAdmin } from './views/admin';
 import { renderJoin } from './views/join';
 import { renderLatency } from './views/latency';
@@ -97,3 +99,7 @@ void initScreenCodecAuto();
 
 // PWA：注册不缓存任何资源的最小 service worker，只为拿到「安装」入口
 registerServiceWorker();
+
+// 装成 PWA 打开：不等第一条实时消息，页面加载就备好通知权限申请
+// （armNotifyPermission 本身已是"挂一次性手势监听"的实现，不会一进页面就弹）
+if (isStandalone()) armNotifyPermission();
