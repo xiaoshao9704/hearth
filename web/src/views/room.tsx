@@ -26,7 +26,7 @@ import { notifyJoin, notifyMessage } from '../notify';
 import { renderShell } from '../shell';
 import { avatarHtml, confirmDialog, el, esc, fmtClock, icon, licon, menuButtonHtml, micIcon, slashIcon, toast, wireMenuButton } from '../ui';
 import { CameraFlipButton } from './room/camera-flip';
-import { ConnPanel } from './room/conn-panel';
+import { ConnPanel, QualityMark } from './room/conn-panel';
 import type { ConnRow } from './room/conn-panel';
 import { IngestBadge } from './room/ingest-badge';
 import { IngestPanel } from './room/ingest-panel';
@@ -2268,6 +2268,8 @@ export async function renderRoom(root: HTMLElement, channel: string) {
       ),
     );
     const memberUserCount = createMemo(() => new Set(roster().map(groupKey)).size);
+    // 连接质量：名册快照里的 quality（引擎监听内核事件后走同一条参与者变更通路）
+    const qualityOf = (identity: string) => roster().find((pp) => pp.identity === identity)?.quality;
     // 推流徽标的实测数据：借用该 identity 投屏卡片已有的 2s 轮询，名册不另开一路 getStats
     const screenStatsOf = (identity: string) =>
       videoEntries().find((e) => e.identity === identity && e.source === 'screen')?.liveStats() ?? null;
@@ -2706,8 +2708,9 @@ export async function renderRoom(root: HTMLElement, channel: string) {
                                   <span class="tag tag-afk">离开</span>
                                 </Show>
                                 <Show when={p.ingest}>
-                                  <IngestBadge stats={() => screenStatsOf(p.identity)} />
+                                  <IngestBadge stats={() => screenStatsOf(p.identity)} quality={() => qualityOf(p.identity)} />
                                 </Show>
+                                <QualityMark quality={() => qualityOf(p.identity)} />
                               </div>
                               <div class="m-status" classList={{ hot: devSpeaking(p) || p.sharing }}>
                                 {devName(p)}
@@ -2765,13 +2768,14 @@ export async function renderRoom(root: HTMLElement, channel: string) {
                                     {' '}
                                     <span class="tag tag-ember">本机</span>
                                   </Show>
+                                  <QualityMark quality={() => qualityOf(p.identity)} />
                                 </div>
                                 <div class="d-status" classList={{ hot: devSpeaking(p) || p.sharing }}>
                                   {devBits(p)}
                                 </div>
                               </div>
                               <Show when={p.ingest}>
-                                <IngestBadge stats={() => screenStatsOf(p.identity)} />
+                                <IngestBadge stats={() => screenStatsOf(p.identity)} quality={() => qualityOf(p.identity)} />
                               </Show>
                               {muteBtn(p)}
                               {kickBtn(p)}

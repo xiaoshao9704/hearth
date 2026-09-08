@@ -3,6 +3,7 @@
 // 不另开 getStats；面板关着的时候整个组件不存在，也就不读。
 import { createMemo, createSignal, onCleanup, For, Show } from 'solid-js';
 import type { LineStats } from '../../engine/types';
+import { el, icon } from '../../ui';
 
 export interface ConnRow {
   label: string;
@@ -75,3 +76,18 @@ export const ConnPanel = (p: { rows: () => ConnRow[]; anchor: HTMLElement | null
     </div>
   );
 };
+
+// 名册里的连接质量标记：只在内核判定 poor/lost 时出现（excellent/good 与未回报都不出图标，
+// 一切正常时名册应当是干净的）。数据来自参与者快照的 quality，不另外算
+export const QualityMark = (p: { quality: () => string | undefined }) => (
+  <Show when={p.quality() === 'poor' || p.quality() === 'lost'}>
+    <span
+      class="quality-mark"
+      classList={{ lost: p.quality() === 'lost' }}
+      title={p.quality() === 'lost' ? '与服务器失联' : '连接质量差'}
+      aria-label={p.quality() === 'lost' ? '与服务器失联' : '连接质量差'}
+    >
+      {el(icon('signalLow', 13, 'currentColor', 1.7))}
+    </span>
+  </Show>
+);
