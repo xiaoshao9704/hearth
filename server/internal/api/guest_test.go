@@ -215,6 +215,10 @@ func TestGuestScopeAndCapabilities(t *testing.T) {
 func TestGuestClaimKeepsIdentity(t *testing.T) {
 	a, r, ownerTok, c, _ := guestFixture(t)
 	ctx := context.Background()
+	// 转正默认关闭，本用例测的是开着时的行为
+	if err := a.st.SetSetting(ctx, "cfg_guest_claim", "on"); err != nil {
+		t.Fatal(err)
+	}
 	inv := newGuestInvite(t, r, ownerTok, c.Name, map[string]any{"ttl": "24h", "guest_ttl": "1h", "max_uses": 5})
 	rec := doReq(t, r, http.MethodPost, "/api/invites/"+inv.Code+"/guest", "",
 		map[string]any{"username": "visitor", "device_id": "dev0aaaa"})
@@ -347,5 +351,72 @@ func TestGuestInvitePermissions(t *testing.T) {
 	}
 	if got := doReq(t, r, http.MethodDelete, "/api/channels/"+c.Name+"/invites/"+strconv.FormatInt(inv.ID, 10), ownerTok, nil); got.Code != http.StatusNoContent {
 		t.Fatalf("撤销访客邀请状态码=%d: %s", got.Code, got.Body.String())
+	}
+}
+
+// 转正开关：默认 off 时 403，置 on 后放行；/api/me 的 can_claim 与开关同步，非访客恒 false。
+func TestGuestClaimGate(t *testing.T) {
+	a, r, ownerTok, c, _ := guestFixture(t)
+	ctx := context.Background()
+	inv := newGuestInvite(t, r, ownerTok, c.Name, map[string]any{"ttl": "24h", "guest_ttl": "1h", "max_uses": 5})
+	rec := doReq(t, r, http.MethodPost, "/api/invites/"+inv.Code+"/guest", "",
+		map[string]any{"username": "visitor", "device_id": "dev0aaaa"})
+	var entered struct {
+		Token string `json:"token"`
+		User  struct {
+			CanClaim bool `json:"can_claim"`
+		} `json:"user"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &entered); err != nil {
+		t.Fatal(err)
+	}
+	// 入场响应与 /api/me 同源：默认关闭时进大厅那一刻就该知道没有转正入口
+	if entered.User.CanClaim {
+		t.Fatal("默认关闭时入场响应的 can_claim 应为 false")
+	}
+
+	canClaim := func(token, device string) bool {
+		t.Helper()
+		got := doReqDev(t, r, http.MethodGet, "/api/me", token, device, nil)
+		if got.Code != http.StatusOK {
+			t.Fatalf("/api/me 状态码=%d: %s", got.Code, got.Body.String())
+		}
+		var me struct {
+			CanClaim bool `json:"can_claim"`
+		}
+		if err := json.Unmarshal(got.Body.Bytes(), &me); err != nil {
+			t.Fatal(err)
+		}
+		return me.CanClaim
+	}
+
+	if canClaim(entered.Token, "dev0aaaa") {
+		t.Fatal("默认关闭时 /api/me 的 can_claim 应为 false")
+	}
+	if got := doReqDev(t, r, http.MethodPost, "/api/account/claim", entered.Token, "dev0aaaa",
+		map[string]any{"username": "visitor", "password": "secret123"}); got.Code != http.StatusForbidden {
+		t.Fatalf("未开放访客转正时应 403，状态码=%d: %s", got.Code, got.Body.String())
+	}
+	// 非访客（房主）恒 false，与开关无关
+	if canClaim(ownerTok, "") {
+		t.Fatal("非访客的 can_claim 应恒为 false")
+	}
+
+	if err := a.st.SetSetting(ctx, "cfg_guest_claim", "on"); err != nil {
+		t.Fatal(err)
+	}
+	if !canClaim(entered.Token, "dev0aaaa") {
+		t.Fatal("开关置 on 后访客的 can_claim 应为 true")
+	}
+	if canClaim(ownerTok, "") {
+		t.Fatal("开关置 on 也不该让非访客的 can_claim 变 true")
+	}
+	if got := doReqDev(t, r, http.MethodPost, "/api/account/claim", entered.Token, "dev0aaaa",
+		map[string]any{"username": "visitor", "password": "secret123"}); got.Code != http.StatusOK {
+		t.Fatalf("开放后转正应成功，状态码=%d: %s", got.Code, got.Body.String())
+	}
+	// 转正后不再是访客，can_claim 回到 false
+	if canClaim(entered.Token, "") {
+		t.Fatal("转正后 can_claim 应回到 false")
 	}
 }

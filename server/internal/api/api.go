@@ -465,14 +465,16 @@ func (a *API) logout(w http.ResponseWriter, r *http.Request) {
 }
 
 // me 当前用户 + passkey_count（登录后推荐卡片据此判断「这个账号还没有通行密钥」，
-// 免得前端为一个计数再打一次列表接口）。计数查不到按 0 处理，不让 /api/me 因此失败。
+// 免得前端为一个计数再打一次列表接口）+ can_claim（转正入口的显隐依据，见 canClaimGuest）。
+// 计数查不到按 0 处理，不让 /api/me 因此失败。
 func (a *API) me(w http.ResponseWriter, r *http.Request) {
 	u := userFrom(r)
 	n, _ := a.st.CountPasskeys(r.Context(), u.ID)
 	writeJSON(w, http.StatusOK, struct {
 		*store.User
-		PasskeyCount int `json:"passkey_count"`
-	}{u, n})
+		PasskeyCount int  `json:"passkey_count"`
+		CanClaim     bool `json:"can_claim"`
+	}{u, n, a.canClaimGuest(r.Context(), u)})
 }
 
 // ---- 频道 ----

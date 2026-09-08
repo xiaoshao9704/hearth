@@ -269,10 +269,16 @@ export async function renderLobby(root: HTMLElement, alive: () => boolean) {
       <div id="install-nudge"></div>
       ${
         isGuest(user)
-          ? `<button type="button" class="hit card" id="guest-bar" style="display:flex;align-items:center;gap:11px;padding:12px 16px;border-color:var(--ember-line);text-align:left;width:100%">
+          ? user?.can_claim
+            ? `<button type="button" class="hit card" id="guest-bar" style="display:flex;align-items:center;gap:11px;padding:12px 16px;border-color:var(--ember-line);text-align:left;width:100%">
         <span style="flex-shrink:0">${icon('user', 16, 'var(--ember)', 1.7)}</span>
         <span style="flex-grow:1;font-size:12.5px;line-height:1.6;color:var(--text-1);text-wrap:pretty">你正以访客身份使用，${esc(guestTimeLeft(user))}。<span style="color:var(--ember)">注册以保留身份</span>——user_id 不变，聊天记录和频道里的位置都留下。</span>
       </button>`
+            : // 站点没开访客转正：只报剩余时间，不给引导也不点开账号页（那里也没有表单）
+              `<div class="card" id="guest-bar" style="display:flex;align-items:center;gap:11px;padding:12px 16px;border-color:var(--ember-line)">
+        <span style="flex-shrink:0">${icon('user', 16, 'var(--ember)', 1.7)}</span>
+        <span style="flex-grow:1;font-size:12.5px;line-height:1.6;color:var(--text-1);text-wrap:pretty">你正以访客身份使用，${esc(guestTimeLeft(user))}。</span>
+      </div>`
           : ''
       }
       <div class="lobby-title">
@@ -343,7 +349,7 @@ export async function renderLobby(root: HTMLElement, alive: () => boolean) {
   acctEntry.addEventListener('click', () => openAccountMenu(acctEntry));
 
   root.querySelector('#tune-av')!.addEventListener('click', () => openSettings('av'));
-  root.querySelector('#guest-bar')?.addEventListener('click', () => openSettings('account'));
+  if (user?.can_claim) root.querySelector('#guest-bar')?.addEventListener('click', () => openSettings('account'));
 
   const statusDot = root.querySelector<HTMLSpanElement>('#status-dot')!;
   const statusText = root.querySelector<HTMLSpanElement>('#status-text')!;

@@ -93,8 +93,17 @@ export function renderPane(body: HTMLElement, pane: PersonalPane, host: PaneHost
 
 function renderAccount(body: HTMLElement, close: () => void) {
   const user = getUser();
-  // 访客没有密码可改，取而代之的是「注册保留身份」（转正：user_id 不变）
+  // 访客没有密码可改，取而代之的是「注册保留身份」（转正：user_id 不变）；
+  // 显隐只看服务端下发的 can_claim：站点没开 guest_claim 就连表单都不渲染（服务端也会 403）
   const guest = isGuest(user);
+  const claimable = !!user?.can_claim;
+  const guestNoClaimCard = `
+      <div class="card">
+        <div style="font-size:13.5px;font-weight:600">访客身份</div>
+        <div style="font-size:11.5px;line-height:1.6;color:var(--text-2);margin-top:4px;text-wrap:pretty">
+          本站未开放访客转正，访客身份到期即失效。
+        </div>
+      </div>`;
   const guestClaimCard = `
       <div class="card" style="border-color:var(--ember-line)">
         <div style="font-size:13.5px;font-weight:600">注册保留身份</div>
@@ -150,7 +159,7 @@ function renderAccount(body: HTMLElement, close: () => void) {
         <div id="name-hint" style="margin-top:9px;font-size:11.5px;color:var(--text-2)">和当前用户名相同</div>
       </div>
 
-      ${guest ? guestClaimCard : `<div class="card">
+      ${guest ? (claimable ? guestClaimCard : guestNoClaimCard) : `<div class="card">
         <div style="font-size:13.5px;font-weight:600">修改密码</div>
         <div style="font-size:11.5px;color:var(--text-2);margin-top:4px">改完其他设备上的会话会全部退出，需要重新登录</div>
         <div style="display:flex;flex-direction:column;gap:11px;margin-top:13px">
@@ -218,8 +227,9 @@ function renderAccount(body: HTMLElement, close: () => void) {
     }
   });
 
-  if (guest) wireClaim(body, close);
-  else wirePassword(body);
+  if (guest) {
+    if (claimable) wireClaim(body, close);
+  } else wirePassword(body);
 
   renderSessions(body.querySelector<HTMLElement>('#acc-sessions')!);
   // 访客看不到通行密钥卡片（服务端也拒，见 api.requirePasskeyAccount）

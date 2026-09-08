@@ -80,6 +80,11 @@ var adminKeys = []rtc.ConfigKey{
 		Label: "访客默认寿命 (秒)",
 		Hint: "注册邀请勾了「允许先以访客进入」时，产出访客的存活时长；" +
 			"频道访客邀请自带寿命（生成链接时选），不看这个值。过期的访客账号每小时清理一次"},
+	{Name: "guest_claim", Group: "admin", Default: "off",
+		Options: []string{"off", "on"},
+		Label:   "访客转正",
+		Hint: "on：访客可在账号页把当前身份转成注册账号（user_id 不变、聊天与频道位置保留）；" +
+			"off：不允许，访客到期即失效"},
 }
 
 // passkeyKeys 通行密钥（WebAuthn）的 RP 身份：两项都留空时按请求现推导（见 api/passkey.go），

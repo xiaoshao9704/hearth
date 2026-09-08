@@ -21,6 +21,7 @@ export interface User {
   expires_at: string | null; // 仅访客有值
   is_admin: boolean; // 派生只读（role ≥ admin），过渡一个版本后删
   passkey_count?: number; // 只有 /api/me 带；登录后推荐卡片据此判断「还没有通行密钥」
+  can_claim?: boolean; // 服务端下发：访客能否转正（是访客 + 站点开了 guest_claim），转正入口的唯一依据
 }
 
 export interface Channel {

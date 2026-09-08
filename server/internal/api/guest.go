@@ -35,6 +35,12 @@ func (a *API) guestTTL(ctx context.Context) time.Duration {
 	return time.Duration(n) * time.Second
 }
 
+// canClaimGuest 前端转正入口的显隐依据（`can_claim`）：当前身份是访客，且站点开了
+// `guest_claim`。非访客恒 false——转正只对访客有意义。
+func (a *API) canClaimGuest(ctx context.Context, u *store.User) bool {
+	return u.Role == store.RoleGuest && strings.TrimSpace(a.dynVal(ctx, "guest_claim")) == "on"
+}
+
 // guestInviteTTLs 频道访客邀请的可选寿命档（前端只发这几个键）。
 var guestInviteTTLs = map[string]time.Duration{
 	"1h": time.Hour, "24h": 24 * time.Hour, "7d": 7 * 24 * time.Hour,
@@ -196,7 +202,13 @@ func (a *API) guestEntry(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"token": token, "user": u, "channel": inv.ChannelName,
+		// user 与 /api/me 同形状（带 can_claim）：进大厅那一刻就要知道转正入口该不该出
+		"token": token,
+		"user": struct {
+			*store.User
+			CanClaim bool `json:"can_claim"`
+		}{u, a.canClaimGuest(r.Context(), u)},
+		"channel": inv.ChannelName,
 	})
 }
 
@@ -207,6 +219,10 @@ func (a *API) claimGuest(w http.ResponseWriter, r *http.Request) {
 	u := userFrom(r)
 	if u.Role != store.RoleGuest {
 		writeErr(w, http.StatusBadRequest, "当前账号已经是注册账号")
+		return
+	}
+	if !a.canClaimGuest(r.Context(), u) {
+		writeErr(w, http.StatusForbidden, "本站未开放访客转正")
 		return
 	}
 	var req struct {

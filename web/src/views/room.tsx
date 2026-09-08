@@ -172,9 +172,12 @@ export async function renderRoom(root: HTMLElement, channel: string) {
 
   const myUid = getUser()?.id ?? 0;
 
-  // 访客提示条：转正后（浮层里派 hearth:user）自己消失
-  const [guestLeft, setGuestLeft] = createSignal(isGuest(getUser()) ? guestTimeLeft(getUser()) : '');
-  const onUserChanged = () => setGuestLeft(isGuest(getUser()) ? guestTimeLeft(getUser()) : '');
+  // 访客提示条：转正后（浮层里派 hearth:user）自己消失。转正入口的显隐只看服务端下发的
+  // can_claim（站点没开 guest_claim 时提示条只报剩余时间，不引导注册、不点开账号页）
+  const [me, setMe] = createSignal(getUser());
+  const guestLeft = createMemo(() => (isGuest(me()) ? guestTimeLeft(me()) : ''));
+  const canClaim = createMemo(() => !!me()?.can_claim);
+  const onUserChanged = () => setMe(getUser());
   window.addEventListener('hearth:user', onUserChanged);
 
   // ---- 连接层状态（非响应式）----
@@ -2395,15 +2398,29 @@ export async function renderRoom(root: HTMLElement, channel: string) {
           </Show>
           <div class="spacer"></div>
           <Show when={guestLeft()}>
-            <button
-              class="hit btn btn-sm"
-              style="border-color:var(--ember-line);color:var(--ember)"
-              title={`你正以访客身份使用，${guestLeft()}。注册以保留身份：user_id 不变，聊天记录和频道里的位置都留下。`}
-              onClick={() => openSettings('account', settingsCtx)}
+            <Show
+              when={canClaim()}
+              fallback={
+                <span
+                  class="btn btn-sm"
+                  style="border-color:var(--ember-line);color:var(--ember)"
+                  title={`你正以访客身份使用，${guestLeft()}。`}
+                >
+                  {el(icon('user', 13, 'var(--ember)', 1.7))}
+                  <span class="pill-label">访客 · {guestLeft()}</span>
+                </span>
+              }
             >
-              {el(icon('user', 13, 'var(--ember)', 1.7))}
-              <span class="pill-label">访客 · {guestLeft()} · 注册保留</span>
-            </button>
+              <button
+                class="hit btn btn-sm"
+                style="border-color:var(--ember-line);color:var(--ember)"
+                title={`你正以访客身份使用，${guestLeft()}。注册以保留身份：user_id 不变，聊天记录和频道里的位置都留下。`}
+                onClick={() => openSettings('account', settingsCtx)}
+              >
+                {el(icon('user', 13, 'var(--ember)', 1.7))}
+                <span class="pill-label">访客 · {guestLeft()} · 注册保留</span>
+              </button>
+            </Show>
           </Show>
           <div class="seg-group" style="padding:3px;background:var(--bg-3)">
             <button
