@@ -50,10 +50,8 @@ export async function renderLatency(root: HTMLElement, alive: () => boolean) {
   const paint = () => {
     // 页面已切走（视图被换掉）就停：vanilla 视图没有 dispose 钩子，靠元素还在不在文档里判断
     if (!canvas.isConnected) return;
-    if (document.hidden) {
-      requestAnimationFrame(paint); // 隐藏时浏览器本就不回调，这里只是不画
-      return;
-    }
+    // 不看 document.hidden：页面不渲染时 rAF 自己就不回调（这就是「隐藏时停」），
+    // 而标签页被采集时 hidden 也是 true——那时再停就会让观众读到一个冻住的时间戳
     const dpr = window.devicePixelRatio || 1;
     const w = Math.max(40, Math.round(canvas.clientWidth * dpr));
     const h = Math.max(1, Math.round(canvas.clientHeight * dpr));

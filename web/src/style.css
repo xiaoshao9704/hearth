@@ -1306,8 +1306,9 @@ body.theater-on .sidebar { display: none; }
 
 /* ---- 端到端延迟标尺（#/latency 与卡片上的测延迟）---- */
 .latency-page { height: 100%; display: flex; flex-direction: column; background: var(--bg-0); }
-/* 色码行固定占顶部 1/3：观众端按画面高度 1/6 处取样，正落在这一行中间 */
-.latency-page .lat-bar { flex: 0 0 33.34%; width: 100%; display: block; background: #000; }
+/* 色码行固定占顶部 1/3：观众端按画面高度 1/6 处取样，正落在这一行中间。
+   height 要显式写：canvas 有内在宽高比，只给 flex-basis 会被它按宽度撑高 */
+.latency-page .lat-bar { flex: 0 0 auto; width: 100%; height: 33.34%; display: block; background: #000; }
 .latency-page .lat-body {
   flex-grow: 1; min-height: 0; padding: 24px; display: flex; flex-direction: column;
   align-items: center; justify-content: center; gap: 10px; text-align: center;
