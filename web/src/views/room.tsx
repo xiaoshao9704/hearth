@@ -2546,15 +2546,6 @@ export async function renderRoom(root: HTMLElement, channel: string) {
                   {el(icon('screen', 17, 'currentColor'))}
                   <span class="pill-label">{screenOn() ? '投屏中' : '投屏'}</span>
                 </button>
-                <button
-                  class="hit ctl-square"
-                  title="投屏画质"
-                  aria-label="投屏画质"
-                  onClick={() => openSettings('screen', settingsCtx)}
-                >
-                  {el(icon('sliders', 16, 'var(--text-1)', 1.6))}
-                  <span class="ctl-mobile-label">画质</span>
-                </button>
                 <StageViewButtons theater={theaterCtl} pip={pipCtl} />
               </div>
               <div class="spacer"></div>

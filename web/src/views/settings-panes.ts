@@ -13,12 +13,10 @@ import {
   getUser,
   guestTimeLeft,
   isGuest,
-  listChannels,
   listInvites,
   listMyDevices,
   logout,
   resetIngestToken,
-  setChannelMuted,
   setIngestTag,
   updatePassword,
   updateUsername,
@@ -56,7 +54,6 @@ export const PERSONAL_PANES: { id: PersonalPane; label: string; icon: string; su
 export interface PaneHost {
   close(): void; // 退出登录等需要关掉整个浮层
   go(pane: PersonalPane): void; // pane 间跳转（投屏画质 → 推流）
-  channel?: string; // 从房间打开设置时的当前频道：推流页据此顺手给出该频道的完整地址
 }
 
 // 把 pane 渲染进 body，返回清理函数（没有后台资源的 pane 返回 undefined）
@@ -69,12 +66,12 @@ export function renderPane(body: HTMLElement, pane: PersonalPane, host: PaneHost
       renderAppearance(body);
       return;
     case 'av':
-      return renderAV(body, host.channel);
+      return renderAV(body);
     case 'screen':
       renderScreen(body, () => host.go('stream'));
       return;
     case 'stream':
-      renderStream(body, host.channel);
+      renderStream(body);
       return;
     case 'devices':
       renderDevices(body);
@@ -382,8 +379,7 @@ async function enumerate(kind: MediaDeviceKind): Promise<MediaDeviceOpt[]> {
   }
 }
 
-// channel 非空 = 从某个频道里打开的设置：通知区块多一个「静音这个频道」开关
-function renderAV(body: HTMLElement, channel?: string): () => void {
+function renderAV(body: HTMLElement): () => void {
   const prefs = loadPrefs();
   let openPicker = '';
   let micStream: MediaStream | null = null;
@@ -471,17 +467,6 @@ function renderAV(body: HTMLElement, channel?: string): () => void {
           </div>
           <div class="switch" id="notify-push-switch"><div class="knob"></div></div>
         </button>
-        ${
-          channel
-            ? `<button class="hit switch-row" id="notify-mute-row" style="width:100%;text-align:left">
-          <div style="flex-grow:1">
-            <div class="s-title">静音「${esc(channel)}」</div>
-            <div class="s-desc">这个频道不再响提示音、不弹通知、不发离线推送（被 @ 和回复也不例外）</div>
-          </div>
-          <div class="switch" id="notify-mute-switch"><div class="knob"></div></div>
-        </button>`
-            : ''
-        }
         <div class="opt-list" id="audio-chain"></div>
         <div class="kv-line">
           <span class="k">离开状态</span>
@@ -863,33 +848,6 @@ function renderAV(body: HTMLElement, channel?: string): () => void {
     }
   });
 
-  // 频道静音开关（只在从房间里打开设置时出现）：落库即生效，每次操作 toast
-  const muteRow = body.querySelector<HTMLButtonElement>('#notify-mute-row');
-  const muteSwitch = body.querySelector<HTMLDivElement>('#notify-mute-switch');
-  if (channel && muteRow && muteSwitch) {
-    const paintMute = () =>
-      void listChannels()
-        .then((chs) => muteSwitch.classList.toggle('on', chs.find((c) => c.name === channel)?.muted === true))
-        .catch(() => {});
-    paintMute();
-    let muteBusy = false;
-    muteRow.addEventListener('click', async () => {
-      if (muteBusy) return;
-      muteBusy = true;
-      const on = muteSwitch.classList.contains('on');
-      try {
-        await setChannelMuted(channel, !on);
-        muteSwitch.classList.toggle('on', !on);
-        toast(on ? `已恢复「${channel}」的提醒` : `已静音「${channel}」`, 'ok');
-      } catch (err) {
-        toast((err as Error).message, 'bad');
-        paintMute();
-      } finally {
-        muteBusy = false;
-      }
-    });
-  }
-
   const mirrorSwitch = body.querySelector<HTMLDivElement>('#mirror-switch')!;
   body.querySelector('#mirror-row')!.addEventListener('click', () => {
     prefs.mirror = !prefs.mirror;
@@ -1052,10 +1010,8 @@ function renderScreen(body: HTMLElement, goStream: () => void) {
 // ---- 推流 ----
 
 // 推流页只管账号级的东西：令牌查看/复制/重置、设备标签、OBS 填法。
-// 「哪个频道的地址」属于频道级，归房间顶栏的「OBS 推流」面板；从房间打开设置时这里顺手兜一份。
-function renderStream(body: HTMLElement, channel?: string) {
-  let channelID = 0; // 当前频道 id（只有带着频道上下文打开时才查得到）
-  let base = ''; // WHIP 基地址（…/providers/{alias}/w/），拼上频道 id 即完整服务器地址
+// 「哪个频道的地址」属于频道级，归频道菜单的「OBS 推流地址…」面板，这里不再随打开位置变。
+function renderStream(body: HTMLElement) {
   let token = ''; // 推流令牌（每用户一把，不区分频道和设备）
   let tag = ''; // 已保存的设备标签（identity = {用户名}-{标签}）
   let enabled = true; // 推流入口是否可用（false 时地址照给，但推起来会被拒）
@@ -1067,7 +1023,6 @@ function renderStream(body: HTMLElement, channel?: string) {
 
   // 与服务端 ingestTagRe 一致
   const TAG_RE = /^[a-z0-9][a-z0-9-]{0,31}$/;
-  const serverAddr = () => (base && channelID ? `${base}${channelID}` : '');
 
   const paint = () => {
     if (!token) return; // 首屏等加载
@@ -1079,20 +1034,10 @@ function renderStream(body: HTMLElement, channel?: string) {
             ? ''
             : `<div class="notice-bad"><span style="font-size:12px;line-height:1.55">推流进当前舞台内核：舞台内核未启用或缺配置时推流不可用。地址和令牌照常可用，但现在推会被拒。</span></div>`
         }
-        ${
-          serverAddr()
-            ? `<div style="display:flex;flex-direction:column;gap:7px">
-                 <div class="section-label" style="letter-spacing:0.1em">服务器地址 · ${esc(channel ?? '')}</div>
-                 <div class="copy-line">
-                   <span class="val mono">${esc(serverAddr())}</span>
-                   <button class="hit btn btn-sm" data-copy="url">${icon('copy', 13)} 复制</button>
-                 </div>
-               </div>`
-            : `<div class="hint-card" style="border-color:var(--line-soft)">
-                 ${icon('stream', 16, 'var(--ember)')}
-                 <div style="font-size:12px;line-height:1.7">服务器地址含频道，在房间顶栏的「OBS 推流」里复制；令牌全频道通用，就是下面这把。</div>
-               </div>`
-        }
+        <div class="hint-card" style="border-color:var(--line-soft)">
+          ${icon('stream', 16, 'var(--ember)')}
+          <div style="font-size:12px;line-height:1.7">服务器地址含频道，在频道菜单（房间顶栏的频道名）的「OBS 推流地址…」里复制；令牌全频道通用，就是下面这把。</div>
+        </div>
         <div style="display:flex;flex-direction:column;gap:7px">
           <div class="section-label" style="letter-spacing:0.1em">推流令牌 · 全频道通用</div>
           <div class="copy-line">
@@ -1124,16 +1069,15 @@ function renderStream(body: HTMLElement, channel?: string) {
           ${icon('check', 16, 'var(--sage)')}
           <div style="display:flex;flex-direction:column;gap:6px">
             <div style="font-size:12.5px;font-weight:600;color:var(--text-0)">OBS 里怎么填</div>
-            <div style="font-size:12px;line-height:1.7">设置 → 直播 → 服务选 <span class="mono" style="color:var(--text-1)">WHIP</span>，服务器填频道的完整地址（房间顶栏「OBS 推流」里复制，换频道换地址、令牌不变），Bearer Token 填推流令牌。编码器 H.264 / HEVC / AV1 均可，服务端直通不转码，<span style="color:var(--sage)">2K / 4K / 120fps 原样透传</span>。ffmpeg 等不支持 Bearer 的工具用路径模式：服务器地址末尾再拼一段 <span class="mono" style="color:var(--text-1)">/令牌</span>。</div>
+            <div style="font-size:12px;line-height:1.7">设置 → 直播 → 服务选 <span class="mono" style="color:var(--text-1)">WHIP</span>，服务器填频道的完整地址（频道菜单的「OBS 推流地址…」里复制，换频道换地址、令牌不变），Bearer Token 填推流令牌。编码器 H.264 / HEVC / AV1 均可，服务端直通不转码，<span style="color:var(--sage)">2K / 4K / 120fps 原样透传</span>。ffmpeg 等不支持 Bearer 的工具用路径模式：服务器地址末尾再拼一段 <span class="mono" style="color:var(--text-1)">/令牌</span>。</div>
           </div>
         </div>
       </div>`;
 
     body.querySelectorAll<HTMLButtonElement>('[data-copy]').forEach((btn) => {
       btn.addEventListener('click', async () => {
-        const text = btn.dataset.copy === 'url' ? serverAddr() : token;
-        if (!text) return;
-        if (await copyText(text)) toast('已复制', 'ok', 1400);
+        if (!token) return;
+        if (await copyText(token)) toast('已复制', 'ok', 1400);
       });
     });
     body.querySelector('[data-act="reveal"]')?.addEventListener('click', () => {
@@ -1156,7 +1100,6 @@ function renderStream(body: HTMLElement, channel?: string) {
           const info = await resetIngestToken();
           token = info.token;
           tag = info.tag;
-          base = info.base;
           enabled = info.enabled;
           reveal = false;
           notice = '已生成新令牌，旧令牌名下的推流已掐断。';
@@ -1203,12 +1146,9 @@ function renderStream(body: HTMLElement, channel?: string) {
 
   void (async () => {
     try {
-      // 只有带着频道上下文打开才去查列表：地址要的是 id，名字换 id 得问服务端
-      const [chs, info] = await Promise.all([channel ? listChannels() : Promise.resolve([]), getIngestToken()]);
-      channelID = chs.find((c) => c.name === channel)?.id ?? 0;
+      const info = await getIngestToken();
       token = info.token;
       tag = info.tag;
-      base = info.base;
       enabled = info.enabled;
     } catch (err) {
       toast((err as Error).message, 'bad');

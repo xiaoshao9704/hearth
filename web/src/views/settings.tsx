@@ -119,7 +119,7 @@ function SettingsOverlay(p: { pane: Pane; ctx: SettingsContext }) {
             {el(icon('close', 16, 'var(--text-1)', 1.8))}
           </button>
         </header>
-        <Show when={pane() === 'channel'} fallback={<PersonalHost pane={pane() as PersonalPane} go={setPane} channel={p.ctx.channel} />}>
+        <Show when={pane() === 'channel'} fallback={<PersonalHost pane={pane() as PersonalPane} go={setPane} />}>
           <div class="settings-body" style="padding:0;gap:0">
             <ChannelManage channel={p.ctx.channel!} />
           </div>
@@ -129,13 +129,14 @@ function SettingsOverlay(p: { pane: Pane; ctx: SettingsContext }) {
   );
 }
 
-// 个人 pane 的命令式内容挂载点：切 pane 先跑上一个的清理再重画
-function PersonalHost(p: { pane: PersonalPane; go: (pane: PersonalPane) => void; channel?: string }) {
+// 个人 pane 的命令式内容挂载点：切 pane 先跑上一个的清理再重画。
+// 个人 pane 不接频道上下文：内容只跟账号/本机走，不随「从哪里点进来」变（频道级的东西在频道菜单里）
+function PersonalHost(p: { pane: PersonalPane; go: (pane: PersonalPane) => void }) {
   let body!: HTMLDivElement;
   createEffect(() => {
     const pane = p.pane;
     body.innerHTML = '';
-    const cleanup = renderPane(body, pane, { close: closeSettings, go: p.go, channel: p.channel });
+    const cleanup = renderPane(body, pane, { close: closeSettings, go: p.go });
     onCleanup(() => cleanup?.());
   });
   return <div class="settings-body" ref={body} />;
