@@ -9,7 +9,7 @@ import { createEffect, createMemo, createSignal, on, onCleanup, untrack, For, Sh
 import { render } from 'solid-js/web';
 import { startAfkWatch } from '../afk';
 import { ApiError, fetchJoinCredentials, getUser, guestTimeLeft, isGuest, kickUser, listChannels, muteUser, reportClientLog } from '../api';
-import type { DataLine, EngineCred } from '../api';
+import type { ChannelRole, DataLine, EngineCred } from '../api';
 import { playCue } from '../audio';
 import { deleteMessage, fetchMessages, postMessage, setReaction } from '../chat';
 import type { ChatMessage } from '../chat';
@@ -26,6 +26,7 @@ import { notifyJoin, notifyMessage } from '../notify';
 import { renderShell } from '../shell';
 import { avatarHtml, confirmDialog, el, esc, fmtClock, icon, licon, menuButtonHtml, micIcon, slashIcon, toast, wireMenuButton } from '../ui';
 import { CameraFlipButton } from './room/camera-flip';
+import { closeChannelMenu, openChannelMenu } from './room/channel-menu';
 import { ConnPanel, QualityMark } from './room/conn-panel';
 import type { ConnRow } from './room/conn-panel';
 import { LatencyResult, measureTile, showTileMenu } from './room/latency-result';
@@ -2344,8 +2345,25 @@ export async function renderRoom(root: HTMLElement, channel: string) {
       >
         <header class="topbar">
           {el(menuButtonHtml())}
-          {el(icon('volume', 17, 'var(--ember)', 1.6))}
-          <h1>{channel}</h1>
+          {/* 频道名即「我在本频道」那一层的入口：静音 / OBS 推流地址 / 邀请链接 / 频道管理 / 离开 */}
+          <button
+            id="channel-menu-trigger"
+            class="hit channel-title"
+            aria-haspopup="menu"
+            title="频道菜单"
+            onClick={(ev) =>
+              openChannelMenu(ev.currentTarget, channel, {
+                muted: muted(),
+                myRole: myRoleSig() as ChannelRole,
+                onIngest: guestLeft() ? undefined : () => setIngestOpen(true),
+                onLeave: () => void leaveRoom(),
+              })
+            }
+          >
+            {el(icon('volume', 17, 'var(--ember)', 1.6))}
+            <h1>{channel}</h1>
+            {el(icon('chevDown', 13, 'var(--text-2)', 1.9))}
+          </button>
           <div class="vline"></div>
           <span class="sub">{metaText()}</span>
           <span
@@ -2384,24 +2402,6 @@ export async function renderRoom(root: HTMLElement, channel: string) {
               <span class="pill-label">访客 · {guestLeft()} · 注册保留</span>
             </button>
           </Show>
-          <button
-            class="hit btn btn-icon"
-            classList={{ hidden: !canModerate() }}
-            title="频道管理"
-            onClick={() => openSettings('channel', settingsCtx)}
-          >
-            {el(icon('shield', 15, 'var(--text-1)', 1.6))}
-          </button>
-          {/* 访客不显示：服务端也拒发推流令牌。访客身份只来自 getUser()，转正后 guestLeft 一并归零 */}
-          <button
-            id="ingest-entry"
-            class="hit btn btn-icon"
-            classList={{ hidden: !!guestLeft(), on: ingestOpen() }}
-            title="OBS 推流"
-            onClick={() => setIngestOpen((o) => !o)}
-          >
-            {el(icon('stream', 15, 'var(--text-1)', 1.6))}
-          </button>
           <div class="seg-group" style="padding:3px;background:var(--bg-3)">
             <button
               class="hit seg"
@@ -3038,6 +3038,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
       setAppBadge(0);
       diag('info', 'room_close');
       leaving = true;
+      closeChannelMenu(); // 浮层挂在 body 上，房间视图卸载不会带走它
       pipCtl.dispose();
       theaterCtl.dispose();
       exitFs();

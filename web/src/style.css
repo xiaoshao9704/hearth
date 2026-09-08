@@ -785,10 +785,8 @@ body {
    grid item 撑满行高，.channel-card 用 height: 100% 填满 wrap，卡片外观不变 */
 .channel-card-wrap { position: relative; height: 100%; }
 .channel-card { height: 100%; color: var(--text-0); text-decoration: none; }
-.channel-card-wrap .card-gear { position: absolute; top: 12px; right: 12px; }
-/* 静音开关与齿轮并列（有管理权限时排在齿轮左边，没有就占齿轮的位置） */
-.channel-card-wrap .card-bell { position: absolute; top: 12px; right: 46px; }
-.channel-card-wrap .card-bell.solo { right: 12px; }
+/* 卡片右上角只有一个「…」：静音、邀请链接、频道管理都在它弹出的频道菜单里 */
+.channel-card-wrap .card-menu { position: absolute; top: 12px; right: 12px; }
 /* 创建频道输入框校验失败：不占用 .field（这里没有该容器），直接标红输入框本身 */
 .input-bad { box-shadow: inset 0 0 0 1.5px var(--red); border-radius: 6px; }
 /* 「服务器在线」chip 的离线态，尺寸对齐既有 .ok-dot */
@@ -1331,3 +1329,16 @@ body.theater-on .sidebar { display: none; }
 .tile .tile-latency .tl-text { font-size: 11px; line-height: 1.4; }
 .tile .tile-latency .tl-close { flex-shrink: 0; width: 16px; height: 16px; line-height: 1; color: var(--on-stage); opacity: 0.75; }
 .tile .tile-latency .tl-close:hover { opacity: 1; }
+
+/* ---- 入口整理：频道菜单 ---- */
+
+/* 房间顶栏的频道名就是频道菜单的触发器：看着还是标题，摸着是个按钮 */
+.channel-title {
+  display: flex; align-items: center; gap: 8px; min-width: 0;
+  padding: 5px 8px; margin-left: -4px; border-radius: 8px; color: inherit;
+}
+.channel-title:hover, .channel-title:focus-visible { background: var(--bg-3); }
+.channel-title h1 { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.channel-menu { min-width: 190px; }
+/* 菜单里的分组分隔线（频道管理、离开各自成组） */
+.user-menu .um-sep { height: 1px; margin: 4px 6px; background: var(--line-soft); }
