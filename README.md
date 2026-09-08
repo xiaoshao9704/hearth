@@ -78,7 +78,7 @@ volumes:
 
 ```bash
 docker compose up -d
-docker exec hearth /app/hearth adduser <用户名> <密码>   # 首个账号自动成为 super
+docker compose exec hearth /app/hearth adduser <用户名> <密码>   # 首个账号自动成为 super
 ```
 
 打开 `http://<主机>:8080` 就能开黑：语音、投屏 / 摄像头、OBS 推流开箱全部可用，不用进管理后台改任何东西。

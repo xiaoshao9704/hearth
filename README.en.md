@@ -80,7 +80,7 @@ volumes:
 
 ```bash
 docker compose up -d
-docker exec hearth /app/hearth adduser <name> <password>   # the first account becomes super
+docker compose exec hearth /app/hearth adduser <name> <password>   # the first account becomes super
 ```
 
 Open `http://<host>:8080` and you are done: voice, screen sharing, camera and OBS ingest all work without touching the admin console.
