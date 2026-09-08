@@ -2,6 +2,7 @@
 import { canInvite, createChannel, fetchMe, getUser, guestTimeLeft, isGuest, listChannels } from '../api';
 import type { Channel } from '../api';
 import { isSupported, passkeyErrorDetail, registerPasskey } from '../passkey';
+import { installMode, isStandalone, promptInstall } from '../install';
 import { closeAccountMenu, openAccountMenu } from '../account-menu';
 import { renderShell } from '../shell';
 import { closeChannelMenu, openChannelMenu } from './room/channel-menu';
@@ -16,6 +17,10 @@ const VIA_KEY = 'hearth_login_via';
 const NUDGED_KEY = 'hearth_passkey_nudged';
 const NUDGE_KEY = 'hearth_passkey_nudge';
 const NUDGE_SNOOZE_MS = 7 * 24 * 3600_000;
+
+// 安装到桌面推荐：本会话已弹过 + 本设备的「稍后 / 不再提示」记录，键名与通行密钥卡分开
+const INSTALL_NUDGED_KEY = 'hearth_install_nudged';
+const INSTALL_NUDGE_KEY = 'hearth_install_nudge';
 
 function greeting(): string {
   const h = new Date().getHours();
@@ -78,10 +83,11 @@ function cardHtml(c: Channel): string {
 }
 
 // nudgeAllowed 本设备是否还愿意看这张推荐卡：never = 永久关掉，时间戳 = 7 天内不再提。
-function nudgeAllowed(): boolean {
+// key 区分是哪张卡（通行密钥 / 安装），两张卡各自的「稍后 / 不再提示」互不影响。
+function nudgeAllowed(key: string): boolean {
   let mark: string | null = null;
   try {
-    mark = localStorage.getItem(NUDGE_KEY);
+    mark = localStorage.getItem(key);
   } catch {
     return false; // 存不住偏好就别弹——否则每次登录都弹，反而更烦
   }
@@ -90,36 +96,37 @@ function nudgeAllowed(): boolean {
   return !mark || !Number.isFinite(at) || Date.now() - at >= NUDGE_SNOOZE_MS;
 }
 
-function setNudge(v: string) {
+function setNudge(key: string, v: string) {
   try {
-    localStorage.setItem(NUDGE_KEY, v);
+    localStorage.setItem(key, v);
   } catch {
     /* 隐私模式下存不住，下次再问一遍 */
   }
 }
 
-// maybeNudgePasskey 进大厅时的推荐卡（非模态，挂在大厅顶部）。
+// maybeNudgePasskey 进大厅时的推荐卡（非模态，挂在大厅顶部）。返回是否实际画出了卡片
+// （安装推荐卡靠这个决定这次要不要一起出现——两张卡同时满足条件时只出通行密钥这张）。
 // 不绑定「刚刚密码登录」：升级前就已登录、会话一直存着的人从没触发过登录事件，也该被提醒一次。
 // 每个浏览器会话最多弹一次；刚注册完的人正在建账号，那一次跳过；账号已有通行密钥、访客、
 // 浏览器不支持、本设备关掉过（稍后 7 天 / 不再提示）都不画。
-async function maybeNudgePasskey(host: HTMLElement, alive: () => boolean) {
+async function maybeNudgePasskey(host: HTMLElement, alive: () => boolean): Promise<boolean> {
   const via = sessionStorage.getItem(VIA_KEY);
   sessionStorage.removeItem(VIA_KEY);
-  if (via === 'register') return;
+  if (via === 'register') return false;
   let shown = false;
   try {
     shown = sessionStorage.getItem(NUDGED_KEY) === '1';
   } catch {
-    return;
+    return false;
   }
-  if (shown || !isSupported() || !nudgeAllowed()) return;
+  if (shown || !isSupported() || !nudgeAllowed(NUDGE_KEY)) return false;
   let me;
   try {
     me = await fetchMe(); // passkey_count 只有 /api/me 带
   } catch {
-    return;
+    return false;
   }
-  if (!alive() || isGuest(me) || (me.passkey_count ?? 0) > 0) return;
+  if (!alive() || isGuest(me) || (me.passkey_count ?? 0) > 0) return false;
   try {
     sessionStorage.setItem(NUDGED_KEY, '1');
   } catch {
@@ -127,7 +134,7 @@ async function maybeNudgePasskey(host: HTMLElement, alive: () => boolean) {
   }
 
   host.innerHTML = `
-    <div class="card passkey-nudge">
+    <div class="card nudge-card">
       <span class="nudge-icon">${icon('key', 17, 'var(--ember)', 1.7)}</span>
       <div style="flex-grow:1;min-width:0">
         <div style="font-size:13px;font-weight:600">下次一键登录</div>
@@ -157,13 +164,76 @@ async function maybeNudgePasskey(host: HTMLElement, alive: () => boolean) {
     }
   });
   host.querySelector('#nudge-later')!.addEventListener('click', () => {
-    setNudge(String(Date.now()));
+    setNudge(NUDGE_KEY, String(Date.now()));
     host.innerHTML = '';
   });
   host.querySelector('#nudge-never')!.addEventListener('click', () => {
-    setNudge('never');
+    setNudge(NUDGE_KEY, 'never');
     host.innerHTML = '';
   });
+  return true;
+}
+
+// installMode → 推荐卡文案；prompt 模式带一个能直接触发系统安装对话框的主按钮，
+// 其余模式（iOS / macOS Safari / 其他浏览器）没有编程接口，只能给操作说明。
+const INSTALL_COPY: Record<'prompt' | 'ios' | 'mac-safari' | 'manual', { title: string; body: string; primary?: string }> = {
+  prompt: { title: '安装到桌面', body: '像应用一样独立打开，带图标和角标，通知更可靠。', primary: '安装' },
+  ios: { title: '添加到主屏幕', body: 'Safari 里点底部「分享」→「添加到主屏幕」。装好后从主屏幕打开，才能收到通知。' },
+  'mac-safari': { title: '安装到程序坞', body: 'Safari 菜单「文件」→「添加到程序坞」。' },
+  manual: { title: '安装到桌面', body: '在浏览器菜单里找「安装」或「添加到主屏幕」。' },
+};
+
+// maybeNudgeInstall 进大厅时的安装推荐卡，挂在通行密钥卡下面。条件：非独立窗口运行、
+// 当前平台有安装路径（installMode() !== 'none'）、本设备没关掉过、本会话没弹过。
+async function maybeNudgeInstall(host: HTMLElement, alive: () => boolean): Promise<boolean> {
+  let shown = false;
+  try {
+    shown = sessionStorage.getItem(INSTALL_NUDGED_KEY) === '1';
+  } catch {
+    return false;
+  }
+  if (shown || isStandalone() || !nudgeAllowed(INSTALL_NUDGE_KEY)) return false;
+  const mode = installMode();
+  if (mode === 'none') return false;
+  if (!alive()) return false;
+  try {
+    sessionStorage.setItem(INSTALL_NUDGED_KEY, '1');
+  } catch {
+    /* 存不住就可能下次再弹一次，可接受 */
+  }
+
+  const copy = INSTALL_COPY[mode];
+  host.innerHTML = `
+    <div class="card nudge-card">
+      <span class="nudge-icon">${icon('install', 17, 'var(--ember)', 1.7)}</span>
+      <div style="flex-grow:1;min-width:0">
+        <div style="font-size:13px;font-weight:600">${esc(copy.title)}</div>
+        <div style="font-size:11.5px;line-height:1.6;color:var(--text-2);margin-top:3px;text-wrap:pretty">
+          ${esc(copy.body)}
+        </div>
+      </div>
+      <div class="nudge-acts">
+        ${copy.primary ? `<button type="button" class="hit btn btn-primary btn-sm" id="install-nudge-do">${esc(copy.primary)}</button>` : ''}
+        <button type="button" class="hit btn btn-sm" id="install-nudge-later">${copy.primary ? '稍后' : '知道了'}</button>
+        <button type="button" class="hit btn btn-sm" id="install-nudge-never">不再提示</button>
+      </div>
+    </div>`;
+
+  host.querySelector('#install-nudge-do')?.addEventListener('click', async () => {
+    const outcome = await promptInstall();
+    if (outcome === 'accepted') toast('已安装到桌面。', 'ok');
+    else if (outcome === 'dismissed') setNudge(INSTALL_NUDGE_KEY, String(Date.now()));
+    host.innerHTML = ''; // unavailable（事件已用掉）也没有别的动作可做，一并收起
+  });
+  host.querySelector('#install-nudge-later')!.addEventListener('click', () => {
+    setNudge(INSTALL_NUDGE_KEY, String(Date.now()));
+    host.innerHTML = '';
+  });
+  host.querySelector('#install-nudge-never')!.addEventListener('click', () => {
+    setNudge(INSTALL_NUDGE_KEY, 'never');
+    host.innerHTML = '';
+  });
+  return true;
 }
 
 export async function renderLobby(root: HTMLElement, alive: () => boolean) {
@@ -185,6 +255,7 @@ export async function renderLobby(root: HTMLElement, alive: () => boolean) {
     </header>
     <div class="lobby-body">
       <div id="passkey-nudge"></div>
+      <div id="install-nudge"></div>
       ${
         isGuest(user)
           ? `<button type="button" class="hit card" id="guest-bar" style="display:flex;align-items:center;gap:11px;padding:12px 16px;border-color:var(--ember-line);text-align:left;width:100%">
@@ -251,7 +322,11 @@ export async function renderLobby(root: HTMLElement, alive: () => boolean) {
   };
   window.addEventListener('hashchange', onLeave, { once: true });
 
-  void maybeNudgePasskey(root.querySelector<HTMLElement>('#passkey-nudge')!, alive);
+  // 通行密钥优先：这次弹了就不再看安装卡，安装卡留到下次会话（各自的「稍后/不再提示」互不影响）
+  void (async () => {
+    const shownPasskey = await maybeNudgePasskey(root.querySelector<HTMLElement>('#passkey-nudge')!, alive);
+    if (!shownPasskey) await maybeNudgeInstall(root.querySelector<HTMLElement>('#install-nudge')!, alive);
+  })();
 
   const acctEntry = root.querySelector<HTMLButtonElement>('#acct-entry')!;
   acctEntry.addEventListener('click', () => openAccountMenu(acctEntry));

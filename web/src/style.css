@@ -1233,18 +1233,18 @@ body.theater-on .sidebar { display: none; }
 .auth-or { display: flex; align-items: center; gap: 10px; font-size: 11.5px; color: var(--text-3); }
 .auth-or::before, .auth-or::after { content: ''; flex-grow: 1; height: 1px; background: var(--line-soft); }
 #lg-passkey { display: flex; align-items: center; justify-content: center; gap: 8px; }
-/* 大厅顶部的推荐卡：非模态，一行摆下，窄屏按钮换行到下面 */
-.passkey-nudge {
+/* 大厅顶部的推荐卡（通行密钥、安装到桌面共用）：非模态，一行摆下，窄屏按钮换行到下面 */
+.nudge-card {
   display: flex; align-items: center; gap: 13px; padding: 13px 16px; border-color: var(--ember-line);
 }
-.passkey-nudge .nudge-icon {
+.nudge-card .nudge-icon {
   width: 34px; height: 34px; flex-shrink: 0; border-radius: 9px;
   display: flex; align-items: center; justify-content: center; background: var(--ember-tint);
 }
-.passkey-nudge .nudge-acts { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+.nudge-card .nudge-acts { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
 @media (max-width: 620px) {
-  .passkey-nudge { flex-wrap: wrap; }
-  .passkey-nudge .nudge-acts { width: 100%; justify-content: flex-end; }
+  .nudge-card { flex-wrap: wrap; }
+  .nudge-card .nudge-acts { width: 100%; justify-content: flex-end; }
 }
 /* 通行密钥行内改名：套用 .field 但压到与行高相称 */
 .pk-edit { height: 32px; padding: 0 10px; flex-grow: 1; min-width: 0; max-width: 260px; background: var(--bg-2); }

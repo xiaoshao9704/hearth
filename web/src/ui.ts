@@ -64,6 +64,8 @@ const PATHS: Record<string, string> = {
   file: 'M5 2.5h6l4 4v11H5zM11 2.5V7h4',
   // 铃铛（通知）：静音态复用 slashIcon 加斜杠，不另画一个 bellOff
   bell: 'M10 3.2a4 4 0 00-4 4v2.6L4.5 13h11L14 9.8V7.2a4 4 0 00-4-4M8.2 15.4a1.9 1.9 0 003.6 0',
+  // 安装（下载到设备）：箭头落进托盘
+  install: 'M10 3v10M6.5 9.5L10 13l3.5-3.5M4 15.5v2h12v-2',
 };
 
 export function icon(name: string, size = 16, color = 'currentColor', strokeWidth = 1.7): string {

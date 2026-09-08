@@ -1,5 +1,6 @@
 // hash 路由：#/login、#/join/<code>、#/lobby、#/room/<频道名>、#/manage/<频道名>、#/admin/<tab>。
 import './style.css';
+import './install'; // beforeinstallprompt 在加载早期触发，必须尽早 import 才接得住
 import { initScreenCodecAuto } from './prefs';
 import { fetchMe, getToken } from './api';
 import { allowLeave } from './nav';
