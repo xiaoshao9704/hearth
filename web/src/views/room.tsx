@@ -43,7 +43,7 @@ import { openSettings } from './settings';
 import { ChatFirstBar, syncPanelWithChatFirst } from './room/chat-first';
 import { FloatingRoster, mountPipRoster } from './room/floating-roster';
 import { createPipCtl } from './room/pip';
-import { createTheaterCtl, StageViewButtons } from './room/theater';
+import { createTheaterCtl, ViewModeControl } from './room/theater';
 
 type SinkMedia = HTMLMediaElement & { setSinkId?: (id: string) => Promise<void>; sinkId?: string };
 
@@ -1227,7 +1227,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
     onNotice: (m) => toast(m, 'bad'),
   });
 
-  // ---- 键盘快捷键：M 切麦、D 静音全部、T 剧场、F 全屏、按住 Space 说话（Ctrl+Enter 发送在聊天输入框自己的 keydown 上）----
+  // ---- 键盘快捷键：M 切麦、D 静音全部、T 剧场、F 全屏、P 画中画、按住 Space 说话（Ctrl+Enter 发送在聊天输入框自己的 keydown 上）----
   const inTypingTarget = (ev: KeyboardEvent) => {
     const t = ev.target as HTMLElement | null;
     return !!t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable);
@@ -1261,6 +1261,8 @@ export async function renderRoom(root: HTMLElement, channel: string) {
       theaterCtl.toggle();
     } else if (key === 'f') {
       theaterCtl.toggleFullscreen();
+    } else if (key === 'p') {
+      void pipCtl.toggle();
     } else if (ev.key === ' ') {
       ev.preventDefault(); // 阻止页面滚动与聚焦按钮被激活
       if (pttHeld || micOn()) return; // 已开麦时按住 Space 不做多余翻转
@@ -2571,7 +2573,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
                   {el(icon('screen', 17, 'currentColor'))}
                   <span class="pill-label">{screenOn() ? '投屏中' : '投屏'}</span>
                 </button>
-                <StageViewButtons theater={theaterCtl} pip={pipCtl} />
+                <ViewModeControl theater={theaterCtl} pip={pipCtl} hasStage={hasStageContent} />
               </div>
               <div class="spacer"></div>
               <div class="group">
