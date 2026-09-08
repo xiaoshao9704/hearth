@@ -1,6 +1,7 @@
 // AVEngine 的 LiveKit 实现：livekit-client 的全部使用收敛在此。
 // 采集链（RNNoise / 设备选择 / 处理开关）与发布参数（语音码率、投屏编码/SVC）按 prefs 读取。
 import {
+  ConnectionQuality,
   DisconnectReason,
   Participant,
   RemoteParticipant,
@@ -21,7 +22,7 @@ import { RnnoisePipeline } from '../audio';
 import { RES_DIMS, loadPrefs } from '../prefs';
 import type { RoomPrefs, ScreenCodec } from '../prefs';
 import { DATA_TOPIC_FILE, DATA_TOPIC_TEXT } from './types';
-import type { AVEngine, EPart, EngineCallbacks, TrackSource, VideoStats } from './types';
+import type { AVEngine, EPart, EngineCallbacks, LineStats, TrackSource, VideoStats } from './types';
 
 const toSource = (s: Track.Source): TrackSource | null =>
   s === Track.Source.Camera ? 'camera' : s === Track.Source.ScreenShare ? 'screen' : null;
@@ -40,7 +41,11 @@ interface IceTransportSnapshot {
   local: string[]; // 去重后的本地候选
   remote: string[]; // 去重后的远端候选
   selected: string | null; // 当前选中 pair 的远端 endpoint
+  line: LineStats; // 本 transport 的连接读数（RTT/抖动/丢包/传输方式）
 }
+
+// 连上之后快照的刷新间隔：读数面板与 60 秒诊断都取这份快照，不另开 getStats 轮询
+const LINE_PROBE_MS = 5000;
 
 export class LiveKitEngine implements AVEngine {
   // 凭证是短时效入场券，断线后必须回房间层重新签发并重做入场判定。禁用 SDK 内部
@@ -56,6 +61,8 @@ export class LiveKitEngine implements AVEngine {
   // 本地属性镜像：setAttribute 先写这里再尽力广播，本机名册不等服务端回执
   private localAttrs: Record<string, string> = {};
   private snapshot: Record<'pub' | 'sub', IceTransportSnapshot | null> = { pub: null, sub: null };
+  // 线路丢包要看区间差分（累计值会把开局那几个包一直摊到最后）：按 transport 记上一次的累计数
+  private lastLine: Record<'pub' | 'sub', { lost: number; total: number } | null> = { pub: null, sub: null };
 
   constructor(cbs: EngineCallbacks) {
     this.cbs = cbs;
@@ -92,6 +99,7 @@ export class LiveKitEngine implements AVEngine {
       ingest,
       tag: meta?.tag ?? '', // 浏览器参与者也有设备标签，展示设备名要用它
       afk: isLocal ? this.localAttrs.afk === '1' : p.attributes?.afk === '1',
+      quality: p.connectionQuality === ConnectionQuality.Unknown ? undefined : p.connectionQuality,
     };
   }
 
@@ -182,6 +190,8 @@ export class LiveKitEngine implements AVEngine {
       .on(RoomEvent.ParticipantPermissionsChanged, () => this.cbs.onRoster())
       // 参与者属性（afk 等纯展示态）变化：同样只是重绘名册
       .on(RoomEvent.ParticipantAttributesChanged, () => this.cbs.onRoster())
+      // 连接质量（内核按 RTCP 回报算，全员的更新都会到）：并进 EPart，走同一条名册通路
+      .on(RoomEvent.ConnectionQualityChanged, () => this.cbs.onRoster())
       // 自动播放被拦截：SDK 自己不会出提示，交给房间层弹「点击开启声音」
       .on(RoomEvent.AudioPlaybackStatusChanged, () => {
         if (!this.room.canPlaybackAudio) this.cbs.onAudioBlocked?.();
@@ -191,6 +201,7 @@ export class LiveKitEngine implements AVEngine {
       .on(RoomEvent.Reconnecting, () => this.cbs.onReconnecting())
       .on(RoomEvent.Reconnected, () => this.cbs.onReconnected())
       .on(RoomEvent.Disconnected, (reason) => {
+        this.stopIceProbe();
         if (this.disposed) return;
         if (reason === DisconnectReason.CLIENT_INITIATED) return; // 自己调 disconnect
         if (reason === DisconnectReason.PARTICIPANT_REMOVED) return this.cbs.onEnded('kicked');
@@ -204,28 +215,30 @@ export class LiveKitEngine implements AVEngine {
   // 这里不能再套同期限的 Promise.race：外层先超时会绕过 SDK 的清理，下一次完整入场
   // 可能与尚未退出的 participant 重叠，被服务端判成 duplicate identity。
   async connect(url: string, token: string) {
+    this.snapshot = { pub: null, sub: null };
+    this.lastLine = { pub: null, sub: null };
     this.startIceProbe();
     try {
       await this.room.connect(url, token);
       await this.captureIceStats();
       this.emitSelectedServer();
+      this.startIceProbe(LINE_PROBE_MS);
     } catch (err) {
       // connect 失败时 SDK 会立即清理 PeerConnection；轮询负责在清理前留下候选，
       // 这里再尽力抓一次最终状态（PC 可能已经被清理，抓不到就用轮询期间攒下的快照）。
       await this.captureIceStats();
       this.emitIceFailed();
-      throw err;
-    } finally {
       this.stopIceProbe();
+      throw err;
     }
   }
 
-  private startIceProbe() {
+  // RTCEngine/PCTransport 要等信令 JoinResponse 后才创建，连接期间的快速轮询才能在
+  // SDK 超时关闭 PeerConnection 之前留下失败候选；连上后转 LINE_PROBE_MS 慢速，
+  // 同一个定时器同一条采集路径继续刷新快照（读数与诊断都读它）。轮询只刷新快照，不上报。
+  private startIceProbe(intervalMs = 400) {
     this.stopIceProbe();
-    this.snapshot = { pub: null, sub: null };
-    // RTCEngine/PCTransport 要等信令 JoinResponse 后才创建，连接期间轮询才能在
-    // SDK 超时关闭 PeerConnection 之前留下失败候选；轮询只刷新快照，不上报。
-    this.iceProbeTimer = window.setInterval(() => void this.captureIceStats(), 400);
+    this.iceProbeTimer = window.setInterval(() => void this.captureIceStats(), intervalMs);
   }
 
   private stopIceProbe() {
@@ -281,13 +294,7 @@ export class LiveKitEngine implements AVEngine {
         if (stat.type === 'transport') selectedPairID = String(stat.selectedCandidatePairId ?? '');
         if (stat.type === 'candidate-pair') pairs.push(stat);
       });
-      const endpoint = (stat: Record<string, unknown> | undefined) => {
-        if (!stat) return 'unknown';
-        // Safari/WebKit 的 RTCStats 仍可能只提供旧字段 ip；Chromium/Firefox 用 address。
-        const address = String(stat.address ?? stat.ip ?? 'unknown');
-        const host = address.includes(':') ? `[${address}]` : address;
-        return `${String(stat.protocol ?? '?')}/${String(stat.candidateType ?? '?')} ${host}:${String(stat.port ?? '?')}`;
-      };
+      const endpoint = (stat: Record<string, unknown> | undefined) => (stat ? this.endpointOf(stat) : 'unknown');
       const local = new Set<string>();
       const remote = new Set<string>();
       for (const stat of byID.values()) {
@@ -305,10 +312,104 @@ export class LiveKitEngine implements AVEngine {
         pairs.find((pair) => pair.selected === true) ??
         pairs.find((pair) => pair.nominated === true && pair.state === 'succeeded');
       const selected = selectedPair ? endpoint(byID.get(String(selectedPair.remoteCandidateId ?? ''))) : null;
-      this.snapshot[target] = { pairs: pairSnaps, local: [...local], remote: [...remote], selected };
+      this.snapshot[target] = {
+        pairs: pairSnaps,
+        local: [...local],
+        remote: [...remote],
+        selected,
+        line: this.deriveLine(target, byID, selectedPair),
+      };
     } catch {
       // getStats 失败（如 PC 已关闭）：保留上一次快照，让失败上报仍有内容可看
     }
+  }
+
+  // 从一份 getStats 派生本 transport 的线路读数：
+  // RTT 取选中候选对（没有再退回服务端回报的 remote-inbound-rtp）；
+  // 抖动/丢包收侧看 inbound-rtp（自己实际收到的），发侧看服务端回报的 remote-inbound-rtp；
+  // 传输方式按候选对的 protocol，远端候选是中继时直接记 relay（走了 TURN 才是真正的兜底）
+  private deriveLine(
+    target: 'pub' | 'sub',
+    byID: Map<string, Record<string, unknown>>,
+    selectedPair: Record<string, unknown> | undefined,
+  ): LineStats {
+    const num = (v: unknown): number | undefined => (typeof v === 'number' && Number.isFinite(v) ? v : undefined);
+    const out: LineStats = { at: Date.now() };
+
+    if (selectedPair) {
+      const rtt = num(selectedPair.currentRoundTripTime);
+      if (rtt !== undefined) out.rtt_ms = Math.round(rtt * 1000);
+      const localCand = byID.get(String(selectedPair.localCandidateId ?? ''));
+      const remoteCand = byID.get(String(selectedPair.remoteCandidateId ?? ''));
+      const proto = String(localCand?.protocol ?? remoteCand?.protocol ?? '');
+      const remoteType = String(remoteCand?.candidateType ?? '');
+      out.transport = remoteType === 'relay' ? 'relay' : proto === 'udp' || proto === 'tcp' ? proto : 'unknown';
+      if (localCand) out.local = this.endpointOf(localCand);
+      if (remoteCand) out.remote = this.endpointOf(remoteCand);
+    }
+
+    let jitter: number | undefined;
+    let lostSum = 0;
+    let recvSum = 0;
+    let haveInbound = false;
+    let remoteRTT: number | undefined;
+    let remoteJitter: number | undefined;
+    let fractionLost: number | undefined;
+    for (const stat of byID.values()) {
+      if (stat.type === 'inbound-rtp') {
+        haveInbound = true;
+        const j = num(stat.jitter);
+        if (j !== undefined) jitter = Math.max(jitter ?? 0, j);
+        lostSum += num(stat.packetsLost) ?? 0;
+        recvSum += num(stat.packetsReceived) ?? 0;
+      }
+      if (stat.type === 'remote-inbound-rtp') {
+        const rtt = num(stat.roundTripTime);
+        if (rtt !== undefined) remoteRTT = Math.max(remoteRTT ?? 0, rtt);
+        const j = num(stat.jitter);
+        if (j !== undefined) remoteJitter = Math.max(remoteJitter ?? 0, j);
+        const f = num(stat.fractionLost);
+        if (f !== undefined) fractionLost = Math.max(fractionLost ?? 0, f);
+      }
+    }
+    if (out.rtt_ms === undefined && remoteRTT !== undefined) out.rtt_ms = Math.round(remoteRTT * 1000);
+
+    if (haveInbound) {
+      const prev = this.lastLine[target];
+      this.lastLine[target] = { lost: lostSum, total: lostSum + recvSum };
+      if (jitter !== undefined) out.jitter_ms = Math.round(jitter * 10000) / 10;
+      if (prev) {
+        const dl = Math.max(0, lostSum - prev.lost);
+        const dt = Math.max(0, lostSum + recvSum - prev.total);
+        if (dt > 0) out.loss_pct = Math.round((dl / dt) * 1000) / 10;
+      }
+    } else {
+      if (remoteJitter !== undefined) out.jitter_ms = Math.round(remoteJitter * 10000) / 10;
+      if (fractionLost !== undefined) out.loss_pct = Math.round(fractionLost * 1000) / 10;
+    }
+    return out;
+  }
+
+  // Safari/WebKit 的 RTCStats 仍可能只提供旧字段 ip；Chromium/Firefox 用 address
+  private endpointOf(stat: Record<string, unknown>): string {
+    const address = String(stat.address ?? stat.ip ?? 'unknown');
+    const host = address.includes(':') ? `[${address}]` : address;
+    return `${String(stat.protocol ?? '?')}/${String(stat.candidateType ?? '?')} ${host}:${String(stat.port ?? '?')}`;
+  }
+
+  // 两个 transport 的读数合成一条线：RTT/传输方式取有选中候选对的那个（订阅侧优先，
+  // 合并形态下它一定在），抖动与丢包优先用收侧（用户真正感受到的那一路）
+  lineStats(): LineStats | null {
+    if (!this.connected()) return null;
+    const sub = this.snapshot.sub?.line;
+    const pub = this.snapshot.pub?.line;
+    const base = sub?.rtt_ms !== undefined ? sub : pub?.rtt_ms !== undefined ? pub : (sub ?? pub);
+    if (!base) return null;
+    return {
+      ...base,
+      jitter_ms: sub?.jitter_ms ?? pub?.jitter_ms,
+      loss_pct: sub?.loss_pct ?? pub?.loss_pct,
+    };
   }
 
   async resumeAudio() {
@@ -356,8 +457,12 @@ export class LiveKitEngine implements AVEngine {
     return out;
   }
 
-  // 实测统计：对相邻两次采样做字节差分得码率（bits/ms = kbps）
-  private lastSample = new Map<string, { bytes: number; t: number; packets: number; lost: number }>();
+  // 实测统计：对相邻两次采样做字节差分得码率（bits/ms = kbps）。
+  // jb/decode/encode 也按区间差分（累计值除以累计帧数会被开局那几帧长期拖住）
+  private lastSample = new Map<
+    string,
+    { bytes: number; t: number; packets: number; lost: number; jb: number; jbCount: number; work: number; frames: number }
+  >();
 
   private pickVideoStats(report: RTCStatsReport | undefined, type: 'outbound-rtp' | 'inbound-rtp', key: string): VideoStats | null {
     if (!report) return null;
@@ -367,14 +472,22 @@ export class LiveKitEngine implements AVEngine {
         type?: string; kind?: string; bytesSent?: number; bytesReceived?: number;
         timestamp?: number; frameWidth?: number; frameHeight?: number; framesPerSecond?: number;
         packetsReceived?: number; packetsLost?: number;
+        jitterBufferDelay?: number; jitterBufferEmittedCount?: number;
+        totalDecodeTime?: number; framesDecoded?: number; framesDropped?: number;
+        totalEncodeTime?: number; framesEncoded?: number; qualityLimitationReason?: string;
       };
       if (r.type !== type || r.kind !== 'video') return;
       const bytes = r.bytesSent ?? r.bytesReceived ?? 0;
       const t = r.timestamp ?? 0;
       const packets = r.packetsReceived ?? 0;
       const lost = r.packetsLost ?? 0;
+      // 收侧看解码，发侧看编码：两侧各一对「累计耗时 / 累计帧数」，同一组差分算区间均值
+      const work = (type === 'inbound-rtp' ? r.totalDecodeTime : r.totalEncodeTime) ?? 0;
+      const frames = (type === 'inbound-rtp' ? r.framesDecoded : r.framesEncoded) ?? 0;
+      const jb = r.jitterBufferDelay ?? 0;
+      const jbCount = r.jitterBufferEmittedCount ?? 0;
       const prev = this.lastSample.get(key);
-      this.lastSample.set(key, { bytes, t, packets, lost });
+      this.lastSample.set(key, { bytes, t, packets, lost, jb, jbCount, work, frames });
       const kbps = prev && t > prev.t ? ((bytes - prev.bytes) * 8) / (t - prev.t) : 0;
       // 丢包只对接收侧有意义，且要看区间差分——累计值会把开局那几个包一直摊到最后
       let loss: number | undefined;
@@ -383,12 +496,26 @@ export class LiveKitEngine implements AVEngine {
         const dp = Math.max(0, packets - prev.packets);
         if (dl + dp > 0) loss = Math.round((dl / (dl + dp)) * 1000) / 10;
       }
+      const avgMs = (dv: number, dn: number): number | undefined =>
+        dn > 0 ? Math.round((dv / dn) * 10000) / 10 : undefined;
+      const frameMs = prev ? avgMs(work - prev.work, frames - prev.frames) : undefined;
+      const limitation = r.qualityLimitationReason;
       out = {
         width: r.frameWidth ?? 0,
         height: r.frameHeight ?? 0,
         fps: r.framesPerSecond ?? 0,
         kbps: Math.max(0, Math.round(kbps)),
         loss,
+        jitter_buffer_ms: type === 'inbound-rtp' && prev ? avgMs(jb - prev.jb, jbCount - prev.jbCount) : undefined,
+        decode_ms: type === 'inbound-rtp' ? frameMs : undefined,
+        frames_dropped: type === 'inbound-rtp' ? r.framesDropped : undefined,
+        encode_ms: type === 'outbound-rtp' ? frameMs : undefined,
+        limitation:
+          type === 'outbound-rtp' && limitation
+            ? limitation === 'none' || limitation === 'cpu' || limitation === 'bandwidth'
+              ? limitation
+              : 'other'
+            : undefined,
       };
     });
     return out;

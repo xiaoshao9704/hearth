@@ -4,13 +4,31 @@
 
 export type TrackSource = 'camera' | 'screen';
 
-// 视频流运行时真值（getStats）：发送侧为实际上行，接收侧为本端实际拿到的层
+// 视频流运行时真值（getStats）：发送侧为实际上行，接收侧为本端实际拿到的层。
+// 扩展项全部可选：浏览器缺该字段、或采样区间内没有新帧时不给值，展示层没有值就不显示那一段
 export interface VideoStats {
   width: number;
   height: number;
   fps: number;
   kbps: number;
   loss?: number; // 丢包率 %（接收侧两次采样的差分；发送侧无此项）
+  jitter_buffer_ms?: number; // 收侧：抖动缓冲驻留时长（区间均值）
+  decode_ms?: number; // 收侧：每帧解码耗时（区间均值）
+  frames_dropped?: number; // 收侧：累计丢弃帧
+  encode_ms?: number; // 发侧：每帧编码耗时（区间均值）
+  limitation?: 'none' | 'cpu' | 'bandwidth' | 'other'; // 发侧：画质受限原因
+}
+
+// 一条线（语音 / 舞台）到服务器的连接读数：从引擎已有的 transport 快照派生，
+// 不另开一路 getStats。at = 快照采样时刻（Date.now），展示层据此判断新鲜度
+export interface LineStats {
+  rtt_ms?: number;
+  jitter_ms?: number;
+  loss_pct?: number;
+  transport?: 'udp' | 'tcp' | 'relay' | 'unknown';
+  local?: string; // 选中候选对的本地端点（已格式化，含协议与候选类型）
+  remote?: string;
+  at: number;
 }
 
 // 参与者快照（identity 粒度 = 账号的一台设备；username 用于按账号聚合展示）
@@ -26,6 +44,8 @@ export interface EPart {
   ingest: boolean; // 推流参与者（参与者元数据 kind=ingest，不再解析 identity 后缀）
   tag: string; // 推流设备标签（identity = {username}-{tag}）；非推流参与者为空
   afk: boolean; // 对方自己广播的「离开」（参与者属性 afk=1）；纯展示，不参与任何判定
+  // 内核按 RTCP 回报算出的连接质量（unknown / 尚未回报时为 undefined）；纯展示
+  quality?: 'excellent' | 'good' | 'poor' | 'lost';
 }
 
 // 数据通道话题：文本走 TEXT，文件字节走 FILE。引擎只按 topic 注册/透传，
@@ -85,6 +105,8 @@ export interface AVEngine {
   screenStats(): Promise<VideoStats | null>;
   // 远端视频轨的本端实测接收数据（SVC 下反映本端实际拿到的层）；无该轨或引擎无视频返回 null
   remoteVideoStats(identity: string, source: TrackSource): Promise<VideoStats | null>;
+  // 本线到服务器的连接读数（取引擎内周期刷新的 transport 快照）；未连接或拿不到返回 null
+  lineStats(): LineStats | null;
   switchCamera(deviceId: string): Promise<void>;
   // 前后摄像头对调（手机）：未开摄像头或本机只有一个摄像头时抛错，由调用方提示
   flipCamera(): Promise<void>;

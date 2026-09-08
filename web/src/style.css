@@ -1285,3 +1285,17 @@ body.theater-on .sidebar { display: none; }
   .ingest-scrim { padding: 56px 12px 12px; }
   .ingest-panel { padding: 16px; }
 }
+
+/* ---- 连接质量读数面板（顶栏 conn-chip 点开）---- */
+.conn-chip-btn { cursor: pointer; }
+.conn-chip-btn:hover { color: var(--text-1); }
+.conn-panel {
+  position: fixed; z-index: 320; width: 264px; padding: 9px 10px;
+  background: var(--bg-1); border: 1px solid var(--line); border-radius: 11px;
+  box-shadow: var(--shadow-lg); display: flex; flex-direction: column; gap: 6px;
+}
+.conn-panel .cp-title { font-size: 11px; color: var(--text-2); }
+.conn-panel .cp-row { display: flex; align-items: baseline; gap: 8px; }
+.conn-panel .cp-line { flex-shrink: 0; font-size: 11.5px; color: var(--text-1); }
+.conn-panel .cp-val { flex-grow: 1; min-width: 0; font-size: 11px; color: var(--text-0); word-break: break-word; }
+.conn-panel .cp-note { font-size: 10.5px; line-height: 1.55; color: var(--text-2); }

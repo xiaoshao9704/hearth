@@ -26,6 +26,8 @@ import { notifyJoin, notifyMessage } from '../notify';
 import { renderShell } from '../shell';
 import { avatarHtml, confirmDialog, el, esc, fmtClock, icon, licon, menuButtonHtml, micIcon, slashIcon, toast, wireMenuButton } from '../ui';
 import { CameraFlipButton } from './room/camera-flip';
+import { ConnPanel } from './room/conn-panel';
+import type { ConnRow } from './room/conn-panel';
 import { IngestBadge } from './room/ingest-badge';
 import { IngestPanel } from './room/ingest-panel';
 import { createUnreadMarker } from './room/unread-divider';
@@ -100,6 +102,9 @@ interface FileState {
   progress: number; // 0~1，仅发送侧
   url: string; // Blob URL（ready 时非空）
 }
+
+// 发侧画质受限原因的中文说法（getStats 的 qualityLimitationReason）
+const LIMIT_TEXT: Record<string, string> = { cpu: 'CPU', bandwidth: '带宽', other: '其他' };
 
 // 内联预览的图片 MIME 白名单：白名单外一律当文件走 a[download]，不进 <img>
 const IMAGE_MIME = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
@@ -300,6 +305,18 @@ export async function renderRoom(root: HTMLElement, channel: string) {
   // 只从频道列表来，页面自己不记第二份——设置浮层里改完会派 hearth:channels，这里重取
   const [muted, setMuted] = createSignal(false);
   const [ingestOpen, setIngestOpen] = createSignal(false); // 顶栏「OBS 推流」面板
+  const [connOpen, setConnOpen] = createSignal(false); // 顶栏 conn-chip 点开的连接读数面板
+  let connAnchor: HTMLElement | null = null; // 面板的定位锚（点开那一下的 chip 元素）
+
+  // 面板行：合并形态两种角色同一条连接，只出一行
+  const connRows = (): ConnRow[] => {
+    const rows: ConnRow[] = [];
+    if (voiceLine.engine) {
+      rows.push({ label: combined ? '语音 · 舞台' : '语音线', stats: () => voiceLine.engine?.lineStats() ?? null });
+    }
+    if (!combined && stageLine) rows.push({ label: '舞台线', stats: () => stageLine?.engine?.lineStats() ?? null });
+    return rows;
+  };
 
   // DOM ref（引擎产的命令式元素挂载点等）
   let audioBinEl!: HTMLDivElement;
@@ -1885,6 +1902,18 @@ export async function renderRoom(root: HTMLElement, channel: string) {
                       {el(licon('gauge'))}
                       {(s().kbps / 1000).toFixed(1)}M
                     </span>
+                    <Show when={s().jitter_buffer_ms !== undefined}>
+                      <span class="stat">缓冲 {Math.round(s().jitter_buffer_ms!)} ms</span>
+                    </Show>
+                    <Show when={s().decode_ms !== undefined}>
+                      <span class="stat">解码 {s().decode_ms!.toFixed(1)} ms</span>
+                    </Show>
+                    <Show when={s().encode_ms !== undefined}>
+                      <span class="stat">编码 {s().encode_ms!.toFixed(1)} ms</span>
+                    </Show>
+                    <Show when={s().limitation && s().limitation !== 'none'}>
+                      <span class="stat">受限：{LIMIT_TEXT[s().limitation!]}</span>
+                    </Show>
                   </>
                 )}
               </Show>
@@ -2298,8 +2327,14 @@ export async function renderRoom(root: HTMLElement, channel: string) {
           <div class="vline"></div>
           <span class="sub">{metaText()}</span>
           <span
-            class="conn-chip"
+            id="conn-entry"
+            class="conn-chip conn-chip-btn"
             classList={{ live: voiceState().phase === 'up', retry: voiceState().phase === 'retry' }}
+            title="连接质量读数"
+            onClick={(ev) => {
+              connAnchor = ev.currentTarget;
+              setConnOpen((o) => !o);
+            }}
           >
             <span class="dot"></span>
             <span>
@@ -2312,6 +2347,9 @@ export async function renderRoom(root: HTMLElement, channel: string) {
                     : '重连中'}
             </span>
           </span>
+          <Show when={connOpen()}>
+            <ConnPanel rows={connRows} anchor={connAnchor} onClose={() => setConnOpen(false)} />
+          </Show>
           <div class="spacer"></div>
           <Show when={guestLeft()}>
             <button
@@ -2920,6 +2958,33 @@ export async function renderRoom(root: HTMLElement, channel: string) {
   const onChannelsChanged = () => syncChannelInfo();
   window.addEventListener('hearth:channels', onChannelsChanged);
 
+  // ---- 线路读数诊断（60 秒一条）----
+  // 页面隐藏或语音线不在 up 时跳过：后台标签页的读数没有诊断价值，断线期间也不该刷日志
+  let lineDiagTimer = 0;
+  const lineDiag = async () => {
+    if (document.hidden || voiceState().phase !== 'up') return;
+    const rows: [Role, AVEngine | null][] = combined
+      ? [['voice', voiceLine.engine]]
+      : [
+          ['voice', voiceLine.engine],
+          ['stage', stageLine?.engine ?? null],
+        ];
+    for (const [role, eng] of rows) {
+      if (!eng?.connected()) continue;
+      const line = eng.lineStats();
+      // 本地投屏的发侧读数（编码耗时/受限原因）只在承担舞台角色的那条线上有
+      const video = combined || role === 'stage' ? await eng.screenStats() : null;
+      if (!line && !video) continue;
+      // 服务端 detail 上限 2000 字符：一条线的读数加一路投屏远小于此，slice 只是兜底
+      diag('info', 'line_stats', role, { detail: JSON.stringify({ line, video }).slice(0, 2000) });
+    }
+  };
+  // 第一次等 10 秒（让 ICE 与快照稳定），之后每 60 秒一次
+  const lineDiagStart = window.setTimeout(() => {
+    void lineDiag();
+    lineDiagTimer = window.setInterval(() => void lineDiag(), 60000);
+  }, 10000);
+
   // ---- 首次连接与清理 ----
   // 清理监听必须先于首次连接注册：连接期间用户离开时，清理块要能置 leaving 并释放已建好的部分
   // 离开判定 → 广播成参与者属性（语音线是名册权威）；引擎不在/服务端不收都不影响本机显示
@@ -2966,6 +3031,8 @@ export async function renderRoom(root: HTMLElement, channel: string) {
       clearInterval(vuTimer);
       tileTimers.forEach((t) => clearInterval(t));
       tileTimers.clear();
+      clearTimeout(lineDiagStart);
+      clearInterval(lineDiagTimer);
       void vuCtx?.close();
       clearTimeout(voiceLine.timer);
       if (stageLine && stageLine !== voiceLine) clearTimeout(stageLine.timer);
