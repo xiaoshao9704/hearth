@@ -7,6 +7,7 @@
 // - 视图层（Solid）：信号驱动，引擎回调只写信号，DOM 由 JSX 派生，消灭手工 refresh* 互相调用。
 import { createEffect, createMemo, createSignal, on, onCleanup, untrack, For, Show } from 'solid-js';
 import { render } from 'solid-js/web';
+import { closeAccountMenu, openAccountMenu } from '../account-menu';
 import { startAfkWatch } from '../afk';
 import { ApiError, fetchJoinCredentials, getUser, guestTimeLeft, isGuest, kickUser, listChannels, muteUser, reportClientLog } from '../api';
 import type { ChannelRole, DataLine, EngineCred } from '../api';
@@ -2432,6 +2433,17 @@ export async function renderRoom(root: HTMLElement, channel: string) {
               <span class="pill-label">聚焦</span>
             </button>
           </div>
+          {/* 账户入口：手机上侧栏是抽屉、房间里看不到，顶栏这个小头像才是能看见的入口 */}
+          <button
+            id="acct-entry"
+            class="hit acct-entry"
+            aria-haspopup="menu"
+            title="账户"
+            aria-label="账户"
+            onClick={(ev) => openAccountMenu(ev.currentTarget)}
+          >
+            {el(avatarHtml(getUser()?.username ?? '?', 'avatar avatar-sm'))}
+          </button>
         </header>
         <div class="room-body">
           <Show when={layoutMode() === 'chat'}>
@@ -3029,7 +3041,8 @@ export async function renderRoom(root: HTMLElement, channel: string) {
       setAppBadge(0);
       diag('info', 'room_close');
       leaving = true;
-      closeChannelMenu(); // 浮层挂在 body 上，房间视图卸载不会带走它
+      closeChannelMenu(); // 两个浮层都挂在 body 上，房间视图卸载不会带走它们
+      closeAccountMenu();
       pipCtl.dispose();
       theaterCtl.dispose();
       exitFs();

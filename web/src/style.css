@@ -791,11 +791,15 @@ body {
 .input-bad { box-shadow: inset 0 0 0 1.5px var(--red); border-radius: 6px; }
 /* 「服务器在线」chip 的离线态，尺寸对齐既有 .ok-dot */
 .status-chip .bad-dot { width: 5px; height: 5px; border-radius: 50%; background: var(--red); display: inline-block; }
-/* 侧栏用户栏点头像/名字弹出的小菜单：独立命名，不与房间页 .user-menu 耦合 */
+/* 账户菜单：侧栏用户栏与顶栏账户入口共用一份，贴着触发器定位（fixed，锚点由 JS 量） */
 .user-bar { position: relative; }
 .user-bar-trigger { display: flex; align-items: center; gap: 9px; flex-grow: 1; min-width: 0; text-align: left; }
+/* 用户栏的箭头：给「这里能点」一个视觉提示 */
+.user-bar-trigger .acct-chev { flex-shrink: 0; display: flex; opacity: 0.75; }
+.user-bar-trigger:hover, .user-bar-trigger[aria-expanded='true'] { background: var(--bg-3); border-radius: 8px; }
+.user-bar-trigger:hover .acct-chev { opacity: 1; }
 .acct-menu {
-  position: absolute; left: 8px; right: 8px; bottom: calc(100% + 6px); z-index: 60; padding: 5px;
+  position: fixed; z-index: 320; min-width: 176px; padding: 5px;
   background: var(--bg-1); border: 1px solid var(--line); border-radius: 11px; box-shadow: var(--shadow-lg);
 }
 .acct-menu .am-item {
@@ -1342,3 +1346,16 @@ body.theater-on .sidebar { display: none; }
 .channel-menu { min-width: 190px; }
 /* 菜单里的分组分隔线（频道管理、离开各自成组） */
 .user-menu .um-sep { height: 1px; margin: 4px 6px; background: var(--line-soft); }
+
+/* ---- 入口整理：顶栏账户入口 ---- */
+
+/* 桌面宽度下侧栏用户栏一直可见，顶栏这个入口只在窄屏（侧栏变抽屉）出现 */
+.acct-entry {
+  display: none; flex-shrink: 0; width: 36px; height: 36px; border-radius: 999px;
+  align-items: center; justify-content: center;
+}
+.acct-entry:hover, .acct-entry[aria-expanded='true'] { background: var(--bg-3); }
+.acct-entry .avatar { width: 26px; height: 26px; font-size: 10.5px; }
+@media (max-width: 860px) {
+  .acct-entry { display: flex; align-items: center; }
+}

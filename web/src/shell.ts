@@ -1,8 +1,9 @@
 // 应用壳：左侧栏（频道导航 / 连接状态 / 用户栏）+ 内容区。大厅与房间共用。
-import { getUser, listChannels, logout } from './api';
+import { getUser, listChannels } from './api';
 import type { Channel } from './api';
 import { loadPrefs, savePrefs, notifyPrefsChanged, prefsBus } from './prefs';
-import { avatarHtml, confirmDialog, esc, flameLogo, icon, micIcon, slashIcon } from './ui';
+import { closeAccountMenu, openAccountMenu } from './account-menu';
+import { avatarHtml, esc, flameLogo, icon, micIcon, slashIcon } from './ui';
 import { wireThemeButton } from './theme';
 import { openSettings } from './views/settings';
 
@@ -57,6 +58,7 @@ export function renderShell(root: HTMLElement, opts: ShellOptions = {}): Shell {
               <div class="name" id="side-name">${esc(user?.username ?? '')}</div>
               <div class="meta mono">本机</div>
             </div>
+            <span class="acct-chev">${icon('chevUp', 13, 'var(--text-2)', 1.9)}</span>
           </button>
           <button class="hit mini-btn" id="side-mic" title="麦克风偏好" aria-label="麦克风偏好" style="${opts.activeChannel ? 'display:none' : ''}"></button>
           <button class="hit mini-btn" id="side-theme" aria-label="外观"></button>
@@ -75,7 +77,6 @@ export function renderShell(root: HTMLElement, opts: ShellOptions = {}): Shell {
   const micBtn = root.querySelector<HTMLButtonElement>('#side-mic')!;
   const avatarWrap = root.querySelector<HTMLDivElement>('#side-avatar-wrap')!;
   const nameEl = root.querySelector<HTMLDivElement>('#side-name')!;
-  const userBar = root.querySelector<HTMLDivElement>('#user-bar')!;
   const acctTrigger = root.querySelector<HTMLButtonElement>('#acct-trigger')!;
   const themeBtn = root.querySelector<HTMLButtonElement>('#side-theme')!;
 
@@ -113,58 +114,8 @@ export function renderShell(root: HTMLElement, opts: ShellOptions = {}): Shell {
     openSettings('av', { channel: opts.activeChannel });
   });
 
-  // ---- 用户栏小菜单：点头像/名字，账户设置 / 外观 / 退出登录 ----
-  let acctMenu: HTMLDivElement | null = null;
-
-  function closeAcctMenu() {
-    if (!acctMenu) return;
-    acctMenu.remove();
-    acctMenu = null;
-    acctTrigger.setAttribute('aria-expanded', 'false');
-    document.removeEventListener('pointerdown', onOutsidePointer, true);
-    document.removeEventListener('keydown', onAcctKeydown, true);
-  }
-  function onOutsidePointer(ev: PointerEvent) {
-    if (acctMenu && !acctMenu.contains(ev.target as Node) && !acctTrigger.contains(ev.target as Node)) closeAcctMenu();
-  }
-  function onAcctKeydown(ev: KeyboardEvent) {
-    if (ev.key === 'Escape') closeAcctMenu();
-  }
-  async function doLogout() {
-    closeAcctMenu();
-    const ok = await confirmDialog({ title: '退出登录？', body: '只退这台设备', danger: true, confirmText: '退出登录' });
-    if (!ok) return;
-    await logout().catch(() => {});
-    location.replace('#/login');
-  }
-  function openAcctMenu() {
-    const menu = document.createElement('div');
-    menu.className = 'acct-menu';
-    menu.setAttribute('role', 'menu');
-    menu.innerHTML = `
-      <button type="button" class="hit am-item" role="menuitem" data-act="account">${icon('user', 14, 'currentColor', 1.6)}<span>账户设置</span></button>
-      <button type="button" class="hit am-item" role="menuitem" data-act="theme">${icon('sun', 14, 'currentColor', 1.6)}<span>外观</span></button>
-      <button type="button" class="hit am-item danger" role="menuitem" data-act="logout">${icon('leave', 14, 'var(--red)', 1.6)}<span>退出登录</span></button>
-    `;
-    userBar.appendChild(menu);
-    acctMenu = menu;
-    acctTrigger.setAttribute('aria-expanded', 'true');
-    menu.querySelector('[data-act="account"]')!.addEventListener('click', () => {
-      closeAcctMenu();
-      openSettings('account');
-    });
-    menu.querySelector('[data-act="theme"]')!.addEventListener('click', () => {
-      closeAcctMenu();
-      themeBtn.click(); // 复用主题按钮已有的切换 + 图标 + toast 逻辑
-    });
-    menu.querySelector('[data-act="logout"]')!.addEventListener('click', () => void doLogout());
-    document.addEventListener('pointerdown', onOutsidePointer, true);
-    document.addEventListener('keydown', onAcctKeydown, true);
-  }
-  acctTrigger.addEventListener('click', () => {
-    if (acctMenu) closeAcctMenu();
-    else openAcctMenu();
-  });
+  // ---- 用户栏小菜单：与顶栏账户入口共用 account-menu.ts 那一份 ----
+  acctTrigger.addEventListener('click', () => openAccountMenu(acctTrigger));
 
   function paintChannels(channels: Channel[]) {
     if (channels.length === 0) {
@@ -230,7 +181,7 @@ export function renderShell(root: HTMLElement, opts: ShellOptions = {}): Shell {
       prefsBus.removeEventListener('prefs', onPrefs);
       window.removeEventListener('hearth:user', onUser);
       window.removeEventListener('hearth:channels', onChannelsChanged);
-      closeAcctMenu();
+      closeAccountMenu();
     },
   };
 }

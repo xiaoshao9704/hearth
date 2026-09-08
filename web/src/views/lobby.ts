@@ -2,9 +2,10 @@
 import { canInvite, createChannel, fetchMe, getUser, guestTimeLeft, isGuest, listChannels } from '../api';
 import type { Channel } from '../api';
 import { isSupported, passkeyErrorDetail, registerPasskey } from '../passkey';
+import { closeAccountMenu, openAccountMenu } from '../account-menu';
 import { renderShell } from '../shell';
 import { closeChannelMenu, openChannelMenu } from './room/channel-menu';
-import { esc, icon, menuButtonHtml, slashIcon, toast, wireMenuButton } from '../ui';
+import { avatarHtml, esc, icon, menuButtonHtml, slashIcon, toast, wireMenuButton } from '../ui';
 import { openSettings } from './settings';
 
 const NAME_RE = /^[A-Za-z0-9_-]{1,64}$/;
@@ -179,6 +180,8 @@ export async function renderLobby(root: HTMLElement, alive: () => boolean) {
       <div class="spacer"></div>
       ${user?.is_admin ? `<a class="hit btn btn-sm" href="#/admin">${icon('shield', 14, 'var(--text-1)', 1.6)} 管理后台</a>` : ''}
       <div class="status-chip mono" id="status-chip"><span style="display:flex;align-items:center;gap:5px"><span class="ok-dot" id="status-dot"></span><span id="status-text">服务器在线</span></span></div>
+      <!-- 账户入口：手机上侧栏是抽屉，顶栏这个小头像才是能看见的入口 -->
+      <button type="button" class="hit acct-entry" id="acct-entry" aria-haspopup="menu" title="账户" aria-label="账户">${avatarHtml(user?.username ?? '?', 'avatar avatar-sm')}</button>
     </header>
     <div class="lobby-body">
       <div id="passkey-nudge"></div>
@@ -241,13 +244,17 @@ export async function renderLobby(root: HTMLElement, alive: () => boolean) {
     document.removeEventListener('visibilitychange', onVisible);
     window.removeEventListener('hearth:user', onUser);
     window.removeEventListener('hearth:channels', onChannelsChanged);
-    closeChannelMenu(); // 浮层挂在 body 上，切页不会带走它
+    closeChannelMenu(); // 两个浮层都挂在 body 上，切页不会带走它们
+    closeAccountMenu();
     shell.destroy();
     unwireMenu();
   };
   window.addEventListener('hashchange', onLeave, { once: true });
 
   void maybeNudgePasskey(root.querySelector<HTMLElement>('#passkey-nudge')!, alive);
+
+  const acctEntry = root.querySelector<HTMLButtonElement>('#acct-entry')!;
+  acctEntry.addEventListener('click', () => openAccountMenu(acctEntry));
 
   root.querySelector('#tune-av')!.addEventListener('click', () => openSettings('av'));
   root.querySelector('#guest-bar')?.addEventListener('click', () => openSettings('account'));
