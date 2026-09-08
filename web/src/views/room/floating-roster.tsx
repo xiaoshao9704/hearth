@@ -2,10 +2,11 @@
 // 可拖到四角（松手吸附最近的角，落 prefs）、可折叠成一个小按钮。
 // 停靠角与折叠态是模块级信号：主窗口与画中画窗口各挂一份视图，共享同一份真相，
 // 一边拖动另一边跟着走（两者都只是 prefs 的镜像，不是第二真相源）。
-import { createMemo, createSignal, For, Show } from 'solid-js';
+import { createMemo, createSignal, onCleanup, For, Show } from 'solid-js';
 import { render } from 'solid-js/web';
 import type { EPart } from '../../engine/types';
 import { loadPrefs, savePrefs, type TheaterCorner } from '../../prefs';
+import { wireLongPress } from '../../longpress';
 import { avatarHtml, el, icon, micIcon } from '../../ui';
 
 const initial = loadPrefs();
@@ -114,11 +115,24 @@ export function FloatingRoster(props: FloatingRosterProps) {
             </button>
           </Show>
         </div>
-        <div class="fr-list">
+        <div
+          class="fr-list"
+          ref={(elm) =>
+            // 触屏无右键：名册行的长按在列表容器上委托一次，按 .fr-row 找人
+            onCleanup(
+              wireLongPress(elm, (x, y, target) => {
+                const key = target.closest<HTMLElement>('.fr-row')?.dataset.key;
+                const r = rows().find((it) => it.key === key);
+                if (r && props.onMenu) props.onMenu(x, y, r.parts[0]);
+              }),
+            )
+          }
+        >
           <For each={rows()}>
             {(r) => (
               <div
                 class="fr-row"
+                data-key={r.key}
                 classList={{ speaking: rowSpeaking(r) }}
                 onContextMenu={(ev) => {
                   if (!props.onMenu) return;

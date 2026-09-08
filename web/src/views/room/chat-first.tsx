@@ -1,7 +1,8 @@
 // 无投屏时的「聊天为主」布局顶栏：一行频道用户（头像 + 名字 + 说话高亮）。
 // 舞台区这时没有任何画面可看，与其留一屏空卡片，不如把在场的人压成一条，把地方让给聊天。
-import { createEffect, createMemo, on, untrack, For, Show } from 'solid-js';
+import { createEffect, createMemo, on, onCleanup, untrack, For, Show } from 'solid-js';
 import type { EPart } from '../../engine/types';
+import { wireLongPress } from '../../longpress';
 import { avatarHtml, el, icon, micIcon } from '../../ui';
 
 export interface ChatFirstProps {
@@ -32,11 +33,24 @@ export function ChatFirstBar(props: ChatFirstProps) {
   const micOn = (c: UserChip) => c.parts.some((p) => p.micOn);
 
   return (
-    <div class="chat-first-bar">
+    <div
+      class="chat-first-bar"
+      ref={(elm) =>
+        // 触屏无右键：头像条的长按在容器上委托一次，按 .cf-chip 找人
+        onCleanup(
+          wireLongPress(elm, (x, y, target) => {
+            const key = target.closest<HTMLElement>('.cf-chip')?.dataset.key;
+            const c = chips().find((it) => it.key === key);
+            if (c && props.onMenu) props.onMenu(x, y, c.parts[0]);
+          }),
+        )
+      }
+    >
       <For each={chips()}>
         {(c) => (
           <div
             class="cf-chip"
+            data-key={c.key}
             classList={{ speaking: isSpeaking(c) }}
             title={c.name}
             onContextMenu={(ev) => {

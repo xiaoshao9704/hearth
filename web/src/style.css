@@ -928,7 +928,9 @@ body {
 
 
 /* 触屏长按弹操作菜单：禁用 iOS 长按系统气泡与文本选中 */
-.tile, .member-row { -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; }
+.tile, .member-row, .cf-chip, .fr-row, .chat-msg { -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; }
+/* 消息正文例外：正文要能长按选中复制，所以长按菜单只在头像/时间行/空白处触发（见 longpress 接线） */
+.chat-msg .text { -webkit-touch-callout: default; -webkit-user-select: text; user-select: text; }
 
 /* 全屏/模拟全屏压过 spotlight 边栏的定宽定高（含窄屏媒体查询那条），否则边栏卡片全屏只有 116px 高 */
 .video-grid.spotlight .rail .tile.faux-fs,

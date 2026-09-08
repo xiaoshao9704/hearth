@@ -21,6 +21,7 @@ import { encodeDelete, encodeMessage, encodeReaction, parseEnvelope } from '../c
 import { createEngine } from '../engine';
 import { DATA_TOPIC_FILE, DATA_TOPIC_TEXT } from '../engine/types';
 import type { AVEngine, EPart, EngineCallbacks, TrackSource, VideoStats } from '../engine/types';
+import { wireLongPress } from '../longpress';
 import { clearLeaveGuard, setLeaveGuard } from '../nav';
 import { encoderIsHw, loadPrefs, prefsBus, savePrefs } from '../prefs';
 import { notifyJoin, notifyMessage } from '../notify';
@@ -598,9 +599,6 @@ export async function renderRoom(root: HTMLElement, channel: string) {
   // ---- 用户操作菜单（聊天卡片、成员行与视频卡片右键共用；挂 body，保持命令式）----
   // 管理操作（禁言/踢出）= 频道 owner 或 moderator（与后端 requireModerator 一致；系统 admin 的隐含 owner 已由 my_role 下发）
   const canModerate = () => myRoleSig() === 'owner' || myRoleSig() === 'moderator';
-
-  let longPressTimer = 0; // 触屏长按弹菜单的定时器（tile 触摸事件共用）
-  let longPressFired = false; // 本次触摸已触发长按：touchend 要吞掉随之而来的合成 click
 
   // 命令式按钮的进行中态：await 期间置灰并禁止重复触发
   function markBusy(btn: HTMLButtonElement): () => void {
@@ -2107,27 +2105,31 @@ export async function renderRoom(root: HTMLElement, channel: string) {
     </div>
   );
 
+  // 消息菜单：卡片上的「…」、右键与长按共用（长按在聊天日志容器上委托，按 data-msg-id 反查消息）
+  const openMsgMenuFor = (m: ChatMessage, x: number, y: number) => {
+    const mine = m.uid === myUid;
+    showMsgMenu({
+      x,
+      y,
+      mine,
+      canDelete: mine || canModerate(),
+      deleted: m.deleted === true,
+      myEmojis: (m.reactions ?? []).filter((r) => r.uids.includes(myUid)).map((r) => r.emoji),
+      onReply: () => {
+        setReplyToId(m.id);
+        chatInputEl.focus();
+      },
+      onDelete: () => void removeMessage(m),
+      onReact: (emoji, on) => void toggleReaction(m, emoji, on),
+    });
+  };
+
   const ChatMsgView = (p: { m: ChatMessage }) => {
     const mine = p.m.uid === myUid;
     const openMenu = (ev: MouseEvent) => showUserMenu(ev.clientX, ev.clientY, p.m.uid, p.m.username);
     // 被引用的原消息：只在已加载的历史里找（找不到时 ReplyQuote 自己出"原消息已不在"）
     const quoted = createMemo(() => (p.m.reply_to ? msgs().find((x) => x.id === p.m.reply_to) : undefined));
-    const myEmojis = () => (p.m.reactions ?? []).filter((r) => r.uids.includes(myUid)).map((r) => r.emoji);
-    const openMsgMenu = (x: number, y: number) =>
-      showMsgMenu({
-        x,
-        y,
-        mine,
-        canDelete: mine || canModerate(),
-        deleted: p.m.deleted === true,
-        myEmojis: myEmojis(),
-        onReply: () => {
-          setReplyToId(p.m.id);
-          chatInputEl.focus();
-        },
-        onDelete: () => void removeMessage(p.m),
-        onReact: (emoji, on) => void toggleReaction(p.m, emoji, on),
-      });
+    const openMsgMenu = (x: number, y: number) => openMsgMenuFor(p.m, x, y);
     return (
       <div
         class="chat-msg"
@@ -2483,25 +2485,16 @@ export async function renderRoom(root: HTMLElement, channel: string) {
                   ev.preventDefault();
                   showUserMenu(ev.clientX, ev.clientY, p.uid, p.username, p.identity);
                 }}
-                onTouchStart={(ev) => {
-                  // 触屏无右键：长按 500ms 弹同一个菜单（iOS Safari 不发 contextmenu）
-                  const identity = (ev.target as HTMLElement).closest<HTMLElement>('.tile')?.dataset.identity;
-                  const p = parts().find((pp) => pp.identity === identity);
-                  if (!p) return;
-                  const t = ev.touches[0];
-                  longPressFired = false;
-                  longPressTimer = window.setTimeout(() => {
-                    longPressFired = true;
-                    showUserMenu(t.clientX, t.clientY, p.uid, p.username, p.identity);
-                  }, 500);
-                }}
-                onTouchMove={() => clearTimeout(longPressTimer)}
-                onTouchEnd={(ev) => {
-                  clearTimeout(longPressTimer);
-                  // 长按已弹菜单：吞掉抬手的合成 click，否则会误点卡片底下的按钮（置顶/全屏等）
-                  if (longPressFired) ev.preventDefault();
-                }}
-                onTouchCancel={() => clearTimeout(longPressTimer)}
+                ref={(elm) =>
+                  // 触屏无右键：长按弹同一个菜单（iOS Safari 不发 contextmenu）
+                  onCleanup(
+                    wireLongPress(elm, (x, y, target) => {
+                      const identity = target.closest<HTMLElement>('.tile')?.dataset.identity;
+                      const p = parts().find((pp) => pp.identity === identity);
+                      if (p) showUserMenu(x, y, p.uid, p.username, p.identity);
+                    }),
+                  )
+                }
               >
                 <For each={gridTiles()}>{(e) => <Tile e={e} />}</For>
                 <div class="rail">
@@ -2623,6 +2616,16 @@ export async function renderRoom(root: HTMLElement, channel: string) {
                 ev.preventDefault();
                 showUserMenu(ev.clientX, ev.clientY, Number(row.dataset.uid), row.dataset.uname ?? '', row.dataset.identity);
               }}
+              ref={(elm) =>
+                // 成员行的长按：在容器上委托一次，按 .member-row 找行（每行一个定时器没必要）
+                onCleanup(
+                  wireLongPress(elm, (x, y, target) => {
+                    const row = target.closest<HTMLElement>('.member-row');
+                    if (!row?.dataset.uid) return;
+                    showUserMenu(x, y, Number(row.dataset.uid), row.dataset.uname ?? '', row.dataset.identity);
+                  }),
+                )
+              }
             >
               <div>
                 <div class="side-section-title">
@@ -2829,7 +2832,18 @@ export async function renderRoom(root: HTMLElement, channel: string) {
             <div
               class="chat-log"
               classList={{ dropping: chatDrag() }}
-              ref={chatLogEl}
+              ref={(elm) => {
+                chatLogEl = elm;
+                // 消息行长按：在日志容器上委托一次；正文（.text）让给原生长按选中复制
+                onCleanup(
+                  wireLongPress(elm, (x, y, target) => {
+                    if (target.closest('.chat-msg .text')) return;
+                    const id = Number(target.closest<HTMLElement>('.chat-msg')?.dataset.msgId);
+                    const m = msgs().find((it) => it.id === id);
+                    if (m) openMsgMenuFor(m, x, y);
+                  }),
+                );
+              }}
               onScroll={onChatScroll}
               onDragOver={(ev) => {
                 ev.preventDefault();
