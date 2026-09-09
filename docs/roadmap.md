@@ -10,7 +10,7 @@ Hearth 是几个朋友的私人客厅：一个文件跑起来的语音、高清�
 
 ## 节点 0：文档收尾（v0.9.21，纯文档）
 
-状态：进行中（2026-09-09）。
+状态：已完成（2026-09-09），待推送发布。
 
 - README / README.en / 宣传页首屏加命名段落与定位语。
 - 状态过期的 plan 文档（passkey、notify、latency、entrypoints、ingest-entry、chat-files、site-readme）改成「已实施」。
