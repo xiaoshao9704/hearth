@@ -253,7 +253,7 @@ export function TlsCard(props: {
                       <div>
                         到期：<span class="mono">{fmtDate(cert().not_after)}</span>
                       </div>
-                      <div style="display:flex;align-items:center;gap:8px">
+                      <div class="tls-fp-row">
                         指纹：<span class="mono">{cert().fingerprint_sha256}</span>
                         <button type="button" class="hit btn btn-sm" onClick={() => void copyFp(cert().fingerprint_sha256)}>
                           {el(icon('copy', 12))} 复制
@@ -277,7 +277,7 @@ export function TlsCard(props: {
                         <div>
                           有效期至：<span class="mono">{fmtDate(ca().not_after)}</span>
                         </div>
-                        <div style="display:flex;align-items:center;gap:8px">
+                        <div class="tls-fp-row">
                           指纹：<span class="mono">{ca().fingerprint_sha256}</span>
                           <button type="button" class="hit btn btn-sm" onClick={() => void copyFp(ca().fingerprint_sha256)}>
                             {el(icon('copy', 12))} 复制
