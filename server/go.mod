@@ -15,6 +15,7 @@ require (
 	github.com/pion/ice/v4 v4.4.0
 	github.com/pion/stun/v3 v3.1.7
 	github.com/pion/webrtc/v4 v4.2.19
+	github.com/soheilhy/cmux v0.1.5
 	github.com/uptrace/bun v1.2.18
 	github.com/uptrace/bun/dialect/mysqldialect v1.2.18
 	github.com/uptrace/bun/dialect/pgdialect v1.2.18

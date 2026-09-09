@@ -3,9 +3,11 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -22,6 +24,7 @@ import (
 	"hearth/server/internal/store"
 	"hearth/server/internal/webui"
 
+	"github.com/soheilhy/cmux"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -146,6 +149,76 @@ func main() {
 	runServer(ctx, cfg, st)
 }
 
+// httpListeners 两种监听模式的共同外壳：
+//   - 合并模式（HTTPS_ADDR 空或与 ADDR 相同）：一个端口，cmux 按连接首字节是不是 TLS
+//     握手记录分流，明文与 TLS 各挂一个子 listener，同一个 http.Server 服务两边
+//     （srv.TLSConfig 保持 nil，Serve 才会自动挂上 HTTP/2 处理器，h2 由 ALPN 协商出来）。
+//   - 分开模式：两个端口两个 http.Server，同一个 handler。
+type httpListeners struct {
+	srv    *http.Server // 明文；合并模式下同时服务 TLS 子 listener
+	srvTLS *http.Server // 仅分开模式
+	root   net.Listener // 仅合并模式：cmux 的根 listener
+	errCh  chan error
+	// Addr/TLSAddr 实际监听地址（端口填 0 时由内核分配，测试据此拨号）
+	Addr, TLSAddr net.Addr
+}
+
+func startHTTP(cfg config.Config, h http.Handler, tlsCfg *tls.Config) (*httpListeners, error) {
+	l := &httpListeners{srv: &http.Server{Handler: h}, errCh: make(chan error, 2)}
+	if cfg.TLSSplit() {
+		ln, err := net.Listen("tcp", cfg.Addr)
+		if err != nil {
+			return nil, err
+		}
+		lnTLS, err := net.Listen("tcp", cfg.HTTPSAddr)
+		if err != nil {
+			ln.Close()
+			return nil, err
+		}
+		l.Addr, l.TLSAddr = ln.Addr(), lnTLS.Addr()
+		l.srvTLS = &http.Server{Handler: h, TLSConfig: tlsCfg}
+		go func() { l.errCh <- l.srv.Serve(ln) }()
+		go func() { l.errCh <- l.srvTLS.ServeTLS(lnTLS, "", "") }()
+		return l, nil
+	}
+	root, err := net.Listen("tcp", cfg.Addr)
+	if err != nil {
+		return nil, err
+	}
+	l.root, l.Addr, l.TLSAddr = root, root.Addr(), root.Addr()
+	m := cmux.New(root)
+	// 嗅探期间一个字节都不发的连接不能无限占着：超时后 cmux 关掉它
+	m.SetReadTimeout(5 * time.Second)
+	tlsL := tls.NewListener(m.Match(cmux.TLS()), tlsCfg)
+	plainL := m.Match(cmux.Any())
+	go l.srv.Serve(tlsL)
+	go l.srv.Serve(plainL)
+	go func() { l.errCh <- m.Serve() }()
+	return l, nil
+}
+
+// wait 阻塞到监听真正出错；正常关闭返回 nil。
+func (l *httpListeners) wait() error {
+	err := <-l.errCh
+	if err == nil || errors.Is(err, http.ErrServerClosed) || errors.Is(err, net.ErrClosed) ||
+		errors.Is(err, cmux.ErrServerClosed) || errors.Is(err, cmux.ErrListenerClosed) {
+		return nil
+	}
+	return err
+}
+
+// shutdown 优雅关闭：先让 http.Server 收尾在途请求（顺带关掉它们的 listener），
+// 再关合并模式的根 listener，让 cmux 的 Serve 返回。
+func (l *httpListeners) shutdown(ctx context.Context) {
+	l.srv.Shutdown(ctx)
+	if l.srvTLS != nil {
+		l.srvTLS.Shutdown(ctx)
+	}
+	if l.root != nil {
+		l.root.Close()
+	}
+}
+
 func runServer(ctx context.Context, cfg config.Config, st *store.Store) {
 	// 端口映射先建好：它是内核宣告外部地址的来源之一（lite.MappedFunc），要在内核构造前交出去。
 	// Run 之前查不到任何映射，返回 false 即可，内核那边只是暂时少一条 srflx 候选。
@@ -198,10 +271,22 @@ func runServer(ctx context.Context, cfg config.Config, st *store.Store) {
 		}
 	}()
 
-	srv := &http.Server{Addr: cfg.Addr, Handler: r}
+	// TLS 证书：先同步跑一轮（首个握手就有证书），之后 60 秒一轮热换
+	a.SetPortmapStatus(mapper.Snapshot)
+	a.CheckTLS(ctx)
+	go a.RunTLSCheck(ctx)
+
+	lis, err := startHTTP(cfg, r, a.TLSServerConfig())
+	if err != nil {
+		log.Fatalf("监听失败: %v", err)
+	}
+	if cfg.TLSSplit() {
+		log.Printf("hearth server http 监听于 %s，https 监听于 %s", cfg.Addr, cfg.HTTPSAddr)
+	} else {
+		log.Printf("hearth server 监听于 %s（http 与 https 同端口）", cfg.Addr)
+	}
 	go func() {
-		log.Printf("hearth server 监听于 %s", cfg.Addr)
-		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		if err := lis.wait(); err != nil {
 			log.Fatalf("监听失败: %v", err)
 		}
 	}()
@@ -209,7 +294,7 @@ func runServer(ctx context.Context, cfg config.Config, st *store.Store) {
 	<-ctx.Done()
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	srv.Shutdown(shutdownCtx)
+	lis.shutdown(shutdownCtx)
 	// Run 的 ctx 已经结束，撤销映射必须用新的 ctx，否则请求发不出去、映射留在网关上
 	closeCtx, closeCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer closeCancel()

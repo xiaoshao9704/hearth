@@ -3,6 +3,7 @@ package api
 
 import (
 	"errors"
+	"net"
 	"net/http"
 	"os"
 	"runtime"
@@ -41,11 +42,18 @@ func (a *API) regDefaultRole(r *http.Request) store.Role {
 	return store.RoleUser
 }
 
-// site 下发登录与邀请页需要的公开信息，不承载首启或 TLS 状态。
+// site 下发登录与邀请页需要的公开信息。tls_source 与 http_port 只用于前端拼地址
+// （自签证书 OBS 不认，推流地址要用明文端口），不回显任何证书内容。
 func (a *API) site(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]string{
-		"name":   a.cfg.SiteName,
-		"policy": a.regPolicy(r),
+	port := 0
+	if _, ps, err := net.SplitHostPort(a.cfg.Addr); err == nil {
+		port, _ = strconv.Atoi(ps)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"name":       a.cfg.SiteName,
+		"policy":     a.regPolicy(r),
+		"tls_source": a.dynVal(r.Context(), "tls_cert_source"),
+		"http_port":  port,
 	})
 }
 

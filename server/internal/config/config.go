@@ -10,7 +10,8 @@ import (
 )
 
 type Config struct {
-	Addr        string // HTTP 监听地址
+	Addr        string // HTTP 监听地址（合并模式下同时接明文与 TLS）
+	HTTPSAddr   string // 独立的 HTTPS 监听地址；空或与 Addr 相同 = 合并模式（同端口双协议）
 	DataDir     string // 数据目录：数据库、证书、日志等持久化边界
 	DBPath      string // sqlite 文件路径（DATABASE_URL 为空时使用）
 	DatabaseURL string // 数据库连接串：空/sqlite = sqlite，mysql:// 或 postgres:// 切换后端
@@ -46,6 +47,7 @@ func Load() Config {
 	}
 	return Config{
 		Addr:        env("ADDR", ":8080"),
+		HTTPSAddr:   env("HTTPS_ADDR", ""),
 		DataDir:     dataDir,
 		DBPath:      dbPath,
 		DatabaseURL: env("DATABASE_URL", ""),
@@ -56,6 +58,12 @@ func Load() Config {
 		PublicURL:   env("PUBLIC_URL", ""),
 		SiteName:    env("SITE_NAME", "Hearth"),
 	}
+}
+
+// TLSSplit 是否分开模式：HTTPS_ADDR 另填了一个端口。空或与 ADDR 相同都是合并模式——
+// 一个端口按首字节是不是 TLS 握手记录分流，http:// 与 https:// 同一个地址。
+func (c Config) TLSSplit() bool {
+	return c.HTTPSAddr != "" && c.HTTPSAddr != c.Addr
 }
 
 // DefaultRegPolicy 注册策略默认值：REG_POLICY 优先，兼容 REGISTRATION_OPEN=true，否则邀请制。

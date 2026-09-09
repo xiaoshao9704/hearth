@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	neturl "net/url"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
@@ -14,11 +15,13 @@ import (
 
 	"hearth/server/internal/config"
 	"hearth/server/internal/perm"
+	"hearth/server/internal/portmap"
 	"hearth/server/internal/rtc"
 	"hearth/server/internal/rtc/lite"
 	"hearth/server/internal/rtc/livekitembed"
 	"hearth/server/internal/rtc/livekitrtc"
 	"hearth/server/internal/store"
+	"hearth/server/internal/tlscert"
 
 	"crypto/rand"
 	"encoding/hex"
@@ -60,6 +63,11 @@ type API struct {
 	webpushMu sync.Mutex
 	pushHTTP  *http.Client
 
+	// tlsStore HTTPS 证书（自签/外部文件/上传三来源，见 tls.go 与 internal/tlscert）；
+	// portmapStatus 端口映射快照，由 cmd/server 接进来给 TLS 状态接口回显（nil = 未接）
+	tlsStore      *tlscert.Store
+	portmapStatus func() portmap.Status
+
 	// announcer 进程内唯一的宣告探测器（STUN/显式公网 IP + 端口映射 → 宣告候选）：
 	// lkembed 的 ExternalIPs 回调从它的快照取外部地址（见 lkembed.go）
 	announcer *lite.Announcer
@@ -91,6 +99,7 @@ func New(st *store.Store, cfg config.Config, mapped lite.MappedFunc, version str
 		}
 		return adm.Room, adm.Identity, adm.Meta, nil
 	}
+	a.tlsStore = tlscert.New(filepath.Join(cfg.DataDir, "tls"), a.tlsSettings)
 	a.lkembed = livekitrtc.New(a.embedCfg)
 	a.lkembedWHIP = livekitrtc.NewWHIP(a.embedCfg, a.whipResolver, a.stageKernelRunning)
 	a.kernelKeys = livekitembed.ConfigKeys()
@@ -120,6 +129,10 @@ func (a *API) Router() *chi.Mux {
 	// 通行密钥登录：可发现凭证，未鉴权（还不知道是谁），按来源 IP 限频（见 passkey.go）
 	r.Post("/api/auth/passkey/login/begin", a.passkeyLoginBegin)
 	r.Post("/api/auth/passkey/login/finish", a.passkeyLoginFinish)
+
+	// 根证书下载与安装说明页：无鉴权——要装根证书的设备还没信任本站，也可能还在明文侧
+	r.Get("/ca.crt", a.caCert)
+	r.Get("/ca", a.caPage)
 
 	// 健康检查：只表示进程活着（宣告探测的刷新由进程内周期任务触发，不挂在这里）
 	r.Get("/healthz", a.healthz)
@@ -237,6 +250,9 @@ func (a *API) Router() *chi.Mux {
 			r.Post("/users/{id}/enable", a.adminSetUserDisabled(false))
 			r.Delete("/users/{id}", a.adminDeleteUser)
 			r.Delete("/channels/{id}", a.adminDeleteChannel)
+			r.Get("/tls", a.adminTLS)
+			r.Post("/tls/upload", a.adminTLSUpload)
+			r.Post("/tls/ca/rotate", a.adminTLSRotateCA)
 			r.Get("/providers", a.adminListProviders)
 			r.Post("/providers", a.adminCreateProvider)
 			r.Put("/providers/{alias}", a.adminUpdateProvider)
