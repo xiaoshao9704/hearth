@@ -11,7 +11,7 @@ Open a channel, get a few people in, put your screen up. Group voice, 1080p60 sc
 One binary holds all of it: the API, the media core, the ingest endpoint and the web UI. No redis, no second container, no separate media server to install.
 Your data lives in the one directory you mounted, and video never even passes through the server — it only handles auth, signalling and same-origin proxying, so a machine with a thin uplink can still carry it.
 
-![A Hearth room: a live screen share next to the chat panel](site/assets/room.png)
+![30-second demo: log in, create a channel, an OBS stream appears, two people chat](site/assets/demo.gif)
 
 ## What it does
 
