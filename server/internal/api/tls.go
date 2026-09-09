@@ -19,19 +19,19 @@ import (
 // tlsKeys 证书来源与路径。来源默认 self：没有域名的部署起进程即有 https，
 // 装一次根证书就能用麦克风/投屏/通行密钥这些要安全上下文的能力。
 var tlsKeys = []rtc.ConfigKey{
-	{Name: "tls_cert_source", Env: "TLS_CERT_SOURCE", Group: "network", Default: "self",
+	{Name: "tls_cert_source", Env: "TLS_CERT_SOURCE", Group: "server", Default: "self",
 		Options: []string{"off", "self", "file", "upload"},
 		Label:   "TLS 证书来源",
 		Hint: "off = 不提供 https（放在反代后面时用）；self = 本机自签，需在各设备安装根证书（安装说明在 /ca）；" +
 			"file = 用外部工具签发的 PEM，续期后文件一变自动热换；upload = 后台上传证书与私钥。" +
 			"改动保存即生效，不必重启"},
-	{Name: "tls_cert_file", Env: "TLS_CERT_FILE", Group: "network",
+	{Name: "tls_cert_file", Env: "TLS_CERT_FILE", Group: "server",
 		Label: "证书文件路径",
 		Hint:  "来源为 file 时的证书 PEM 绝对路径（含中间证书时按「叶证书在前」拼接）"},
-	{Name: "tls_key_file", Env: "TLS_KEY_FILE", Group: "network",
+	{Name: "tls_key_file", Env: "TLS_KEY_FILE", Group: "server",
 		Label: "私钥文件路径",
 		Hint:  "来源为 file 时的私钥 PEM 绝对路径，进程需有读权限"},
-	{Name: "tls_self_hosts", Group: "network",
+	{Name: "tls_self_hosts", Group: "server",
 		Label: "自签证书额外主机名",
 		Hint: "逗号分隔的主机名或 IP，追加进自签证书的 SAN（本机地址与探测到的公网地址已自动带上）。" +
 			"新增主机名需要重新生成根证书，装过根证书的设备要重装——有域名的话改用 file/upload 更省事"},
