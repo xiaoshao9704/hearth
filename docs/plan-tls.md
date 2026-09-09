@@ -13,10 +13,11 @@
 - **两种监听模式，由两个 env 决定**（2026-09-09 定稿，取代之前的双端口与同端口两版）：
   - `HTTPS_ADDR` 留空（默认）或与 `ADDR` 相同 → **合并模式**：`ADDR`（默认 `:8080`）一个端口同时接明文与 TLS，连接第一个字节是 TLS 握手记录（`0x16`）走 TLS，否则走明文；`http://` 与 `https://` 同一个地址。
   - `HTTPS_ADDR` 另填一个端口 → **分开模式**：`ADDR` 只收明文，`HTTPS_ADDR` 只收 TLS。
-  - 两个 env 只在启动时读，不进动态配置。没有单独的「关 TLS」开关：合并模式下 TLS 只是额外接受，明文照常。
+  - 两个 env 只在启动时读，不进动态配置。关 TLS 走 `tls_cert_source=off`（可由 env `TLS_CERT_SOURCE` 锁定）。
 - **合并模式的嗅探用成熟依赖 `github.com/soheilhy/cmux` v0.1.5**（用户倾向成熟依赖少踩坑）：etcd 至今用它在一个端口上分 gRPC 与 HTTP；唯一传递依赖 `golang.org/x/net` 已在依赖图里；核心约 800 行、2021 年后冻结无新版本，API 只用 `New`/`Match(TLS())`/`Match(Any())`/`SetReadTimeout`/`Serve` 五个。不手写嗅探。
-- **不做**：ACME 签发/续期、DDNS、HTTP→HTTPS 跳转、HSTS、`.mobileconfig`、TLS 关闭开关。签发交给 acme.sh / lego / certbot / Caddy / `tailscale cert`；域名解析交给路由器或 ddns-go。
-- **证书三来源**，dyncfg 键 `tls_cert_source`（Group `server`，Options `self|file|upload`，默认 `self`，保存即生效）：
+- **不做**：ACME 签发/续期、DDNS、HTTP→HTTPS 跳转、HSTS、`.mobileconfig`。签发交给 acme.sh / lego / certbot / Caddy / `tailscale cert`；域名解析交给路由器或 ddns-go。
+- **证书来源**，dyncfg 键 `tls_cert_source`（Group `server`，Options `off|self|file|upload`，默认 `self`，保存即生效；**env `TLS_CERT_SOURCE` 存在即锁定**，后台只读，与其它 dyncfg 键同规则）：
+  - `off`（2026-09-09 用户追加）：完全不启用 TLS，行为与现状一致——不生成任何证书文件、`/ca.crt` 404、`/ca` 显示「已关闭」、TLS 握手直接失败（合并模式下 `GetCertificate` 返回错误；分开模式下 `HTTPS_ADDR` 监听仍在但握手失败）、明文照常。部署侧用 `TLS_CERT_SOURCE=off` 即可一锤定音；
   - `self`：hearth 自己当根 CA 自签；
   - `file`：`tls_cert_file` / `tls_key_file` 指向磁盘上的 PEM（可由 env `TLS_CERT_FILE` / `TLS_KEY_FILE` 锁定），外部工具续期后文件一变自动热换；
   - `upload`：管理后台上传证书与私钥，hearth 存进数据目录。
@@ -26,7 +27,7 @@
 ### 新包 `server/internal/tlscert/`
 
 - `Store`：持有当前 `*tls.Certificate`（`atomic.Pointer`），对外只暴露 `GetCertificate` 给 `tls.Config`；解析失败保留旧证书并打日志，永不因坏文件把 HTTPS 端口拉死。
-- 三个 loader 对应三来源，由 `tls_cert_source` 切换；后台循环每 60 秒跑一次当前 loader 的 `Check()`：`file`/`upload` 看 mtime 变化即重读；`self` 看重签条件。
+- `off` 时 Store 不持证书，`GetCertificate` 返回错误「TLS 已关闭」；三个 loader 对应另三个来源，由 `tls_cert_source` 切换；后台循环每 60 秒跑一次当前 loader 的 `Check()`：`file`/`upload` 看 mtime 变化即重读；`self` 看重签条件。
 - `self` 细节：
   - 根 CA：ECDSA P-256，10 年，`<data>/tls/ca.crt` + `ca.key`（0600）。只在文件不存在时生成，**之后永不重签**（朋友设备上的信任靠它）。
   - 叶证书：`<data>/tls/self.crt` + `self.key`，有效期 397 天（Apple 对所有 TLS 叶证书的 825 天上限之内），到期前 30 天重签；`ExtKeyUsage ServerAuth`、SHA-256、SAN 必填（Apple 不认 CN）。
@@ -73,14 +74,14 @@
 
 ## 前端
 
-- `/api/site` 增加 `tls_source`（`self|file|upload`）与 `http_port`（`ADDR` 的端口号；合并模式下与页面端口相同）。
+- `/api/site` 增加 `tls_source`（`off|self|file|upload`）与 `http_port`（`ADDR` 的端口号；合并模式下与页面端口相同）。
 - OBS 推流地址面板（`web/src/views/room/ingest-panel.tsx`）：`tls_source=self` 且页面是 https 时，地址改成 `http://<页面主机名>:<http_port>/...`（合并模式下就是同主机同端口换协议），面板加一行说明「自签证书 OBS 不认，推流地址用 http」；`file`/`upload` 或页面本来就是 http 时照旧用页面 origin。分开模式 + 家庭 NAT 把 http 端口改派成别的外部号时这个地址会不对，文档注明「OBS 从局域网推，或用合并模式」，代码不处理。
-- 管理后台（`web/src/views/admin.tsx`）「服务器」分区新增「TLS 与对外地址」卡片：来源选择（三选一）、证书摘要（主体、SAN、到期、指纹）、`self` 下的「下载根证书」与安装页链接、根指纹、「重新生成根证书」（二次确认，说明朋友需重装）、`constraint_stale` 时的提示、`file` 下的两个路径输入、`upload` 下的上传表单、对外地址与映射诊断回显。状态接口返回的监听地址只有一个。新组件放 `web/src/views/admin/tls-card.tsx`，`admin.tsx` 只加接线。
+- 管理后台（`web/src/views/admin.tsx`）「服务器」分区新增「TLS 与对外地址」卡片：来源选择（四选一，含 `off`；env 锁定时只读并注明）、证书摘要（主体、SAN、到期、指纹）、`self` 下的「下载根证书」与安装页链接、根指纹、「重新生成根证书」（二次确认，说明朋友需重装）、`constraint_stale` 时的提示、`file` 下的两个路径输入、`upload` 下的上传表单、对外地址与映射诊断回显。状态接口返回的监听地址只有一个。新组件放 `web/src/views/admin/tls-card.tsx`，`admin.tsx` 只加接线。
 - 登录页 / 大厅在**明文且非 localhost** 访问时已有的「没有 https 浏览器不给权限」提示（若没有则加一条）链接到 `/ca` 页。
 
 ## 文档
 
-- README / README.en：「三分钟跑起来」写明同一端口 `https://` 即可用、首次装根证书；「放在反代后面」注明反代用 `http://` 指向该端口；配置表加 `tls_cert_source`、`tls_cert_file`、`tls_key_file`、`tls_self_hosts`；常见问题加「朋友手机装根证书」与「地址要带 https」。
+- README / README.en：「三分钟跑起来」写明同一端口 `https://` 即可用、首次装根证书；「放在反代后面」注明反代用 `http://` 指向该端口；配置表加 `tls_cert_source`（env `TLS_CERT_SOURCE`）、`tls_cert_file`、`tls_key_file`、`tls_self_hosts`；常见问题加「朋友手机装根证书」与「地址要带 https」。
 - `docs/selfhost-home.md`：三档的 HTTPS 段改写为「默认自签 + 装根证书；有域名用 `file`/`upload`」；文末路线图段删掉已实现的部分。
 - `docs/roadmap.md` 节点 1 状态。
 
@@ -99,5 +100,6 @@
 6. 反代：Caddy/nginx 指向 `http://127.0.0.1:8080` 并透传 `X-Forwarded-Proto`，通行密钥注册与登录不受影响。
 7. OBS 面板：自签 https 页面下给出的是 http 端口地址；用 ffmpeg 对该地址 WHIP 推流成功（`lkembed_tcp_port` 临时 0）。
 8. 分开模式：`HTTPS_ADDR=:8443` 启动，`http://127.0.0.1:8080` 只收明文（`curl -sk https://127.0.0.1:8080/` 握手失败）、`https://127.0.0.1:8443/healthz` 200 且 `HTTP/2`；`PortWants` 多一条 `hearth https`；`HTTPS_ADDR` 与 `ADDR` 相同时等价于合并模式。
+8b. `TLS_CERT_SOURCE=off` 启动：数据目录无 `tls/`，`/ca.crt` 404，`curl -sk https://127.0.0.1:8080/` 握手失败，明文全部正常，后台该键只读。
 9. 明文回归：`http://localhost:8080` 登录、进房、投屏与现状一致；WebSocket 信令在 `http://` 与 `https://` 下都能建连；`go test -race` 覆盖 cmux 接线的关闭路径（Shutdown 后 `m.Serve` 正常返回、无 goroutine 泄漏）。
 10. `cd server && go build ./... && go vet ./... && go test ./...`；`cd web && npx tsc --noEmit && npm run build`。
