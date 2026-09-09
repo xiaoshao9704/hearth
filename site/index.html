@@ -108,6 +108,10 @@ figure img {
 }
 figcaption { color: var(--text-2); font-size: 0.85rem; margin-top: 9px; }
 
+/* ---- 命名段落 ---- */
+.prose p { max-width: 760px; color: var(--text-1); margin: 0 0 12px; font-size: 0.98rem; }
+.prose p:last-child { margin-bottom: 0; }
+
 /* ---- 卡片网格 ---- */
 .grid { display: grid; gap: 14px; }
 .grid-3 { grid-template-columns: repeat(3, 1fr); }
@@ -182,7 +186,7 @@ footer { border-top: 1px solid var(--line-soft); padding: 30px 0 46px; color: va
   <section class="hero">
     <div class="wrap hero-in">
       <h1 data-i18n="hero.h1">自己的语音房，自己的那台机器</h1>
-      <p class="lede" data-i18n="hero.lede">Hearth 是一套自托管的语音 / 投屏 / OBS 推流 / 聊天房间：开一间频道，几个人进来说话，把画面投上去。</p>
+      <p class="lede" data-i18n="hero.lede">炉火之旁，几个人的语音与投屏房间。</p>
       <p class="sub" data-i18n="hero.sub">一个二进制文件就是全部：API、媒体内核、推流入口、前端都在里面。没有 redis，没有第二个容器，数据只落在你挂的那个目录里。</p>
       <div class="hero-cta">
         <a class="btn btn-primary btn-lg" href="#deploy" data-i18n="hero.cta1">三分钟部署</a>
@@ -207,6 +211,14 @@ footer { border-top: 1px solid var(--line-soft); padding: 30px 0 46px; color: va
           <figcaption data-i18n="shot.mobile">手机：没人投屏时聊天优先</figcaption>
         </figure>
       </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="wrap prose">
+      <h2 data-i18n="name.h2">为什么叫 Hearth</h2>
+      <p data-i18n="name.p1">Hearth 是壁炉边。以前人们围着炉火坐下说话、听故事。</p>
+      <p data-i18n="name.p2">现在几个朋友聚在一间频道里，说话、看同一块画面，就是这件事的数字版：一间私人客厅，不替代 Discord，只做 Discord 做不好或用不了的那一块——画质、延迟、在自己家里跑、数据在自己手里。</p>
     </div>
   </section>
 
@@ -338,10 +350,13 @@ const I18N = {
     'meta.desc': '自建的语音 / 投屏 / OBS 推流 / 聊天房间。单二进制，零外部依赖。',
     'nav.lang': 'English',
     'hero.h1': '自己的语音房，自己的那台机器',
-    'hero.lede': 'Hearth 是一套自托管的语音 / 投屏 / OBS 推流 / 聊天房间：开一间频道，几个人进来说话，把画面投上去。',
+    'hero.lede': '炉火之旁，几个人的语音与投屏房间。',
     'hero.sub': '一个二进制文件就是全部：API、媒体内核、推流入口、前端都在里面。没有 redis，没有第二个容器，数据只落在你挂的那个目录里。',
     'hero.cta1': '三分钟部署',
     'hero.cta2': '在 GitHub 上看源码',
+    'name.h2': '为什么叫 Hearth',
+    'name.p1': 'Hearth 是壁炉边。以前人们围着炉火坐下说话、听故事。',
+    'name.p2': '现在几个朋友聚在一间频道里，说话、看同一块画面，就是这件事的数字版：一间私人客厅，不替代 Discord，只做 Discord 做不好或用不了的那一块——画质、延迟、在自己家里跑、数据在自己手里。',
     'shot.lobby': '大厅：频道一览，谁在里面一眼看到',
     'shot.lobby.alt': 'Hearth 大厅界面截图：左侧频道列表，右侧频道卡片与在线人数',
     'shot.room': '房间：一路投屏 + 聊天面板，实时统计写在画面上',
@@ -393,10 +408,13 @@ const I18N = {
     'meta.desc': 'Self-hosted voice, screen sharing, OBS ingest and chat rooms. One binary, no external services.',
     'nav.lang': '中文',
     'hero.h1': 'Your voice room, on your own box',
-    'hero.lede': 'Hearth is a self-hosted room for voice, screen sharing, OBS ingest and chat. Open a channel, get a few people in, put your screen up.',
+    'hero.lede': 'The fireside for your voice and screen.',
     'hero.sub': 'One binary holds all of it: the API, the media core, the ingest endpoint and the web UI. No redis, no second container, and your data never leaves the directory you mounted.',
     'hero.cta1': 'Deploy in three minutes',
     'hero.cta2': 'Read the source on GitHub',
+    'name.h2': 'Why "Hearth"',
+    'name.p1': 'A hearth is the fireside people once gathered around to talk and tell stories.',
+    'name.p2': 'Hearth is that gathering for a few friends online: one channel, voices, and a shared screen. A private living room, not a Discord replacement — it covers the part Discord does poorly or cannot do at all: picture quality, latency, running from home, and keeping the data on your own machine.',
     'shot.lobby': 'Lobby — every channel and who is already in it',
     'shot.lobby.alt': 'Screenshot of the Hearth lobby: channel list on the left, channel cards with live counts on the right',
     'shot.room': 'Room — a live screen share next to the chat panel, with live stats on the tile',

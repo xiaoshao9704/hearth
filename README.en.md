@@ -4,6 +4,9 @@
 
 **Self-hosted rooms for voice, screen sharing, OBS ingest and chat.**
 
+A hearth is the fireside people once gathered around to talk. Hearth is that gathering for a few friends online: one channel, voices, and a shared screen.
+It is a private living room for a handful of friends, not a Discord replacement: it covers the part Discord does poorly or cannot do at all, namely picture quality, latency, running from home, and keeping the data on your own machine.
+
 Open a channel, get a few people in, put your screen up. Group voice, 1080p60 screen sharing at a real bitrate, OBS pushing straight in, and chat with mentions and file transfer — all one thing.
 One binary holds all of it: the API, the media core, the ingest endpoint and the web UI. No redis, no second container, no separate media server to install.
 Your data lives in the one directory you mounted, and video never even passes through the server — it only handles auth, signalling and same-origin proxying, so a machine with a thin uplink can still carry it.
@@ -117,6 +120,8 @@ Kernel signalling and WHIP live under `/providers/{alias}` on the same port as t
 **Stage line on another machine.** When the hearth host has a thin uplink, screen share and OBS video should not detour through it. Run a single `stage` container elsewhere (image `ghcr.io/xiaoshao9704/hearth-stage`, or the `stage-linux-amd64` / `stage-linux-arm64` single files from Releases): it requests its own port mappings and discovers and announces its own external addresses, with browser viewers and OBS arriving on the same punched-out UDP port. On the hearth side it is just an external `livekit` instance — the `LIVEKIT_API_URL/KEY/SECRET` environment variables synthesize a locked instance, or you register one in the admin console — and then you point `stage_provider` at it. Voice stays on the in-process `lkembed`, physically separated from video. So that both LAN and internet viewers can connect, **leave `STAGE_PUBLIC_IP` empty**: setting it explicitly is an override, and pinning it to the public IP forces LAN clients through NAT hairpinning.
 
 **An upstream LiveKit.** At larger scale the stage line can point at a separately deployed LiveKit cluster — again, just a registered `livekit` instance. Note that the Data Streams used for chat need a kernel server at 1.8 or newer (both `lkembed` and the `stage` image qualify).
+
+Running from a home connection splits into three cases — a public IPv4 address, IPv6 only, or CGNAT with neither — with what to configure and what works in each. They are written up in [`docs/selfhost-home.md`](docs/selfhost-home.md) (Chinese only for now).
 
 ## Configuration
 
