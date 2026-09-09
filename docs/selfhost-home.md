@@ -20,7 +20,7 @@
 
 - **入站端口.** 默认要放行两个：hearth 的 HTTP 端口（`ADDR`，默认 `:8080`，tcp）与内建内核的媒体端口（`lkembed_udp_port`，默认 `47720/udp`）。`portmap_mode=auto`（默认）时 hearth 会自己向网关申请这两条映射（UPnP IGD / PCP / NAT-PMP），媒体端口按「外部端口必须与内部端口同号」申请——网关改派端口会被判为失败，因为宣告出去的候选只换 IP 不换端口。docker **bridge** 网络里发现不到网关（日志 `portmap: … no_gateway`），要自动映射就用 host 网络，否则在路由器上手工转发这两个端口。
 - **域名.** hearth **不内置 DDNS**。动态 IP 就靠路由器自带的 DDNS 或第三方脚本把 `hearth.example.com` 的 A 记录指过来。公网 IP 变了 hearth 这边不用管：外部地址是周期探测出来的，变化不重启进程、不打断在途会话；要改的只有 DNS 记录。
-- **HTTPS.** hearth 自己只监听明文 HTTP，**TLS 必须由反代终止**（Caddy / nginx）。三个要点见 README 的「放在反代后面」：透传 `Host`、透传 `X-Forwarded-Proto`、允许 WebSocket 升级；**媒体端口不走反代**，直接放行到宿主。
+- **HTTPS.** hearth 自带 https，默认自签根证书：装一次（首次打开 `/ca` 看分系统安装步骤）就能用麦克风、投屏、通行密钥这些要安全上下文的能力，不必另起反代。有域名的话更省心：用 acme.sh / lego / certbot / `tailscale cert` 之类工具签出证书文件，路径填进管理后台的 `tls_cert_file` / `tls_key_file`（外部工具续期后文件一变自动热换），或直接在后台上传证书与私钥。想让前面的反代（Caddy / nginx）终止 TLS 也可以，那时把 hearth 自己的 `tls_cert_source` 设成 `off`；三个要点见 README 的「放在反代后面」：透传 `Host`、透传 `X-Forwarded-Proto`、允许 WebSocket 升级；**媒体端口不走反代**，直接放行到宿主。
 - **80/443 被封时.** 家庭线路常见。证书用 DNS-01 签（在反代侧配，与 hearth 无关），站点挂在非标端口即可，例如 `https://hearth.example.com:8443`：
   - 通行密钥正常——RP ID 取请求 `Host` **去掉端口**，`hearth.example.com:8443` 与 `hearth.example.com` 是同一个 RP ID；
   - 离线推送正常——浏览器只要求 https，不要求 443；
@@ -40,7 +40,7 @@
 - **v6 入站放行.** IPv6 没有 NAT，需要的是防火墙放行（pinhole）。`portmap_mode=auto` 时 hearth 会对本机每个全局单播 v6 地址申请放行同样那几个端口，走 PCP（v6 下的 MAP 即放行）或 UPnP 的 IPv6 防火墙控制；成败看日志里的 `portmap: v6 放行 …` 行。网关不支持就在路由器上手工放行这几个端口的入站。
 - **容器里的地址.** 容器内枚举不到宿主网卡时，把宿主的 v6 地址填进 `lkembed_extra_ips`（逗号分隔），它会与自动探测的结果并列宣告为候选，由 ICE 逐条探测。
 - **域名.** AAAA 记录指到那个 v6 地址；同样没有内置 DDNS。
-- **HTTPS.** 与第一档相同，靠反代。
+- **HTTPS.** 与第一档相同：默认自签装根证书，有域名的话用 `file` / `upload`，反代仍是可选项而非必需。
 
 **能用什么.** 观众所在网络有 IPv6 时，语音、投屏、推流与第一档没有区别。
 
@@ -61,11 +61,11 @@
 
 ## 通用提醒
 
-- **ICE-TCP 默认是关的**（`lkembed_tcp_port` 默认 `0`）。家庭网络做策略路由 / 分流时 UDP 常被中间设备接管、回程不通，这种线路建议把它设成与媒体 UDP 端口同号（默认 `47720`）并在防火墙 / 路由器上放行该端口的 tcp；开启后端口映射会自动把这条 tcp 一并申请。改动重启生效。
+- **默认已开 47720/tcp**（`lkembed_tcp_port` 默认与媒体 UDP 端口同号），端口映射会把它跟 UDP 一起自动申请，防火墙 / 路由器也要放行这个 tcp 端口。家庭网络做策略路由 / 分流导致 UDP 回程不通时它是现成的兜底；不需要就填 `0` 关掉，省一个开放端口。改动重启生效。
 - **`/healthz` 不反映端口映射结果**，它只表示进程活着（探测失败、映射为空都仍然返回 200，免得被自动重启机制误杀）。映射到底成没成，看启动与运行日志里的 `portmap:` 行：`no_gateway`（找不到支持的网关）、`disabled_by_gateway`（网关禁用了端口转发）、`upstream_nat`（上游还有一层 NAT，需要在上游设备上转发或开 DMZ）、`port_conflict`（外部端口被占，换一个）。装成系统服务时日志在 `<data>/hearth.log`。
 - **两个 STUN 键别混**：`lkembed_stun_servers` 是服务端探测自己公网映射用的，`client_stun_servers` 是下发给浏览器的。默认列表不可达的地区两个都可以改。
 - **换域名会让已注册的通行密钥全部失效**（浏览器按 RP ID 绑定凭证），换之前先通知使用者，换完让他们重新添加一枚。
 
 ## 路线图
 
-以下都还**没有**实现，是 [`docs/roadmap.md`](roadmap.md) 节点 1 计划中的能力：内置 TLS 三档（`off` / 本地根 CA 自签 / ACME DNS-01 签证书，并用同一份 DNS 凭证顺带做 DDNS），以及 ICE-TCP 默认开启并纳入端口映射。在那之前，本文写的手工做法就是当前的做法。
+hearth 目前都不内置的两项：**DDNS**（动态 IP 就用路由器自带的 DDNS 或第三方脚本把域名指过来）与 **TURN 中继**（`docs/plan-client-ice.md` 第二阶段，UDP 与 ICE-TCP 都不通时才需要）。在那之前，本文写的手工做法就是当前的做法。

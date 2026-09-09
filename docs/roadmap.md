@@ -21,15 +21,15 @@ Hearth 是几个朋友的私人客厅：一个文件跑起来的语音、高清�
 
 ## 节点 1：家庭自托管 TLS（v0.10.0）
 
-状态：待设计（先写 `docs/plan-tls.md`）。
+状态：已实施（2026-09-09），待真机验收与发布。设计见 `docs/plan-tls.md`。
 
-- `tls_mode` 三档 `off / self / acme`，默认 `self`。
-- `self`：本地根 CA 落 `<data>/tls/`；叶证书 SAN 随本机与公网 IP 变化重签，根 CA 不动；无鉴权的 `/ca.crt` 与分系统安装说明页（iOS 需在「证书信任设置」里手动开完全信任）。
-- `acme`：DNS-01 签证书（Cloudflare、阿里云、DNSPod），同一份凭证更新 A/AAAA 记录做 DDNS。
-- 顺带：ICE-TCP 默认开并纳入端口映射；当前对外地址在管理后台与大厅可见可复制。
+- `tls_cert_source` 四档 `off / self / file / upload`，默认 `self`；`HTTPS_ADDR` 决定合并模式（同端口双协议，默认）还是分开模式（明文与 TLS 各一个端口）。
+- `self`：本地根 CA 落 `<data>/tls/`，带名称约束防滥用；叶证书 SAN 随本机与公网 IP 变化重签，根 CA 不动；无鉴权的 `/ca.crt` 与分系统安装说明页 `/ca`（iOS 需在「证书信任设置」里手动开完全信任）。
+- `file` / `upload`：外部工具（acme.sh / lego / certbot / `tailscale cert` 等）签出的证书指路径，续期后自动热换；或后台直接上传证书与私钥。
+- 顺带：ICE-TCP（`lkembed_tcp_port`）默认开并纳入端口映射；对外地址与映射诊断在管理后台 `GET /api/admin/tls` 可见。
 - 没域名时通行密钥不可用（WebAuthn 要求 RP ID 是域名），密码登录兜底，文档写明。
 
-完成标准：无域名的新机器上，手机装根 CA 后语音、投屏、推送、PWA 全通；有域名的机器 `acme` 档自动出证书并跟随 IP 变化；`off` 档行为与现状一致。
+完成标准：无域名的新机器上，手机装根 CA 后语音、投屏、推送、PWA 全通；有域名的机器 `file`/`upload` 档证书生效并跟随文件变化热换；`off` 档行为与现状一致。
 
 ## 节点 2：国内发布轮（不改代码，与节点 1 交错）
 

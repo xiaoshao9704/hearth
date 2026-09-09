@@ -29,7 +29,7 @@
 - **推流入口 = 当前舞台实例**，没有独立的 ingest 选择器：剩下的每种实例都自带 WHIP 入口，「推流进哪个实例」与「舞台在哪个实例」不可能不同——推进别的实例观众看不到。OBS 的 WHIP 一律进 `/providers/{alias}/w/{channel}`（令牌在路径段或 `Authorization: Bearer`），alias 必须是当前舞台实例否则 404；`{channel}` 路径段按 `channelByRef` 解析——纯数字先按频道 id、找不到再按名字，新地址一律给 id，OBS 里已存的名字地址永久有效；hearth 做完入场判定后现签短时效 LiveKit 票换掉用户令牌反代过去（`livekitrtc/whip.go`）。
 - 实例连接参数存 params（键名沿用 `livekit_*` 命名空间，rtc 实现零改动）；仍是全局键的只有选择器与进程内网络基建（`portmap_mode`）。旧 `cfg_livekit_*` 等全局键启动时一次性导入为实例后删除（`migrateProviders`）。`lkembed` 类型 `livekit-embedded`（`server/internal/api/lkembed.go`）：实例对象复用 `livekitrtc.New`，`embedCfg` 把它要的 `livekit_api_url/key/secret` 映射到 `lkembed_port`（回环地址）与 `lkembed_api_key`/`lkembed_api_secret`（留空首启生成落库），`livekit_*` 命名空间因此对 lkembed 零改动地复用。`lkembed_public_ip`/`lkembed_stun_servers` 是显式公网 IP / STUN 覆盖键（承接已删内核的同名能力）。
 - 接入路径统一 `/providers/{alias}/...`：`/rtc/*` livekit 信令反代、`/w/{channel}[/{token}]` WHIP 推流（按路径 alias 裁决：OBS 推给哪个实例就由哪个实例判定/签发/反代）。
-- 打洞与宣告基建在 `rtc/lite`：`lite.Announcer`/`candidate` 周期探测（STUN/显式公网 IP + 端口映射结果并列），公网 IP 或映射变化不重启、不动在途会话；lkembed 的候选地址改写从它的快照取外部地址。`/healthz` 与 `healthcheck` 子命令只表示进程活着、无副作用：探测失败/映射为空不得返回非 200（防 autoheal 误杀）；网络诊断回显走管理接口，不放进 healthz。
+- 打洞与宣告基建在 `rtc/lite`：`lite.Announcer`/`candidate` 周期探测（STUN/显式公网 IP + 端口映射结果并列），公网 IP 或映射变化不重启、不动在途会话；lkembed 的候选地址改写从它的快照取外部地址。`/healthz` 与 `healthcheck` 子命令只表示进程活着、无副作用：探测失败/映射为空不得返回非 200（防 autoheal 误杀）；网络诊断回显走管理接口，不放进 healthz（`GET /api/admin/tls` 的 `external`/`portmap` 字段）。
 - **user_id 是唯一的身份键，username 只做展示/登录/注册**。identity 由 `rtc.Identity(userID, tag)` 组成 `u{user_id}` 或 `u{user_id}-{标签}`（浏览器标签 = 设备标签，推流标签 = 令牌的可改属性，默认 `obs`），归属判断**必须**用 `rtc.MatchesUser(identity, userID)`，禁止手写主体解析。用户名绝不进入判定路径：它可改、改后旧名即释放、且字符集含 `-`——拿它当键会在改名后让归属错位，也会让互为前缀的两个用户名彼此误伤（禁言一个掐掉另一个的推流）。管理接口（踢出/封禁/禁言/移出白名单）一律收 `user_id`；例外只有「加白名单」，那是房主手输名字的一次 `名字 → 用户` 查找（与登录同类），查到后立即换成 user_id。
 - 展示信息统一走参与者元数据 `rtc.Meta{uid,username,kind,tag}`：进房令牌（`lktoken.Sign` 的 `SetMetadata`）与推流判定（`admitIngest` 挂 ctx、换票时写入）两条路径都写。前端据此显示名字、按 uid 聚合设备、识别推流设备（`kind=ingest`），**不解析 identity、不按用户名反查**。
 - `MuteUserAudio` 契约：禁言 = 禁**全部**媒体发布（音频/摄像头/投屏），不只是音频。
@@ -79,5 +79,5 @@
 
 - 服务端：`cd server && go build ./... && go vet ./...` 必须通过。
 - 前端：`cd web && npx tsc --noEmit && npm run build` 必须通过。
-- 行为改动尽量本地起服务验证：`go run ./cmd/server` 零外部依赖（选择器默认 voice/stage 均 lkembed，语音 + 投屏开箱可用，浏览器进房说话与投屏可见即通过）。注意 `.env` 里有 `LIVEKIT_*` 时迁移会把选择器落库成 livekit，本地验证要用干净 DB 或先改 settings 里的 `cfg_voice_provider`/`cfg_stage_provider`；lkembed 的媒体端口（默认 47720/udp）被别的 hearth 进程占着时 lkembed 起不来，管理后台改 `lkembed_udp_port` 即可。
+- 行为改动尽量本地起服务验证：`go run ./cmd/server` 零外部依赖（选择器默认 voice/stage 均 lkembed，语音 + 投屏开箱可用，浏览器进房说话与投屏可见即通过）。注意 `.env` 里有 `LIVEKIT_*` 时迁移会把选择器落库成 livekit，本地验证要用干净 DB 或先改 settings 里的 `cfg_voice_provider`/`cfg_stage_provider`；lkembed 的媒体端口（默认 47720/udp）被别的 hearth 进程占着时 lkembed 起不来，管理后台改 `lkembed_udp_port` 即可。`lkembed_tcp_port` 默认已开，ffmpeg 9 的 whip muxer 遇 TCP 候选会失败，用 ffmpeg 验 WHIP 时临时设 0。
 - 发布：打 `v*` tag 触发 CI（`.github/workflows/release.yml`，原生交叉编译 + 纯装配镜像，无 QEMU）。

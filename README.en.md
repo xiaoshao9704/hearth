@@ -49,6 +49,7 @@ Your data lives in the one directory you mounted, and video never even passes th
 **Deployment**
 
 - One file for Windows, macOS and Linux that can install itself as a system service; one docker image otherwise
+- HTTPS built in: one port serves both http and https, with a choice of three certificate sources (a self-signed root CA, an external certificate file, or one uploaded from the admin console)
 - Behind NAT it asks the gateway for port mappings itself (PCP / NAT-PMP / UPnP IGD)
 - A changed public address or mapping costs neither a restart nor a live session
 - The stage line (screen sharing and ingest) can move wholesale to a machine with a better uplink
@@ -87,6 +88,7 @@ docker compose exec hearth /app/hearth adduser <name> <password>   # the first a
 ```
 
 Open `http://<host>:8080` and you are done: voice, screen sharing, camera and OBS ingest all work without touching the admin console.
+The same port also serves `https://<host>:8080` by default (merged mode: one port auto-detects the protocol per connection). Other devices on the LAN need to install a root certificate the first time — open `https://<host>:8080/ca` (plain http works too) for the install steps, a couple of minutes at most — then use the https address, since microphone, screen share and notifications all need it. `http://localhost:8080` on the host itself is unaffected; localhost is already a secure context.
 
 - `47720/udp` is the media port (voice and video share it; the public IP is discovered automatically) and has to be open in your firewall or security group. **Docker cannot add a published port to a running container**, so write it in when you create it.
 - `47720/tcp` only matters on networks that hijack UDP: set *Stage → ICE-TCP port* in the admin console to the same number (47720 by default), then allow both udp and tcp on it.
@@ -102,7 +104,7 @@ Releases ship one executable per platform with the web UI compiled in, so the ar
 ./hearth service install # install as a system service (optional)
 ```
 
-Open `http://localhost:8080` — on localhost the browser lets the microphone and screen capture work without HTTPS. Data goes to a `data/` directory next to the executable, falling back to the OS user data directory when that is not writable; `--data <dir>` or `HEARTH_DATA` overrides it. The macOS build is unsigned, so right-click → Open the first time. On Windows the first bind pops the firewall prompt; choose Allow.
+Open `http://localhost:8080` — on localhost the browser lets the microphone and screen capture work without HTTPS. The same port also serves `https://` by default (merged mode): other devices on the LAN need to install a root certificate first, at `https://<this machine's address>:8080/ca` (plain http works too), then switch to the https address for microphone and screen share to be allowed. Data goes to a `data/` directory next to the executable, falling back to the OS user data directory when that is not writable; `--data <dir>` or `HEARTH_DATA` overrides it. The macOS build is unsigned, so right-click → Open the first time. On Windows the first bind pops the firewall prompt; choose Allow.
 
 ### Behind a reverse proxy
 
@@ -112,6 +114,7 @@ Kernel signalling and WHIP live under `/providers/{alias}` on the same port as t
 - Pass `X-Forwarded-Proto` through: it is how a TLS-terminating deployment derives an `https://…` origin
 - Allow the WebSocket upgrade: signalling is a WebSocket
 - **The media port does not go through the proxy** — open it straight to the host
+- If the proxy terminates TLS itself, point it at hearth's port with plain `http://`; to stop hearth from also serving TLS, set `tls_cert_source` to `off` (or lock it with the `TLS_CERT_SOURCE=off` environment variable, read-only in the console)
 
 ## Deployment shapes
 
@@ -134,7 +137,7 @@ Precedence is **environment variables (locked; read-only in the console) > datab
 | `voice_provider` | `lkembed` | Which service instance carries voice (the value is an instance alias) |
 | `stage_provider` | `lkembed` | Which instance carries the stage line (screen, camera, OBS ingest); `none` for a voice-only deployment |
 | `lkembed_udp_port` | `47720` | Single media UDP port of the built-in kernel; must be open. Takes effect on restart |
-| `lkembed_tcp_port` | `0` | ICE-TCP port, `0` disables it. On networks that hijack UDP, use the same number as the media port |
+| `lkembed_tcp_port` | `47720` | ICE-TCP port, on by default at the same number as the media UDP port; `0` disables it. Some networks (policy routing, traffic splitting) hijack UDP, and this is the fallback; takes effect on restart |
 | `lkembed_port` | `47730` | Signalling port of the built-in kernel; loopback only, reached through the same-origin proxy |
 | `lkembed_api_key` / `lkembed_api_secret` | empty | Empty means a pair is generated on first start and stored in the database (backed up with it) |
 | `lkembed_public_ip` | empty | Empty announces every interface address plus whatever STUN discovers; setting it announces only that address |
@@ -142,6 +145,9 @@ Precedence is **environment variables (locked; read-only in the console) > datab
 | `lkembed_stun_servers` | empty | Used by the server to discover its own public mapping; empty uses the built-in defaults |
 | `lkembed_log_level` | `warn` | `debug` / `info` / `warn` / `error` |
 | `portmap_mode` | `auto` | `auto` asks the gateway for UPnP / PCP / NAT-PMP mappings; `off` disables and revokes them |
+| `tls_cert_source` | `self` | `off` serves no https (use it behind a reverse proxy); `self` self-signs a root certificate, installed once per device (guide at `/ca`); `file` loads a PEM from `tls_cert_file`/`tls_key_file`, hot-swapped whenever an external tool renews the file; `upload` accepts a cert/key pair uploaded from the console. Effective on save |
+| `tls_cert_file` / `tls_key_file` | empty | Absolute paths to the certificate / key PEM when the source is `file` |
+| `tls_self_hosts` | empty | Comma-separated extra hostnames / IPs added to the self-signed certificate's SAN; adding a hostname requires regenerating the root certificate, and devices that installed the old one need to reinstall |
 | `client_stun_servers` | `stun.miwifi.com:3478,stun.l.google.com:19302` | STUN list handed to browsers, comma-separated; `none` sends nothing |
 | `chat_data_line` | `auto` | Which line carries chat: `auto` / `voice` / `stage` |
 | `chat_file_max_mb` | `25` | Chat file size cap; fan-out cost is size × people online |
@@ -160,7 +166,10 @@ Do not confuse `client_stun_servers` (handed to browsers) with `lkembed_stun_ser
 
 | Variable | Default | What it does |
 |---|---|---|
-| `ADDR` | `:8080` | HTTP listen address |
+| `ADDR` | `:8080` | HTTP listen address; if `HTTPS_ADDR` is empty or equal to it, this port serves both http and https (merged mode) |
+| `HTTPS_ADDR` | empty | Set to a different port for split mode: `ADDR` serves plain HTTP only and this port serves TLS only; empty or equal to `ADDR` means merged mode |
+| `TLS_CERT_SOURCE` | empty | Setting it locks `tls_cert_source` (read-only in the console); same values as that key (`off`/`self`/`file`/`upload`) |
+| `TLS_CERT_FILE` / `TLS_KEY_FILE` | empty | Environment-locked form of the matching config keys |
 | `HEARTH_DATA` | see note | Data directory; `--data <dir>` does the same. Defaults to `data/` next to the executable, falling back to the OS user data directory |
 | `DB_PATH` | `<data>/hearth.db` | sqlite file path (used when `DATABASE_URL` is empty) |
 | `DATABASE_URL` | empty | `mysql://` or `postgres://` to switch backends |
@@ -208,7 +217,11 @@ Global flags: `--data <dir>` picks the data directory, and `--service` is set by
 
 **We changed domains and every passkey stopped working.** Browsers bind credentials to the RP ID, and `hearth.example.com` and `example.com` are two different RP IDs with no path between them. Warn people before the move and have them add a new passkey afterwards; password login is unaffected. Set `passkey_rp_id` explicitly if you want credentials bound to the apex domain. A bare IP cannot be an RP ID.
 
-**What to put in OBS.** Server: `https://<your site>/providers/{current stage instance alias}/w/{channel}`, with the ingest token as the Bearer token. Both are one click away in the room — click the channel name in the top bar, then "OBS ingest URL". Tools without Bearer support (ffmpeg and friends) use the path form `…/w/{channel}/{token}`. The alias has to be the current stage instance or you get a 404. The channel segment accepts an id or a name, so a URL you saved in OBS under the old name keeps working.
+**How does a friend install the root certificate on their phone.** The default certificate source is self-signed (`tls_cert_source=self`). Send them a link: `https://<your address>:8080/ca` (plain http works too), and the page walks them through the steps for their platform. iOS/iPadOS needs one extra step: after installing the configuration profile, go to Settings → General → About → Certificate Trust Settings and turn on full trust for "Hearth CA", otherwise Safari still reports it as insecure.
+
+**The address needs `https`, and forgetting the `s` blocks the microphone.** In merged mode, http and https are the same address and the same port — only the protocol prefix differs. Browsers only grant microphone, camera and screen-share permission in a secure context (https, or `localhost`), so a missing `s` looks like a broken permission when the page is simply not secure.
+
+**What to put in OBS.** Server: `https://<your site>/providers/{current stage instance alias}/w/{channel}`, with the ingest token as the Bearer token. Both are one click away in the room — click the channel name in the top bar, then "OBS ingest URL". Tools without Bearer support (ffmpeg and friends) use the path form `…/w/{channel}/{token}`. The alias has to be the current stage instance or you get a 404. The channel segment accepts an id or a name, so a URL you saved in OBS under the old name keeps working. OBS does not trust a self-signed certificate, so the panel in the room falls back to the same-host http address automatically — just use what it gives you.
 
 ## Architecture
 

@@ -49,6 +49,7 @@ Hearth 是壁炉边。以前人们围着炉火坐下说话、听故事；现在�
 **部署**
 
 - Windows / macOS / Linux 单文件，可装成系统服务；docker 一个镜像到位
+- 自带 https：一个端口同时收 http 与 https，证书三选一（自签根证书 / 外部证书文件 / 后台上传）
 - NAT 后自动向网关申请端口映射（PCP / NAT-PMP / UPnP IGD）
 - 公网 IP 或映射变化不重启进程、不打断在途会话
 - 舞台线（投屏与推流）可整台搬到上行更好的另一台机器
@@ -85,6 +86,7 @@ docker compose exec hearth /app/hearth adduser <用户名> <密码>   # 首个�
 ```
 
 打开 `http://<主机>:8080` 就能开黑：语音、投屏 / 摄像头、OBS 推流开箱全部可用，不用进管理后台改任何东西。
+同一个端口默认也收 `https://<主机>:8080`（合并模式，一个端口按连接首字节自动分流 http/https）：局域网里其它设备第一次要装一次根证书，打开 `https://<主机>:8080/ca`（用 http 也能打开）看安装步骤，几分钟内搞定；装完把地址换成 https 打开，麦克风、投屏、通知这些要安全上下文的权限才给。宿主机本地用 `http://localhost:8080` 不受影响，localhost 下浏览器本来就放行。
 
 - `47720/udp` 是媒体端口（语音与投屏同一个，公网 IP 自动探测），必须在防火墙 / 安全组放行。**docker 的端口发布不能事后热加**，创建容器时就要一并写上。
 - `47720/tcp` 只在 UDP 被中间设备接管的网络才用得上：管理后台「舞台 → ICE-TCP 端口」填成与媒体 UDP 同号（默认 47720）后生效，云侧安全组该端口 udp/tcp 双放行。
@@ -100,7 +102,7 @@ Release 里每个平台一个可执行文件，前端已编进二进制，解开
 ./hearth service install # 装成系统服务（可选）
 ```
 
-浏览器打开 `http://localhost:8080` 即用——localhost 下麦克风与投屏不受 HTTPS 限制。数据落在可执行文件旁的 `data/` 目录，写不进去时自动回落系统用户数据目录；`--data <目录>` 或 `HEARTH_DATA` 可显式指定。macOS 未签名，首次运行右键「打开」；Windows 首次监听会弹防火墙询问，点「允许」。
+浏览器打开 `http://localhost:8080` 即用——localhost 下麦克风与投屏不受 HTTPS 限制。同一个端口默认也收 `https://`（合并模式）：局域网里其它设备访问要装一次根证书，打开 `https://<本机地址>:8080/ca`（用 http 也能打开）看步骤，装完换成 https 地址才有麦克风与投屏权限。数据落在可执行文件旁的 `data/` 目录，写不进去时自动回落系统用户数据目录；`--data <目录>` 或 `HEARTH_DATA` 可显式指定。macOS 未签名，首次运行右键「打开」；Windows 首次监听会弹防火墙询问，点「允许」。
 
 ### 放在反代后面
 
@@ -110,6 +112,7 @@ Release 里每个平台一个可执行文件，前端已编进二进制，解开
 - 透传 `X-Forwarded-Proto`：终止 TLS 的部署靠它推出 `https://…` 的 origin
 - 允许 WebSocket 升级：信令走的是 WebSocket
 - **媒体端口不经反代**，直接放行到宿主
+- 反代自己终止 TLS 时用 `http://` 指向 hearth 这个端口即可；不想让 hearth 自己也收 TLS，把 `tls_cert_source` 设成 `off`（或环境变量 `TLS_CERT_SOURCE=off` 锁定，后台只读）
 
 ## 部署形态
 
@@ -132,7 +135,7 @@ Release 里每个平台一个可执行文件，前端已编进二进制，解开
 | `voice_provider` | `lkembed` | 语音线用哪个服务实例（值是实例 alias） |
 | `stage_provider` | `lkembed` | 舞台线（投屏 / 摄像头 / OBS 推流）用哪个实例；`none` = 纯语音部署 |
 | `lkembed_udp_port` | `47720` | 内建内核的媒体 UDP 单端口，需放行；改动重启生效 |
-| `lkembed_tcp_port` | `0` | ICE-TCP 端口，`0` = 关；UDP 被接管的网络建议与媒体端口同号 |
+| `lkembed_tcp_port` | `47720` | ICE-TCP 端口，默认与媒体 UDP 端口同号开启；`0` = 关。部分网络做策略路由 / 分流时 UDP 会被中间设备接管，靠它兜底；改动重启生效 |
 | `lkembed_port` | `47730` | 内建内核的信令端口，只监听回环，浏览器经同源反代访问 |
 | `lkembed_api_key` / `lkembed_api_secret` | 空 | 留空 = 首次启动自动生成并落库（随数据库备份） |
 | `lkembed_public_ip` | 空 | 留空 = 宣告全部网卡地址与 STUN 探测到的公网映射；显式设置则只通告该地址 |
@@ -140,6 +143,9 @@ Release 里每个平台一个可执行文件，前端已编进二进制，解开
 | `lkembed_stun_servers` | 空 | 服务端探测自身公网映射用；留空用内置默认，不可达时改填 |
 | `lkembed_log_level` | `warn` | `debug` / `info` / `warn` / `error` |
 | `portmap_mode` | `auto` | `auto` = 向网关申请 UPnP / PCP / NAT-PMP 映射；`off` = 关闭并撤销已建映射 |
+| `tls_cert_source` | `self` | `off` = 不提供 https（放反代后面时用）；`self` = 本机自签根证书，各设备访问前装一次（引导页 `/ca`）；`file` = 用 `tls_cert_file`/`tls_key_file` 指向外部工具签发的 PEM，续期后文件一变自动热换；`upload` = 后台上传证书与私钥。保存即生效 |
+| `tls_cert_file` / `tls_key_file` | 空 | 来源为 `file` 时的证书 / 私钥 PEM 绝对路径 |
+| `tls_self_hosts` | 空 | 逗号分隔的额外主机名 / IP，追加进自签证书的 SAN；新增主机名要重新生成根证书，装过根的设备需重装 |
 | `client_stun_servers` | `stun.miwifi.com:3478,stun.l.google.com:19302` | 下发给浏览器的 STUN 列表，逗号分隔；`none` = 不下发 |
 | `chat_data_line` | `auto` | 聊天走哪条线的数据通道：`auto` / `voice` / `stage` |
 | `chat_file_max_mb` | `25` | 聊天文件大小上限；扇出成本 = 大小 × 在线人数 |
@@ -158,7 +164,10 @@ Release 里每个平台一个可执行文件，前端已编进二进制，解开
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
-| `ADDR` | `:8080` | HTTP 监听地址 |
+| `ADDR` | `:8080` | HTTP 监听地址；留空 `HTTPS_ADDR` 或与它同值时这个端口同时收 http 与 https（合并模式） |
+| `HTTPS_ADDR` | 空 | 另填一个端口时改成分开模式：`ADDR` 只收明文，这个端口只收 TLS；留空或与 `ADDR` 相同即合并模式 |
+| `TLS_CERT_SOURCE` | 空 | 设了即锁定 `tls_cert_source`，后台只读；取值同该键（`off`/`self`/`file`/`upload`） |
+| `TLS_CERT_FILE` / `TLS_KEY_FILE` | 空 | 同名配置键的环境变量锁定形态 |
 | `HEARTH_DATA` | 见下 | 数据目录；也可用 `--data <目录>`。默认优先可执行文件旁的 `data/`，写不进去回落系统用户目录 |
 | `DB_PATH` | `<data>/hearth.db` | sqlite 文件路径（`DATABASE_URL` 为空时使用） |
 | `DATABASE_URL` | 空 | `mysql://` 或 `postgres://` 切换数据库后端 |
@@ -206,7 +215,11 @@ hearth service install|uninstall|start|stop|status [--system]
 
 **换了域名，通行密钥全失效了。** 浏览器把凭证按 RP ID 绑定，`hearth.example.com` 与 `example.com` 是两个不同的 RP ID，不能互换。换域名前先告知用户，换完让他们重新添加一枚（密码登录不受影响）。想让凭证绑在主域名上就显式填 `passkey_rp_id`。裸 IP 不能当 RP ID。
 
-**OBS 怎么填。** 服务器填 `https://<你的站点>/providers/{当前舞台实例 alias}/w/{频道}`，Bearer Token 填推流令牌；地址与令牌在房间顶栏点频道名 →「OBS 推流地址…」一键复制。不支持 Bearer 的工具（ffmpeg 等）用路径形态 `…/w/{频道}/{令牌}`。alias 必须是当前舞台实例，否则 404。频道段既可以是 id 也可以是名字，OBS 里存着的旧名字地址永久有效。
+**朋友的手机怎么装根证书。** 默认证书来源是自签（`tls_cert_source=self`），发给对方一个链接：打开 `https://<你的地址>:8080/ca`（用 http 打开也行），页面按系统给出分步说明。iOS/iPadOS 多一步：装完描述文件后还要去 设置 → 通用 → 关于本机 → 证书信任设置，把「Hearth CA」的完全信任打开，否则 Safari 仍然报不安全。
+
+**地址要带 https，少打一个 s 麦克风权限就点不开。** 合并模式下 http 和 https 是同一个地址、同一个端口，区别只在协议前缀；浏览器只在安全上下文（https 或 `localhost`）下才给麦克风、摄像头、投屏权限，忘了打 `s` 会看起来像权限坏了，其实是页面本身不安全。
+
+**OBS 怎么填。** 服务器填 `https://<你的站点>/providers/{当前舞台实例 alias}/w/{频道}`，Bearer Token 填推流令牌；地址与令牌在房间顶栏点频道名 →「OBS 推流地址…」一键复制。不支持 Bearer 的工具（ffmpeg 等）用路径形态 `…/w/{频道}/{令牌}`。alias 必须是当前舞台实例，否则 404。频道段既可以是 id 也可以是名字，OBS 里存着的旧名字地址永久有效。自签证书下 OBS 不认这份证书，房间里的面板会自动给出同主机 http 端口的地址，直接用即可。
 
 ## 架构
 
