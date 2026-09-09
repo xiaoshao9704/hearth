@@ -253,6 +253,15 @@ export function TlsCard(props: {
       <Show when={status()} fallback={<Show when={err()}><div class="error-text" style="margin-top:13px">{err()}</div></Show>}>
         {(st) => (
           <>
+            <div style="font-size:11.5px;color:var(--text-2);margin-top:11px">
+              <Show
+                when={st().mode === 'split'}
+                fallback={<>监听：<span class="mono">{st().http_addr}</span>（http 与 https 同端口）</>}
+              >
+                监听：<span class="mono">{st().http_addr}</span>（http）· <span class="mono">{st().https_addr}</span>（https）
+              </Show>
+            </div>
+
             <Show when={st().source === 'off'}>
               <div class="hint-card" style="margin-top:16px">TLS 已关闭，当前仅明文访问。</div>
             </Show>
