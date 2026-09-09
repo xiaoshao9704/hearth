@@ -10,7 +10,7 @@ Hearth 是几个朋友的私人客厅：一个文件跑起来的语音、高清�
 
 ## 节点 0：文档收尾（v0.9.21，纯文档）
 
-状态：已完成（2026-09-09），待推送发布。
+状态：已发布 v0.10.0（2026-09-09）。
 
 - README / README.en / 宣传页首屏加命名段落与定位语。
 - 状态过期的 plan 文档（passkey、notify、latency、entrypoints、ingest-entry、chat-files、site-readme）改成「已实施」。
@@ -21,7 +21,7 @@ Hearth 是几个朋友的私人客厅：一个文件跑起来的语音、高清�
 
 ## 节点 1：家庭自托管 TLS（v0.10.0）
 
-状态：已实施（2026-09-09），待真机验收与发布。设计见 `docs/plan-tls.md`。
+状态：已发布 v0.10.0（2026-09-09）。设计见 `docs/plan-tls.md`。
 
 - `tls_cert_source` 四档 `off / self / file / upload`，默认 `self`；`HTTPS_ADDR` 决定合并模式（同端口双协议，默认）还是分开模式（明文与 TLS 各一个端口）。
 - `self`：本地根 CA 落 `<data>/tls/`，带名称约束防滥用；叶证书 SAN 随本机与公网 IP 变化重签，根 CA 不动；无鉴权的 `/ca.crt` 与分系统安装说明页 `/ca`（iOS 需在「证书信任设置」里手动开完全信任）。
