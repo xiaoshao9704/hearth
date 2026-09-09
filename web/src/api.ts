@@ -2,7 +2,7 @@
 import { setLeaveGuard } from './nav';
 import { toast } from './ui';
 
-const SERVER_URL: string = import.meta.env.VITE_SERVER_URL ?? 'http://localhost:8080';
+export const SERVER_URL: string = import.meta.env.VITE_SERVER_URL ?? 'http://localhost:8080';
 export const LIVEKIT_URL_FALLBACK: string =
   import.meta.env.VITE_LIVEKIT_URL ?? 'ws://localhost:7880';
 
@@ -132,13 +132,15 @@ async function req<T>(path: string, options: { method?: string; body?: unknown }
   if (token) headers['Authorization'] = `Bearer ${token}`;
   // 设备头对普通会话无害（服务端只在会话绑定了设备时校验，即访客）
   headers['X-Device-Id'] = deviceId();
-  if (options.body !== undefined) headers['Content-Type'] = 'application/json';
+  // FormData（证书上传）不手写 Content-Type：浏览器要自己带上 multipart boundary
+  const isForm = options.body instanceof FormData;
+  if (options.body !== undefined && !isForm) headers['Content-Type'] = 'application/json';
   let res: Response;
   try {
     res = await fetch(`${SERVER_URL}${path}`, {
       method: options.method ?? 'GET',
       headers,
-      body: options.body === undefined ? undefined : JSON.stringify(options.body),
+      body: options.body === undefined ? undefined : isForm ? (options.body as FormData) : JSON.stringify(options.body),
       signal: AbortSignal.timeout(REQ_TIMEOUT_MS),
     });
   } catch (e) {
@@ -697,6 +699,8 @@ export function deleteInvite(id: number): Promise<void> {
 export interface SiteInfo {
   name: string;
   policy: string;
+  tls_source: 'off' | 'self' | 'file' | 'upload'; // 当前生效的证书来源
+  http_port: number; // ADDR 的端口号；合并模式下与页面端口相同
 }
 
 // 登录页与邀请页只需要站点名和注册策略；首启流程不在本发布线。
@@ -784,6 +788,69 @@ export async function adminGetConfig(): Promise<ConfigItem[]> {
 
 export function adminSetConfig(values: Record<string, string>): Promise<void> {
   return req('/api/admin/config', { method: 'POST', body: { values } });
+}
+
+// ---- TLS ----
+
+export interface TlsCertInfo {
+  subject: string;
+  sans: string[];
+  not_after: string;
+  fingerprint_sha256: string;
+}
+
+export interface TlsCaInfo {
+  fingerprint_sha256: string;
+  not_after: string;
+  constraint_stale: boolean; // tls_self_hosts 加了根约束里没有的 DNS 名，根证书需要重新生成
+}
+
+export interface TlsExternalInfo {
+  addresses: string[];
+  probed_at: string;
+}
+
+export interface TlsPinhole {
+  proto: string;
+  port: number;
+  gua: string;
+  method: string;
+}
+
+export interface TlsPortmapInfo {
+  mode: 'auto' | 'off'; // portmap_mode 当前值
+  diagnosis: string; // portmap.Diagnosis：ok/off/no_gateway/disabled_by_gateway/upstream_nat/port_conflict/host_firewall/error
+  detail: string;
+  v6_detail: string;
+  pinholes: TlsPinhole[];
+}
+
+export interface TlsStatus {
+  source: 'off' | 'self' | 'file' | 'upload';
+  mode: 'merged' | 'split';
+  http_addr: string;
+  https_addr: string;
+  cert: TlsCertInfo | null; // 来源 off 或当前没有可用证书时为 null
+  ca: TlsCaInfo | null; // 来源不是 self 时为 null
+  cert_file: string;
+  key_file: string;
+  external: TlsExternalInfo;
+  portmap: TlsPortmapInfo;
+}
+
+export function getTls(): Promise<TlsStatus> {
+  return req('/api/admin/tls');
+}
+
+export function uploadTls(cert: File, key: File): Promise<TlsStatus> {
+  const form = new FormData();
+  form.append('cert', cert);
+  form.append('key', key);
+  return req('/api/admin/tls/upload', { method: 'POST', body: form });
+}
+
+export function rotateTlsCA(): Promise<TlsStatus> {
+  return req('/api/admin/tls/ca/rotate', { method: 'POST', body: {} });
 }
 
 // ---- 审计日志 ----

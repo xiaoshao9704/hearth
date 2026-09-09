@@ -1,5 +1,5 @@
 // 大厅：频道卡片、创建频道、设备提示。
-import { canInvite, createChannel, fetchMe, getUser, guestTimeLeft, isGuest, listChannels } from '../api';
+import { canInvite, createChannel, fetchMe, getUser, guestTimeLeft, isGuest, listChannels, SERVER_URL } from '../api';
 import type { Channel } from '../api';
 import { isSupported, passkeyErrorDetail, registerPasskey } from '../passkey';
 import { installMode, isStandalone, onInstallAvailable, promptInstall } from '../install';
@@ -265,6 +265,15 @@ export async function renderLobby(root: HTMLElement, alive: () => boolean) {
       <button type="button" class="hit acct-entry" id="acct-entry" aria-haspopup="menu" title="账户" aria-label="账户">${avatarHtml(user?.username ?? '?', 'avatar avatar-sm')}</button>
     </header>
     <div class="lobby-body">
+      ${
+        // 明文且非本机访问：浏览器不会给这个源麦克风/投屏权限，指路装根证书走 https
+        location.protocol === 'http:' && !['localhost', '127.0.0.1', '::1'].includes(location.hostname)
+          ? `<div class="hint-card">
+        ${icon('warn', 15, 'var(--text-2)', 1.6)}
+        <span>浏览器在 http 下不给麦克风与投屏权限，<a href="${SERVER_URL}/ca" style="color:var(--ember)">装根证书后用 https 打开</a>。</span>
+      </div>`
+          : ''
+      }
       <div id="passkey-nudge"></div>
       <div id="install-nudge"></div>
       ${
