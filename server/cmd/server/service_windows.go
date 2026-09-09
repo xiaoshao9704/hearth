@@ -197,10 +197,11 @@ type firewallRule struct {
 	port  int
 }
 
-var firewallRuleNames = []string{"Hearth HTTP", "Hearth Media UDP", "Hearth Media TCP"}
+var firewallRuleNames = []string{"Hearth HTTP", "Hearth Media UDP", "Hearth Media TCP", "Hearth HTTPS"}
 
 // firewallRules 放行 HTTP（ADDR）与 lkembed 的 UDP/可选 ICE-TCP 端口。媒体端口没有
 // env 覆盖，按 DB settings→实现默认值读取，与 dyncfg 的生效口径一致。
+// 分开模式（HTTPS_ADDR 另一个端口）再放行 https 那个端口；合并模式下 https 就在 HTTP 端口上。
 func firewallRules(cfg config.Config) []firewallRule {
 	httpPort := 0
 	_, ps, err := net.SplitHostPort(cfg.Addr)
@@ -230,7 +231,14 @@ func firewallRules(cfg config.Config) []firewallRule {
 	rules := []firewallRule{
 		{name: firewallRuleNames[0], proto: "TCP", port: httpPort},
 		{name: firewallRuleNames[1], proto: "UDP", port: pick("lkembed_udp_port", "47720")},
-		{name: firewallRuleNames[2], proto: "TCP", port: pick("lkembed_tcp_port", "0")},
+		{name: firewallRuleNames[2], proto: "TCP", port: pick("lkembed_tcp_port", "47720")},
+	}
+	if cfg.TLSSplit() {
+		httpsPort := 0
+		if _, ps, err := net.SplitHostPort(cfg.HTTPSAddr); err == nil {
+			httpsPort, _ = strconv.Atoi(ps)
+		}
+		rules = append(rules, firewallRule{name: firewallRuleNames[3], proto: "TCP", port: httpsPort})
 	}
 	return rules
 }

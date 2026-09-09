@@ -136,6 +136,7 @@ func (a *API) allConfigKeys() []rtc.ConfigKey {
 	keys := append(append([]rtc.ConfigKey{}, selectorKeys...), a.kernelKeys...)
 	keys = append(keys, portmapKeys...)
 	keys = append(keys, clientICEKeys...)
+	keys = append(keys, tlsKeys...)
 	keys = append(keys, chatKeys...)
 	keys = append(keys, passkeyKeys...)
 	keys = append(keys, webpushKeys...)
@@ -157,6 +158,14 @@ func (a *API) PortWants(ctx context.Context) []portmap.Want {
 	if _, port, err := net.SplitHostPort(a.cfg.Addr); err == nil {
 		if p, err := strconv.Atoi(port); err == nil {
 			ws = append(ws, portmap.Want{Proto: "tcp", Port: p, Desc: "hearth http"})
+		}
+	}
+	// 分开模式下 https 是另一个端口，一并申请（合并模式下就是上面那条 http）
+	if a.cfg.TLSSplit() {
+		if _, port, err := net.SplitHostPort(a.cfg.HTTPSAddr); err == nil {
+			if p, err := strconv.Atoi(port); err == nil {
+				ws = append(ws, portmap.Want{Proto: "tcp", Port: p, Desc: "hearth https"})
+			}
 		}
 	}
 	// lkembed 的媒体端口必须 StrictPort：LiveKit 的候选地址改写（补丁二）只换
@@ -338,6 +347,13 @@ func (a *API) adminSetConfig(w http.ResponseWriter, r *http.Request) {
 		if err := a.st.SetSetting(r.Context(), "cfg_"+name, strings.TrimSpace(value)); err != nil {
 			writeErr(w, http.StatusInternalServerError, "内部错误")
 			return
+		}
+	}
+	// TLS 相关键改了立刻跑一轮检查：来源切换与路径修改保存即生效，不等下一个 60 秒轮次
+	for name := range req.Values {
+		if strings.HasPrefix(name, "tls_") {
+			a.tlsStore.Check(r.Context())
+			break
 		}
 	}
 	// 语音/舞台选择器切到/切走 lkembed：立即启停它（另起协程，启动要 1 秒级）
