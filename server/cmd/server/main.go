@@ -164,7 +164,15 @@ type httpListeners struct {
 }
 
 func startHTTP(cfg config.Config, h http.Handler, tlsCfg *tls.Config) (*httpListeners, error) {
-	l := &httpListeners{srv: &http.Server{Handler: h}, errCh: make(chan error, 2)}
+	// 连上不发字节的连接不能无限占用：cmux 的 SetReadTimeout 只管嗅探那一读，
+	// 而 cmux.Any() 不读字节就匹配，所以真正兜底的是 ReadHeaderTimeout。
+	// IdleTimeout 单独给，否则 keep-alive 的空闲连接会被 ReadHeaderTimeout 按同一档掐掉。
+	// 都不设 ReadTimeout：大文件上传与长响应不能有整体时限；WebSocket 在 hijack 时
+	// 由 net/http 自己清掉 deadline，不受影响。
+	newSrv := func() *http.Server {
+		return &http.Server{Handler: h, ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 2 * time.Minute}
+	}
+	l := &httpListeners{srv: newSrv(), errCh: make(chan error, 2)}
 	if cfg.TLSSplit() {
 		ln, err := net.Listen("tcp", cfg.Addr)
 		if err != nil {
@@ -176,7 +184,8 @@ func startHTTP(cfg config.Config, h http.Handler, tlsCfg *tls.Config) (*httpList
 			return nil, err
 		}
 		l.Addr, l.TLSAddr = ln.Addr(), lnTLS.Addr()
-		l.srvTLS = &http.Server{Handler: h, TLSConfig: tlsCfg}
+		l.srvTLS = newSrv()
+		l.srvTLS.TLSConfig = tlsCfg
 		go func() { l.errCh <- l.srv.Serve(ln) }()
 		go func() { l.errCh <- l.srvTLS.ServeTLS(lnTLS, "", "") }()
 		return l, nil

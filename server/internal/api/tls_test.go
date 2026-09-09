@@ -63,6 +63,29 @@ func TestAdminTLSShape(t *testing.T) {
 	}
 }
 
+// TestPortWantsHTTPS 分开模式下 https 端口要一并申请映射（合并模式下它就是 http 那条）。
+func TestPortWantsHTTPS(t *testing.T) {
+	maskProviderEnv(t)
+	t.Setenv("PORTMAP_MODE", "")
+	a := testAPI(t)
+	ctx := context.Background()
+	has := func() bool {
+		for _, w := range a.PortWants(ctx) {
+			if w.Desc == "hearth https" {
+				return w.Proto == "tcp" && !w.StrictPort
+			}
+		}
+		return false
+	}
+	if has() {
+		t.Fatal("合并模式不该有独立的 https 映射")
+	}
+	a.cfg.HTTPSAddr = ":8443"
+	if !has() {
+		t.Fatalf("分开模式应有一条非 Strict 的 https tcp want: %+v", a.PortWants(ctx))
+	}
+}
+
 // TestSiteTLSFields /api/site 带上前端拼推流地址要用的两项。
 func TestSiteTLSFields(t *testing.T) {
 	maskProviderEnv(t)

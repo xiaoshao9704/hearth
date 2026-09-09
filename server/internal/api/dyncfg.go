@@ -349,6 +349,13 @@ func (a *API) adminSetConfig(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// TLS 相关键改了立刻跑一轮检查：来源切换与路径修改保存即生效，不等下一个 60 秒轮次
+	for name := range req.Values {
+		if strings.HasPrefix(name, "tls_") {
+			a.tlsStore.Check(r.Context())
+			break
+		}
+	}
 	// 语音/舞台选择器切到/切走 lkembed：立即启停它（另起协程，启动要 1 秒级）
 	if _, ok := req.Values["stage_provider"]; ok {
 		go a.EnsureStageKernel(context.Background())
