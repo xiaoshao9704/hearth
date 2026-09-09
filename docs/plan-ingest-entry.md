@@ -1,6 +1,6 @@
 # 计划：推流入口重做 + 频道寻址渐进切 id（第一批）
 
-状态：**设计定稿（2026-09-07），待实施。** 本文自包含。
+状态：**已实施（原定稿 2026-09-07，2026-09-09 核对）。** 证据：`server/internal/api/channel_ref.go`、`web/src/views/room/ingest-panel.tsx`、`server/internal/api/admission.go`。本文自包含。
 
 ## 背景与动机
 

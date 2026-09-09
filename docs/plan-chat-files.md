@@ -1,6 +1,6 @@
 # 计划：聊天与文件走 LiveKit 数据通道，hearth 不维护聊天长连接、不经手文件
 
-状态：**方案定稿（2026-09-05，用户拍板），待实施。** 本计划自包含，实施会话读完即可开工。
+状态：**已实施（原方案定稿 2026-09-05，用户拍板；2026-09-09 核对）。** 证据：`server/internal/api/chat_messages.go`、`web/src/chat/protocol.ts`、`server/internal/store/00004_chat_kind.go`。本计划自包含。
 
 ## 决定（用户拍板）
 

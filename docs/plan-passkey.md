@@ -1,6 +1,6 @@
 # 计划：通行密钥（Passkey / WebAuthn）快速登录与登录后推荐
 
-状态：**设计定稿（2026-09-07），待实施。** 本文自包含。
+状态：**已实施（原定稿 2026-09-07，2026-09-09 核对）。** 证据：`server/internal/api/passkey.go`、`web/src/passkey.ts`、`server/internal/store/00007_passkeys.go`。本文自包含。
 
 ## 目标与判据
 
