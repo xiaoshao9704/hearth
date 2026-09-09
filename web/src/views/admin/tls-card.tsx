@@ -37,6 +37,7 @@ export function TlsCard(props: {
   dirty: boolean;
   saving: boolean;
   onSave: () => Promise<void>;
+  onUploaded: () => Promise<void>; // 上传接口自己落了 tls_cert_source，让宿主把配置项拉回来
 }) {
   const [status, setStatus] = createSignal<TlsStatus>();
   const [err, setErr] = createSignal('');
@@ -104,6 +105,7 @@ export function TlsCard(props: {
       setStatus(await uploadTls(cert, key));
       setUploadCert(null);
       setUploadKey(null);
+      await props.onUploaded();
       toast('证书已上传并生效', 'ok');
     } catch (e) {
       toast((e as Error).message, 'bad');
