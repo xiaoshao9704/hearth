@@ -454,7 +454,7 @@ function ConfigTab(props: { onDirty: (groups: string[]) => void }) {
   };
 
   const allGroups = createMemo(() => [...new Set(items().map((it) => it.group))]);
-  // server 组（tls_cert_source/tls_cert_file/tls_key_file）不进这套通用卡片：TlsCard 自己渲染，
+  // server 组（四个 tls_* 键）不进这套通用卡片：TlsCard 自己渲染，
   // 但保存仍复用这里的 draft/saveGroup（见下方 <TlsCard>），脏标记也仍算进未保存改动提示
   const groups = createMemo(() => allGroups().filter((g) => g !== 'server'));
   const groupItems = (g: string) => items().filter((it) => it.group === g);

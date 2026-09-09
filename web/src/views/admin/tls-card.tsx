@@ -1,6 +1,7 @@
 // 管理后台「服务器」分区：TLS 证书来源、根证书管理、对外地址与端口映射诊断。
-// 来源三个 dyncfg 键（tls_cert_source/tls_cert_file/tls_key_file）复用 ConfigTab 已有的
-// 草稿/保存机制（valOf/setVal/onSave），本组件自己只管 GET /api/admin/tls 状态与上传/轮换。
+// server 组的四个 dyncfg 键（tls_cert_source/tls_cert_file/tls_key_file/tls_self_hosts）复用
+// ConfigTab 已有的草稿/保存机制（valOf/setVal/onSave）——它们不进通用 GroupCard，这里不渲染
+// 就没有别处渲染；本组件自己只管 GET /api/admin/tls 状态与上传/轮换。
 import { createSignal, For, Show } from 'solid-js';
 import { getTls, rotateTlsCA, SERVER_URL, uploadTls } from '../../api';
 import type { ConfigItem, TlsStatus } from '../../api';
@@ -30,7 +31,7 @@ function fmtDate(iso: string): string {
 }
 
 export function TlsCard(props: {
-  items: ConfigItem[]; // group=server 的三个键
+  items: ConfigItem[]; // group=server 的四个 tls_* 键
   valOf: (it: ConfigItem) => string;
   setVal: (it: ConfigItem, v: string) => void;
   dirty: boolean;
@@ -59,11 +60,15 @@ export function TlsCard(props: {
   const sourceItem = () => props.items.find((it) => it.name === 'tls_cert_source');
   const certFileItem = () => props.items.find((it) => it.name === 'tls_cert_file');
   const keyFileItem = () => props.items.find((it) => it.name === 'tls_key_file');
+  const selfHostsItem = () => props.items.find((it) => it.name === 'tls_self_hosts');
   // 草稿优先：切来源立刻切换下方表单，不等保存；items 还没到位时按状态接口的当前来源兜底
   const sourceVal = () => {
     const it = sourceItem();
     return it ? props.valOf(it) : (status()?.source ?? 'self');
   };
+
+  // 卡片上当前有没有可改的字段：来源被 env 锁定时只剩自签的额外主机名还能填
+  const hasEditable = () => !sourceItem()?.locked || (sourceVal() === 'self' && selfHostsItem() !== undefined && !selfHostsItem()!.locked);
 
   const doSave = async () => {
     await props.onSave();
@@ -156,6 +161,26 @@ export function TlsCard(props: {
         </Show>
       </div>
 
+      <Show when={sourceVal() === 'self' && selfHostsItem()}>
+        {(it) => (
+          <div style="margin-top:12px">
+            <div style="font-size:11px;color:var(--text-2);margin-bottom:6px">{it().label}</div>
+            <div class="field" style="height:38px;background:var(--bg-2)">
+              <input
+                class="mono"
+                style="font-size:12px"
+                value={props.valOf(it())}
+                placeholder="逗号分隔，例如 hearth.example.com, 198.51.100.7"
+                autocomplete="off"
+                disabled={it().locked}
+                onInput={(ev) => props.setVal(it(), ev.currentTarget.value)}
+              />
+            </div>
+            <div style="font-size:10.5px;color:var(--text-3);margin-top:6px;line-height:1.6">{it().hint}</div>
+          </div>
+        )}
+      </Show>
+
       <Show when={sourceVal() === 'file' && !sourceItem()?.locked}>
         <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:11px;margin-top:12px">
           <For each={[certFileItem(), keyFileItem()]}>
@@ -180,7 +205,7 @@ export function TlsCard(props: {
         </div>
       </Show>
 
-      <Show when={!sourceItem()?.locked && props.items.length > 0}>
+      <Show when={hasEditable()}>
         <div style="display:flex;align-items:center;gap:10px;margin-top:13px">
           <span style="font-size:11px;color:var(--text-3);flex-grow:1">
             {props.dirty ? '有改动还没保存，点右边生效' : '保存后立即生效，无需重启'}
