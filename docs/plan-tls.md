@@ -32,12 +32,18 @@
   - 叶证书：`<data>/tls/self.crt` + `self.key`，有效期 397 天（Apple 对所有 TLS 叶证书的 825 天上限之内），到期前 30 天重签；`ExtKeyUsage ServerAuth`、SHA-256、SAN 必填（Apple 不认 CN）。
   - SAN 集合 = `localhost` + `127.0.0.1` + 本机全部非回环单播 IP（v4/v6） + `lite.Announcer.Snapshot()` 的外部地址 + `tls_self_hosts`（逗号分隔的额外主机名/IP，默认空）。集合变化即重签，根不动；私网 IP 变化与公网 IP 变化同样处理。
   - `tls_cert_source` 不是 `self` 时不生成任何文件。
+  - **根 CA 防滥用**（用户要求）。装到朋友设备上的根是全局信任锚，必须把它的能力钉死在「只为这台 hearth 签证书」：
+    1. 私钥 `ca.key` 永不经任何接口读出（没有导出、备份、显示接口；后台状态接口只给指纹），文件 0600；`hearth` 的日志不打印私钥路径以外的任何内容。
+    2. 根证书带 **名称约束**（RFC 5280 `nameConstraints`，critical）：`PermittedIPRanges = [0.0.0.0/0, ::/0]`，`PermittedDNSDomains = ["localhost"] + tls_self_hosts 里的 DNS 名`，`PermittedEmailAddresses`/`PermittedURIDomains` 各给一个不可能匹配的占位（如 `invalid`）以关掉这两类。效果：即使私钥泄漏，用它签出的任何域名证书（`example.com` 之类）都会被 Chrome/Firefox/Apple/Android 拒绝，只剩「冒充按 IP 访问的站点」这一条几乎没有实际价值的路。`KeyUsage` 只有 `CertSign|CRLSign`，`MaxPathLen = 0`（不能再签中间 CA）。
+    3. `tls_self_hosts` 新增了根约束里没有的 DNS 名时，不悄悄放宽：状态接口返回 `ca.constraint_stale = true`，后台卡片提示「新增主机名需要重新生成根证书，朋友设备要重装」。有域名的人应改用 `file`/`upload` 拿真证书，页面上写明这一点。
+    4. 后台「重新生成根证书」按钮（`POST /api/admin/tls/ca/rotate`，admin+，需二次确认）：删旧根与叶重签，用于私钥可能泄漏（数据目录备份丢失）或约束过期的情况；响应里带新指纹。
+    5. 根证书有效期 10 年不变；叶证书 397 天、只签 `ServerAuth`。
 - `upload`：`POST /api/admin/tls/upload`（multipart，`cert` + `key`，admin+），先解析校验成对（`tls.X509KeyPair`），通过才写入 `<data>/tls/upload.crt` / `upload.key`（0600）并把 `tls_cert_source` 落成 `upload`；失败返回 400 且什么都不改。
 - 状态：`GET /api/admin/tls`（admin+）。这是 CLAUDE.md 「网络诊断回显走管理接口」的兑现点，`/healthz` 语义不变。响应形状（前后端按此并行实施，不得改动）：
   ```json
   {"source":"self","mode":"merged","http_addr":":8080","https_addr":"",
    "cert":{"subject":"CN=hearth","sans":["localhost","127.0.0.1","192.168.1.10"],"not_after":"2027-10-01T00:00:00Z","fingerprint_sha256":"AB:CD:..."},
-   "ca":{"fingerprint_sha256":"12:34:...","not_after":"2036-09-09T00:00:00Z"},
+   "ca":{"fingerprint_sha256":"12:34:...","not_after":"2036-09-09T00:00:00Z","constraint_stale":false},
    "cert_file":"","key_file":"",
    "external":{"addresses":["203.0.113.5"],"probed_at":"2026-09-09T08:00:00Z"},
    "portmap":{"mode":"auto","diagnosis":"ok","detail":"...","v6_detail":"","pinholes":[]}}
@@ -57,13 +63,19 @@
 ### 公开入口
 
 - `GET /ca.crt`：无鉴权，明文与 TLS 都能取；`Content-Type: application/x-x509-ca-cert`，`Content-Disposition: attachment; filename="hearth-ca.crt"`。来源不是 `self` 时 404。
-- `GET /ca`：无鉴权的安装说明页（服务端渲染的静态 HTML，走现有的 webui 或一个内嵌模板，不进 SPA 路由）。四段：macOS（双击 → 钥匙串 → 始终信任）、Windows（导入到「受信任的根证书颁发机构」）、Android（设置 → 安全 → 安装证书 → CA 证书）、iOS（Safari 下载 → 设置 → 已下载描述文件 → 安装 → 通用 → 关于本机 → 证书信任设置 → 打开完全信任）。页面写明装完后访问的地址：合并模式是 `https://<本机地址>:8080`（**同一个端口，只是前面带 `https://`**，少打一个 `s` 就是不安全上下文、麦克风权限点不开），分开模式是 `https://<本机地址>:<HTTPS 端口>`；并列出当前 SAN 里的地址供复制。来源不是 `self` 时显示「当前使用外部证书，无需安装」。
+- `GET /ca`：无鉴权的安装说明页（服务端渲染的静态 HTML，一个内嵌模板，不进 SPA 路由）。页面必须把「装的是什么、为什么、能做什么、不能做什么、怎么卸载」讲清楚，顺序固定：
+  1. **这是什么**：「这是这台 Hearth 自己生成的根证书。装上它，你的浏览器才会信任 `https://<地址>`，麦克风、投屏、通知才能用。」并给出根证书的 SHA-256 指纹，写明「装之前可以和站长核对这串指纹，不一致就不要装」。
+  2. **它能做什么、不能做什么**：只能让这台 Hearth 的地址显示为安全；带名称约束，不能用来冒充任何域名网站；私钥只在服务器上，网页下载的是公开的证书文件。
+  3. **分系统安装步骤**，每一步写清会看到的系统提示原文与该点什么：macOS（下载 → 双击 → 钥匙串访问里找到「Hearth CA」→ 显示简介 → 信任 → 「使用此证书时」选「始终信任」→ 输密码）；Windows（下载 → 双击 → 「安装证书」→ 当前用户 → 「将所有证书放入下列存储」→ 浏览选「受信任的根证书颁发机构」→ 会弹「安全警告」问是否安装，选「是」）；Android（下载 → 设置 → 安全/加密与凭据 → 安装证书 → CA 证书 → 会提示「你的数据将不再是私密的」，这是系统对所有用户 CA 的固定提示 → 仍然安装 → 选文件）；iOS/iPadOS（用 Safari 打开链接 → 系统提示「此网站正尝试下载一个配置描述文件」选「允许」→ 设置 → 顶部「已下载描述文件」→ 安装 → 输锁屏密码 → 再点「安装」→ 然后**必须**去 设置 → 通用 → 关于本机 → 证书信任设置 → 打开「Hearth CA」的完全信任，否则 Safari 仍然报不安全）。
+  4. **装完打开**：给出要访问的 https 地址（合并/分开模式各自的形态），并强调「地址前面要带 https，少打一个 s 麦克风权限就点不开」。
+  5. **怎么卸载**：四个系统各一行（钥匙串删除 / certmgr 删除 / 设置 → 安全 → 清除凭据 / 设置 → 通用 → VPN 与设备管理 → 移除描述文件）。
+  6. **站长须知**（折叠区）：根证书私钥在服务器数据目录，备份泄漏时到后台「重新生成根证书」，朋友需要重装。页面写明装完后访问的地址：合并模式是 `https://<本机地址>:8080`（**同一个端口，只是前面带 `https://`**，少打一个 `s` 就是不安全上下文、麦克风权限点不开），分开模式是 `https://<本机地址>:<HTTPS 端口>`；并列出当前 SAN 里的地址供复制。来源不是 `self` 时显示「当前使用外部证书，无需安装」。
 
 ## 前端
 
 - `/api/site` 增加 `tls_source`（`self|file|upload`）与 `http_port`（`ADDR` 的端口号；合并模式下与页面端口相同）。
 - OBS 推流地址面板（`web/src/views/room/ingest-panel.tsx`）：`tls_source=self` 且页面是 https 时，地址改成 `http://<页面主机名>:<http_port>/...`（合并模式下就是同主机同端口换协议），面板加一行说明「自签证书 OBS 不认，推流地址用 http」；`file`/`upload` 或页面本来就是 http 时照旧用页面 origin。分开模式 + 家庭 NAT 把 http 端口改派成别的外部号时这个地址会不对，文档注明「OBS 从局域网推，或用合并模式」，代码不处理。
-- 管理后台（`web/src/views/admin.tsx`）「服务器」分区新增「TLS 与对外地址」卡片：来源选择（三选一）、证书摘要（主体、SAN、到期、指纹）、`self` 下的「下载根证书」与安装页链接、`file` 下的两个路径输入、`upload` 下的上传表单、对外地址与映射诊断回显。状态接口返回的监听地址只有一个。新组件放 `web/src/views/admin/tls-card.tsx`，`admin.tsx` 只加接线。
+- 管理后台（`web/src/views/admin.tsx`）「服务器」分区新增「TLS 与对外地址」卡片：来源选择（三选一）、证书摘要（主体、SAN、到期、指纹）、`self` 下的「下载根证书」与安装页链接、根指纹、「重新生成根证书」（二次确认，说明朋友需重装）、`constraint_stale` 时的提示、`file` 下的两个路径输入、`upload` 下的上传表单、对外地址与映射诊断回显。状态接口返回的监听地址只有一个。新组件放 `web/src/views/admin/tls-card.tsx`，`admin.tsx` 只加接线。
 - 登录页 / 大厅在**明文且非 localhost** 访问时已有的「没有 https 浏览器不给权限」提示（若没有则加一条）链接到 `/ca` 页。
 
 ## 文档
@@ -80,7 +92,8 @@
 
 1. 合并模式（默认）新数据目录启动：`curl -s http://127.0.0.1:8080/healthz` 与 `curl -sk https://127.0.0.1:8080/healthz` 都 200；`curl -sk --http2 -I https://127.0.0.1:8080/healthz` 首行 `HTTP/2 200`；`curl -sk https://127.0.0.1:8080/ca.crt | openssl x509 -noout -subject` 是根 CA；`openssl s_client -connect 127.0.0.1:8080 </dev/null | openssl x509 -noout -ext subjectAltName` 含本机 IP；`nc 127.0.0.1 8080` 连上不发字节，5 秒后被服务端断开（嗅探超时生效）。
 2. 一台手机装根证书后访问 `https://<局域网 IP>:8080`：无警告，麦克风、投屏观看、PWA 安装、推送订阅可用。
-3. SAN 变化：改 `lkembed_public_ip` 或 `tls_self_hosts` 后 60 秒内叶证书 SAN 更新，根指纹不变。
+3. SAN 变化：改 `lkembed_public_ip` 或往 `tls_self_hosts` 加 IP 后 60 秒内叶证书 SAN 更新，根指纹不变；往 `tls_self_hosts` 加 DNS 名后状态接口 `constraint_stale=true`、后台出提示；`openssl x509 -text` 看根证书有 critical 的 `Name Constraints`，用根私钥手工签一张 `example.com` 的叶证书，`openssl verify -CAfile ca.crt` 报 `permitted subtree violation`。
+3b. 根轮换：后台点「重新生成根证书」后指纹变化、叶证书由新根签发、旧根签的叶被 `openssl verify` 拒绝。
 4. `file`：openssl 自造证书指路径 → 生效；覆盖文件后 60 秒内序列号变化；写入坏文件后旧证书仍在、日志有错。
 5. `upload`：后台上传生效；证书与私钥不配对返回 400 且原状态不变。
 6. 反代：Caddy/nginx 指向 `http://127.0.0.1:8080` 并透传 `X-Forwarded-Proto`，通行密钥注册与登录不受影响。
