@@ -454,7 +454,7 @@ function ConfigTab(props: { onDirty: (groups: string[]) => void }) {
   };
 
   const allGroups = createMemo(() => [...new Set(items().map((it) => it.group))]);
-  // server 组（tls_cert_source/tls_cert_file/tls_key_file）不进这套通用卡片：TlsCard 自己渲染，
+  // server 组（四个 tls_* 键）不进这套通用卡片：TlsCard 自己渲染，
   // 但保存仍复用这里的 draft/saveGroup（见下方 <TlsCard>），脏标记也仍算进未保存改动提示
   const groups = createMemo(() => allGroups().filter((g) => g !== 'server'));
   const groupItems = (g: string) => items().filter((it) => it.group === g);
@@ -485,6 +485,18 @@ function ConfigTab(props: { onDirty: (groups: string[]) => void }) {
   });
   createEffect(() => props.onDirty(providerDirty() ? [...dirty(), '__provider'] : dirty()));
 
+  // 该组存过之后把服务端值拉回来、清掉草稿。上传证书接口自己会把 tls_cert_source 落成
+  // upload，不经这里的 saveGroup，所以它也要能单独调这一步，否则草稿会一直是「未保存」。
+  const syncGroup = async (g: string) => {
+    const fresh = await adminGetConfig();
+    setItems(fresh);
+    setDraft((d) => {
+      const next = { ...d };
+      for (const it of fresh) if (it.group === g) delete next[it.name];
+      return next;
+    });
+  };
+
   const saveGroup = async (g: string) => {
     if (saving()) return;
     const values: Record<string, string> = {};
@@ -503,13 +515,7 @@ function ConfigTab(props: { onDirty: (groups: string[]) => void }) {
     try {
       await adminSetConfig(values);
       toast('已保存并生效', 'ok');
-      const fresh = await adminGetConfig();
-      setItems(fresh);
-      setDraft((d) => {
-        const next = { ...d };
-        for (const it of fresh) if (it.group === g) delete next[it.name];
-        return next;
-      });
+      await syncGroup(g);
     } catch (e) {
       toast((e as Error).message, 'bad');
     } finally {
@@ -864,6 +870,7 @@ function ConfigTab(props: { onDirty: (groups: string[]) => void }) {
         dirty={dirtyOf('server')}
         saving={saving() === 'server'}
         onSave={() => saveGroup('server')}
+        onUploaded={() => syncGroup('server')}
       />
       <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:16px">
         <For each={groups()}>{(g) => <GroupCard group={g} />}</For>
