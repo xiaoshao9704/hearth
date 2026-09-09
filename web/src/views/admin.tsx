@@ -24,6 +24,7 @@ import {
 import type { AdminOverview, AdminUser, Channel, ConfigItem, ProviderField, ProviderInstance, ProviderType } from '../api';
 import { avatarHtml, confirmDialog, el, icon, menuButtonHtml, timeAgo, toast, wireMenuButton } from '../ui';
 import { AuditTab } from './admin-audit';
+import { TlsCard } from './admin/tls-card';
 import { openSettings } from './settings';
 
 type Tab = 'status' | 'config' | 'users' | 'rooms' | 'audit';
@@ -452,12 +453,15 @@ function ConfigTab(props: { onDirty: (groups: string[]) => void }) {
     setItems(await adminGetConfig());
   };
 
-  const groups = createMemo(() => [...new Set(items().map((it) => it.group))]);
+  const allGroups = createMemo(() => [...new Set(items().map((it) => it.group))]);
+  // server 组（tls_cert_source/tls_cert_file/tls_key_file）不进这套通用卡片：TlsCard 自己渲染，
+  // 但保存仍复用这里的 draft/saveGroup（见下方 <TlsCard>），脏标记也仍算进未保存改动提示
+  const groups = createMemo(() => allGroups().filter((g) => g !== 'server'));
   const groupItems = (g: string) => items().filter((it) => it.group === g);
   const valOf = (it: ConfigItem) => draft()[it.name] ?? it.value;
   const setVal = (it: ConfigItem, v: string) => setDraft((d) => ({ ...d, [it.name]: v }));
   const dirtyOf = (g: string) => groupItems(g).some((it) => !it.locked && valOf(it) !== it.value);
-  const dirty = createMemo(() => groups().filter(dirtyOf));
+  const dirty = createMemo(() => allGroups().filter(dirtyOf));
 
   const resetProviderForm = () => {
     setPMode('create');
@@ -853,6 +857,14 @@ function ConfigTab(props: { onDirty: (groups: string[]) => void }) {
   return (
     <Show when={ov()} fallback={<Placeholder err={err()} />}>
       <ProvidersCard />
+      <TlsCard
+        items={groupItems('server')}
+        valOf={valOf}
+        setVal={setVal}
+        dirty={dirtyOf('server')}
+        saving={saving() === 'server'}
+        onSave={() => saveGroup('server')}
+      />
       <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:16px">
         <For each={groups()}>{(g) => <GroupCard group={g} />}</For>
         <div class="card">

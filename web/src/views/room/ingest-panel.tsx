@@ -1,8 +1,8 @@
 // 房间内的「OBS 推流」面板：把**这个频道**的完整 WHIP 地址与本人令牌摆出来，复制即用。
 // 令牌是账号级的（每用户一把、不分频道），所以这里只读不改——重置与设备标签仍在设置「推流」页。
 import { createSignal, Show } from 'solid-js';
-import { getIngestToken } from '../../api';
-import type { IngestTokenInfo } from '../../api';
+import { getIngestToken, siteInfo } from '../../api';
+import type { IngestTokenInfo, SiteInfo } from '../../api';
 import { copyText, el, icon, toast } from '../../ui';
 
 export const IngestPanel = (p: {
@@ -15,14 +15,29 @@ export const IngestPanel = (p: {
   const [info, setInfo] = createSignal<IngestTokenInfo | null>(null);
   const [loadErr, setLoadErr] = createSignal('');
   const [reveal, setReveal] = createSignal(false);
+  const [site, setSite] = createSignal<SiteInfo | null>(null);
   void getIngestToken()
     .then(setInfo)
     .catch((e) => setLoadErr((e as Error).message));
+  void siteInfo()
+    .then(setSite)
+    .catch(() => {}); // 拉不到就按非自签处理，地址照旧用页面 origin
 
+  // 自签证书 OBS 不认：页面是 https 且证书来源是 self 时，把地址换成同主机的 http 端口
+  // （path 与查询串不变，只动 scheme 与 host:port）
+  const useHttpFallback = () => site()?.tls_source === 'self' && location.protocol === 'https:';
   const addr = () => {
     const i = info();
     const id = p.channelId();
-    return i && id > 0 ? `${i.base}${id}` : '';
+    if (!i || id <= 0) return '';
+    const full = `${i.base}${id}`;
+    const s = site();
+    if (!useHttpFallback() || !s) return full;
+    try {
+      return `http://${location.hostname}:${s.http_port}${new URL(full).pathname}`;
+    } catch {
+      return full;
+    }
   };
   const token = () => info()?.token ?? '';
   const masked = () => {
@@ -73,6 +88,9 @@ export const IngestPanel = (p: {
               {el(icon('copy', 13))} 复制
             </button>
           </div>
+          <Show when={useHttpFallback()}>
+            <div class="ig-tip">自签证书 OBS 不认，推流地址用 http。</div>
+          </Show>
         </div>
 
         <div class="ig-field">

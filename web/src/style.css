@@ -1385,3 +1385,8 @@ body.theater-on .sidebar { display: none; }
 @media (max-width: 860px) {
   .acct-entry { display: flex; align-items: center; }
 }
+
+/* ---- tls ---- */
+/* 指纹是一长串不含空格的 hex：不换行会把复制按钮挤出卡片，窄屏尤其明显 */
+.tls-fp-row { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.tls-fp-row > .mono { flex: 1 1 220px; min-width: 0; overflow-wrap: anywhere; }

@@ -1,6 +1,6 @@
 // 登录页：注册入口按 /api/site 的 policy 显隐（closed 不出；invite 提示要邀请链接；open 出自助注册表单）。
 // 站点名（site.name）用于品牌位与按钮文案，拉取失败按 closed + 默认名处理。
-import { login, register, siteInfo } from '../api';
+import { login, register, SERVER_URL, siteInfo } from '../api';
 import { hasConditionalMediation, isSupported, loginWithPasskey, passkeyErrorDetail, passkeyErrorText } from '../passkey';
 import { wireThemeButton } from '../theme';
 import { esc, flameLogo, icon } from '../ui';
@@ -18,6 +18,8 @@ export function renderLogin(root: HTMLElement) {
   let siteName = 'Hearth';
   let mode: 'login' | 'register' = 'login';
   const lastUser = localStorage.getItem(LAST_USER_KEY) ?? '';
+  // 明文且非本机访问：浏览器不会给这个源麦克风/投屏权限，指路装根证书走 https
+  const insecure = location.protocol === 'http:' && !['localhost', '127.0.0.1', '::1'].includes(location.hostname);
 
   root.innerHTML = `
     <div class="auth-page" style="position:relative">
@@ -28,6 +30,14 @@ export function renderLogin(root: HTMLElement) {
           <div class="word" id="lg-word">HEARTH</div>
           <div class="host mono">${esc(location.host || 'localhost')}</div>
         </div>
+        ${
+          insecure
+            ? `<div class="auth-note hint-card" style="border-color:var(--line-soft)">
+          <span style="flex-shrink:0;margin-top:1px">${icon('warn', 16, 'var(--text-2)', 1.6)}</span>
+          <span>浏览器在 http 下不给麦克风与投屏权限，<a href="${SERVER_URL}/ca" style="color:var(--ember)">装根证书后用 https 打开</a>。</span>
+        </div>`
+            : ''
+        }
         <form class="auth-form" id="login-form">
           <div style="display:flex;flex-direction:column;gap:7px">
             <label class="field-label" for="lg-user">用户名</label>
