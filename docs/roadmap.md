@@ -33,7 +33,7 @@ Hearth 是几个朋友的私人客厅：一个文件跑起来的语音、高清�
 
 ## 节点 2：国内发布轮（不改代码，与节点 1 交错）
 
-状态：待开始。
+状态：进行中（2026-09-10）。应用商店模板与单服务部署形态已入库（`deploy/`：docker run / compose / CasaOS / 1Panel / Unraid / fnOS）；发帖、视频、awesome-selfhosted 待做。
 
 - V2EX、Linux.do、B 站演示视频；切入点「Discord 用不了，一个文件跑私人语音投屏间」。
 - 应用商店模板：CasaOS、1Panel、飞牛、Unraid Community Apps。
