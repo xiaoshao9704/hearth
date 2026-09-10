@@ -1,0 +1,120 @@
+# CasaOS / ZimaOS AppStore 模板（x-casaos v2 规范）。
+#
+# 两种用法：
+#   1. 自定义安装：CasaOS 桌面右上「+」→「安装自定义应用」→「导入」，粘贴本文件全文。
+#   2. 提交 AppStore：把本文件放进 CasaOS-AppStore 仓库的 Apps/Hearth/docker-compose.yml 提 PR。
+#
+# 注意：v2 规范的 locale key 是 en_US / zh_CN（语言小写 + 地区大写），不是 v1 时代的 en_us / zh_cn；
+# service 级的 x-casaos（envs/ports/volumes 描述块）是 v1 遗留写法，v2 构建会整段丢弃，这里不写。
+#
+# 持久化用**命名卷**而不是 CasaOS 惯用的 /DATA/AppData/$AppID bind-mount：
+# 镜像以 uid 65532（distroless nonroot）运行，而 CasaOS 建出来的 AppData 目录属主是 root，
+# 容器会写不动数据库、启动即失败。命名卷由 docker 建、属主随容器，装完就能用。
+# 代价是数据不出现在 CasaOS 的文件管理器里，备份要用 docker volume 或容器内导出。
+
+name: hearth
+
+services:
+  hearth:
+    image: ghcr.io/xiaoshao9704/hearth:latest
+    container_name: hearth
+    network_mode: bridge
+    restart: unless-stopped
+    ports:
+      # Web / API / 信令 / WHIP 唯一的 HTTP 端口，同端口默认也收 https（合并模式）
+      - target: 8080
+        published: "8080"
+        protocol: tcp
+      # 媒体端口：语音与投屏共用，必须放行
+      - target: 47720
+        published: "47720"
+        protocol: udp
+      # ICE-TCP 兜底，只在 UDP 被中间设备接管的网络才用得上
+      - target: 47720
+        published: "47720"
+        protocol: tcp
+    volumes:
+      # 唯一持久化边界：数据库、自动生成的密钥、自签 TLS 根证书
+      - type: volume
+        source: hearth-data
+        target: /data
+
+volumes:
+  hearth-data:
+
+x-casaos:
+  id: io.github.xiaoshao9704.hearth
+  main: hearth
+  index: /
+  port_map: "8080"
+  scheme: http
+  architectures:
+    - amd64
+    - arm64
+  author: xiaoshao9704
+  developer: xiaoshao9704
+  category: Social
+  icon: https://raw.githubusercontent.com/xiaoshao9704/hearth/main/docs/icon.svg
+  screenshot_link:
+    - https://raw.githubusercontent.com/xiaoshao9704/hearth/main/site/assets/room.png
+    - https://raw.githubusercontent.com/xiaoshao9704/hearth/main/site/assets/lobby.png
+    - https://raw.githubusercontent.com/xiaoshao9704/hearth/main/site/assets/mobile.png
+  title:
+    en_US: Hearth
+    zh_CN: Hearth
+  tagline:
+    en_US: Self-hosted rooms for voice, screen sharing, OBS ingest and chat
+    zh_CN: 自建的语音 / 投屏 / OBS 推流 / 聊天房间
+  description:
+    en_US: |
+      A private living room for a handful of friends: one channel, voices, and a shared screen.
+
+      - Group voice forwarded by an SFU, with noise suppression, push-to-talk and auto-mute
+      - 1080p60 screen sharing at a real bitrate, system audio included; camera rides the same line
+      - OBS pushes in over plain WHIP with no plugin; the stream is forwarded untouched, so HEVC and AV1 pass through
+      - Chat with mentions, replies, reactions and direct file transfer
+      - Passkey login, invite-only registration, per-channel roles
+
+      One container holds all of it: API, media core, ingest endpoint and web UI. No redis, no second
+      service, no separate media server. `/data` is the only persistence boundary.
+    zh_CN: |
+      几个朋友的私人客厅：一间频道，说话，看同一块画面。
+
+      - SFU 转发的多人语音，降噪、按键说话、挂机自动静音
+      - 1080p60 高码率投屏并带系统声音，摄像头同一条线
+      - OBS 走标准 WHIP 直推不装插件，服务端不转码原样透传，HEVC / AV1 直通
+      - 带 @、回复、表情反应与文件直传的聊天
+      - 通行密钥登录、注册邀请制、频道内三档角色
+
+      一个容器就是全部：API、媒体内核、推流入口、前端都在里面，没有 redis、没有第二个服务、
+      不需要另装媒体服务器。`/data` 是唯一的持久化边界。
+  tips:
+    before_install:
+      en_US: |
+        Ports: 8080/tcp is the web/API/signalling/WHIP port. 47720/udp is the media port and must be
+        open on your firewall — Docker cannot add a published port after the container is created.
+        47720/tcp is an ICE-TCP fallback, on by default at the same number.
+
+        After installing, create the first account from a terminal (it automatically becomes super):
+
+            docker exec -it hearth /app/hearth adduser alice change-me
+
+        The same port also serves https. Other devices on the LAN must install the root certificate
+        once at `https://<host>:8080/ca` (plain http works too) — without it the browser will not
+        grant microphone, screen share or notification permissions.
+      zh_CN: |
+        端口：8080/tcp 是 Web / API / 信令 / WHIP 端口；47720/udp 是媒体端口，必须在防火墙放行
+        ——docker 的端口发布不能事后热加。47720/tcp 是 ICE-TCP 兜底，默认与 UDP 同号开启。
+
+        装完在终端里建第一个账号（首个账号自动成为 super）：
+
+            docker exec -it hearth /app/hearth adduser alice change-me
+
+        同一个端口默认也收 https。局域网里其它设备第一次要打开 `https://<主机>:8080/ca`
+        （用 http 也能打开）装一次根证书，否则浏览器不给麦克风、投屏与通知权限。
+  website: https://github.com/xiaoshao9704/hearth
+  repo: https://github.com/xiaoshao9704/hearth
+  support: https://github.com/xiaoshao9704/hearth/issues
+  docs: https://github.com/xiaoshao9704/hearth#readme
+  version: "0.10.0"
+  update_at: "2026-09-10"
