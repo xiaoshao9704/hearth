@@ -5,7 +5,7 @@
 
 ## 动机与边界
 
-今天的完整形态是 docker 镜像 + 卷；裸机跑要自己准备前端产物目录（`STATIC_DIR`）、反代与证书（`deploy/Caddyfile.template`），
+今天的完整形态是 docker 镜像 + 卷；裸机跑要自己准备前端产物目录（`STATIC_DIR`）、反代与证书，
 Windows/macOS 没有发布产物。而浏览器对 `getUserMedia`/`getDisplayMedia` 的要求是 **HTTPS 或 localhost**，所以「没有证书」
 等于「只能自己听自己」。要把门槛压到：下载一个文件 → 双击 → 浏览器打开向导 → 填一次 → 把链接发给朋友。
 
