@@ -1,58 +1,30 @@
-# Hearth 一键部署：hearth + livekit 两服务；可选 profile：caddy（TLS 终结）
-# 用法见根 README「自托管快速开始」；compose 自动读取同目录 .env
-name: hearth
+# Hearth 最小部署形态：一个服务、三条端口、一个命名卷。
+# 与根目录 README「三分钟跑起来」里的那份保持一致，改这里记得同步改 README。
+#
+#   docker compose -f deploy/docker-compose.yml up -d
+#   docker compose -f deploy/docker-compose.yml exec hearth /app/hearth adduser alice change-me
+#
+# 首个账号自动成为 super（全站最高权限）。之后打开 http://<主机>:8080 即可用。
+# 局域网里的其它设备要先打开 https://<主机>:8080/ca 装一次根证书，
+# 装完用 https 打开才有麦克风、投屏、通知权限（浏览器只在安全上下文里放行）。
 
 services:
   hearth:
-    build:
-      context: ..
-      dockerfile: Dockerfile
+    image: ghcr.io/xiaoshao9704/hearth:latest
     restart: unless-stopped
     ports:
-      - "${HEARTH_PORT:-8080}:8080" # hearth 一个 HTTP 端口承载 Web/API/信令/WHIP 代理
-    environment:
-      ADDR: ":8080"
-      DATABASE_URL: ${DATABASE_URL:-} # 空 = sqlite（/data 卷）；mysql:// 或 postgres:// 切换
-      DB_PATH: /data/hearth.db
-      STATIC_DIR: /app/web
-      # 空 = 按请求推导同源地址（/providers/{alias} 信令/WHIP 经 hearth 内置反代），一般无需设置
-      LIVEKIT_URL: ${LIVEKIT_URL:-}
-      LIVEKIT_API_KEY: ${LIVEKIT_API_KEY}
-      LIVEKIT_API_SECRET: ${LIVEKIT_API_SECRET}
-      LIVEKIT_API_URL: http://livekit:7880 # 容器网络内直连 Twirp（也是 /providers/livekit 信令代理上游）
-      CORS_ORIGIN: "*" # 同源部署，宽放即可
+      # Web / API / 信令 / WHIP 共用的唯一 HTTP 端口，同端口默认也收 https（合并模式）
+      - "8080:8080"
+      # 媒体端口：语音与投屏共用，必须在防火墙 / 安全组放行。
+      # docker 的端口发布不能事后热加，创建容器时就要一并写上。
+      - "47720:47720/udp"
+      # ICE-TCP 兜底：只在 UDP 被中间设备接管的网络才用得上，默认与 UDP 同号开启
+      - "47720:47720/tcp"
     volumes:
+      # 唯一持久化边界：数据库、自动生成的密钥、自签 TLS 根证书都在里面。
+      # 用命名卷而不是 bind-mount：容器以 uid 65532（distroless nonroot）运行，
+      # 挂宿主目录要先 chown 65532:65532，命名卷没有这个坑。
       - hearth-data:/data
-    depends_on:
-      - livekit
-
-  livekit:
-    image: livekit/livekit-server:latest
-    restart: unless-stopped
-    command: --config /etc/livekit.yaml
-    volumes:
-      - ./generated/livekit.yaml:/etc/livekit.yaml:ro
-    ports:
-      # WebRTC 媒体端口必须直达宿主机（不经过反代）
-      - "${RTC_UDP_PORT}:${RTC_UDP_PORT}/udp"
-      - "${RTC_TCP_PORT}:${RTC_TCP_PORT}"
-
-  # ---- 可选：Caddy TLS 终结（docker compose --profile caddy up -d）----
-  caddy:
-    image: caddy:2-alpine
-    restart: unless-stopped
-    profiles: ["caddy"]
-    ports:
-      - "80:80"
-      - "443:443"
-    volumes:
-      - ./generated/Caddyfile:/etc/caddy/Caddyfile:ro
-      - caddy-data:/data # LE 证书持久化
-      - caddy-config:/config
-    depends_on:
-      - hearth
 
 volumes:
   hearth-data:
-  caddy-data:
-  caddy-config:

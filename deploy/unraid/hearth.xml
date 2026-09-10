@@ -1,0 +1,29 @@
+<?xml version="1.0"?>
+<Container version="2">
+  <Name>hearth</Name>
+  <Repository>ghcr.io/xiaoshao9704/hearth:latest</Repository>
+  <Registry>https://github.com/xiaoshao9704/hearth/pkgs/container/hearth</Registry>
+  <Network>bridge</Network>
+  <MyIP/>
+  <Privileged>false</Privileged>
+  <Support>https://github.com/xiaoshao9704/hearth/issues</Support>
+  <Project>https://github.com/xiaoshao9704/hearth</Project>
+  <Overview>Self-hosted rooms for voice, screen sharing, OBS ingest and chat - a private living room for a handful of friends: open a channel, get a few people in, put your screen up.&#13;&#13;- Group voice forwarded by an SFU, with noise suppression, push-to-talk and auto-mute&#13;- 1080p60 screen sharing at a real bitrate, system audio included; the camera rides the same line&#13;- OBS pushes in over plain WHIP with no plugin; the stream is forwarded untouched, so HEVC and AV1 pass through&#13;- Chat with mentions, replies, reactions and direct file transfer&#13;- Passkey login, invite-only registration, per-channel roles&#13;&#13;One container holds all of it: API, media core, ingest endpoint and web UI. No redis, no second container, no separate media server to install.&#13;&#13;[b]Before you start: appdata ownership[/b]&#13;The image runs as uid 65532 (distroless nonroot), while Unraid creates appdata as nobody:users. Run this once in the Unraid terminal or the container will not be able to write its database:&#13;mkdir -p /mnt/user/appdata/hearth &amp;&amp; chown -R 65532:65532 /mnt/user/appdata/hearth&#13;&#13;[b]After installing[/b]&#13;Create the first account from the Unraid terminal - it automatically becomes super admin:&#13;docker exec -it hearth /app/hearth adduser alice change-me&#13;&#13;[b]Certificate[/b]&#13;The web port also serves https. Other devices on the LAN must install the root certificate once at https://[IP]:[PORT:8080]/ca (plain http works too). Without it the browser will not grant microphone, screen share or notification permissions.&#13;&#13;[b]Media port[/b]&#13;47720/udp must be open on your firewall, and the host port must keep the same number as the container port: the in-process media core writes the port it listens on into its ICE candidates, so a different host port would advertise an unreachable one. 47720/tcp is an ICE-TCP fallback, on by default at the same number.</Overview>
+  <Category>Network:Other Tools:Utilities</Category>
+  <WebUI>http://[IP]:[PORT:8080]/</WebUI>
+  <TemplateURL>https://raw.githubusercontent.com/xiaoshao9704/hearth/main/deploy/unraid/hearth.xml</TemplateURL>
+  <Icon>https://raw.githubusercontent.com/xiaoshao9704/hearth/main/deploy/icon.png</Icon>
+  <ReadMe>https://github.com/xiaoshao9704/hearth#readme</ReadMe>
+  <Screenshot>https://raw.githubusercontent.com/xiaoshao9704/hearth/main/site/assets/room.png</Screenshot>
+  <Screenshot>https://raw.githubusercontent.com/xiaoshao9704/hearth/main/site/assets/lobby.png</Screenshot>
+  <Screenshot>https://raw.githubusercontent.com/xiaoshao9704/hearth/main/site/assets/mobile.png</Screenshot>
+  <ExtraSearchTerms>voice chat screen share obs whip webrtc discord selfhosted</ExtraSearchTerms>
+  <Requires>The appdata directory must be owned by uid 65532 before first start: chown -R 65532:65532 /mnt/user/appdata/hearth</Requires>
+  <ExtraParams/>
+  <PostArgs/>
+  <CPUset/>
+  <Config Name="Web UI" Target="8080" Default="8080" Mode="tcp" Description="Web, API, signalling and WHIP share this one port, which also accepts https by default." Type="Port" Display="always" Required="true" Mask="false">8080</Config>
+  <Config Name="Media UDP" Target="47720" Default="47720" Mode="udp" Description="Media port for voice and screen sharing. Must be open on your firewall, and must keep the same number on host and container." Type="Port" Display="always" Required="true" Mask="false">47720</Config>
+  <Config Name="Media ICE-TCP" Target="47720" Default="47720" Mode="tcp" Description="ICE-TCP fallback, only needed where UDP is intercepted by middleboxes. Same number as the UDP media port." Type="Port" Display="always" Required="true" Mask="false">47720</Config>
+  <Config Name="Data" Target="/data" Default="/mnt/user/appdata/hearth" Mode="rw" Description="The only persistence boundary: database, generated keys and the self-signed root certificate. Must be owned by uid 65532 - run chown -R 65532:65532 on it before first start." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/hearth</Config>
+</Container>

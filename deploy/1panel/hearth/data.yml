@@ -1,0 +1,35 @@
+name: Hearth
+tags:
+  - 工具
+title: 自建的语音 / 投屏 / OBS 推流 / 聊天房间
+description: 自建的语音 / 投屏 / OBS 推流 / 聊天房间
+additionalProperties:
+  key: hearth
+  name: Hearth
+  tags:
+    - Tool
+  shortDescZh: 自建的语音 / 投屏 / OBS 推流 / 聊天房间
+  shortDescEn: Self-hosted rooms for voice, screen sharing, OBS ingest and chat
+  description:
+    zh: 自建的语音 / 投屏 / OBS 推流 / 聊天房间
+    zh-Hant: 自建的語音 / 投螢幕 / OBS 推流 / 聊天房間
+    en: Self-hosted rooms for voice, screen sharing, OBS ingest and chat
+    ja: 音声・画面共有・OBS 配信・チャットのセルフホスト型ルーム
+    ko: 음성, 화면 공유, OBS 송출, 채팅을 위한 셀프호스팅 룸
+    es-es: Salas autoalojadas para voz, pantalla compartida, ingesta OBS y chat
+    pt-br: Salas auto-hospedadas para voz, compartilhamento de tela, ingest OBS e chat
+    ru: Самостоятельно размещаемые комнаты для голоса, демонстрации экрана, приёма OBS и чата
+    tr: Ses, ekran paylaşımı, OBS yayını ve sohbet için kendi sunucunuzda çalışan odalar
+    ms: Bilik hos sendiri untuk suara, perkongsian skrin, ingest OBS dan sembang
+    fa: اتاق‌های خودمیزبان برای صدا، اشتراک صفحه، دریافت OBS و گفتگو
+  type: tool
+  crossVersionUpdate: true
+  limit: 1
+  recommend: 0
+  website: https://github.com/xiaoshao9704/hearth
+  github: https://github.com/xiaoshao9704/hearth
+  document: https://github.com/xiaoshao9704/hearth#readme
+  memoryRequired: 512
+  architectures:
+    - amd64
+    - arm64

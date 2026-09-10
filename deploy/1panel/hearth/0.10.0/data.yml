@@ -1,0 +1,34 @@
+additionalProperties:
+  formFields:
+    - type: number
+      envKey: PANEL_APP_PORT_HTTP
+      default: 8080
+      required: true
+      edit: true
+      rule: paramPort
+      labelZh: Web 端口
+      labelEn: Web port
+      label:
+        zh: Web 端口
+        zh-Hant: Web 連接埠
+        en: Web port
+        ja: Web ポート
+        ko: 웹 포트
+        es-es: Puerto web
+        pt-br: Porta web
+        ru: Веб-порт
+        tr: Web bağlantı noktası
+        ms: Port web
+        fa: 'درگاه وب'
+      description:
+        zh: Web / API / 信令 / WHIP 共用这一个端口，同端口默认也收 https。媒体端口固定 47720（udp 与 tcp 各一条），必须在防火墙放行。
+        zh-Hant: Web / API / 信令 / WHIP 共用這一個連接埠，同連接埠預設也收 https。媒體連接埠固定 47720（udp 與 tcp 各一條），必須在防火牆放行。
+        en: One port serves the web UI, API, signalling and WHIP, and also accepts https by default. The media ports are fixed at 47720 (one udp, one tcp) and must be open on your firewall.
+        ja: Web UI・API・シグナリング・WHIP はこの 1 ポートを共有し、既定で https も受け付けます。メディアポートは 47720 固定（udp と tcp 各 1 本）で、ファイアウォールでの開放が必要です。
+        ko: 웹 UI, API, 시그널링, WHIP이 이 포트 하나를 공유하며 기본적으로 https도 받습니다. 미디어 포트는 47720(udp/tcp 각 1개)으로 고정이며 방화벽에서 열어야 합니다.
+        es-es: Un solo puerto sirve la interfaz web, la API, la señalización y WHIP, y también acepta https por defecto. Los puertos de medios son fijos en 47720 (uno udp, uno tcp) y deben estar abiertos en el cortafuegos.
+        pt-br: Uma única porta serve a interface web, a API, a sinalização e o WHIP, e também aceita https por padrão. As portas de mídia são fixas em 47720 (uma udp, uma tcp) e devem estar abertas no firewall.
+        ru: Один порт обслуживает веб-интерфейс, API, сигнализацию и WHIP, а также по умолчанию принимает https. Медиапорты фиксированы на 47720 (один udp, один tcp) и должны быть открыты в брандмауэре.
+        tr: Tek bir bağlantı noktası web arayüzünü, API'yi, sinyalleşmeyi ve WHIP'i sunar ve varsayılan olarak https de kabul eder. Medya bağlantı noktaları 47720 olarak sabittir (biri udp, biri tcp) ve güvenlik duvarında açık olmalıdır.
+        ms: Satu port menyediakan antara muka web, API, isyarat dan WHIP, dan turut menerima https secara lalai. Port media ditetapkan pada 47720 (satu udp, satu tcp) dan mesti dibuka pada tembok api.
+        fa: 'یک درگاه واحد رابط وب، API، سیگنالینگ و WHIP را ارائه می‌دهد و به‌صورت پیش‌فرض https را نیز می‌پذیرد. درگاه‌های رسانه روی ۴۷۷۲۰ ثابت است (یکی udp و یکی tcp) و باید در دیوار آتش باز باشد.'

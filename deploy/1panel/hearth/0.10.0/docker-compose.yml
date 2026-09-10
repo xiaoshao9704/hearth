@@ -1,0 +1,33 @@
+# 1Panel 应用商店版本级 compose。
+#
+# 媒体端口写死 47720 而不是做成表单项：进程内的媒体内核把自己监听的 UDP 端口写进 ICE 候选，
+# 宿主端口与容器端口不同号会让候选指向一个连不通的端口。要换号得同时改这里与
+# Hearth 管理后台的「舞台 → 媒体 UDP 端口」，不是一个表单项能兜住的，所以不给旋钮。
+# Web 端口无此约束，走 1Panel 的 PANEL_APP_PORT_HTTP，装前有端口冲突校验。
+#
+# ./data 是应用安装目录下的持久化目录；镜像以 uid 65532（distroless nonroot）运行，
+# 由 scripts/init.sh 在起容器前把它 chown 成 65532，否则容器写不动数据库。
+
+services:
+  hearth:
+    image: ghcr.io/xiaoshao9704/hearth:latest
+    container_name: ${CONTAINER_NAME}
+    restart: always
+    networks:
+      - 1panel-network
+    ports:
+      # Web / API / 信令 / WHIP 唯一的 HTTP 端口，同端口默认也收 https（合并模式）
+      - ${PANEL_APP_PORT_HTTP}:8080
+      # 媒体端口：语音与投屏共用，必须在防火墙放行
+      - 47720:47720/udp
+      # ICE-TCP 兜底，只在 UDP 被中间设备接管的网络才用得上
+      - 47720:47720/tcp
+    volumes:
+      # 唯一持久化边界：数据库、自动生成的密钥、自签 TLS 根证书
+      - ./data:/data
+    labels:
+      createdBy: "Apps"
+
+networks:
+  1panel-network:
+    external: true

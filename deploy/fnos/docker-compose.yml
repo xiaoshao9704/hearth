@@ -1,0 +1,28 @@
+# 飞牛 fnOS —— 手动导入形态。
+#
+# 截至 2026-09-10：fnOS 有官方开发者文档与 .fpk 应用包格式（fnpack CLI、docker-project 资源类型，
+# 见 developer.fnnas.com），但**没有公开的第三方应用商店提交仓库或模板规范**——上架走人工申请。
+# 所以这里不打 .fpk，只给一份可直接粘进 fnOS「Docker → Compose → 新增项目」的 compose。
+#
+# 用命名卷而不是挂 /vol1/1000/docker/hearth 这类宿主目录：镜像以 uid 65532（distroless nonroot）
+# 运行，而 fnOS 不会替你把挂载目录 chown 成容器用户，属主对不上容器就写不动数据库。
+# 想挂宿主目录就先在 SSH 里 `chown -R 65532:65532 <目录>`，再把下面的卷换成 bind。
+
+services:
+  hearth:
+    image: ghcr.io/xiaoshao9704/hearth:latest
+    container_name: hearth
+    restart: unless-stopped
+    ports:
+      # Web / API / 信令 / WHIP 唯一的 HTTP 端口，同端口默认也收 https（合并模式）
+      - "8080:8080"
+      # 媒体端口：语音与投屏共用，必须在防火墙放行；宿主与容器必须同号
+      - "47720:47720/udp"
+      # ICE-TCP 兜底，只在 UDP 被中间设备接管的网络才用得上
+      - "47720:47720/tcp"
+    volumes:
+      # 唯一持久化边界：数据库、自动生成的密钥、自签 TLS 根证书
+      - hearth-data:/data
+
+volumes:
+  hearth-data:
