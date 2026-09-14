@@ -918,6 +918,8 @@ body {
   box-shadow: var(--shadow-lg); display: flex; flex-direction: column; gap: 1px;
 }
 .user-menu .um-title { font-size: 11px; color: var(--text-2); padding: 5px 9px 4px; }
+/* 菜单底部的说明小字：与 .um-title 同一列对齐，允许换行 */
+.user-menu .um-note { font-size: 11px; line-height: 1.45; color: var(--text-2); padding: 4px 9px 3px; max-width: 220px; }
 .user-menu .um-item {
   display: flex; align-items: center; gap: 8px; text-align: left;
   padding: 7px 9px; border-radius: 8px; font-size: 12.5px; color: var(--text-0);

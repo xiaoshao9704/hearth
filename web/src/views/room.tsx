@@ -95,6 +95,12 @@ interface RoomEvent {
 // 语音线连接阶段（顶栏 chip 与外壳连接框的唯一来源）；retry 带上第几次，避免再开一个信号
 type VoiceState = { phase: 'connecting' | 'up' | 'retry'; attempt: number };
 
+// iOS 私有的视频原生全屏（标准 Fullscreen API 缺席时的唯一出路），未进 lib.dom
+interface NativeFsVideo extends HTMLVideoElement {
+  webkitEnterFullscreen?: () => void;
+  webkitSupportsFullscreen?: boolean;
+}
+
 // 文件卡片的本地字节状态：消息本体（卡片）来自服务端，字节只经数据通道，
 // 二者互不重叠——这里存的是「本次会话有没有拿到字节」，不是消息的副本。
 // expired = 历史里的卡片，字节是发送那一刻扇出的，晚到的人补不回来
@@ -548,17 +554,15 @@ export async function renderRoom(root: HTMLElement, channel: string) {
   }
 
   // 触屏没有「卡片全屏」这个形态：它盖住控制栏、名册与聊天，只剩卡片角上几个按钮，
-  // 严格弱于全屏模式——手机上剧场相对全屏只多一条地址栏，网页收不掉浏览器 UI，只有
-  // Fullscreen API 能，所以这个按钮改成把该卡片置顶并直接进全屏（先剧场再全屏，与
-  // ViewModeControl.setMode('fullscreen') 同一路径）；被浏览器拒绝时 toggleFullscreen
-  // 自己会弹提示并停留在剧场，这就是兜底。
+  // 严格弱于剧场，所以这个按钮改成把该卡片置顶并进剧场。iPhone 没有元素级全屏，这里
+  // 不顺带请求全屏：要收掉地址栏得走观看模式里的「全屏」（退到视频原生全屏、即系统
+  // 播放器），或把站点添加到主屏幕。
   // 桌面照旧：全屏对 tile 容器请求（不是 video 元素），才能叠自定义控制条（音量滑条）；
-  // iOS 私有全屏只接受 video 元素，或被浏览器拒绝时，退回 fixed 定位的模拟全屏
+  // 请求被拒时退回 fixed 定位的模拟全屏
   function toggleFs(key: string, tileEl: HTMLElement) {
     if (touchOnly()) {
       setPinnedKey(key);
       if (!theaterCtl.on()) theaterCtl.toggle(); // 运行时才调，theaterCtl 那时已初始化
-      if (!theaterCtl.fullscreen()) theaterCtl.toggleFullscreen();
       return;
     }
     if (fsKey() === key) return exitFs();
@@ -1284,6 +1288,18 @@ export async function renderRoom(root: HTMLElement, channel: string) {
     hasStage: hasStageContent,
     onNotice: (m) => toast(m, '', 2600),
     onDiag: (ev, d) => diag('info', ev, undefined, { detail: JSON.stringify(d) }),
+    // iPhone 没有元素级全屏，只有 video 元素的原生全屏（系统播放器）能收掉地址栏：
+    // 焦点画面与画中画取同一块 video，没有画面时让 theater 去走「浏览器拒绝」提示
+    nativeFullscreen: () => {
+      const v = screenVideo() as NativeFsVideo | null;
+      if (!v || typeof v.webkitEnterFullscreen !== 'function' || v.webkitSupportsFullscreen === false) return false;
+      try {
+        v.webkitEnterFullscreen();
+        return true;
+      } catch {
+        return false;
+      }
+    },
   });
   const pipCtl = createPipCtl({
     getVideo: screenVideo,
@@ -1933,7 +1949,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
     let tileEl!: HTMLDivElement;
     const name = e.isLocal && e.source === 'camera' ? '你' : e.display;
     const isFs = () => fsKey() === e.key;
-    // 触屏上这个按钮进的是全屏（见 toggleFs），文案沿用「放大画面」不写「全屏」
+    // 触屏上这个按钮进的是置顶 + 剧场（见 toggleFs），文案用「放大画面」不写「全屏」
     const fsLabel = () => (touchOnly() ? '放大画面' : isFs() ? '退出全屏' : '全屏');
     const [fsBarOpen, setFsBarOpen] = createSignal(true);
     return (
