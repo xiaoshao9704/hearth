@@ -23,6 +23,14 @@ export interface TheaterOpts {
   hasStage: () => boolean; // 有画面可看才允许进剧场
   onNotice?: (msg: string) => void;
   onDiag?: (event: string, detail: Record<string, unknown>) => void;
+  // 没有元素级全屏时的兜底：对焦点画面的 video 请求原生（系统播放器）全屏，成功返回 true
+  nativeFullscreen?: () => boolean;
+}
+
+// iPhone 上 Safari 与 Chrome 都没有元素级 Fullscreen API（requestFullscreen 不是函数、
+// fullscreenEnabled 为 undefined），菜单据此提示用户「全屏会打开系统播放器」
+export function elementFullscreenSupported(): boolean {
+  return typeof document.documentElement.requestFullscreen === 'function';
 }
 
 export interface TheaterCtl {
@@ -79,9 +87,9 @@ export function createTheaterCtl(opts: TheaterOpts): TheaterCtl {
       return;
     }
     fsFromTheater = on();
-    const supported = typeof document.documentElement.requestFullscreen === 'function';
+    const supported = elementFullscreenSupported();
     // iPhone 上全屏请求经常悄无声息地失败：把结果上报出去，方便远端看请求到底走到哪一步
-    const report = (outcome: 'ok' | 'rejected' | 'threw' | 'unsupported', err?: unknown) => {
+    const report = (outcome: 'ok' | 'rejected' | 'threw' | 'unsupported' | 'native', err?: unknown) => {
       opts.onDiag?.('fullscreen_request', {
         supported,
         enabled: document.fullscreenEnabled,
@@ -94,6 +102,17 @@ export function createTheaterCtl(opts: TheaterOpts): TheaterCtl {
       fsFromTheater = false;
       report(outcome, err);
     };
+    // 没有元素全屏的设备退回视频元素的原生全屏：进的是系统播放器，我们的界面全部让位，
+    // document.fullscreenElement 不变，fullscreen() 因此保持假，退出播放器后自然还在剧场
+    if (!supported) {
+      if (opts.nativeFullscreen?.()) {
+        fsFromTheater = false;
+        report('native');
+        return;
+      }
+      refused('unsupported');
+      return;
+    }
     // requestFullscreen 被权限策略挡住时是**同步**抛 TypeError（不是 reject 的 promise），
     // 只挂 .catch 会漏成未捕获错误，还会把 fsFromTheater 留在 true
     try {
@@ -342,6 +361,9 @@ function ViewModeMenu(p: {
           </button>
         )}
       </For>
+      <Show when={!elementFullscreenSupported()}>
+        <div class="um-note">此浏览器不支持网页全屏：全屏会打开系统播放器；添加到主屏幕后剧场模式即无地址栏</div>
+      </Show>
     </div>
   );
 }
