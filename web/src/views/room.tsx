@@ -384,6 +384,10 @@ export async function renderRoom(root: HTMLElement, channel: string) {
   const volumePctFor = (identity: string) => volumes().get(identity) ?? (isOwnIngest(identity) ? 0 : 100);
   const volumeFor = (identity: string) => volumePctFor(identity) / 100;
 
+  // 人耳对响度是对数感知，线性映射（pct/100）在 50% 附近只降 6dB，听感上和 100% 差不多；
+  // 平方后 50%≈-12dB、25%≈-24dB，中段能听出差别，0 和 100 两端不变
+  const gainOf = (pct: number) => (pct / 100) ** 2;
+
   // 拖动滑条每个 tick 都会来：持久化做去抖，别把 localStorage 当流式写
   let volSaveTimer = 0;
   function scheduleSaveVolumes() {
@@ -421,9 +425,9 @@ export async function renderRoom(root: HTMLElement, channel: string) {
 
   function applyAudioPrefs() {
     const p = loadPrefs();
-    const master = deafened() ? 0 : p.volume / 100;
+    const master = deafened() ? 0 : gainOf(p.volume);
     audioEls.forEach((set, identity) => {
-      const v = master * volumeFor(identity);
+      const v = master * gainOf(volumePctFor(identity));
       if (useGain) {
         // 增益链路径：音量全在 GainNode 上，元素保持 muted（iOS 也没有 setSinkId 可用）
         const g = gainNodes.get(identity);
