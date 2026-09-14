@@ -1105,9 +1105,6 @@ body.theater-on .sidebar { display: none; }
 /* 缩略轨与其余卡片让位：剧场里只留焦点画面，谁在房间看浮动名册 */
 .room-frame.layout-theater .video-grid.spotlight .rail { display: none; }
 .room-frame.layout-theater .tile.featured { border-radius: 0; border: 0; box-shadow: none; }
-/* 上下滑手势的「亮度」：网页拿不到系统屏幕亮度，只能压画面本身——
-   作用对象只有 video，名字标签/徽标/控制栏不跟着变暗 */
-.room-frame.layout-theater .tile.featured video { filter: brightness(var(--stage-brightness, 1)); }
 /* 侧栏不再占布局：要看成员/聊天时浮在画面上（控件仍然可达，不是被砍掉） */
 .room-frame.layout-theater .side-panel {
   position: fixed; top: 0; right: 0; bottom: 0; z-index: 280;
@@ -1123,7 +1120,7 @@ body.theater-on .sidebar { display: none; }
 .room-frame.layout-theater.chrome-hidden .control-bar { opacity: 0; pointer-events: none; }
 .room-frame.layout-theater.chrome-hidden { cursor: none; }
 
-/* 剧场上下滑手势的中央 HUD（左亮度 / 右音量）：抬手后停留一会儿再淡出 */
+/* 剧场上下滑手势的中央 HUD（主音量）：抬手后停留一会儿再淡出 */
 .stage-hud {
   position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); z-index: 4;
   display: flex; flex-direction: column; align-items: center; gap: 9px;
