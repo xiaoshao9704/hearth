@@ -7,6 +7,8 @@
 // 全屏是独立开关（快捷键 F），但两者常一起用：只有「由剧场发起的那次全屏」被退出时
 // 才顺带退出剧场，别人（卡片全屏）退出全屏不受影响。
 //
+// 触屏没有「移动鼠标唤出」这回事：点一下画面切换显隐，滑动（调音量等手势）不算活动。
+//
 // 控制栏里这三件事（剧场/全屏/画中画）对用户是一个「观看模式」选择器，见文件末尾
 // 的 ViewModeControl：四态互斥，状态由这些 ctl 派生。
 import { createSignal, For, onCleanup, onMount, Show } from 'solid-js';
@@ -28,6 +30,7 @@ export interface TheaterCtl {
   autoHide: () => boolean;
   chromeHidden: () => boolean; // 剧场里顶栏/控制栏当前是否淡出
   toggle: () => void;
+  toggleChrome: () => void; // 触屏点画面：显隐互切
   exit: () => void;
   toggleFullscreen: () => void;
   toggleAutoHide: () => void;
@@ -90,6 +93,16 @@ export function createTheaterCtl(opts: TheaterOpts): TheaterCtl {
     }
   }
 
+  function toggleChrome() {
+    if (!on() || !autoHide()) return; // 没开剧场，或控制栏被用户固定住：点画面不做事
+    if (idle()) {
+      wake();
+    } else {
+      clearTimeout(idleTimer);
+      setIdle(true);
+    }
+  }
+
   function toggleAutoHide() {
     const v = !autoHide();
     setAutoHide(v);
@@ -99,7 +112,9 @@ export function createTheaterCtl(opts: TheaterOpts): TheaterCtl {
     wake();
   }
 
-  const onActivity = () => {
+  const onActivity = (ev: Event) => {
+    // 触屏点按/滑动不算「活动」：显隐完全交给 toggleChrome，否则手指一碰就把刚收起的栏叫回来
+    if (ev instanceof PointerEvent && ev.pointerType === 'touch') return;
     if (on()) wake();
   };
   const onFullscreenChange = () => {
@@ -112,7 +127,6 @@ export function createTheaterCtl(opts: TheaterOpts): TheaterCtl {
   };
   document.addEventListener('pointermove', onActivity, { passive: true });
   document.addEventListener('pointerdown', onActivity, { passive: true });
-  document.addEventListener('touchstart', onActivity, { passive: true });
   document.addEventListener('keydown', onActivity);
   document.addEventListener('wheel', onActivity, { passive: true });
   document.addEventListener('fullscreenchange', onFullscreenChange);
@@ -123,6 +137,7 @@ export function createTheaterCtl(opts: TheaterOpts): TheaterCtl {
     autoHide,
     chromeHidden: () => on() && autoHide() && idle(),
     toggle,
+    toggleChrome,
     exit,
     toggleFullscreen,
     toggleAutoHide,
@@ -130,7 +145,6 @@ export function createTheaterCtl(opts: TheaterOpts): TheaterCtl {
       clearTimeout(idleTimer);
       document.removeEventListener('pointermove', onActivity);
       document.removeEventListener('pointerdown', onActivity);
-      document.removeEventListener('touchstart', onActivity);
       document.removeEventListener('keydown', onActivity);
       document.removeEventListener('wheel', onActivity);
       document.removeEventListener('fullscreenchange', onFullscreenChange);
