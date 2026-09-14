@@ -129,9 +129,6 @@ function touchOnly(): boolean {
   return window.matchMedia('(hover: none)').matches;
 }
 
-// 剧场手势：亮度只改焦点画面 video 的 CSS filter（网页拿不到系统屏幕亮度，没有这个 API）
-const BRIGHT_MIN = 0.3;
-const BRIGHT_MAX = 1.6;
 const HUD_HOLD_MS = 600; // 抬手后 HUD 再停留这么久
 const SWIPE_TOL = 8; // px：垂直位移超过它才算上下滑，之前不拦事件
 
@@ -289,18 +286,11 @@ export async function renderRoom(root: HTMLElement, channel: string) {
   const [pinnedKey, setPinnedKey] = createSignal<string | null>(null);
   const [fsKey, setFsKey] = createSignal<string | null>(null); // 全屏中的卡片 key（含 iOS 模拟全屏）
   const [lastSpeaker, setLastSpeaker] = createSignal<string | null>(null);
-  // 剧场上下滑手势：亮度是会话级的（不进 prefs，退出剧场复位 1）
-  const [stageBright, setStageBright] = createSignal(1);
-  // HUD 只记「显示哪个通道 / 是否正在淡出」：数值一律现取（亮度取 stageBright，
-  // 音量取 prefs.volume），每次滑动换一个新对象触发重渲染，不留第二份数值
-  const [hud, setHud] = createSignal<{ kind: 'brightness' | 'volume'; fading?: boolean } | null>(null);
-  const hudPct = () => {
-    const h = hud();
-    if (!h) return 0;
-    if (h.kind === 'brightness') return ((stageBright() - BRIGHT_MIN) / (BRIGHT_MAX - BRIGHT_MIN)) * 100;
-    return loadPrefs().volume;
-  };
-  const hudLabel = () => (hud()?.kind === 'brightness' ? Math.round(stageBright() * 100) : loadPrefs().volume);
+  // HUD 只记「是否正在淡出」：数值一律现取 prefs.volume，每次滑动换一个新对象
+  // 触发重渲染，不留第二份数值
+  const [hud, setHud] = createSignal<{ fading?: boolean } | null>(null);
+  const hudPct = () => (hud() ? loadPrefs().volume : 0);
+  const hudLabel = () => loadPrefs().volume;
   // 每设备本地音量（0~100，0=屏蔽），按 identity 持久化，跨频道/会话记住
   const [volumes, setVolumes] = createSignal<Map<string, number>>(loadVolumes());
   const restoreVol = new Map<string, number>(); // 屏蔽前的音量（仅本会话），恢复时回填
@@ -631,7 +621,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
     if (ev.key === 'Escape' && fsKey() && !document.fullscreenElement) exitFs();
   };
 
-  // ---- 剧场里舞台区的上下滑手势（左半边亮度 / 右半边主音量）----
+  // ---- 剧场里舞台区的上下滑手势（整块区域调主音量）----
   // 手势结束会合成一次 click，而焦点卡片的 click 是置顶：照 longpress 的做法记时间戳吞掉
   let swipeEndedAt = 0;
   const swipeJustEnded = () => Date.now() - swipeEndedAt < 300;
@@ -642,10 +632,8 @@ export async function renderRoom(root: HTMLElement, channel: string) {
   function wireStageSwipe(elm: HTMLElement): () => void {
     let tracking = false; // 单指按下、方向还没判定
     let active = false; // 已判定为上下滑，进入调节态
-    let kind: 'brightness' | 'volume' = 'volume';
     let sx = 0;
     let sy = 0;
-    let baseBright = 1;
     let baseVol = 100;
     let hudTimer = 0;
 
@@ -654,12 +642,8 @@ export async function renderRoom(root: HTMLElement, channel: string) {
       active = false;
       if (!theaterCtl.on() || ev.touches.length !== 1) return; // 双指留给缩放
       const t = ev.touches[0];
-      const r = elm.getBoundingClientRect();
       sx = t.clientX;
       sy = t.clientY;
-      // 通道按**起点**的左右半边定死，滑动中跨过中线不切换
-      kind = t.clientX - r.left < r.width / 2 ? 'brightness' : 'volume';
-      baseBright = stageBright();
       baseVol = loadPrefs().volume;
       tracking = true;
     };
@@ -683,17 +667,12 @@ export async function renderRoom(root: HTMLElement, channel: string) {
       ev.preventDefault();
       // 半屏高度 = 全程变化量，从按下时的值开始累加（不每次从头算）
       const ratio = -dy / Math.max(1, window.innerHeight / 2);
-      if (kind === 'brightness') {
-        const v = baseBright + ratio * (BRIGHT_MAX - BRIGHT_MIN);
-        setStageBright(Math.max(BRIGHT_MIN, Math.min(BRIGHT_MAX, v)));
-      } else {
-        const p = loadPrefs();
-        p.volume = Math.max(0, Math.min(100, Math.round(baseVol + ratio * 100)));
-        savePrefs(p);
-        applyAudioPrefs();
-        if (useGain) void audioCtx?.resume(); // 手势本身是用户交互，顺手唤醒挂起的上下文
-      }
-      setHud({ kind });
+      const p = loadPrefs();
+      p.volume = Math.max(0, Math.min(100, Math.round(baseVol + ratio * 100)));
+      savePrefs(p);
+      applyAudioPrefs();
+      if (useGain) void audioCtx?.resume(); // 手势本身是用户交互，顺手唤醒挂起的上下文
+      setHud({});
       clearTimeout(hudTimer);
     };
 
@@ -2486,12 +2465,9 @@ export async function renderRoom(root: HTMLElement, channel: string) {
       document.body.classList.toggle('theater-on', layoutMode() === 'theater');
     });
     onCleanup(() => document.body.classList.remove('theater-on'));
-    // 手势调出来的亮度是会话级的：退出剧场就复位，别把变暗的画面带回网格布局
+    // 退出剧场清掉滑动手势留下的 HUD，别带到网格布局里
     createEffect(() => {
-      if (layoutMode() !== 'theater') {
-        setStageBright(1);
-        setHud(null);
-      }
+      if (layoutMode() !== 'theater') setHud(null);
     });
     // 画中画期间画面没了（对方停了投屏）：收回窗口，别留一个空壳浮在桌面上
     createEffect(() => {
@@ -2633,11 +2609,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
             />
           </Show>
           <div class="room-main" style="flex-grow:1;display:flex;flex-direction:column;min-width:0;min-height:0">
-            <div
-              class="stage-area"
-              style={{ '--stage-brightness': String(stageBright()) }}
-              ref={(elm) => onCleanup(wireStageSwipe(elm))}
-            >
+            <div class="stage-area" ref={(elm) => onCleanup(wireStageSwipe(elm))}>
               <div class="stage-status">
                 {statusText()}
                 <Show when={voiceState().phase === 'retry'}>
@@ -2687,13 +2659,13 @@ export async function renderRoom(root: HTMLElement, channel: string) {
               <Show when={hud()}>
                 {(h) => (
                   <div class="stage-hud" classList={{ fading: !!h().fading }} aria-hidden="true">
-                    {el(icon(h().kind === 'brightness' ? 'sun' : 'volume', 24, 'currentColor'))}
+                    {el(icon('volume', 24, 'currentColor'))}
                     <div class="stage-hud-bar">
                       <i style={{ width: `${hudPct()}%` }}></i>
                     </div>
                     <div class="stage-hud-num mono">{hudLabel()}%</div>
                     {/* 静音全部时 master 恒为 0，滑动不会有声音变化——说清楚，但不替用户解除 */}
-                    <Show when={h().kind === 'volume' && deafened()}>
+                    <Show when={deafened()}>
                       <div class="stage-hud-note">已静音全部</div>
                     </Show>
                   </div>
