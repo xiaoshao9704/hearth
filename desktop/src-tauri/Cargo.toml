@@ -21,6 +21,17 @@ gstreamer = "0.25"
 gstreamer-app = "0.25"
 gstreamer-video = "0.25"
 gstreamer-audio = "0.25"
+gstreamer-webrtc = "0.25"
+# 应用内信任与 WHIP 回环反代：reqwest 选 native-tls（macOS 上就是 Security.framework，
+# 与 WKWebView 的 SecTrust 同一套判定；加锚不会关掉系统根，见 pair/check 的注释）。
+reqwest = { version = "0.13", default-features = false, features = ["native-tls"] }
+sha2 = "0.10"
+base64 = "0.22"
+getrandom = "0.3"
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+tokio = { version = "1", features = ["net", "rt"] }
 
 # macOS 采集：直接用 objc2 的框架绑定（ScreenCaptureKit + CoreMedia/CoreVideo），
 # 不走第三方封装——SCStream 的音频样本与像素缓冲都要按原样拿到，封装层反而挡路。
@@ -57,3 +68,11 @@ objc2-core-video = { version = "0.3", features = [
 objc2-core-graphics = { version = "0.3", features = ["CGDirectDisplay"] }
 block2 = "0.6"
 dispatch2 = "0.3"
+objc2-security = { version = "0.3", default-features = false, features = [
+    "std",
+    "objc2",
+    "SecBase",
+    "SecTrust",
+    "SecCertificate",
+] }
+

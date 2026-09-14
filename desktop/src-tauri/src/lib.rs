@@ -6,6 +6,8 @@
 // 「只允许当前配置的那台服务器 + self」。
 mod capture;
 mod publish;
+mod trust;
+mod whipproxy;
 
 use std::sync::Mutex;
 
@@ -60,7 +62,9 @@ fn list_sources() -> Result<Vec<capture::Source>, String> {
 
 #[tauri::command(async, rename_all = "snake_case")]
 fn start_publish(
+    app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
+    trust: tauri::State<'_, std::sync::Arc<trust::Trust>>,
     endpoint: String,
     token: String,
     source_id: String,
@@ -83,7 +87,15 @@ fn start_publish(
     if let Some(old) = slot.take() {
         old.stop(); // 同时只允许一路发布：再点一次就是换目标
     }
-    *slot = Some(publish::Publisher::start(&endpoint, &token, &source_id, bitrate_kbps, &codec)?);
+    *slot = Some(publish::Publisher::start(
+        &app,
+        &trust,
+        &endpoint,
+        &token,
+        &source_id,
+        bitrate_kbps,
+        &codec,
+    )?);
     Ok(())
 }
 
@@ -109,8 +121,24 @@ pub fn run() {
             list_sources,
             start_publish,
             stop_publish,
-            publish_stats
+            publish_stats,
+            trust::check_server,
+            trust::pair_server,
+            trust::forget_server
         ])
+        .setup(|app| {
+            // 信任配置放 app 配置目录；WebView 的证书回调与 Rust 侧出站 https 共用这一份
+            let dir = app.path().app_config_dir().map_err(|e| format!("取配置目录失败：{e}"))?;
+            let trust = trust::Trust::load(dir);
+            app.manage(trust.clone());
+            #[cfg(target_os = "macos")]
+            if let Some(win) = app.get_webview_window("main") {
+                // with_webview 的闭包在主线程上跑：WebView 只能在事件循环所在线程上碰
+                let trust = trust.clone();
+                win.with_webview(move |wv| unsafe { trust::macos::install(wv.inner(), trust) })?;
+            }
+            Ok(())
+        })
         // 关窗与退出都要把在途发布收回来，否则 WHIP 会话会一直挂在服务端
         .on_window_event(|window, event| {
             if matches!(event, WindowEvent::Destroyed | WindowEvent::CloseRequested { .. }) {

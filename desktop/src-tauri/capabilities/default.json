@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "本地打包窗口的最小权限：只放行事件订阅（壳把发布状态推给网页）。自定义命令不在 ACL 内，默认就只有本地窗口能调，这里不放宽。",
+  "windows": ["main"],
+  "permissions": ["core:event:allow-listen", "core:event:allow-unlisten"]
+}
