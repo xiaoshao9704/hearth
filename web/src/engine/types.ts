@@ -112,6 +112,10 @@ export interface AVEngine {
   flipCamera(): Promise<void>;
   // 广播一条自己的参与者属性（值为空串 = 清除）；只用于展示态（如 afk），不承载任何权限语义
   setAttribute(key: string, value: string): Promise<void>;
+  // 远端参与者音量：0-1 线性增益，对该参与者**所有**远端音轨生效（含推流带进来的音频）。
+  // 参与者不在本引擎里（拆分形态下他只在另一条线上）静默忽略
+  setVolume(identity: string, gain: number): void;
+  setAudioOutput(deviceId: string): Promise<void>; // 切音频输出设备；平台不支持时静默忽略
   resumeAudio(): Promise<void>; // 用户手势后重放被拦截的音频元素
   // 数据通道发送：未连接时抛错，调用方先看 connected()
   sendText(topic: string, text: string): Promise<void>;

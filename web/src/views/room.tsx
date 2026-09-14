@@ -45,8 +45,6 @@ import { FloatingRoster, mountPipRoster } from './room/floating-roster';
 import { createPipCtl } from './room/pip';
 import { createTheaterCtl, ViewModeControl } from './room/theater';
 
-type SinkMedia = HTMLMediaElement & { setSinkId?: (id: string) => Promise<void>; sinkId?: string };
-
 type Role = 'voice' | 'stage';
 
 interface Line {
@@ -198,58 +196,10 @@ export async function renderRoom(root: HTMLElement, channel: string) {
   let leaving = false;
   let bounced = false;
   let seq = 0; // 卡片到达顺序计数
-  const audioEls = new Map<string, Set<SinkMedia>>();
-  // 新版 iOS 上 volume 属性能写能读回，但不影响实际播放响度（只认 muted）：
-  // 探测只能兜底旧行为，iOS 一律强制走 Web Audio 增益链，每 identity 一个 GainNode，
-  // 元素本体 muted；其余可写平台维持 elm.volume 直控
-  const volProbe = document.createElement('audio');
-  volProbe.volume = 0.5;
-  const isIOS = /iPhone|iPad|iPod/.test(navigator.userAgent) || (/Macintosh/.test(navigator.userAgent) && navigator.maxTouchPoints > 1);
-  const useGain = volProbe.volume !== 0.5 || isIOS;
-  diag('info', 'room_open', undefined, {
-    state: document.visibilityState,
-    detail: JSON.stringify({ use_gain: useGain, vol_probe: volProbe.volume }),
-  });
-  let audioCtx: AudioContext | null = null;
-  let gainResume: (() => void) | null = null;
-  const gainNodes = new Map<string, GainNode>();
-  const srcNodes = new Map<SinkMedia, MediaStreamAudioSourceNode>();
-
-  function wireGain(identity: string, elm: SinkMedia) {
-    const stream = elm.srcObject as MediaStream | null;
-    if (!stream) return;
-    if (!audioCtx) {
-      audioCtx = new AudioContext();
-      // 自动播放策略：上下文要在用户手势里 resume
-      gainResume = () => void audioCtx?.resume();
-      document.addEventListener('pointerdown', gainResume);
-      document.addEventListener('keydown', gainResume);
-    }
-    let g = gainNodes.get(identity);
-    if (!g) {
-      g = audioCtx.createGain();
-      g.connect(audioCtx.destination);
-      gainNodes.set(identity, g);
-    }
-    const src = audioCtx.createMediaStreamSource(stream);
-    src.connect(g);
-    srcNodes.set(elm, src);
-    elm.muted = true;
-    // livekit 的 attach/startAudio（webAudioMix 关闭时）会把 muted 翻回 false，
-    // 元素一旦直放就和增益链双路出声：盯 volumechange 压回去
-    elm.addEventListener('volumechange', reassertMute);
-  }
-
-  const reassertMute = (ev: Event) => {
-    const elm = ev.currentTarget as SinkMedia;
-    if (srcNodes.has(elm) && !elm.muted) elm.muted = true;
-  };
-
-  function unwireGain(elm: SinkMedia) {
-    elm.removeEventListener('volumechange', reassertMute);
-    srcNodes.get(elm)?.disconnect();
-    srcNodes.delete(elm);
-  }
+  // 只登记「哪些 identity 有音频元素」：音量与输出设备都由引擎内部的增益链执行，
+  // 页面不再碰元素的 muted/volume/setSinkId
+  const audioEls = new Map<string, Set<HTMLMediaElement>>();
+  diag('info', 'room_open', undefined, { state: document.visibilityState });
   const speakingByRole: Record<Role, Set<string>> = { voice: new Set(), stage: new Set() };
   const tileTimers = new Set<number>(); // 投屏徽章的实测轮询定时器，离房时兜底清掉
 
@@ -408,7 +358,6 @@ export async function renderRoom(root: HTMLElement, channel: string) {
     });
     scheduleSaveVolumes();
     applyAudioPrefs();
-    if (useGain) void audioCtx?.resume(); // 拖滑条本身是手势，顺手唤醒挂起的上下文
   }
 
   // 拖动起点记为恢复点：拖到 0 再点恢复，回到开拖前的值而不是最后一个 tick
@@ -427,30 +376,23 @@ export async function renderRoom(root: HTMLElement, channel: string) {
     }
   };
 
+  // 上次已切到的输出设备 id：纯防抖状态，不是真相源（真相源是 prefs.speakerId）
+  let appliedSpeakerId = '';
+
   function applyAudioPrefs() {
     const p = loadPrefs();
     const master = deafened() ? 0 : gainOf(p.volume);
-    audioEls.forEach((set, identity) => {
+    // combined 形态两条线是同一个引擎（Set 去重）；拆分形态各自只认自己有的参与者
+    const engines = new Set([voiceLine.engine, stageEngine()]);
+    audioEls.forEach((_set, identity) => {
       const v = master * gainOf(volumePctFor(identity));
-      if (useGain) {
-        // 增益链路径：音量全在 GainNode 上，元素保持 muted（iOS 也没有 setSinkId 可用）
-        const g = gainNodes.get(identity);
-        if (g) g.gain.value = v;
-        set.forEach((elm) => {
-          elm.muted = true;
-        });
-        return;
-      }
-      set.forEach((elm) => {
-        // iOS Safari 走不到这里（useGain）；静音保留 muted 属性兜底
-        elm.muted = v === 0;
-        elm.volume = v;
-        // 拖滑条会反复进这里：sinkId 没变就别重复调用（返回 promise，有成本）
-        if (p.speakerId && typeof elm.setSinkId === 'function' && elm.sinkId !== p.speakerId) {
-          elm.setSinkId(p.speakerId).catch(() => {});
-        }
-      });
+      engines.forEach((eng) => eng?.setVolume(identity, v));
     });
+    // 拖滑条会反复进这里：输出设备没变就别重复切（异步调用，有成本）
+    if (p.speakerId && p.speakerId !== appliedSpeakerId) {
+      appliedSpeakerId = p.speakerId;
+      engines.forEach((eng) => void eng?.setAudioOutput(p.speakerId));
+    }
   }
 
   // 语音连着时清掉舞台区状态文案（旧版 syncAudioTiles 尾部的行为）
@@ -679,7 +621,6 @@ export async function renderRoom(root: HTMLElement, channel: string) {
       p.volume = Math.max(0, Math.min(100, Math.round(baseVol + ratio * 100)));
       savePrefs(p);
       applyAudioPrefs();
-      if (useGain) void audioCtx?.resume(); // 手势本身是用户交互，顺手唤醒挂起的上下文
       setHud({});
       clearTimeout(hudTimer);
     };
@@ -1023,6 +964,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
         line.engine?.dispose();
         line.engine = await createEngine(cred.engine, makeCallbacks(role));
         line.engineName = cred.engine;
+        appliedSpeakerId = ''; // 新引擎 = 新 Room，输出设备要重新切一次
         // 建引擎期间用户可能已经离开房间：清理块跑过了就没人再释放这个半成品
         if (leaving) {
           line.engine.dispose();
@@ -1169,22 +1111,17 @@ export async function renderRoom(root: HTMLElement, channel: string) {
           set = new Set();
           audioEls.set(identity, set);
         }
-        set.add(elm as SinkMedia);
+        set.add(elm);
+        // 元素必须在 DOM 里（引擎的增益链从它的 srcObject 取流），但保持 muted 由引擎管
         audioBinEl.appendChild(elm);
-        if (useGain) wireGain(identity, elm as SinkMedia);
         applyAudioPrefs();
       },
       onAudioTrackRemoved: (identity, els) => {
         els.forEach((elm) => {
           elm.remove();
-          unwireGain(elm as SinkMedia);
-          audioEls.get(identity)?.delete(elm as SinkMedia);
+          audioEls.get(identity)?.delete(elm);
         });
-        // 该 identity 没有音轨了：拆掉增益节点，重进时重建
-        if (!audioEls.get(identity)?.size) {
-          gainNodes.get(identity)?.disconnect();
-          gainNodes.delete(identity);
-        }
+        if (!audioEls.get(identity)?.size) audioEls.delete(identity);
       },
       onRoster: () => {
         refreshRoster();
@@ -1390,10 +1327,9 @@ export async function renderRoom(root: HTMLElement, channel: string) {
   document.addEventListener('keyup', onHotkeyUp);
   window.addEventListener('blur', pttRelease);
 
-  // 自动播放被拦截：横幅点击是用户手势，两条线的引擎与增益链一起解锁
+  // 自动播放被拦截：横幅点击是用户手势，两条线的引擎一起解锁（引擎内部负责 resume 增益链）
   async function resumeAllAudio() {
     setAudioBlocked(false);
-    void audioCtx?.resume();
     for (const eng of new Set([voiceLine.engine, stageEngine()])) {
       if (eng) await eng.resumeAudio().catch(() => {});
     }
@@ -3251,14 +3187,6 @@ export async function renderRoom(root: HTMLElement, channel: string) {
       afkWatch.dispose();
       clearTimeout(volSaveTimer);
       saveVolumes(volumes()); // 去抖的尾触可能还没落盘
-      if (gainResume) {
-        document.removeEventListener('pointerdown', gainResume);
-        document.removeEventListener('keydown', gainResume);
-      }
-      srcNodes.forEach((s) => s.disconnect());
-      srcNodes.clear();
-      gainNodes.clear();
-      void audioCtx?.close();
       clearInterval(vuTimer);
       tileTimers.forEach((t) => clearInterval(t));
       tileTimers.clear();
