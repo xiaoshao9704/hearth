@@ -27,6 +27,11 @@ export function setServerURL(url: string) {
   localStorage.setItem(SERVER_KEY, trimSlash(url));
 }
 
+// 忘记服务器（桌面壳的 #/server 页用）：清掉存档，下次启动重新问连哪台
+export function clearServerURL() {
+  localStorage.removeItem(SERVER_KEY);
+}
+
 export const SERVER_URL: string = trimSlash(
   getServerURL() ?? window.__HEARTH_SERVER__ ?? import.meta.env.VITE_SERVER_URL ?? 'http://localhost:8080',
 );

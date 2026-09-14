@@ -24,6 +24,20 @@ export interface PublishStats {
   error: string | null;
 }
 
+// 发布状态推送：壳侧看门狗判定失败时推一次（ICE 没建起来、迟迟没有画面、管线报错）。
+// 不做前台轮询——WKWebView 进后台会挂起 JS 定时器，轮询等于没有。
+export interface PublishState {
+  running: boolean;
+  error: string | null;
+}
+
+// 服务器探测结果。reason：untrusted / unreachable / not_https / not_hearth / bad_url
+export interface CheckResult {
+  ok: boolean;
+  reason: string;
+  detail: string;
+}
+
 export interface PublishArgs {
   endpoint: string; // 完整 WHIP 地址（含频道）
   token: string; // 推流令牌
@@ -35,11 +49,21 @@ export interface PublishArgs {
 const NO_BRIDGE: BridgeCaps = { native_publish: false, platform: 'web', app_audio: false };
 
 type Invoke = <T>(cmd: string, args?: Record<string, unknown>) => Promise<T>;
+type TransformCallback = (cb: (payload: unknown) => void) => number;
+
+interface Internals {
+  invoke?: Invoke;
+  transformCallback?: TransformCallback;
+}
+
+function internals(): Internals | null {
+  return (window as { __TAURI_INTERNALS__?: Internals }).__TAURI_INTERNALS__ ?? null;
+}
 
 function rawInvoke(): Invoke | null {
-  const internals = (window as { __TAURI_INTERNALS__?: { invoke?: Invoke } }).__TAURI_INTERNALS__;
-  if (!internals || typeof internals.invoke !== 'function') return null;
-  return internals.invoke.bind(internals) as Invoke;
+  const api = internals();
+  if (!api || typeof api.invoke !== 'function') return null;
+  return api.invoke.bind(api) as Invoke;
 }
 
 // 同步可判的「装在壳里」：服务器地址要在首屏之前决定，等不了异步能力检测。
@@ -86,4 +110,45 @@ export function stopPublish(): Promise<void> {
 
 export function publishStats(): Promise<PublishStats | null> {
   return call<PublishStats | null>('publish_stats');
+}
+
+// 壳侧事件订阅（Tauri 的 event 插件）：不引 @tauri-apps/api，桥本来就只经 __TAURI_INTERNALS__ 通信。
+export async function onPublishState(cb: (s: PublishState) => void): Promise<() => void> {
+  const api = internals();
+  const invoke = rawInvoke();
+  if (!invoke || typeof api?.transformCallback !== 'function') return () => {};
+  const handler = api.transformCallback((payload) => cb((payload as { payload: PublishState }).payload));
+  try {
+    const id = await invoke<number>('plugin:event|listen', {
+      event: 'publish-state',
+      target: { kind: 'Any' },
+      handler,
+    });
+    return () => {
+      void invoke('plugin:event|unlisten', { event: 'publish-state', eventId: id }).catch(() => {});
+    };
+  } catch {
+    return () => {};
+  }
+}
+
+// ---- 应用内信任（只在桌面壳里可用，浏览器里这几条命令不存在）----
+// 与投屏能力无关：没有采集能力的机器也要能连服务器，所以不走 call() 的能力门槛。
+function shellCall<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
+  const invoke = rawInvoke();
+  if (!invoke) return Promise.reject(new Error('当前环境不是桌面壳'));
+  return invoke<T>(cmd, args);
+}
+
+export function checkServer(url: string): Promise<CheckResult> {
+  return shellCall<CheckResult>('check_server', { url });
+}
+
+// fingerprint 是从管理员那里另行取得的根证书 SHA-256，不是从本页下载的证书上抄来的
+export function pairServer(url: string, fingerprint: string): Promise<void> {
+  return shellCall<void>('pair_server', { url, fingerprint_sha256: fingerprint });
+}
+
+export function forgetServer(url: string): Promise<void> {
+  return shellCall<void>('forget_server', { url });
 }

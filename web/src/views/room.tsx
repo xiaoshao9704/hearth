@@ -12,7 +12,7 @@ import { startAfkWatch } from '../afk';
 import { ApiError, fetchJoinCredentials, getIngestToken, getUser, guestTimeLeft, isGuest, kickUser, listChannels, muteUser, reportClientLog } from '../api';
 import type { ChannelRole, DataLine, EngineCred } from '../api';
 import { playCue } from '../audio';
-import { capabilities, listSources, startPublish, stopPublish } from '../bridge';
+import { capabilities, listSources, onPublishState, startPublish, stopPublish } from '../bridge';
 import type { BridgeCaps, NativeSource } from '../bridge';
 import { deleteMessage, fetchMessages, postMessage, setReaction } from '../chat';
 import type { ChatMessage } from '../chat';
@@ -270,6 +270,19 @@ export async function renderRoom(root: HTMLElement, channel: string) {
   const nativeScreen = createMemo(() => bridgeCaps()?.native_publish === true);
   const [sourcePick, setSourcePick] = createSignal<NativeSource[] | null>(null);
   void capabilities().then(setBridgeCaps);
+  // 原生发布失败（ICE 没建起来、没有画面、管线报错）由壳主动推过来：
+  // 壳那边已经把管线收了，这里只负责复位按钮与提示。
+  let unlistenPublish: (() => void) | null = null;
+  void onPublishState((s) => {
+    if (!s.error) return;
+    setScreenOn(false);
+    setSourcePick(null);
+    refreshMeta();
+    toast(`投屏已停止：${s.error}`, 'bad', 6000);
+  }).then((un) => {
+    if (leaving) un();
+    else unlistenPublish = un;
+  });
   const [deafened, setDeafened] = createSignal(false);
   const [stageOk, setStageOk] = createSignal(false); // 舞台线可用（决定摄像头/投屏按钮禁用态）
   const [stageHint, setStageHint] = createSignal('本服未启用舞台线（投屏/摄像头）');
@@ -3303,6 +3316,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
       leaving = true;
       // 原生发布在壳的进程里，不随页面卸载停：离房必须显式收回
       if (nativeScreen() && screenOn()) void stopPublish().catch(() => {});
+      unlistenPublish?.();
       closeChannelMenu(); // 两个浮层都挂在 body 上，房间视图卸载不会带走它们
       closeAccountMenu();
       pipCtl.dispose();
