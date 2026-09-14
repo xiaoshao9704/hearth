@@ -43,7 +43,7 @@ import { openSettings } from './settings';
 import { ChatFirstBar, syncPanelWithChatFirst } from './room/chat-first';
 import { FloatingRoster, mountPipRoster } from './room/floating-roster';
 import { createPipCtl } from './room/pip';
-import { createTheaterCtl, ViewModeControl } from './room/theater';
+import { createTheaterCtl, elementFullscreenSupported, ViewModeControl } from './room/theater';
 
 type Role = 'voice' | 'stage';
 
@@ -99,6 +99,18 @@ type VoiceState = { phase: 'connecting' | 'up' | 'retry'; attempt: number };
 interface NativeFsVideo extends HTMLVideoElement {
   webkitEnterFullscreen?: () => void;
   webkitSupportsFullscreen?: boolean;
+}
+
+// 请求某个 video 元素的私有原生全屏；不支持或调用失败都返回 false 交给调用方走兜底路径
+function enterNativeFullscreen(v: HTMLVideoElement | null): boolean {
+  const nv = v as NativeFsVideo | null;
+  if (!nv || typeof nv.webkitEnterFullscreen !== 'function' || nv.webkitSupportsFullscreen === false) return false;
+  try {
+    nv.webkitEnterFullscreen();
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 // 文件卡片的本地字节状态：消息本体（卡片）来自服务端，字节只经数据通道，
@@ -553,17 +565,20 @@ export async function renderRoom(root: HTMLElement, channel: string) {
     setPinnedKey((k) => (k === key ? null : key));
   }
 
-  // 触屏没有「卡片全屏」这个形态：它盖住控制栏、名册与聊天，只剩卡片角上几个按钮，
-  // 严格弱于剧场，所以这个按钮改成把该卡片置顶并进剧场。iPhone 没有元素级全屏，这里
-  // 不顺带请求全屏：要收掉地址栏得走观看模式里的「全屏」（退到视频原生全屏、即系统
-  // 播放器），或把站点添加到主屏幕。
+  // 触屏三条路，按能力依次降级：iPhone 只有 video 元素的私有原生全屏，这张卡的画面
+  // 直接进系统播放器；没有原生全屏但支持标准元素全屏的触屏设备（iPad / Android）落到
+  // 下面桌面共用的标准路径，对卡片容器请求真全屏；两者都没有就退回置顶 + 进剧场。
   // 桌面照旧：全屏对 tile 容器请求（不是 video 元素），才能叠自定义控制条（音量滑条）；
   // 请求被拒时退回 fixed 定位的模拟全屏
-  function toggleFs(key: string, tileEl: HTMLElement) {
+  function toggleFs(key: string, tileEl: HTMLElement, video?: HTMLVideoElement) {
     if (touchOnly()) {
       setPinnedKey(key);
-      if (!theaterCtl.on()) theaterCtl.toggle(); // 运行时才调，theaterCtl 那时已初始化
-      return;
+      if (enterNativeFullscreen(video ?? null)) return; // iPhone：这张卡进系统播放器
+      if (!elementFullscreenSupported()) {
+        if (!theaterCtl.on()) theaterCtl.toggle(); // 运行时才调，theaterCtl 那时已初始化
+        return;
+      }
+      // 支持元素全屏的触屏设备（iPad / Android）：落到下面的标准路径，对卡片容器请求真全屏
     }
     if (fsKey() === key) return exitFs();
     if (typeof tileEl.requestFullscreen === 'function') {
@@ -1290,16 +1305,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
     onDiag: (ev, d) => diag('info', ev, undefined, { detail: JSON.stringify(d) }),
     // iPhone 没有元素级全屏，只有 video 元素的原生全屏（系统播放器）能收掉地址栏：
     // 焦点画面与画中画取同一块 video，没有画面时让 theater 去走「浏览器拒绝」提示
-    nativeFullscreen: () => {
-      const v = screenVideo() as NativeFsVideo | null;
-      if (!v || typeof v.webkitEnterFullscreen !== 'function' || v.webkitSupportsFullscreen === false) return false;
-      try {
-        v.webkitEnterFullscreen();
-        return true;
-      } catch {
-        return false;
-      }
-    },
+    nativeFullscreen: () => enterNativeFullscreen(screenVideo()),
   });
   const pipCtl = createPipCtl({
     getVideo: screenVideo,
@@ -1949,8 +1955,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
     let tileEl!: HTMLDivElement;
     const name = e.isLocal && e.source === 'camera' ? '你' : e.display;
     const isFs = () => fsKey() === e.key;
-    // 触屏上这个按钮进的是置顶 + 剧场（见 toggleFs），文案用「放大画面」不写「全屏」
-    const fsLabel = () => (touchOnly() ? '放大画面' : isFs() ? '退出全屏' : '全屏');
+    const fsLabel = () => (isFs() ? '退出全屏' : '全屏');
     const [fsBarOpen, setFsBarOpen] = createSignal(true);
     return (
       <div
@@ -2039,7 +2044,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
             aria-label={fsLabel()}
             onClick={(ev) => {
               ev.stopPropagation();
-              toggleFs(e.key, tileEl);
+              toggleFs(e.key, tileEl, e.video);
             }}
           >
             {el(icon('fullscreen', 15))}
