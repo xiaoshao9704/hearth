@@ -542,13 +542,17 @@ export async function renderRoom(root: HTMLElement, channel: string) {
   }
 
   // 触屏没有「卡片全屏」这个形态：它盖住控制栏、名册与聊天，只剩卡片角上几个按钮，
-  // 严格弱于剧场模式——这个按钮改成把该卡片置顶并进剧场。
+  // 严格弱于全屏模式——手机上剧场相对全屏只多一条地址栏，网页收不掉浏览器 UI，只有
+  // Fullscreen API 能，所以这个按钮改成把该卡片置顶并直接进全屏（先剧场再全屏，与
+  // ViewModeControl.setMode('fullscreen') 同一路径）；被浏览器拒绝时 toggleFullscreen
+  // 自己会弹提示并停留在剧场，这就是兜底。
   // 桌面照旧：全屏对 tile 容器请求（不是 video 元素），才能叠自定义控制条（音量滑条）；
   // iOS 私有全屏只接受 video 元素，或被浏览器拒绝时，退回 fixed 定位的模拟全屏
   function toggleFs(key: string, tileEl: HTMLElement) {
     if (touchOnly()) {
       setPinnedKey(key);
       if (!theaterCtl.on()) theaterCtl.toggle(); // 运行时才调，theaterCtl 那时已初始化
+      if (!theaterCtl.fullscreen()) theaterCtl.toggleFullscreen();
       return;
     }
     if (fsKey() === key) return exitFs();
@@ -1919,7 +1923,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
     let tileEl!: HTMLDivElement;
     const name = e.isLocal && e.source === 'camera' ? '你' : e.display;
     const isFs = () => fsKey() === e.key;
-    // 触屏上这个按钮进的是剧场（见 toggleFs），措辞别写「全屏」
+    // 触屏上这个按钮进的是全屏（见 toggleFs），文案沿用「放大画面」不写「全屏」
     const fsLabel = () => (touchOnly() ? '放大画面' : isFs() ? '退出全屏' : '全屏');
     const [fsBarOpen, setFsBarOpen] = createSignal(true);
     return (
