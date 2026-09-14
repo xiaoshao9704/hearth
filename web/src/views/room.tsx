@@ -199,7 +199,13 @@ export async function renderRoom(root: HTMLElement, channel: string) {
   // 只登记「哪些 identity 有音频元素」：音量与输出设备都由引擎内部的增益链执行，
   // 页面不再碰元素的 muted/volume/setSinkId
   const audioEls = new Map<string, Set<HTMLMediaElement>>();
-  diag('info', 'room_open', undefined, { state: document.visibilityState });
+  diag('info', 'room_open', undefined, {
+    state: document.visibilityState,
+    detail: JSON.stringify({
+      fullscreen_supported: typeof document.documentElement.requestFullscreen === 'function',
+      fullscreen_enabled: document.fullscreenEnabled,
+    }),
+  });
   const speakingByRole: Record<Role, Set<string>> = { voice: new Set(), stage: new Set() };
   const tileTimers = new Set<number>(); // 投屏徽章的实测轮询定时器，离房时兜底清掉
 
@@ -1274,7 +1280,11 @@ export async function renderRoom(root: HTMLElement, channel: string) {
   const hasStageContent = () => videoEntries().length > 0 || roster().some((p) => p.sharing || p.ingest);
   // 画中画弹出的画面：投屏优先，没有投屏就弹第一块视频
   const screenVideo = () => (videoEntries().find((e) => e.source === 'screen') ?? videoEntries()[0])?.video ?? null;
-  const theaterCtl = createTheaterCtl({ hasStage: hasStageContent, onNotice: (m) => toast(m, '', 2600) });
+  const theaterCtl = createTheaterCtl({
+    hasStage: hasStageContent,
+    onNotice: (m) => toast(m, '', 2600),
+    onDiag: (ev, d) => diag('info', ev, undefined, { detail: JSON.stringify(d) }),
+  });
   const pipCtl = createPipCtl({
     getVideo: screenVideo,
     mountExtras: (host) => mountPipRoster(host, { parts: roster, speaking }),

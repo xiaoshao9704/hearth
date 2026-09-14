@@ -22,6 +22,7 @@ const IDLE_MS = 3000;
 export interface TheaterOpts {
   hasStage: () => boolean; // 有画面可看才允许进剧场
   onNotice?: (msg: string) => void;
+  onDiag?: (event: string, detail: Record<string, unknown>) => void;
 }
 
 export interface TheaterCtl {
@@ -78,18 +79,29 @@ export function createTheaterCtl(opts: TheaterOpts): TheaterCtl {
       return;
     }
     fsFromTheater = on();
-    const refused = () => {
+    const supported = typeof document.documentElement.requestFullscreen === 'function';
+    // iPhone 上全屏请求经常悄无声息地失败：把结果上报出去，方便远端看请求到底走到哪一步
+    const report = (outcome: 'ok' | 'rejected' | 'threw' | 'unsupported', err?: unknown) => {
+      opts.onDiag?.('fullscreen_request', {
+        supported,
+        enabled: document.fullscreenEnabled,
+        outcome,
+        error: err instanceof Error ? `${err.name}: ${err.message}` : err != null ? `${typeof err}: ${String(err)}` : '',
+      });
+    };
+    const refused = (outcome: 'rejected' | 'threw' | 'unsupported', err?: unknown) => {
       opts.onNotice?.('浏览器拒绝了全屏请求');
       fsFromTheater = false;
+      report(outcome, err);
     };
     // requestFullscreen 被权限策略挡住时是**同步**抛 TypeError（不是 reject 的 promise），
     // 只挂 .catch 会漏成未捕获错误，还会把 fsFromTheater 留在 true
     try {
       const p = document.documentElement.requestFullscreen?.();
-      if (p) void p.catch(refused);
-      else refused();
-    } catch {
-      refused();
+      if (p) void p.then(() => report('ok')).catch((err) => refused('rejected', err));
+      else refused('unsupported');
+    } catch (err) {
+      refused('threw', err);
     }
   }
 
@@ -120,6 +132,7 @@ export function createTheaterCtl(opts: TheaterOpts): TheaterCtl {
   const onFullscreenChange = () => {
     const fs = !!document.fullscreenElement;
     setFullscreen(fs);
+    opts.onDiag?.('fullscreen_change', { active: fs });
     if (!fs && fsFromTheater) {
       fsFromTheater = false;
       exit(); // 「退出全屏自动退出剧场」
