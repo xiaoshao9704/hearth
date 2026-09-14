@@ -98,6 +98,10 @@ fn publish_stats(state: tauri::State<'_, AppState>) -> Option<publish::Stats> {
 }
 
 pub fn run() {
+    // 启动即初始化 GStreamer：运行时缺插件要第一时间暴露，不拖到用户点投屏才报
+    if let Err(e) = publish::init_gst() {
+        eprintln!("{e}");
+    }
     tauri::Builder::default()
         .manage(AppState::default())
         .invoke_handler(tauri::generate_handler![

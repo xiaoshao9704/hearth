@@ -39,7 +39,7 @@ pub fn testsrc_mode() -> bool {
 
 static GST_INIT: OnceLock<Result<(), String>> = OnceLock::new();
 
-fn init_gst() -> Result<(), String> {
+pub fn init_gst() -> Result<(), String> {
     GST_INIT
         .get_or_init(|| gst::init().map_err(|e| format!("GStreamer 初始化失败：{e}")))
         .clone()
