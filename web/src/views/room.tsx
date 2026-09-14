@@ -582,6 +582,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
   function wireStageSwipe(elm: HTMLElement): () => void {
     let tracking = false; // 单指按下、方向还没判定
     let active = false; // 已判定为上下滑，进入调节态
+    let moved = false; // 按下后有过任意方向的位移，用来把「点按」和「滑动」分开
     let sx = 0;
     let sy = 0;
     let baseVol = 100;
@@ -590,6 +591,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
     const onStart = (ev: TouchEvent) => {
       tracking = false;
       active = false;
+      moved = false;
       if (!theaterCtl.on() || ev.touches.length !== 1) return; // 双指留给缩放
       const t = ev.touches[0];
       sx = t.clientX;
@@ -609,6 +611,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
       const t = ev.touches[0];
       const dx = t.clientX - sx;
       const dy = t.clientY - sy;
+      if (Math.abs(dx) > SWIPE_TOL || Math.abs(dy) > SWIPE_TOL) moved = true; // 横滑也算 moved，只是不调音量
       if (!active) {
         // 判定前不 preventDefault，否则会吃掉正常点击与横向手势
         if (Math.abs(dy) < SWIPE_TOL || Math.abs(dy) <= Math.abs(dx)) return;
@@ -625,8 +628,12 @@ export async function renderRoom(root: HTMLElement, channel: string) {
       clearTimeout(hudTimer);
     };
 
-    const onEnd = () => {
-      if (active) swipeEndedAt = Date.now();
+    const onEnd = (ev: TouchEvent) => {
+      // 没有位移的单指点按：切换剧场顶栏/控制栏显隐（栏隐藏时它们 pointer-events:none，
+      // 点在原栏位置的触摸本就会落到舞台区，走这条逻辑符合预期）
+      const isTap = ev.type === 'touchend' && tracking && !active && !moved;
+      if (active || isTap) swipeEndedAt = Date.now(); // 吞掉抬手合成的 click，避免顺带触发焦点卡片 togglePin
+      if (isTap) theaterCtl.toggleChrome();
       tracking = false;
       active = false;
       if (!hud()) return;
