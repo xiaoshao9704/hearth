@@ -13,6 +13,7 @@ import {
 import type {
   AudioCaptureOptions,
   LocalVideoTrack,
+  RemoteAudioTrack,
   ScreenShareCaptureOptions,
   TrackPublishOptions,
   VideoCaptureOptions,
@@ -51,7 +52,9 @@ export class LiveKitEngine implements AVEngine {
   // 凭证是短时效入场券，断线后必须回房间层重新签发并重做入场判定。禁用 SDK 内部
   // resume 也避免无 Redis 的 stage 重启后，客户端拿已消失的 participant 状态反复
   // reconnect=1，卡在 STATE_MISMATCH 而永远不发起完整 join。
-  private room = new Room({ reconnectPolicy: { nextRetryDelayInMs: () => null } });
+  // webAudioMix：远端音轨走 SDK 自己的「MediaStreamSource → GainNode → destination」，
+  // attach 出来的元素保持 muted。iOS 上 elm.volume 不影响播放，音量只能落在增益节点上
+  private room = new Room({ reconnectPolicy: { nextRetryDelayInMs: () => null }, webAudioMix: true });
   private cbs: EngineCallbacks;
   private rnnoise = new RnnoisePipeline();
   private rnnoiseBroken = false;
@@ -63,6 +66,8 @@ export class LiveKitEngine implements AVEngine {
   private snapshot: Record<'pub' | 'sub', IceTransportSnapshot | null> = { pub: null, sub: null };
   // 线路丢包要看区间差分（累计值会把开局那几个包一直摊到最后）：按 transport 记上一次的累计数
   private lastLine: Record<'pub' | 'sub', { lost: number; total: number } | null> = { pub: null, sub: null };
+  // 每人音量的引擎执行态（真相源在房间层的 prefs/volumes）：后到的音轨按它补一次增益
+  private volumes = new Map<string, number>();
 
   constructor(cbs: EngineCallbacks) {
     this.cbs = cbs;
@@ -156,6 +161,7 @@ export class LiveKitEngine implements AVEngine {
       .on(RoomEvent.TrackSubscribed, (track: RemoteTrack, _pub, p: RemoteParticipant) => {
         if (track.kind === Track.Kind.Audio) {
           this.cbs.onAudioTrack(p.identity, track.attach());
+          this.applyVolume(p); // 后到的音轨（如推流带的音频）补上已记的增益
           return;
         }
         this.emitVideo(p, track, false);
@@ -410,6 +416,27 @@ export class LiveKitEngine implements AVEngine {
       jitter_ms: sub?.jitter_ms ?? pub?.jitter_ms,
       loss_pct: sub?.loss_pct ?? pub?.loss_pct,
     };
+  }
+
+  // 不用 participant.setVolume(v, source)：它按 source 找发布，推流进来的音频 source
+  // 未必是 Microphone，会整条漏掉。直接遍历已订阅的音轨逐条设增益
+  private applyVolume(p: RemoteParticipant) {
+    const v = this.volumes.get(p.identity);
+    if (v === undefined) return;
+    p.audioTrackPublications.forEach((pub) => {
+      if (pub.track) (pub.track as RemoteAudioTrack).setVolume(v);
+    });
+  }
+
+  setVolume(identity: string, gain: number) {
+    this.volumes.set(identity, gain);
+    const p = this.room.remoteParticipants.get(identity);
+    if (p) this.applyVolume(p);
+  }
+
+  async setAudioOutput(deviceId: string) {
+    // 浏览器不支持切输出设备时 SDK 直接抛：调用方（音量面板）没有可做的补救，吞掉
+    await this.room.switchActiveDevice('audiooutput', deviceId).catch(() => {});
   }
 
   async resumeAudio() {
