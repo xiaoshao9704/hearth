@@ -1,4 +1,4 @@
-// LiveKit 加入令牌签发：grant 带发布/订阅/数据权限，24 小时过期。
+// LiveKit 加入令牌签发：grant 带发布/订阅/数据权限，10 分钟过期（见下方 ttl）。
 package lktoken
 
 import (

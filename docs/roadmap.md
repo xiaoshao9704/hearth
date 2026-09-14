@@ -40,6 +40,15 @@ Hearth 是几个朋友的私人客厅：一个文件跑起来的语音、高清�
 - awesome-selfhosted 提 PR。
 - 观察 2 到 4 周：star、镜像拉取、陌生人 issue。这三个数决定后续节点的投入力度。
 
+## 提前技术验证：Windows / macOS 桌面端（不另定版本号）
+
+状态：关键假设已验证（2026-09-15），里程碑 1（macOS 纵切）实施中。见 [桌面端方案](plan-desktop.md)。
+
+- Rust + Tauri 壳，GStreamer 管线，原生投屏走现有 WHIP 推流入口（服务端零改动，H.264/H.265 已实测建流）；观看、语音、聊天复用网页。
+- 应用内信任不装系统 CA：WKWebView 的证书回调已实测覆盖 JS 的 wss；Windows 侧只做了文档核实。
+- macOS 采集需自写 ScreenCaptureKit；Windows 采集、进程音频回环与硬编全是 GStreamer 现成元素，待 Windows 机器实测。
+- 节点 5 的「全局热键小托盘程序」并入桌面端里程碑 3。
+
 ## 节点 3：i18n（v0.11.0，独占版本）
 
 状态：待开始。前置：所有并行功能分支合完，期间不开新功能分支。
@@ -62,7 +71,7 @@ Hearth 是几个朋友的私人客厅：一个文件跑起来的语音、高清�
 ## 节点 5：按反馈排序的储备项
 
 - TURN over TLS 443（`docs/plan-client-ice.md` 第二阶段），需要公网机器，家庭场景配合另一台机器上的 `stage` 一起讲。
-- 全局热键小托盘程序，解决游戏全屏时按键说话失效。
+- 全局热键按键说话（游戏全屏时按键说话失效）：已并入桌面端里程碑 3，见 `docs/plan-desktop.md`。
 - 浏览器投屏 HEVC（`docs/plan-hevc-clarity.md` 评审）。
 - 技术债：`is_admin` 列、`warnLegacyConfig`、server-sdk-go 回正式版、Windows 与 OBS HEVC 真机验收。
 
