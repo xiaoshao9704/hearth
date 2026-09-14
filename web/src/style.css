@@ -1090,6 +1090,8 @@ body {
 /* --- 剧场模式：画面占满，顶栏与控制栏改浮层 --- */
 /* 外壳侧栏也一起让位（房间只是 shell 的内容区，够不着它的 DOM） */
 body.theater-on .sidebar { display: none; }
+/* 堵住剧场下 body 的橡皮筋回弹，否则触屏上下滑手势会带着整页面一起晃 */
+body.theater-on { overscroll-behavior: none; }
 .room-frame.layout-theater { position: relative; background: var(--stage); }
 .room-frame.layout-theater > .topbar {
   position: absolute; left: 0; right: 0; top: 0; z-index: 270;
@@ -1101,6 +1103,9 @@ body.theater-on .sidebar { display: none; }
   transition: opacity 0.22s ease;
 }
 .room-frame.layout-theater .stage-area { padding: 0; background: var(--stage); }
+/* iOS 会在首个未被 preventDefault 拦下的 touchmove 上把手势判给页面滚动并发 touchcancel，
+   我们的竖向滑动判定天然晚一步；关掉原生手势，上下滑调音量完全交给脚本判定 */
+.room-frame.layout-theater .stage-area { touch-action: none; }
 .room-frame.layout-theater .video-grid.spotlight { gap: 0; }
 /* 缩略轨与其余卡片让位：剧场里只留焦点画面，谁在房间看浮动名册 */
 .room-frame.layout-theater .video-grid.spotlight .rail { display: none; }
