@@ -199,13 +199,17 @@ export async function renderRoom(root: HTMLElement, channel: string) {
   let bounced = false;
   let seq = 0; // 卡片到达顺序计数
   const audioEls = new Map<string, Set<SinkMedia>>();
-  diag('info', 'room_open', undefined, { state: document.visibilityState });
-
-  // iOS Safari 的 volume 只读（设置被静默忽略）：探测后切到 Web Audio 增益链，
-  // 每 identity 一个 GainNode，元素本体 muted；可写平台维持 elm.volume 直控
+  // 新版 iOS 上 volume 属性能写能读回，但不影响实际播放响度（只认 muted）：
+  // 探测只能兜底旧行为，iOS 一律强制走 Web Audio 增益链，每 identity 一个 GainNode，
+  // 元素本体 muted；其余可写平台维持 elm.volume 直控
   const volProbe = document.createElement('audio');
   volProbe.volume = 0.5;
-  const useGain = volProbe.volume !== 0.5;
+  const isIOS = /iPhone|iPad|iPod/.test(navigator.userAgent) || (/Macintosh/.test(navigator.userAgent) && navigator.maxTouchPoints > 1);
+  const useGain = volProbe.volume !== 0.5 || isIOS;
+  diag('info', 'room_open', undefined, {
+    state: document.visibilityState,
+    detail: JSON.stringify({ use_gain: useGain, vol_probe: volProbe.volume }),
+  });
   let audioCtx: AudioContext | null = null;
   let gainResume: (() => void) | null = null;
   const gainNodes = new Map<string, GainNode>();
