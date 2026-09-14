@@ -124,6 +124,17 @@ function fmtSize(n: number): string {
   return `${n} B`;
 }
 
+// 触屏口径与 style.css 的 (hover: none) 一致，不做 UA 嗅探
+function touchOnly(): boolean {
+  return window.matchMedia('(hover: none)').matches;
+}
+
+// 剧场手势：亮度只改焦点画面 video 的 CSS filter（网页拿不到系统屏幕亮度，没有这个 API）
+const BRIGHT_MIN = 0.3;
+const BRIGHT_MAX = 1.6;
+const HUD_HOLD_MS = 600; // 抬手后 HUD 再停留这么久
+const SWIPE_TOL = 8; // px：垂直位移超过它才算上下滑，之前不拦事件
+
 // ---- 每设备本地音量持久化（0~100，按 identity）----
 const VOLS_KEY = 'hearth_room_volumes';
 // 频道菜单一次性提示：本机进过房就不再出
@@ -278,6 +289,18 @@ export async function renderRoom(root: HTMLElement, channel: string) {
   const [pinnedKey, setPinnedKey] = createSignal<string | null>(null);
   const [fsKey, setFsKey] = createSignal<string | null>(null); // 全屏中的卡片 key（含 iOS 模拟全屏）
   const [lastSpeaker, setLastSpeaker] = createSignal<string | null>(null);
+  // 剧场上下滑手势：亮度是会话级的（不进 prefs，退出剧场复位 1）
+  const [stageBright, setStageBright] = createSignal(1);
+  // HUD 只记「显示哪个通道 / 是否正在淡出」：数值一律现取（亮度取 stageBright，
+  // 音量取 prefs.volume），每次滑动换一个新对象触发重渲染，不留第二份数值
+  const [hud, setHud] = createSignal<{ kind: 'brightness' | 'volume'; fading?: boolean } | null>(null);
+  const hudPct = () => {
+    const h = hud();
+    if (!h) return 0;
+    if (h.kind === 'brightness') return ((stageBright() - BRIGHT_MIN) / (BRIGHT_MAX - BRIGHT_MIN)) * 100;
+    return loadPrefs().volume;
+  };
+  const hudLabel = () => (hud()?.kind === 'brightness' ? Math.round(stageBright() * 100) : loadPrefs().volume);
   // 每设备本地音量（0~100，0=屏蔽），按 identity 持久化，跨频道/会话记住
   const [volumes, setVolumes] = createSignal<Map<string, number>>(loadVolumes());
   const restoreVol = new Map<string, number>(); // 屏蔽前的音量（仅本会话），恢复时回填
@@ -578,9 +601,16 @@ export async function renderRoom(root: HTMLElement, channel: string) {
     setPinnedKey((k) => (k === key ? null : key));
   }
 
-  // 全屏对 tile 容器请求（不是 video 元素），才能叠自定义控制条（音量滑条）；
+  // 触屏没有「卡片全屏」这个形态：它盖住控制栏、名册与聊天，只剩卡片角上几个按钮，
+  // 严格弱于剧场模式——这个按钮改成把该卡片置顶并进剧场。
+  // 桌面照旧：全屏对 tile 容器请求（不是 video 元素），才能叠自定义控制条（音量滑条）；
   // iOS 私有全屏只接受 video 元素，或被浏览器拒绝时，退回 fixed 定位的模拟全屏
   function toggleFs(key: string, tileEl: HTMLElement) {
+    if (touchOnly()) {
+      setPinnedKey(key);
+      if (!theaterCtl.on()) theaterCtl.toggle(); // 运行时才调，theaterCtl 那时已初始化
+      return;
+    }
     if (fsKey() === key) return exitFs();
     if (typeof tileEl.requestFullscreen === 'function') {
       tileEl.requestFullscreen().catch(() => setFsKey(key));
@@ -600,6 +630,95 @@ export async function renderRoom(root: HTMLElement, channel: string) {
   const onFsKey = (ev: KeyboardEvent) => {
     if (ev.key === 'Escape' && fsKey() && !document.fullscreenElement) exitFs();
   };
+
+  // ---- 剧场里舞台区的上下滑手势（左半边亮度 / 右半边主音量）----
+  // 手势结束会合成一次 click，而焦点卡片的 click 是置顶：照 longpress 的做法记时间戳吞掉
+  let swipeEndedAt = 0;
+  const swipeJustEnded = () => Date.now() - swipeEndedAt < 300;
+
+  // 只在剧场生效（普通网格与聊天面板里没有这个手势）。
+  // touchmove 必须手动注册且 passive:false：Solid 的事件委托挂到 document 上，
+  // 而 document 级 touchmove 默认 passive，preventDefault 会失效并报警告。
+  function wireStageSwipe(elm: HTMLElement): () => void {
+    let tracking = false; // 单指按下、方向还没判定
+    let active = false; // 已判定为上下滑，进入调节态
+    let kind: 'brightness' | 'volume' = 'volume';
+    let sx = 0;
+    let sy = 0;
+    let baseBright = 1;
+    let baseVol = 100;
+    let hudTimer = 0;
+
+    const onStart = (ev: TouchEvent) => {
+      tracking = false;
+      active = false;
+      if (!theaterCtl.on() || ev.touches.length !== 1) return; // 双指留给缩放
+      const t = ev.touches[0];
+      const r = elm.getBoundingClientRect();
+      sx = t.clientX;
+      sy = t.clientY;
+      // 通道按**起点**的左右半边定死，滑动中跨过中线不切换
+      kind = t.clientX - r.left < r.width / 2 ? 'brightness' : 'volume';
+      baseBright = stageBright();
+      baseVol = loadPrefs().volume;
+      tracking = true;
+    };
+
+    const onMove = (ev: TouchEvent) => {
+      if (!tracking) return;
+      if (ev.touches.length > 1) {
+        tracking = false;
+        active = false;
+        setHud(null);
+        return;
+      }
+      const t = ev.touches[0];
+      const dx = t.clientX - sx;
+      const dy = t.clientY - sy;
+      if (!active) {
+        // 判定前不 preventDefault，否则会吃掉正常点击与横向手势
+        if (Math.abs(dy) < SWIPE_TOL || Math.abs(dy) <= Math.abs(dx)) return;
+        active = true;
+      }
+      ev.preventDefault();
+      // 半屏高度 = 全程变化量，从按下时的值开始累加（不每次从头算）
+      const ratio = -dy / Math.max(1, window.innerHeight / 2);
+      if (kind === 'brightness') {
+        const v = baseBright + ratio * (BRIGHT_MAX - BRIGHT_MIN);
+        setStageBright(Math.max(BRIGHT_MIN, Math.min(BRIGHT_MAX, v)));
+      } else {
+        const p = loadPrefs();
+        p.volume = Math.max(0, Math.min(100, Math.round(baseVol + ratio * 100)));
+        savePrefs(p);
+        applyAudioPrefs();
+        if (useGain) void audioCtx?.resume(); // 手势本身是用户交互，顺手唤醒挂起的上下文
+      }
+      setHud({ kind });
+      clearTimeout(hudTimer);
+    };
+
+    const onEnd = () => {
+      if (active) swipeEndedAt = Date.now();
+      tracking = false;
+      active = false;
+      if (!hud()) return;
+      setHud((h) => (h ? { ...h, fading: true } : null));
+      clearTimeout(hudTimer);
+      hudTimer = window.setTimeout(() => setHud(null), HUD_HOLD_MS);
+    };
+
+    elm.addEventListener('touchstart', onStart, { passive: true });
+    elm.addEventListener('touchmove', onMove, { passive: false });
+    elm.addEventListener('touchend', onEnd);
+    elm.addEventListener('touchcancel', onEnd);
+    return () => {
+      clearTimeout(hudTimer);
+      elm.removeEventListener('touchstart', onStart);
+      elm.removeEventListener('touchmove', onMove);
+      elm.removeEventListener('touchend', onEnd);
+      elm.removeEventListener('touchcancel', onEnd);
+    };
+  }
 
   // ---- 用户操作菜单（聊天卡片、成员行与视频卡片右键共用；挂 body，保持命令式）----
   // 管理操作（禁言/踢出）= 频道 owner 或 moderator（与后端 requireModerator 一致；系统 admin 的隐含 owner 已由 my_role 下发）
@@ -1870,6 +1989,9 @@ export async function renderRoom(root: HTMLElement, channel: string) {
     let tileEl!: HTMLDivElement;
     const name = e.isLocal && e.source === 'camera' ? '你' : e.display;
     const isFs = () => fsKey() === e.key;
+    // 触屏上这个按钮进的是剧场（见 toggleFs），措辞别写「全屏」
+    const fsLabel = () => (touchOnly() ? '放大画面' : isFs() ? '退出全屏' : '全屏');
+    const [fsBarOpen, setFsBarOpen] = createSignal(true);
     return (
       <div
         ref={tileEl}
@@ -1884,6 +2006,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
         data-tile-key={e.key}
         onClick={(ev) => {
           if (isFs()) return; // 全屏里点击不切置顶
+          if (swipeJustEnded()) return; // 上下滑手势抬手合成的那次 click
           if ((ev.target as HTMLElement).closest('.tile-actions')) return;
           togglePin(e.key);
         }}
@@ -1952,7 +2075,8 @@ export async function renderRoom(root: HTMLElement, channel: string) {
           </button>
           <button
             class="hit tact"
-            title={isFs() ? '退出全屏' : '全屏'}
+            title={fsLabel()}
+            aria-label={fsLabel()}
             onClick={(ev) => {
               ev.stopPropagation();
               toggleFs(e.key, tileEl);
@@ -1977,19 +2101,40 @@ export async function renderRoom(root: HTMLElement, channel: string) {
         <Show when={latency()?.key === e.key}>
           <LatencyResult state={() => latency()!} onClose={() => setLatency(null)} />
         </Show>
-        {/* 全屏控制条：远端卡片给音量滑条（本机卡片没有可调的声音）；退出全屏在右上角 */}
+        {/* 全屏控制条：远端卡片给音量滑条（本机卡片没有可调的声音）；退出全屏在右上角。
+            它居中压在画面上，可收起——收起后只留一个喇叭按钮把它叫回来 */}
         <Show when={isFs() && !e.isLocal}>
-          <div class="fs-bar" onClick={(ev) => ev.stopPropagation()}>
-            <button
-              class="hit fs-vol-mute"
-              classList={{ 'muted-on': volumePctFor(e.identity) === 0 }}
-              title={volumePctFor(e.identity) === 0 ? '恢复声音' : '屏蔽声音'}
-              onClick={() => toggleVol(e.identity)}
-            >
-              {el(slashIcon('volume', 15, volumePctFor(e.identity) === 0, 'currentColor'))}
-            </button>
-            <VolSlider identity={e.identity} />
-          </div>
+          <Show
+            when={fsBarOpen()}
+            fallback={
+              <button
+                class="hit fs-bar-show"
+                title="显示音量条"
+                aria-label="显示音量条"
+                onClick={(ev) => {
+                  ev.stopPropagation();
+                  setFsBarOpen(true);
+                }}
+              >
+                {el(slashIcon('volume', 16, volumePctFor(e.identity) === 0, 'currentColor'))}
+              </button>
+            }
+          >
+            <div class="fs-bar" onClick={(ev) => ev.stopPropagation()}>
+              <button
+                class="hit fs-vol-mute"
+                classList={{ 'muted-on': volumePctFor(e.identity) === 0 }}
+                title={volumePctFor(e.identity) === 0 ? '恢复声音' : '屏蔽声音'}
+                onClick={() => toggleVol(e.identity)}
+              >
+                {el(slashIcon('volume', 15, volumePctFor(e.identity) === 0, 'currentColor'))}
+              </button>
+              <VolSlider identity={e.identity} />
+              <button class="hit fs-bar-hide" title="收起音量条" aria-label="收起音量条" onClick={() => setFsBarOpen(false)}>
+                {el(icon('close', 14))}
+              </button>
+            </div>
+          </Show>
         </Show>
       </div>
     );
@@ -2009,7 +2154,10 @@ export async function renderRoom(root: HTMLElement, channel: string) {
           featured: p.spotlight() && p.focusKey() === p.e.key,
         }}
         data-identity={p.e.identity}
-        onClick={() => togglePin(p.e.key)}
+        onClick={() => {
+          if (swipeJustEnded()) return; // 上下滑手势抬手合成的那次 click
+          togglePin(p.e.key);
+        }}
       >
         {el(avatarHtml(part()?.username ?? '', 'avatar avatar-xl' + (isSpeaking() ? ' speaking' : '')))}
         <div class="a-name">
@@ -2338,6 +2486,13 @@ export async function renderRoom(root: HTMLElement, channel: string) {
       document.body.classList.toggle('theater-on', layoutMode() === 'theater');
     });
     onCleanup(() => document.body.classList.remove('theater-on'));
+    // 手势调出来的亮度是会话级的：退出剧场就复位，别把变暗的画面带回网格布局
+    createEffect(() => {
+      if (layoutMode() !== 'theater') {
+        setStageBright(1);
+        setHud(null);
+      }
+    });
     // 画中画期间画面没了（对方停了投屏）：收回窗口，别留一个空壳浮在桌面上
     createEffect(() => {
       if (pipCtl.active() && !screenVideo()) pipCtl.close();
@@ -2478,7 +2633,11 @@ export async function renderRoom(root: HTMLElement, channel: string) {
             />
           </Show>
           <div class="room-main" style="flex-grow:1;display:flex;flex-direction:column;min-width:0;min-height:0">
-            <div class="stage-area">
+            <div
+              class="stage-area"
+              style={{ '--stage-brightness': String(stageBright()) }}
+              ref={(elm) => onCleanup(wireStageSwipe(elm))}
+            >
               <div class="stage-status">
                 {statusText()}
                 <Show when={voiceState().phase === 'retry'}>
@@ -2523,6 +2682,23 @@ export async function renderRoom(root: HTMLElement, channel: string) {
                   <For each={railTiles()}>{(e) => <Tile e={e} />}</For>
                 </div>
               </div>
+              {/* 上下滑手势的中央 HUD：图标 + 进度条 + 百分比，数值全从权威现取。
+                  纯手势视觉回声，且屏幕阅读器会截走单指滑动：aria-hidden，别刷播报 */}
+              <Show when={hud()}>
+                {(h) => (
+                  <div class="stage-hud" classList={{ fading: !!h().fading }} aria-hidden="true">
+                    {el(icon(h().kind === 'brightness' ? 'sun' : 'volume', 24, 'currentColor'))}
+                    <div class="stage-hud-bar">
+                      <i style={{ width: `${hudPct()}%` }}></i>
+                    </div>
+                    <div class="stage-hud-num mono">{hudLabel()}%</div>
+                    {/* 静音全部时 master 恒为 0，滑动不会有声音变化——说清楚，但不替用户解除 */}
+                    <Show when={h().kind === 'volume' && deafened()}>
+                      <div class="stage-hud-note">已静音全部</div>
+                    </Show>
+                  </div>
+                )}
+              </Show>
               <div style="display:none" ref={audioBinEl}></div>
             </div>
             <div class="control-bar">

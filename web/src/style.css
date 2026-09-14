@@ -415,6 +415,18 @@ body {
 }
 .fs-vol-mute.muted-on { color: var(--red); }
 .fs-bar .vol-num { color: inherit; font-size: 11.5px; }
+/* 音量条压在画面正中偏下，得能收起；收起后留一个喇叭按钮把它叫回来 */
+.fs-bar .fs-bar-hide {
+  width: 24px; height: 24px; flex-shrink: 0; border-radius: 7px;
+  display: flex; align-items: center; justify-content: center; color: var(--on-stage);
+}
+.fs-bar-show {
+  position: absolute; left: 50%; bottom: 22px; transform: translateX(-50%); z-index: 3;
+  width: 38px; height: 38px; border-radius: 10px;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--scrim); border: 1px solid var(--stage-line); color: var(--on-stage);
+  backdrop-filter: blur(6px);
+}
 
 /* 无视频参与者的音频块 */
 .tile.tile-audio {
@@ -1093,6 +1105,9 @@ body.theater-on .sidebar { display: none; }
 /* 缩略轨与其余卡片让位：剧场里只留焦点画面，谁在房间看浮动名册 */
 .room-frame.layout-theater .video-grid.spotlight .rail { display: none; }
 .room-frame.layout-theater .tile.featured { border-radius: 0; border: 0; box-shadow: none; }
+/* 上下滑手势的「亮度」：网页拿不到系统屏幕亮度，只能压画面本身——
+   作用对象只有 video，名字标签/徽标/控制栏不跟着变暗 */
+.room-frame.layout-theater .tile.featured video { filter: brightness(var(--stage-brightness, 1)); }
 /* 侧栏不再占布局：要看成员/聊天时浮在画面上（控件仍然可达，不是被砍掉） */
 .room-frame.layout-theater .side-panel {
   position: fixed; top: 0; right: 0; bottom: 0; z-index: 280;
@@ -1107,6 +1122,20 @@ body.theater-on .sidebar { display: none; }
 .room-frame.layout-theater.chrome-hidden > .topbar,
 .room-frame.layout-theater.chrome-hidden .control-bar { opacity: 0; pointer-events: none; }
 .room-frame.layout-theater.chrome-hidden { cursor: none; }
+
+/* 剧场上下滑手势的中央 HUD（左亮度 / 右音量）：抬手后停留一会儿再淡出 */
+.stage-hud {
+  position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); z-index: 4;
+  display: flex; flex-direction: column; align-items: center; gap: 9px;
+  min-width: 132px; padding: 16px 20px; border-radius: 14px;
+  background: var(--scrim); border: 1px solid var(--stage-line); color: var(--on-stage);
+  backdrop-filter: blur(6px); pointer-events: none;
+}
+.stage-hud.fading { opacity: 0; transition: opacity 0.45s ease 0.15s; }
+.stage-hud-bar { width: 112px; height: 4px; border-radius: 2px; background: rgba(255, 255, 255, 0.24); overflow: hidden; }
+.stage-hud-bar i { display: block; height: 100%; background: var(--ember); }
+.stage-hud-num { font-size: 13px; }
+.stage-hud-note { font-size: 11px; color: var(--red); }
 
 /* --- 剧场浮动名册 --- */
 .float-roster {
