@@ -1,0 +1,59 @@
+[package]
+name = "hearth-desktop"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82"
+description = "Hearth 桌面端"
+publish = false
+
+[lib]
+name = "hearth_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+gstreamer = "0.25"
+gstreamer-app = "0.25"
+gstreamer-video = "0.25"
+gstreamer-audio = "0.25"
+
+# macOS 采集：直接用 objc2 的框架绑定（ScreenCaptureKit + CoreMedia/CoreVideo），
+# 不走第三方封装——SCStream 的音频样本与像素缓冲都要按原样拿到，封装层反而挡路。
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = "0.3"
+objc2-core-foundation = "0.3"
+objc2-core-audio-types = "0.3"
+objc2-screen-capture-kit = { version = "0.3", features = [
+    "SCStream",
+    "SCShareableContent",
+    "SCError",
+    "block2",
+    "dispatch2",
+    "objc2-core-media",
+    "objc2-core-foundation",
+    "objc2-core-graphics",
+] }
+objc2-core-media = { version = "0.3", features = [
+    "CMBase",
+    "CMBlockBuffer",
+    "CMFormatDescription",
+    "CMSampleBuffer",
+    "CMSync",
+    "objc2-core-audio-types",
+] }
+objc2-core-video = { version = "0.3", features = [
+    "CVBase",
+    "CVBuffer",
+    "CVImageBuffer",
+    "CVPixelBuffer",
+    "CVReturn",
+] }
+objc2-core-graphics = { version = "0.3", features = ["CGDirectDisplay"] }
+block2 = "0.6"
+dispatch2 = "0.3"
