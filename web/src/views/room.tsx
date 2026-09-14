@@ -9,9 +9,11 @@ import { createEffect, createMemo, createSignal, on, onCleanup, untrack, For, Sh
 import { render } from 'solid-js/web';
 import { closeAccountMenu, openAccountMenu } from '../account-menu';
 import { startAfkWatch } from '../afk';
-import { ApiError, fetchJoinCredentials, getUser, guestTimeLeft, isGuest, kickUser, listChannels, muteUser, reportClientLog } from '../api';
+import { ApiError, fetchJoinCredentials, getIngestToken, getUser, guestTimeLeft, isGuest, kickUser, listChannels, muteUser, reportClientLog } from '../api';
 import type { ChannelRole, DataLine, EngineCred } from '../api';
 import { playCue } from '../audio';
+import { capabilities, listSources, startPublish, stopPublish } from '../bridge';
+import type { BridgeCaps, NativeSource } from '../bridge';
 import { deleteMessage, fetchMessages, postMessage, setReaction } from '../chat';
 import type { ChatMessage } from '../chat';
 import { compressImage } from '../chat/compress';
@@ -35,6 +37,7 @@ import { LatencyResult, measureTile, showTileMenu } from './room/latency-result'
 import type { LatencyState } from './room/latency-result';
 import { IngestBadge } from './room/ingest-badge';
 import { IngestPanel } from './room/ingest-panel';
+import { NativeSourcePanel } from './room/native-source-panel';
 import { createUnreadMarker } from './room/unread-divider';
 import { showMsgMenu } from './room/msg-menu';
 import { mergeReaction, ReactionBar } from './room/reactions';
@@ -171,6 +174,12 @@ function saveVolumes(m: Map<string, number>) {
   localStorage.setItem(VOLS_KEY, JSON.stringify(Object.fromEntries(m)));
 }
 
+// 取可展示的错误文案：Tauri 命令抛回来的是字符串而不是 Error，统一在这里收口
+function errText(err: unknown): string {
+  if (err instanceof Error) return err.message;
+  return typeof err === 'string' ? err : String(err);
+}
+
 export async function renderRoom(root: HTMLElement, channel: string) {
   const prefs = loadPrefs();
   const canScreenShare = typeof navigator.mediaDevices?.getDisplayMedia === 'function';
@@ -255,6 +264,12 @@ export async function renderRoom(root: HTMLElement, channel: string) {
   const [micOn, setMicOn] = createSignal(prefs.mic);
   const [cameraOn, setCameraOn] = createSignal(prefs.camera);
   const [screenOn, setScreenOn] = createSignal(false);
+  // 桌面壳的原生投屏能力（浏览器里恒为 null → 一切照旧）。有它时「投屏」按钮走
+  // 原生流程：SCK 采集 → 壳内 WHIP 推流，不经浏览器的 PeerConnection。
+  const [bridgeCaps, setBridgeCaps] = createSignal<BridgeCaps | null>(null);
+  const nativeScreen = createMemo(() => bridgeCaps()?.native_publish === true);
+  const [sourcePick, setSourcePick] = createSignal<NativeSource[] | null>(null);
+  void capabilities().then(setBridgeCaps);
   const [deafened, setDeafened] = createSignal(false);
   const [stageOk, setStageOk] = createSignal(false); // 舞台线可用（决定摄像头/投屏按钮禁用态）
   const [stageHint, setStageHint] = createSignal('本服未启用舞台线（投屏/摄像头）');
@@ -1041,7 +1056,8 @@ export async function renderRoom(root: HTMLElement, channel: string) {
             setCameraOn(false);
           }
         }
-        if (screenOn()) {
+        // 原生发布跑在壳里，与舞台线的连接无关，重连不该把它的状态抹掉
+        if (screenOn() && !nativeScreen()) {
           setScreenOn(false);
           toast('重连后投屏需要重新发起', '', 4000);
         }
@@ -1201,7 +1217,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
           scheduleRejoin('voice', 0);
         } else {
           stageUp = false;
-          setScreenOn(false);
+          if (!nativeScreen()) setScreenOn(false);
           updateStageButtons();
           shell.setConn(!!voiceLine.engine?.connected(), connBoxMeta());
           scheduleRejoin('stage', 0);
@@ -1406,6 +1422,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
   }
 
   async function toggleScreen() {
+    if (nativeScreen()) return toggleNativeScreen();
     const eng = stageEngine();
     if (!eng || !stageUp) {
       toast(stageHint(), '', 3000);
@@ -1422,6 +1439,60 @@ export async function renderRoom(root: HTMLElement, channel: string) {
       }
     }
     refreshMeta();
+  }
+
+  // 原生投屏：选源 → 取本人推流令牌 → 交给壳去推 WHIP。发布不经浏览器的
+  // PeerConnection，所以这里不碰 stageEngine；能不能推最终由服务端的 admitIngest 判。
+  // 令牌是账号级的一把（标签 obs），与 OBS 共用——两边同时推会互相顶替。
+  async function toggleNativeScreen() {
+    if (screenOn()) {
+      setScreenOn(false);
+      try {
+        await stopPublish();
+      } catch (err) {
+        toast(`停止投屏失败：${errText(err)}`, 'bad');
+      }
+      refreshMeta();
+      return;
+    }
+    try {
+      const sources = await listSources();
+      if (!sources.length) {
+        toast('没找到可共享的显示器或窗口', 'bad', 4000);
+        return;
+      }
+      setSourcePick(sources);
+    } catch (err) {
+      toast(errText(err), 'bad', 6000);
+    }
+  }
+
+  async function startNativeScreen(source: NativeSource) {
+    setSourcePick(null);
+    const id = channelId();
+    if (!id) {
+      toast('频道信息还没加载完，稍等一下再试', 'bad');
+      return;
+    }
+    try {
+      const info = await getIngestToken();
+      if (!info.base) throw new Error('本服没有可用的推流入口');
+      if (!info.enabled) throw new Error('当前舞台内核未启用，推流入口不可用');
+      const p = loadPrefs();
+      await startPublish({
+        endpoint: `${info.base}${id}`,
+        token: info.token,
+        source_id: source.id,
+        bitrate_kbps: Math.round(p.bitrate * 1000),
+        // 原生侧只有 VideoToolbox 的 H.264 / HEVC，vp9·av1 这类浏览器编码落到 HEVC
+        codec: p.screenCodec === 'h264' ? 'h264' : 'h265',
+      });
+      setScreenOn(true);
+      refreshMeta();
+    } catch (err) {
+      setScreenOn(false);
+      toast(`投屏失败：${errText(err)}`, 'bad', 6000);
+    }
   }
 
   // ---- 本地麦克风电平表：让说话的人确认自己有声音 ----
@@ -1901,7 +1972,8 @@ export async function renderRoom(root: HTMLElement, channel: string) {
           ?.switchCamera(p.camDeviceId)
           .catch((err) => toast(`切换摄像头失败：${(err as Error)?.message ?? ''}`, 'bad'));
     }
-    if (what === 'screen' && screenOn()) applyScreenPrefsSoon();
+    // 原生发布的码率是建流时定死的（固定码率），改画质要重新发起，不热应用
+    if (what === 'screen' && screenOn() && !nativeScreen()) applyScreenPrefsSoon();
   };
   prefsBus.addEventListener('prefs', onPrefs);
 
@@ -3099,6 +3171,14 @@ export async function renderRoom(root: HTMLElement, channel: string) {
             onMenu={(x, y, p) => showUserMenu(x, y, p.uid, p.username, p.identity)}
           />
         </Show>
+        <Show when={sourcePick()}>
+          <NativeSourcePanel
+            sources={sourcePick()!}
+            appAudio={bridgeCaps()?.app_audio === true}
+            onPick={(s) => void startNativeScreen(s)}
+            onClose={() => setSourcePick(null)}
+          />
+        </Show>
         <Show when={ingestOpen()}>
           <IngestPanel
             channel={channel}
@@ -3221,6 +3301,8 @@ export async function renderRoom(root: HTMLElement, channel: string) {
       setAppBadge(0);
       diag('info', 'room_close');
       leaving = true;
+      // 原生发布在壳的进程里，不随页面卸载停：离房必须显式收回
+      if (nativeScreen() && screenOn()) void stopPublish().catch(() => {});
       closeChannelMenu(); // 两个浮层都挂在 body 上，房间视图卸载不会带走它们
       closeAccountMenu();
       pipCtl.dispose();

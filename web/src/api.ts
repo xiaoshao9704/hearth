@@ -2,12 +2,36 @@
 import { setLeaveGuard } from './nav';
 import { toast } from './ui';
 
-export const SERVER_URL: string = import.meta.env.VITE_SERVER_URL ?? 'http://localhost:8080';
-export const LIVEKIT_URL_FALLBACK: string =
-  import.meta.env.VITE_LIVEKIT_URL ?? 'ws://localhost:7880';
-
 const TOKEN_KEY = 'hearth_token';
 const USER_KEY = 'hearth_user';
+const SERVER_KEY = 'hearth_server';
+
+// 桌面壳里服务器地址是用户填的（同一个安装包要能连任意一台 hearth），浏览器里仍是
+// 构建期注入的那个。优先级：本机存档 > 壳注入的默认值 > 构建期变量。
+// 模块加载时定一次，改地址的一方负责 reload——运行中换服务器等于换了整个会话。
+declare global {
+  interface Window {
+    __HEARTH_SERVER__?: string;
+  }
+}
+
+function trimSlash(url: string): string {
+  return url.replace(/\/+$/, '');
+}
+
+export function getServerURL(): string | null {
+  return localStorage.getItem(SERVER_KEY);
+}
+
+export function setServerURL(url: string) {
+  localStorage.setItem(SERVER_KEY, trimSlash(url));
+}
+
+export const SERVER_URL: string = trimSlash(
+  getServerURL() ?? window.__HEARTH_SERVER__ ?? import.meta.env.VITE_SERVER_URL ?? 'http://localhost:8080',
+);
+export const LIVEKIT_URL_FALLBACK: string =
+  import.meta.env.VITE_LIVEKIT_URL ?? 'ws://localhost:7880';
 
 // 系统角色阶梯：guest < user < power < admin < super（前端不推导，只做显隐）
 export type Role = 'guest' | 'user' | 'power' | 'admin' | 'super';

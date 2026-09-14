@@ -2,7 +2,8 @@
 import './style.css';
 import './install'; // beforeinstallprompt 在加载早期触发，必须尽早 import 才接得住
 import { initScreenCodecAuto } from './prefs';
-import { fetchMe, getToken } from './api';
+import { fetchMe, getServerURL, getToken } from './api';
+import { inShell } from './bridge';
 import { isStandalone } from './install';
 import { allowLeave } from './nav';
 import { armNotifyPermission } from './notify';
@@ -14,6 +15,7 @@ import { renderLogin } from './views/login';
 import { renderManage } from './views/manage';
 import { registerServiceWorker } from './sw';
 import { renderRoom } from './views/room';
+import { renderServerPick } from './views/server';
 import { closeSettings } from './views/settings';
 
 // 登录后回跳用：main.ts 判定未登录时记，login.ts 登录成功后读取并清除（同一把 key）
@@ -37,6 +39,13 @@ function route() {
   const authed = getToken() !== null;
 
   closeSettings(); // 换路由时收掉设置浮层
+
+  // 桌面壳里服务器地址是用户填的：没填过就先问，填错了也能从 #/server 回来改。
+  // 浏览器里 SERVER_URL 是构建期定的，这条永不触发。
+  if (inShell() && (hash.startsWith('#/server') || !getServerURL())) {
+    renderServerPick(app);
+    return;
+  }
 
   if (hash.startsWith('#/join/')) {
     document.title = '加入 Hearth';
