@@ -32,3 +32,6 @@ server/internal/webui/dist/*
 !server/internal/webui/dist/.keep
 
 out/
+
+# Retired local deployment generator output
+deploy/generated/
