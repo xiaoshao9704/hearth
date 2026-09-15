@@ -9,7 +9,7 @@ import { createEffect, createMemo, createSignal, on, onCleanup, untrack, For, Sh
 import { render } from 'solid-js/web';
 import { closeAccountMenu, openAccountMenu } from '../account-menu';
 import { startAfkWatch } from '../afk';
-import { ApiError, fetchJoinCredentials, getIngestToken, getUser, guestTimeLeft, isGuest, kickUser, listChannels, muteUser, reportClientLog } from '../api';
+import { ApiError, deviceId, fetchJoinCredentials, getCastTicket, getUser, guestTimeLeft, isGuest, kickUser, listChannels, muteUser, reportClientLog } from '../api';
 import type { ChannelRole, DataLine, EngineCred } from '../api';
 import { playCue } from '../audio';
 import { capabilities, listSources, onPublishState, startPublish, stopPublish } from '../bridge';
@@ -128,6 +128,12 @@ interface FileState {
 }
 
 // 发侧画质受限原因的中文说法（getStats 的 qualityLimitationReason）
+// 推流参与者的来源文案：设备票的标签是 cast-{设备 id}，那是桌面端原生投屏（设备 id 是
+// 内部标识，不展示）；其余走账号级推流令牌，标签是用户自己起的名字，展示出来有用
+function ingestLabel(tag?: string): string {
+  return tag?.startsWith('cast-') ? '桌面投屏' : `OBS 推流${tag ? ` · ${tag}` : ''}`;
+}
+
 const LIMIT_TEXT: Record<string, string> = { cpu: 'CPU', bandwidth: '带宽', other: '其他' };
 
 // 内联预览的图片 MIME 白名单：白名单外一律当文件走 a[download]，不进 <img>
@@ -739,7 +745,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
         (!deviceMode || p.identity === identity),
     );
     const muted = targets.some((p) => volumeFor(p.identity) === 0);
-    const devName = (p: EPart) => (p.ingest ? `OBS 推流${p.tag ? ` · ${p.tag}` : ''}` : p.tag || p.identity);
+    const devName = (p: EPart) => (p.ingest ? ingestLabel(p.tag) : p.tag || p.identity);
     // 禁言判定只看真人设备：推流参与者（推流凭证自带发布权限）会污染 every() 推断
     const voiceTargets = targets.filter((p) => !p.ingest);
     const gagged = voiceTargets.length > 0 && voiceTargets.every((p) => !p.canPublish);
@@ -1454,9 +1460,8 @@ export async function renderRoom(root: HTMLElement, channel: string) {
     refreshMeta();
   }
 
-  // 原生投屏：选源 → 取本人推流令牌 → 交给壳去推 WHIP。发布不经浏览器的
+  // 原生投屏：选源 → 取本设备的投屏票 → 交给壳去推 WHIP。发布不经浏览器的
   // PeerConnection，所以这里不碰 stageEngine；能不能推最终由服务端的 admitIngest 判。
-  // 令牌是账号级的一把（标签 obs），与 OBS 共用——两边同时推会互相顶替。
   async function toggleNativeScreen() {
     if (screenOn()) {
       setScreenOn(false);
@@ -1488,13 +1493,12 @@ export async function renderRoom(root: HTMLElement, channel: string) {
       return;
     }
     try {
-      const info = await getIngestToken();
+      const info = await getCastTicket(id, deviceId());
       if (!info.base) throw new Error('本服没有可用的推流入口');
-      if (!info.enabled) throw new Error('当前舞台内核未启用，推流入口不可用');
       const p = loadPrefs();
       await startPublish({
         endpoint: `${info.base}${id}`,
-        token: info.token,
+        token: info.ticket,
         source_id: source.id,
         bitrate_kbps: Math.round(p.bitrate * 1000),
         // 原生侧只有 VideoToolbox 的 H.264 / HEVC，vp9·av1 这类浏览器编码落到 HEVC
@@ -2104,7 +2108,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
             </div>
           </Show>
           <Show when={e.ingest}>
-            <div class="spec-badge">{e.tag ? `OBS · ${e.tag}` : 'OBS · WHIP'}</div>
+            <div class="spec-badge">{e.tag?.startsWith('cast-') ? '桌面投屏' : e.tag ? `OBS · ${e.tag}` : 'OBS · WHIP'}</div>
           </Show>
         </div>
         <div class="tile-label">
@@ -2216,7 +2220,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
         </div>
         <Show when={part()?.ingest}>
           <div style="position:absolute;top:12px;left:12px" class="tag tag-ember mono">
-            OBS 推流{part()?.tag ? ` · ${part()?.tag}` : ''}
+            {ingestLabel(part()?.tag)}
           </div>
         </Show>
         <div class="tile-actions">
@@ -2880,8 +2884,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
                     const isMe = first.uid === myUid;
                     const isOwner = uname === ownerName();
                     const anySpeaking = () => devices.some((d) => speaking().has(d.identity));
-                    const devName = (p: EPart) =>
-                      p.ingest ? `OBS 推流${p.tag ? ` · ${p.tag}` : ''}` : p.tag || p.identity;
+                    const devName = (p: EPart) => (p.ingest ? ingestLabel(p.tag) : p.tag || p.identity);
                     const devSpeaking = (p: EPart) => speaking().has(p.identity);
                     const devMuted = (p: EPart) => volumePctFor(p.identity) === 0;
                     const devBits = (p: EPart) =>

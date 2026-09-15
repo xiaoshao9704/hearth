@@ -392,6 +392,22 @@ export function getIngestToken(): Promise<IngestTokenInfo> {
   return req<IngestTokenInfo>('/api/ingest/token');
 }
 
+// ---- 桌面端原生投屏的设备票（短时效，绑本频道与本设备）----
+
+export interface CastTicketInfo {
+  ticket: string; // 只能推这个频道、这台设备，10 分钟到期
+  base: string; // 同源 WHIP 基地址（/providers/{alias}/w/），拼上频道 id 即完整端点
+  expires_in: number;
+}
+
+// 点投屏时现取：服务端当场判定能否发布，与 OBS 的账号级推流令牌互不干扰
+export function getCastTicket(channelId: number, deviceId: string): Promise<CastTicketInfo> {
+  return req<CastTicketInfo>(`/api/channels/${channelId}/cast-ticket`, {
+    method: 'POST',
+    body: { device_id: deviceId },
+  });
+}
+
 // 重置令牌（旧令牌立即失效，进行中的推流会话全部掐断）
 export function resetIngestToken(): Promise<IngestTokenInfo> {
   return req<IngestTokenInfo>('/api/ingest/token/reset', { method: 'POST' });
