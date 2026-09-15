@@ -2,9 +2,10 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <!-- 现阶段链接的是 Homebrew 的 GStreamer 动态库，与本 app 不同签名身份；hardened runtime 的
-       库校验会拒载。等 GStreamer 打进 Contents/Frameworks 并用同一身份重签后，此项应删除。 -->
-  <key>com.apple.security.cs.disable-library-validation</key>
-  <true/>
+  <!-- 暂时没有需要声明的 entitlement。GStreamer 已经打进 Contents/Frameworks 与
+       Contents/Resources/gstreamer-1.0（scripts/bundle-gst-macos.sh），与主程序同一份签名；
+       ad-hoc 分发不开 hardened runtime，换 Developer ID 签名后库与主程序同 Team ID，
+       库校验也放行——两种形态都不需要 disable-library-validation。
+       屏幕录制与麦克风走 TCC 授权，不是 entitlement。文件留着是给真实签名/公证留位置。 -->
 </dict>
 </plist>
