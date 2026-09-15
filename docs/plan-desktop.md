@@ -88,6 +88,7 @@
 
 - 全局热键按键说话（含游戏全屏）；「在本机运行服务器」调用已安装 hearth 的 `service` CLI 并显示状态。
 - Windows 签名、WebView2 运行时、GStreamer 运行时打包；macOS 签名、公证、屏幕录制与麦克风权限归属用真实签名的包验证。
+- 通行密钥回归：壳内网页的 WebAuthn 不可用（origin 是 `tauri://localhost`，且 WKWebView 只对带浏览器 entitlement 的应用开放 WebAuthn），M1 起在壳内隐藏入口。M3 用原生 API 接回：macOS 走 `ASAuthorizationPlatformPublicKeyCredentialProvider`，RP ID 取用户选定的服务器域名，系统按该域名的 `/.well-known/apple-app-site-association` 核验 Team ID + bundle id，hearth 服务端内建该文件并写死官方桌面端标识；需要 Developer ID 签名（ad-hoc 无 Team ID）。Windows Hello 原生接口的域名关联规则待 M2 实测。网页侧 `passkey.ts` 在壳内把仪式改走桥，服务端挑战与验签接口不变。
 - 两端从干净系统完成安装、自签直连、邀请进房、原生投屏、升级与卸载后再定版本。
 
 ## 验收总则
