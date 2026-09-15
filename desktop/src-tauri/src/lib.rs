@@ -343,6 +343,11 @@ pub fn run() {
                 let trust = trust.clone();
                 win.with_webview(move |wv| unsafe { trust::macos::install(wv.inner(), trust) })?;
             }
+            #[cfg(target_os = "windows")]
+            if let Some(win) = app.get_webview_window("main") {
+                let trust = trust.clone();
+                win.with_webview(move |wv| trust::windows::install(&wv, trust))?;
+            }
             Ok(())
         })
         // 关窗与退出都要把在途发布收回来，否则 WHIP 会话会一直挂在服务端

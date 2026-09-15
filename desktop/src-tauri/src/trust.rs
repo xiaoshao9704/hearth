@@ -20,6 +20,17 @@ use sha2::{Digest, Sha256};
 
 #[cfg(target_os = "macos")]
 pub mod macos;
+#[cfg(target_os = "windows")]
+pub mod windows;
+
+/// 换根或删根后清掉 WebView 里缓存的放行决定。
+/// 只有 WebView2 有这层缓存（按 host+证书存到 session 结束）；WKWebView 每条连接现问现答，无需清。
+fn clear_webview_decisions(app: &tauri::AppHandle) {
+    #[cfg(target_os = "windows")]
+    windows::clear_decisions(app);
+    #[cfg(not(target_os = "windows"))]
+    let _ = app;
+}
 
 /// 探测与下载的上限：本机网络内应当秒回，卡住不如快失败。
 const HTTP_TIMEOUT: Duration = Duration::from_secs(10);
@@ -118,8 +129,12 @@ fn is_loopback(url: &Url) -> bool {
     host.parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback())
 }
 
-/// 建 http 客户端。anchor 非空时在**系统根之外**再加一条锚（native-tls 在 macOS 上
-/// 走 SecTrustSetAnchorCertificates，不会关掉内置根）；insecure 只给 /ca.crt 下载用。
+/// 建 http 客户端。anchor 非空时在**系统根之外**再加一条锚，两个平台都不会关掉内置根：
+/// macOS 的 native-tls 走 SecTrustSetAnchorCertificates；Windows 走 schannel，加的证书进
+/// 链构建库，只有它真的出现在最终链里才补 CERT_CHAIN_POLICY_ALLOW_UNKNOWN_CA_FLAG，
+/// 有效期、serverAuth、主机名仍由 CertVerifyCertificateChainPolicy 照判
+/// （native-tls 0.2 `src/imp/schannel.rs` + schannel 0.1 `tls_stream.rs` 的 validate）。
+/// insecure 只给 /ca.crt 下载用。
 fn client(anchor: Option<&[u8]>, insecure: bool) -> Result<reqwest::Client, String> {
     let mut b = reqwest::Client::builder()
         .timeout(HTTP_TIMEOUT)
@@ -248,11 +263,17 @@ pub async fn check(trust: &Trust, url: &str) -> Result<CheckResult, String> {
 /// 配对：下载公开的 /ca.crt，指纹对上才作为该服务器的信任锚落盘，落盘后再真实校验一次。
 #[tauri::command(async, rename_all = "snake_case")]
 pub async fn pair_server(
+    app: tauri::AppHandle,
     trust: tauri::State<'_, Arc<Trust>>,
     url: String,
     fingerprint_sha256: String,
 ) -> Result<(), String> {
-    pair(&trust, &url, &fingerprint_sha256).await
+    let result = pair(&trust, &url, &fingerprint_sha256).await;
+    if result.is_ok() {
+        // 同一台服务器换了根：WebView 里按旧根做过的放行决定必须作废。
+        clear_webview_decisions(&app);
+    }
+    result
 }
 
 pub async fn pair(trust: &Trust, url: &str, fingerprint_sha256: &str) -> Result<(), String> {
@@ -312,10 +333,15 @@ pub async fn pair(trust: &Trust, url: &str, fingerprint_sha256: &str) -> Result<
 /// 忘记服务器：删掉本机这条配置（含信任锚）。网页那边的登录态自己清。
 #[tauri::command(async)]
 pub async fn forget_server(
+    app: tauri::AppHandle,
     trust: tauri::State<'_, Arc<Trust>>,
     url: String,
 ) -> Result<(), String> {
-    forget(&trust, &url)
+    let result = forget(&trust, &url);
+    if result.is_ok() {
+        clear_webview_decisions(&app);
+    }
+    result
 }
 
 pub fn forget(trust: &Trust, url: &str) -> Result<(), String> {
