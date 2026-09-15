@@ -198,6 +198,8 @@ func (a *API) Router() *chi.Mux {
 			r.Group(func(r chi.Router) {
 				r.Use(a.requireChannel)
 				r.Post("/kick", a.kick)
+				// 桌面端原生投屏的设备票：权限按入场判定（要能发布），在 handler 内判
+				r.Post("/cast-ticket", a.castTicketIssue)
 				// 聊天：权限按入场判定（封禁/邀请制/禁言），在 handler 内判，不需要频道管理权限
 				r.Get("/messages", a.listMessages)
 				r.Post("/messages", a.postMessage)

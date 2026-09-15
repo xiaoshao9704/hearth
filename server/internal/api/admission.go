@@ -7,6 +7,7 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"strings"
 
 	"hearth/server/internal/rtc"
 	"hearth/server/internal/store"
@@ -86,7 +87,8 @@ type ingestAdmission struct {
 // 推流不再是独立选择器：URL 的 alias 段必须是当前舞台实例（stage_provider 选中的那个，
 // 推进别的实例观众看不到），且该实例有 WHIP 推流能力，否则 definitive 404——
 // 已退场的旧内建推流实例等历史形态因此天然 404。
-// 其后：令牌反查用户 + URL 取频道 → admitUser（封禁/邀请制/禁言）。全部 definitive：
+// 其后：URL 取频道 + 令牌反查用户（账号级推流令牌，或桌面端的设备票 ct1.，见 castticket.go）
+// → admitUser（封禁/邀请制/禁言）。全部 definitive：
 // 令牌不存在 404、频道不存在 404、不许推（封禁/邀请制/禁言/账号停用）403、查询出错 503——
 // 不再有 fail-open：上游收到的已是 hearth 出示的实例凭证，不再承担鉴权。
 // 返回 false 时响应已写好。
@@ -106,22 +108,6 @@ func (a *API) admitIngest(ctx context.Context, w http.ResponseWriter, alias, cha
 		writeErr(w, http.StatusServiceUnavailable, "推流入口暂时不可用，请稍后再试")
 		return ingestAdmission{}, false
 	}
-	it, err := a.st.IngestTokenByToken(ctx, token)
-	if errors.Is(err, store.ErrNotFound) {
-		writeErr(w, http.StatusNotFound, "推流令牌无效或已重置")
-		return ingestAdmission{}, false
-	}
-	if err != nil {
-		return fail(err)
-	}
-	u, err := a.st.UserByID(ctx, it.UserID)
-	if errors.Is(err, store.ErrNotFound) { // 用户已删除，令牌等同失效
-		writeErr(w, http.StatusNotFound, "推流令牌无效或已重置")
-		return ingestAdmission{}, false
-	}
-	if err != nil {
-		return fail(err)
-	}
 	c, err := a.channelByRef(ctx, channel) // 新地址用频道 id，OBS 里已存的名字地址继续有效
 	if errors.Is(err, store.ErrNotFound) {
 		writeErr(w, http.StatusNotFound, "频道不存在")
@@ -129,6 +115,48 @@ func (a *API) admitIngest(ctx context.Context, w http.ResponseWriter, alias, cha
 	}
 	if err != nil {
 		return fail(err)
+	}
+	// 令牌两族：ct1. 前缀是桌面端的设备票（无状态签名、绑频道与设备标签、短时效），
+	// 其余是账号级推流令牌（OBS）。两族只差「怎么反查用户与标签」，其后判定完全一致。
+	var u *store.User
+	var tag string
+	if strings.HasPrefix(token, castTicketPrefix) {
+		secret, serr := a.castSecret(ctx)
+		if serr != nil {
+			return fail(serr)
+		}
+		t, terr := parseCastTicket(secret, token)
+		if terr != nil || t.ChannelID != c.ID {
+			writeErr(w, http.StatusForbidden, "投屏凭证无效或已过期，请重新发起投屏")
+			return ingestAdmission{}, false
+		}
+		u, err = a.st.UserByID(ctx, t.UID)
+		if errors.Is(err, store.ErrNotFound) { // 用户已删除，票等同失效
+			writeErr(w, http.StatusForbidden, "投屏凭证无效或已过期，请重新发起投屏")
+			return ingestAdmission{}, false
+		}
+		if err != nil {
+			return fail(err)
+		}
+		tag = t.Tag
+	} else {
+		it, ierr := a.st.IngestTokenByToken(ctx, token)
+		if errors.Is(ierr, store.ErrNotFound) {
+			writeErr(w, http.StatusNotFound, "推流令牌无效或已重置")
+			return ingestAdmission{}, false
+		}
+		if ierr != nil {
+			return fail(ierr)
+		}
+		u, err = a.st.UserByID(ctx, it.UserID)
+		if errors.Is(err, store.ErrNotFound) { // 用户已删除，令牌等同失效
+			writeErr(w, http.StatusNotFound, "推流令牌无效或已重置")
+			return ingestAdmission{}, false
+		}
+		if err != nil {
+			return fail(err)
+		}
+		tag = it.Tag
 	}
 	if u.Disabled {
 		writeErr(w, http.StatusForbidden, "账号已被停用")
@@ -148,7 +176,7 @@ func (a *API) admitIngest(ctx context.Context, w http.ResponseWriter, alias, cha
 	}
 	return ingestAdmission{
 		Room:     c.Name,
-		Identity: rtc.Identity(u.ID, it.Tag),
-		Meta:     rtc.Meta{UID: u.ID, Username: u.Username, Kind: "ingest", Tag: it.Tag},
+		Identity: rtc.Identity(u.ID, tag),
+		Meta:     rtc.Meta{UID: u.ID, Username: u.Username, Kind: "ingest", Tag: tag},
 	}, true
 }
