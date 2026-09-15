@@ -30,7 +30,9 @@ jobs:
           persist-credentials: false
 
       - name: Validate bundle script syntax
-        run: bash -n desktop/scripts/bundle-gst-macos.sh
+        run: |
+          bash -n desktop/scripts/bundle-gst-macos.sh
+          bash -n desktop/scripts/build-sidecar.sh
 
       - uses: actions/setup-node@v4
         with:
@@ -71,6 +73,16 @@ jobs:
           npm ci
           npx tsc --noEmit
           npm run build
+
+      # sidecar（打进 app 的 hearth 服务端，「在本机运行服务器」用）要在 web 构建之后编：
+      # 前端产物得先拷进 server/internal/webui/dist 才 go build。
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: server/go.mod
+          cache-dependency-path: server/go.sum
+
+      - name: Build hearth sidecar
+        run: bash desktop/scripts/build-sidecar.sh
 
       - name: Install desktop CLI
         working-directory: desktop
