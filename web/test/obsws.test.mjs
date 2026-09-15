@@ -14,11 +14,14 @@ import {
   connectObs,
   encoderLabel,
   ensureObsScene,
+  obsAudioSetupSpec,
   obsAudioSpec,
   obsMajor,
   obsPlatform,
   obsVideoSpec,
+  openObsInputProperties,
   prepareObsCapture,
+  setupObsCapture,
   whipServiceSettings,
 } from './tmp/obsws.js';
 
@@ -209,7 +212,8 @@ test('主动 close 不触发 onLost，之后的请求直接拒', async () => {
   await obs.close();
 });
 
-// ---- 快速配置采集源 ----
+
+// ---- 在 OBS 里建采集源 ----
 
 test('平台识别：认不出的一概当 other（功能不可用，而不是当成 Windows 乱建源）', () => {
   assert.equal(obsPlatform('windows'), 'windows');
@@ -219,28 +223,166 @@ test('平台识别：认不出的一概当 other（功能不可用，而不是�
   assert.equal(obsPlatform(undefined), 'other');
 });
 
-test('画面源规格：Windows 两种捕获方式的 kind 与键名', () => {
-  const t = { kind: 'window', label: 'Game', value: '某游戏:UnrealWindow:game.exe' };
-  const game = obsVideoSpec('windows', 'game', t);
+test('画面源规格：不预设目标，Windows 两种捕获方式只差 kind 与键名', () => {
+  const game = obsVideoSpec('windows', 'game', null);
   assert.equal(game.inputKind, 'game_capture');
-  assert.deepEqual(game.inputSettings, { capture_mode: 'window', window: t.value });
-  const win = obsVideoSpec('windows', 'window', t);
+  assert.deepEqual(game.inputSettings, { capture_mode: 'window' });
+  const win = obsVideoSpec('windows', 'window', null);
   assert.equal(win.inputKind, 'window_capture');
-  assert.deepEqual(win.inputSettings, { method: 2, window: t.value }); // 2 = WGC
-  // 还没选目标时也得建得出源（清单只能从已存在的源上问）
-  assert.deepEqual(obsVideoSpec('windows', 'game', null).inputSettings, { capture_mode: 'window' });
+  assert.deepEqual(win.inputSettings, { method: 2 }); // 2 = WGC
 });
 
-test('画面源规格：macOS 一个 screen_capture，应用与窗口用不同的 type 与键', () => {
+test('画面源规格：macOS 是 screen_capture + type 2（应用），不带 display_uuid', () => {
+  const mac = obsVideoSpec('macos', 'game', null);
+  assert.equal(mac.inputKind, 'screen_capture');
+  assert.deepEqual(mac.inputSettings, { type: 2 });
+});
+
+test('声音源规格：两个平台各有一个按应用取声的 kind，用默认设置建', () => {
+  assert.deepEqual(obsAudioSetupSpec('windows'), {
+    inputKind: 'wasapi_process_output_capture',
+    inputSettings: {},
+  });
+  assert.deepEqual(obsAudioSetupSpec('macos'), { inputKind: 'sck_audio_capture', inputSettings: {} });
+  assert.equal(obsAudioSetupSpec('other'), null);
+});
+
+// 记下每种请求的 requestData，按请求名排队回应
+const sceneFake = (state) =>
+  startFakeObs({
+    reply: (d) => {
+      if (d.requestType === 'GetSceneList') return { data: { scenes: state.scenes.map((sceneName) => ({ sceneName })) } };
+      if (d.requestType === 'GetSceneItemList') return { data: { sceneItems: state.items.map((sourceName) => ({ sourceName })) } };
+      if (d.requestType === 'GetInputPropertiesListPropertyItems')
+        return { data: { propertyItems: state.props?.[d.requestData.propertyName] ?? [] } };
+      if (d.requestType === 'GetInputDefaultSettings') return { data: { defaultInputSettings: { display_uuid: 'DISPLAY-1' } } };
+      if (d.requestType === 'CreateScene') return { data: { sceneUuid: 'u' } };
+      if (d.requestType === 'CreateInput') {
+        if (state.audioInputFails && d.requestData.inputName === 'Hearth 声音')
+          return { status: { result: false, code: 604, comment: 'No such input kind' } };
+        return { data: { inputUuid: 'u', sceneItemId: 1 } };
+      }
+      // 老版本 obs-websocket 没有这个请求，回 UnknownRequestType
+      if (d.requestType === 'OpenInputPropertiesDialog' && state.noDialog)
+        return { status: { result: false, code: 204, comment: 'Unknown request type' } };
+      return {};
+    },
+  });
+
+const sentOf = (obs, requestType) => obs.seen.requests.filter((r) => r.requestType === requestType).map((r) => r.requestData);
+const orderOf = (obs) => obs.seen.requests.map((r) => r.requestType);
+
+test('场景已存在时只清掉本功能的两个源，用户自己加的源不碰', async () => {
+  const obs = await sceneFake({ scenes: ['场景', 'Hearth 投屏'], items: ['Hearth 画面', 'Hearth 声音', '我的摄像头'] });
+  const conn = await connectObs(obs.url, '');
+  await ensureObsScene(conn);
+  assert.deepEqual(sentOf(obs, 'CreateScene'), [], '场景在就不重建');
+  assert.deepEqual(
+    sentOf(obs, 'RemoveInput').map((d) => d.inputName),
+    ['Hearth 画面', 'Hearth 声音'],
+  );
+  conn.close();
+  await obs.close();
+});
+
+test('场景不存在就建一个，且不去删任何源', async () => {
+  const obs = await sceneFake({ scenes: ['场景'], items: [] });
+  const conn = await connectObs(obs.url, '');
+  await ensureObsScene(conn);
+  assert.deepEqual(sentOf(obs, 'CreateScene'), [{ sceneName: 'Hearth 投屏' }]);
+  assert.deepEqual(sentOf(obs, 'RemoveInput'), []);
+  conn.close();
+  await obs.close();
+});
+
+test('建采集源：建画面 → 建声音 → 切场景 → 弹属性窗口，顺序不能乱', async () => {
+  const obs = await sceneFake({ scenes: ['Hearth 投屏'], items: [] });
+  const conn = await connectObs(obs.url, '');
+  const r = await setupObsCapture(conn, 'macos', 'game');
+  assert.deepEqual(r, { dialog: true, note: '' }, '画面、声音、属性窗口都成了就没有补充说明');
+  assert.deepEqual(sentOf(obs, 'CreateInput'), [
+    { sceneName: 'Hearth 投屏', inputName: 'Hearth 画面', inputKind: 'screen_capture', inputSettings: { type: 2 } },
+    { sceneName: 'Hearth 投屏', inputName: 'Hearth 声音', inputKind: 'sck_audio_capture', inputSettings: {} },
+  ]);
+  assert.deepEqual(sentOf(obs, 'SetCurrentProgramScene'), [{ sceneName: 'Hearth 投屏' }]);
+  assert.deepEqual(sentOf(obs, 'OpenInputPropertiesDialog'), [{ inputName: 'Hearth 画面' }]);
+  assert.deepEqual(orderOf(obs).slice(-4), [
+    'CreateInput',
+    'CreateInput',
+    'SetCurrentProgramScene',
+    'OpenInputPropertiesDialog',
+  ]);
+  // 目标一概不预设：hearth 不枚举窗口清单（那会把 OBS 带走），也就没有 SetInputSettings
+  assert.deepEqual(sentOf(obs, 'GetInputPropertiesListPropertyItems'), []);
+  assert.deepEqual(sentOf(obs, 'SetInputSettings'), []);
+  conn.close();
+  await obs.close();
+});
+
+test('建采集源：Windows 的画面源按 mode 选 kind，声音走进程取声', async () => {
+  const obs = await sceneFake({ scenes: [], items: [] });
+  const conn = await connectObs(obs.url, '');
+  await setupObsCapture(conn, 'windows', 'window');
+  assert.deepEqual(sentOf(obs, 'CreateInput'), [
+    { sceneName: 'Hearth 投屏', inputName: 'Hearth 画面', inputKind: 'window_capture', inputSettings: { method: 2 } },
+    { sceneName: 'Hearth 投屏', inputName: 'Hearth 声音', inputKind: 'wasapi_process_output_capture', inputSettings: {} },
+  ]);
+  conn.close();
+  await obs.close();
+});
+
+test('声音源建不出来时照样切场景、照样弹窗，理由带 OBS 的 comment 回给用户', async () => {
+  const obs = await sceneFake({ scenes: ['Hearth 投屏'], items: [], audioInputFails: true });
+  const conn = await connectObs(obs.url, '');
+  const r = await setupObsCapture(conn, 'macos', 'game');
+  assert.equal(r.dialog, true);
+  assert.match(r.note, /No such input kind/);
+  assert.deepEqual(sentOf(obs, 'SetCurrentProgramScene'), [{ sceneName: 'Hearth 投屏' }], '画面那条主路不被声音挡住');
+  assert.deepEqual(sentOf(obs, 'OpenInputPropertiesDialog'), [{ inputName: 'Hearth 画面' }]);
+  conn.close();
+  await obs.close();
+});
+
+test('老版本 obs-websocket 弹不出属性窗口：给中文说明，已建好的源不回滚', async () => {
+  const obs = await sceneFake({ scenes: ['Hearth 投屏'], items: [], noDialog: true });
+  const conn = await connectObs(obs.url, '');
+  const r = await setupObsCapture(conn, 'macos', 'game');
+  assert.equal(r.dialog, false);
+  assert.match(r.note, /双击/, '改让用户自己在 OBS 里双击那个源');
+  assert.match(r.note, /Unknown request type/, '把 OBS 给的理由带出来');
+  assert.equal(sentOf(obs, 'CreateInput').length, 2, '源照样建着');
+  assert.deepEqual(sentOf(obs, 'RemoveInput'), [], '不回滚');
+  assert.deepEqual(sentOf(obs, 'SetCurrentProgramScene'), [{ sceneName: 'Hearth 投屏' }]);
+  conn.close();
+  await obs.close();
+});
+
+test('单独弹声音源的属性窗口', async () => {
+  const obs = await sceneFake({ scenes: [], items: [] });
+  const conn = await connectObs(obs.url, '');
+  await openObsInputProperties(conn, 'Hearth 声音');
+  assert.deepEqual(sentOf(obs, 'OpenInputPropertiesDialog'), [{ inputName: 'Hearth 声音' }]);
+  conn.close();
+  await obs.close();
+});
+
+// ---- 枚举目标（未启用）----
+// UI 不再调用这条路（枚举 macOS screen_capture 会让 OBS 段错误），但代码还在，测试跟着留。
+
+test('未启用：画面源规格带目标时的键名（Windows 串、macOS 窗口是数字）', () => {
+  const t = { kind: 'window', label: 'Game', value: '某游戏:UnrealWindow:game.exe' };
+  assert.deepEqual(obsVideoSpec('windows', 'game', t).inputSettings, { capture_mode: 'window', window: t.value });
+  assert.deepEqual(obsVideoSpec('windows', 'window', t).inputSettings, { method: 2, window: t.value });
   const app = obsVideoSpec('macos', 'game', { kind: 'app', label: 'Finder', value: 'com.apple.finder' });
-  assert.equal(app.inputKind, 'screen_capture');
   assert.deepEqual(app.inputSettings, { type: 2, application: 'com.apple.finder' });
   // 窗口 id 是数字：属性列表给什么类型就回什么类型，别把它串化
-  const win = obsVideoSpec('macos', 'game', { kind: 'window', label: '某窗口', value: 4242 });
-  assert.deepEqual(win.inputSettings, { type: 1, window: 4242 });
+  assert.deepEqual(obsVideoSpec('macos', 'game', { kind: 'window', label: '某窗口', value: 4242 }).inputSettings, {
+    type: 1,
+    window: 4242,
+  });
 });
 
-test('声音源规格：Windows 按进程取声；macOS 只有应用能自动配，窗口给 null', () => {
+test('未启用：声音源按目标取声，macOS 的窗口目标没有对应的源', () => {
   const winTarget = { kind: 'window', label: 'Game', value: '某游戏:UnrealWindow:game.exe' };
   assert.deepEqual(obsAudioSpec('windows', winTarget), {
     inputKind: 'wasapi_process_output_capture',
@@ -254,47 +396,7 @@ test('声音源规格：Windows 按进程取声；macOS 只有应用能自动配
   assert.equal(obsAudioSpec('other', { kind: 'app', label: 'x', value: 'x' }), null);
 });
 
-// 记下每种请求的 requestData，按请求名排队回应
-const sceneFake = (state) =>
-  startFakeObs({
-    reply: (d) => {
-      if (d.requestType === 'GetSceneList') return { data: { scenes: state.scenes.map((sceneName) => ({ sceneName })) } };
-      if (d.requestType === 'GetSceneItemList') return { data: { sceneItems: state.items.map((sourceName) => ({ sourceName })) } };
-      if (d.requestType === 'GetInputPropertiesListPropertyItems')
-        return { data: { propertyItems: state.props[d.requestData.propertyName] ?? [] } };
-      if (d.requestType === 'GetInputDefaultSettings') return { data: { defaultInputSettings: { display_uuid: 'DISPLAY-1' } } };
-      if (d.requestType === 'CreateScene') return { data: { sceneUuid: 'u' } };
-      if (d.requestType === 'CreateInput') return state.createInputFails ? { status: { result: false, code: 604, comment: 'No such input kind' } } : { data: { inputUuid: 'u', sceneItemId: 1 } };
-      return {};
-    },
-  });
-
-const sentOf = (obs, requestType) => obs.seen.requests.filter((r) => r.requestType === requestType).map((r) => r.requestData);
-
-test('场景已存在时只清掉本功能的两个源，用户自己加的源不碰', async () => {
-  const obs = await sceneFake({ scenes: ['场景', 'Hearth 投屏'], items: ['Hearth 画面', 'Hearth 声音', '我的摄像头'], props: {} });
-  const conn = await connectObs(obs.url, '');
-  await ensureObsScene(conn);
-  assert.deepEqual(sentOf(obs, 'CreateScene'), [], '场景在就不重建');
-  assert.deepEqual(
-    sentOf(obs, 'RemoveInput').map((d) => d.inputName),
-    ['Hearth 画面', 'Hearth 声音'],
-  );
-  conn.close();
-  await obs.close();
-});
-
-test('场景不存在就建一个，且不去删任何源', async () => {
-  const obs = await sceneFake({ scenes: ['场景'], items: [], props: {} });
-  const conn = await connectObs(obs.url, '');
-  await ensureObsScene(conn);
-  assert.deepEqual(sentOf(obs, 'CreateScene'), [{ sceneName: 'Hearth 投屏' }]);
-  assert.deepEqual(sentOf(obs, 'RemoveInput'), []);
-  conn.close();
-  await obs.close();
-});
-
-test('取清单：只留 enabled 的项，空占位项丢掉，显示用 itemName', async () => {
+test('未启用：取清单只留 enabled 的项，空占位项丢掉，显示用 itemName', async () => {
   const obs = await sceneFake({
     scenes: [],
     items: [],
@@ -315,58 +417,19 @@ test('取清单：只留 enabled 的项，空占位项丢掉，显示用 itemNam
     { kind: 'app', value: 'com.apple.finder', label: '访达' },
     { kind: 'window', value: 4242, label: '某窗口' },
   ]);
-  // 清单只能从一个已存在的源上问，所以画面源得先建出来；display_uuid 必须借到，
-  // 留空会让 macOS 的源初始化失败、随后的属性枚举把 OBS 带走。
-  assert.deepEqual(sentOf(obs, 'CreateInput'), [
-    {
-      sceneName: 'Hearth 投屏',
-      inputName: 'Hearth 画面',
-      inputKind: 'screen_capture',
-      inputSettings: { type: 2, display_uuid: 'DISPLAY-1' },
-    },
-  ]);
   conn.close();
   await obs.close();
 });
 
-test('确认选择：写画面源 → 建声音源 → 切场景，顺序不能乱（切场景在最后）', async () => {
-  const obs = await sceneFake({ scenes: ['Hearth 投屏'], items: [], props: {} });
+test('未启用：确认选择时写画面源 → 建声音源 → 切场景', async () => {
+  const obs = await sceneFake({ scenes: ['Hearth 投屏'], items: [] });
   const conn = await connectObs(obs.url, '');
   const note = await applyObsCapture(conn, 'windows', 'game', { kind: 'window', label: 'Game', value: 'a:b:game.exe' });
-  assert.equal(note, '', '画面与声音都配好了就没有补充说明');
+  assert.equal(note, '');
   assert.deepEqual(sentOf(obs, 'SetInputSettings'), [
     { inputName: 'Hearth 画面', inputSettings: { capture_mode: 'window', window: 'a:b:game.exe' } },
   ]);
-  assert.deepEqual(sentOf(obs, 'CreateInput'), [
-    {
-      sceneName: 'Hearth 投屏',
-      inputName: 'Hearth 声音',
-      inputKind: 'wasapi_process_output_capture',
-      inputSettings: { window: 'a:b:game.exe' },
-    },
-  ]);
-  assert.deepEqual(sentOf(obs, 'SetCurrentProgramScene'), [{ sceneName: 'Hearth 投屏' }]);
   assert.equal(obs.seen.requests.at(-1).requestType, 'SetCurrentProgramScene');
-  conn.close();
-  await obs.close();
-});
-
-test('声音源建不出来时照样切场景，理由带 OBS 的 comment 回给用户', async () => {
-  const obs = await sceneFake({ scenes: ['Hearth 投屏'], items: [], props: {}, createInputFails: true });
-  const conn = await connectObs(obs.url, '');
-  const note = await applyObsCapture(conn, 'macos', 'game', { kind: 'app', label: '访达', value: 'com.apple.finder' });
-  assert.match(note, /No such input kind/);
-  assert.deepEqual(sentOf(obs, 'SetCurrentProgramScene'), [{ sceneName: 'Hearth 投屏' }], '画面那条主路不被声音挡住');
-  conn.close();
-  await obs.close();
-});
-
-test('macOS 选窗口没有能自动配的声音源，直说而不是偷偷建错的源', async () => {
-  const obs = await sceneFake({ scenes: ['Hearth 投屏'], items: [], props: {} });
-  const conn = await connectObs(obs.url, '');
-  const note = await applyObsCapture(conn, 'macos', 'game', { kind: 'window', label: '某窗口', value: 4242 });
-  assert.match(note, /声音/);
-  assert.deepEqual(sentOf(obs, 'CreateInput'), []);
   conn.close();
   await obs.close();
 });

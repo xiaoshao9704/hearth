@@ -4,20 +4,16 @@
 import { inShell } from '../../bridge';
 import { createMemo, createSignal, For, onCleanup, Show } from 'solid-js';
 import {
-  applyObsCapture,
   connectObs,
   encoderLabel,
   OBS_WHIP_MIN_MAJOR,
   OBS_WS_DEFAULT_URL,
   obsMajor,
-  obsPlatform,
   whipServiceSettings,
   type ObsConn,
   type ObsStreamStatus,
-  type ObsTarget,
   type ObsVersion,
   type ObsVideoSettings,
-  type ObsWinMode,
 } from '../../obsws';
 import { LS_OBS_PASSWORD, LS_OBS_READY, LS_OBS_URL, obsLsGet, obsLsSet, ObsCaptureSection } from './obs-capture';
 import { confirmDialog, el, icon, toast } from '../../ui';
@@ -59,10 +55,7 @@ export const ObsLink = (p: {
   const [ver, setVer] = createSignal<ObsVersion | null>(null);
   const [status, setStatus] = createSignal<ObsStreamStatus | null>(null);
   const [kbps, setKbps] = createSignal(0);
-  const [busy, setBusy] = createSignal<'' | 'test' | 'start' | 'stop' | 'quality' | 'capture'>('');
-  // 「选好就开始推流」：勾上就把选源与开播串成一步，与房间页点「投屏」的体验对齐
-  const [chain, setChain] = createSignal(true);
-  const [captureNote, setCaptureNote] = createSignal('');
+  const [busy, setBusy] = createSignal<'' | 'test' | 'start' | 'stop' | 'quality'>('');
   const [err, setErr] = createSignal('');
   // 画质：都以 OBS 里的现值为准，本地不留第二份真相
   const [video, setVideo] = createSignal<ObsVideoSettings | null>(null);
@@ -187,7 +180,7 @@ export const ObsLink = (p: {
       else toast('OBS 连上了', 'ok', 1600);
     });
 
-  // 写直播服务设置并开播；「配置并开始推流」与「用这个投屏」共用这一段
+  // 写直播服务设置并开播
   const startOn = async (c: ObsConn) => {
     if (!p.server() || !p.token()) throw new Error('推流地址还没拿到，稍等一下再试');
     const v = ver();
@@ -211,13 +204,6 @@ export const ObsLink = (p: {
   };
 
   const start = () => void run('start', startOn);
-
-  const pickTarget = (target: ObsTarget, mode: ObsWinMode) =>
-    void run('capture', async (c) => {
-      setCaptureNote(await applyObsCapture(c, obsPlatform(ver()?.platform), mode, target));
-      toast(`OBS 已切到「${target.label}」`, 'ok', 1800);
-      if (chain()) await startOn(c);
-    });
 
   const stop = () =>
     void run('stop', async (c) => {
@@ -411,22 +397,12 @@ export const ObsLink = (p: {
       </Show>
 
       <Show when={conn() && ver()}>
-        <div class="obs-cap-block">
-          <ObsCaptureSection
-            conn={conn()!}
-            obsVersion={ver()!.obsVersion}
-            platform={ver()!.platform}
-            busy={busy() !== ''}
-            onPick={pickTarget}
-          />
-          <label class="obs-cap-chain">
-            <input type="checkbox" checked={chain()} onChange={(ev) => setChain(ev.currentTarget.checked)} />
-            <span>选好就开始推流</span>
-          </label>
-          <Show when={captureNote()}>
-            <div class="ig-tip">{captureNote()}</div>
-          </Show>
-        </div>
+        <ObsCaptureSection
+          conn={conn()!}
+          obsVersion={ver()!.obsVersion}
+          platform={ver()!.platform}
+          busy={busy() !== ''}
+        />
       </Show>
 
       <Show when={video()}>

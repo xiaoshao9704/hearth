@@ -3,7 +3,7 @@
 import { createEffect, createMemo, createSignal, For, onCleanup, Show } from 'solid-js';
 import { sourcePreview } from '../../bridge';
 import type { NativeSource } from '../../bridge';
-import type { ObsConn, ObsTarget, ObsWinMode } from '../../obsws';
+import type { ObsConn } from '../../obsws';
 import { ObsCaptureSection } from './obs-capture';
 import { el, icon } from '../../ui';
 
@@ -12,8 +12,7 @@ export type ObsShareOption = {
   conn: ObsConn;
   obsVersion: string;
   platform: string;
-  busy: boolean;
-  onPick: (target: ObsTarget, mode: ObsWinMode) => void;
+  onReady: () => void;
 };
 
 export const NativeSourcePanel = (p: {
@@ -165,9 +164,7 @@ export const NativeSourcePanel = (p: {
             conn={p.obs!.conn}
             obsVersion={p.obs!.obsVersion}
             platform={p.obs!.platform}
-            busy={p.obs!.busy}
-            auto
-            onPick={p.obs!.onPick}
+            onReady={p.obs!.onReady}
           />
           <div class="ig-sep" />
         </Show>

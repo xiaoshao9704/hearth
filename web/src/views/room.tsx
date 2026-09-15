@@ -9,7 +9,7 @@ import { createEffect, createMemo, createSignal, on, onCleanup, untrack, For, Sh
 import { render } from 'solid-js/web';
 import { closeAccountMenu, openAccountMenu } from '../account-menu';
 import { startAfkWatch } from '../afk';
-import { ApiError, deviceId, fetchJoinCredentials, getCastTicket, getIngestToken, getUser, guestTimeLeft, isGuest, kickUser, listChannels, muteUser, reportClientLog, siteInfo } from '../api';
+import { ApiError, deviceId, fetchJoinCredentials, getCastTicket, getUser, guestTimeLeft, isGuest, kickUser, listChannels, muteUser, reportClientLog } from '../api';
 import type { ChannelRole, DataLine, EngineCred } from '../api';
 import { playCue } from '../audio';
 import { capabilities, encoderDisplayName, listSources, onPublishState, startPublish, stopPublish, updatePublish } from '../bridge';
@@ -25,8 +25,8 @@ import { DATA_TOPIC_FILE, DATA_TOPIC_TEXT } from '../engine/types';
 import type { AVEngine, EPart, EngineCallbacks, TrackSource, VideoStats } from '../engine/types';
 import { wireLongPress } from '../longpress';
 import { clearLeaveGuard, setLeaveGuard } from '../nav';
-import { applyObsCapture, obsPlatform, whipServiceSettings } from '../obsws';
-import type { ObsConn, ObsStreamStatus, ObsTarget, ObsVersion, ObsWinMode } from '../obsws';
+import { obsPlatform } from '../obsws';
+import type { ObsConn, ObsStreamStatus, ObsVersion } from '../obsws';
 import { encoderIsHw, loadPrefs, prefsBus, RES_DIMS, savePrefs } from '../prefs';
 import { notifyJoin, notifyMessage } from '../notify';
 import { renderShell } from '../shell';
@@ -38,9 +38,9 @@ import type { ConnRow } from './room/conn-panel';
 import { LatencyResult, measureTile, showTileMenu } from './room/latency-result';
 import type { LatencyState } from './room/latency-result';
 import { IngestBadge } from './room/ingest-badge';
-import { IngestPanel, whipServer } from './room/ingest-panel';
+import { IngestPanel } from './room/ingest-panel';
 import { NativeSourcePanel } from './room/native-source-panel';
-import { connectStoredObs, obsCaptureBlocker, ObsScreenPanel } from './room/obs-capture';
+import { connectStoredObs, OBS_SETUP_HINT, obsCaptureBlocker, ObsScreenPanel } from './room/obs-capture';
 import { createUnreadMarker } from './room/unread-divider';
 import { showMsgMenu } from './room/msg-menu';
 import { mergeReaction, ReactionBar } from './room/reactions';
@@ -291,7 +291,6 @@ export async function renderRoom(root: HTMLElement, channel: string) {
   const [obsVer, setObsVer] = createSignal<ObsVersion | null>(null);
   const [obsStatus, setObsStatus] = createSignal<ObsStreamStatus | null>(null);
   const [obsPick, setObsPick] = createSignal(false); // 浏览器里点「投屏」弹的那个面板
-  const [obsBusy, setObsBusy] = createSignal(false);
   const obsLive = createMemo(() => obsStatus()?.outputActive === true);
   // 「投屏中」= 本端在发布 或 本机 OBS 正推到本频道；两者都是各自的权威来源
   const screening = createMemo(() => screenOn() || obsLive());
@@ -1531,39 +1530,10 @@ export async function renderRoom(root: HTMLElement, channel: string) {
       /* OBS 没开或密码变了：静默降级，不弹提示打扰只想用浏览器投屏的人 */
     }
   })();
-  // 本频道的 WHIP 地址与令牌，与「OBS 推流」面板同一套算法
-  async function obsWhipTarget(): Promise<{ server: string; token: string }> {
-    const id = channelId();
-    if (!id) throw new Error('频道信息还没加载完，稍等一下再试');
-    const [info, site] = await Promise.all([getIngestToken(), siteInfo().catch(() => null)]);
-    const server = whipServer(info, site, id);
-    if (!server || !info.token) throw new Error('本服没有可用的推流入口');
-    return { server, token: info.token };
-  }
-
-  // 选中一个窗口/应用：建场景与源 → 切场景 → 写 WHIP 配置 → 开播，一步到位
-  async function startObsScreen(target: ObsTarget, mode: ObsWinMode) {
-    const c = obsConn();
-    const ver = obsVer();
-    if (!c?.alive || !ver) return toast('OBS 连接已断开', 'bad');
-    if (obsBusy()) return;
-    setObsBusy(true);
-    try {
-      const { server, token } = await obsWhipTarget();
-      const note = await applyObsCapture(c, obsPlatform(ver.platform), mode, target);
-      await c.request('SetStreamServiceSettings', whipServiceSettings(server, token));
-      await c.request('StartStream');
-      setObsStatus(await c.request('GetStreamStatus'));
-      setObsPick(false);
-      setSourcePick(null);
-      toast(`OBS 已开始投屏「${target.label}」`, 'ok');
-      if (note) toast(note, '', 6000);
-      refreshMeta();
-    } catch (err) {
-      toast(`OBS 投屏失败：${errText(err)}`, 'bad', 6000);
-    } finally {
-      setObsBusy(false);
-    }
+  // 源建好了：目标由用户在 OBS 弹出的属性窗口里选，选完回「OBS 推流」面板点开播。
+  // 这一步不写直播服务设置、不 StartStream——这会儿画面里投的还不知道是什么。
+  function obsCaptureReady() {
+    toast(OBS_SETUP_HINT, '', 7000);
   }
 
   async function stopObsScreen() {
@@ -3370,8 +3340,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
                     conn: obsConn()!,
                     obsVersion: obsVer()!.obsVersion,
                     platform: obsVer()!.platform,
-                    busy: obsBusy(),
-                    onPick: (t, mode) => void startObsScreen(t, mode),
+                    onReady: obsCaptureReady,
                   }
                 : null
             }
@@ -3384,12 +3353,11 @@ export async function renderRoom(root: HTMLElement, channel: string) {
             conn={obsConn()!}
             obsVersion={obsVer()!.obsVersion}
             platform={obsVer()!.platform}
-            busy={obsBusy()}
             onBrowser={() => {
               setObsPick(false);
               void startBrowserScreen();
             }}
-            onPick={(t, mode) => void startObsScreen(t, mode)}
+            onReady={obsCaptureReady}
             onClose={() => setObsPick(false)}
           />
         </Show>

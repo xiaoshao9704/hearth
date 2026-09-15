@@ -1377,16 +1377,10 @@ body.theater-on { overscroll-behavior: none; }
 .obs-link .obs-q-unit { font-size: 11px; color: var(--text-3); }
 .obs-link .obs-presets { display: flex; flex-wrap: wrap; gap: 8px; }
 
-/* 快速配置采集源：选源分区同时挂在设置面板与点「投屏」弹出的面板里 */
-.obs-cap-block { display: flex; flex-direction: column; gap: 8px; }
+/* 在 OBS 里建采集源：这一节同时挂在设置面板与点「投屏」弹出的面板里 */
 .obs-cap-modes { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .obs-cap-modetip { flex-basis: 100%; }
-/* OBS 只给名字没有缩略图，一行一个更好读，列表也不必占满半屏 */
-.ingest-panel .obs-cap-list { grid-template-columns: 1fr; max-height: 34vh; }
-.ingest-panel .obs-cap-item { padding: 8px 10px; }
 .obs-cap-foot { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
-.obs-cap-foot .ig-tip { flex: 1 1 200px; }
-.obs-cap-chain { display: flex; align-items: center; gap: 7px; font-size: 12.5px; color: var(--text-1); cursor: pointer; }
 .obs-cap-browser { align-self: flex-start; }
 
 @media (max-width: 560px) {
