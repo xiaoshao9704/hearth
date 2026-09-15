@@ -22,6 +22,17 @@ Start-Transcript -Path $transcript -Force | Out-Null
 try {
     # /D 必须位于最后且不能加引号；NSIS 将其后的整段作为含空格的路径。
     $setup = Start-Process $installers[0].FullName -ArgumentList "/S /D=$install" -PassThru -Wait
+    # 在任何安装结果校验抛错前保存目录清单，区分未复制、路径错误与版本不一致。
+    $installedFiles = if (Test-Path $install) {
+        @(Get-ChildItem $install -Recurse -File | Sort-Object FullName | ForEach-Object {
+            [ordered]@{
+                path = [IO.Path]::GetRelativePath($install, $_.FullName).Replace('\', '/')
+                size = $_.Length
+            }
+        })
+    } else { @() }
+    [ordered]@{ install_dir = $install; exit_code = $setup.ExitCode; files = @($installedFiles) } |
+        ConvertTo-Json -Depth 4 | Set-Content (Join-Path $logs 'installed-filelist.json') -Encoding utf8
     if ($setup.ExitCode -ne 0) { throw "NSIS 静默安装失败：exit=$($setup.ExitCode)" }
     $exe = Join-Path $install 'hearth-desktop.exe'
     if (-not (Test-Path $exe)) { throw "安装后找不到主程序：$exe" }

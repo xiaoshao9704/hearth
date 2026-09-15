@@ -66,7 +66,7 @@ npm --prefix desktop run test:windows
     ...                         # 其余 runtime 文件原样保留
 ```
 
-资源 map 将 `target/windows-gstreamer/` 递归映射为 `gstreamer/`，另将其 `bin/*.dll` 平铺到 exe 目录。后者保证 Windows 在进入 Rust `main` 之前就能解析静态 DLL 依赖，不能仅靠 `gst::init` 前修改 PATH 代替。
+资源 map 将 `target/windows-gstreamer/` 递归映射为 `gstreamer/`；脚本将其中 `bin/*.dll` 物理复制到独立的 `target/windows-root-dlls/`，再映射到 exe 目录，避免 NSIS 按相同源路径去重。后者保证 Windows 在进入 Rust `main` 之前就能解析静态 DLL 依赖，不能仅靠 `gst::init` 前修改 PATH 代替。
 
 Rust 实现负责在第一次 `gst::init()` 前用 `current_exe()` 定位：
 

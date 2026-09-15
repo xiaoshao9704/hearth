@@ -26,6 +26,7 @@ jobs:
         shell: pwsh
     env:
       CARGO_TERM_COLOR: always
+      RUST_TOOLCHAIN: '1.95.0'
     steps:
       - uses: actions/checkout@v4
         with:
@@ -49,12 +50,25 @@ jobs:
 
       - name: Install Rust MSVC x64
         run: |
-          rustup toolchain install 1.95.0 --profile minimal --target x86_64-pc-windows-msvc
+          rustup toolchain install $env:RUST_TOOLCHAIN --profile minimal --target x86_64-pc-windows-msvc
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          rustup default 1.95.0
+          rustup default $env:RUST_TOOLCHAIN
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           rustc --version
           cargo --version
+
+      - name: Restore Rust build cache
+        id: rust-cache
+        uses: actions/cache/restore@v4
+        with:
+          key: desktop-rust-v1-${{ runner.os }}-x64-msvc-${{ env.RUST_TOOLCHAIN }}-${{ hashFiles('desktop/src-tauri/Cargo.lock', 'desktop/scripts/setup-gst-windows.ps1') }}
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            desktop/src-tauri/target/**/.fingerprint
+            desktop/src-tauri/target/**/build
+            desktop/src-tauri/target/**/deps
+            desktop/src-tauri/target/**/incremental
 
       - name: Install pinned GStreamer runtime and SDK
         run: ./desktop/scripts/setup-gst-windows.ps1
@@ -88,6 +102,20 @@ jobs:
       - name: Check installed files, plugins and GUI startup
         working-directory: desktop
         run: npm run test:windows
+
+      # 安装或 GUI 检查失败仍保存已编译依赖；精确命中时缓存不可覆盖，也无需重传。
+      - name: Save Rust build cache
+        if: always() && steps.rust-cache.outputs.cache-primary-key != '' && steps.rust-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          key: ${{ steps.rust-cache.outputs.cache-primary-key }}
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            desktop/src-tauri/target/**/.fingerprint
+            desktop/src-tauri/target/**/build
+            desktop/src-tauri/target/**/deps
+            desktop/src-tauri/target/**/incremental
 
       - name: Upload test installer
         uses: actions/upload-artifact@v4

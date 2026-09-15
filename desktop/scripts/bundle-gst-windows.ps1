@@ -40,6 +40,12 @@ $required = @(
 foreach ($relative in $required) {
     if (-not (Test-Path (Join-Path $runtime $relative))) { throw "运行时缺少必需资源：$relative" }
 }
+# NSIS 按源路径去重，同一 bin DLL 映射到两个目标时只会保留一份。
+# 必须物理复制到独立目录，不能再次映射 runtime/bin 或使用目录链接。
+$rootDlls = Join-Path $target 'windows-root-dlls'
+if (Test-Path $rootDlls) { Remove-Item $rootDlls -Recurse -Force }
+New-Item -ItemType Directory -Force $rootDlls | Out-Null
+Copy-Item (Join-Path $runtime 'bin/*.dll') $rootDlls -Force
 Copy-Item (Join-Path $PSScriptRoot 'README-windows.md') $runtime -Force
 $logs = Join-Path $target 'windows-logs'
 New-Item -ItemType Directory -Force $logs | Out-Null
@@ -50,4 +56,4 @@ Get-ChildItem $runtime -File -Recurse | Sort-Object FullName | ForEach-Object {
         sha256 = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
     }
 } | ConvertTo-Json -Depth 3 | Set-Content (Join-Path $logs 'runtime-manifest.json') -Encoding utf8
-Write-Host "完整运行时已准备：$runtime；Tauri 将 bin/*.dll 额外映射到主 exe 同目录。"
+Write-Host "完整运行时已准备：$runtime；主 exe 同目录 DLL 的独立资源源目录：$rootDlls。"
