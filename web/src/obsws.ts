@@ -40,7 +40,11 @@ export const browserSocket: ObsSocketFactory = (url) => {
 
 // 只放行本机明文与 TLS：https 页面连非回环的 ws:// 会被混合内容拦掉，
 // 而把 obs-websocket 的密码送去任意主机本身就越了「配置本机 OBS」的边界。
-export function checkObsWsUrl(raw: string): string {
+// 私网地址（10/8、172.16/12、192.168/16）：只有桌面壳允许明文连过去——浏览器里 https 页面
+// 连局域网 ws:// 会被当混合内容拦下，放行了也连不上，不如直接说清楚。
+const PRIVATE_V4 = /^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/;
+
+export function checkObsWsUrl(raw: string, allowPrivate = false): string {
   const s = raw.trim();
   if (!s) return '请填写 obs-websocket 地址';
   let u: URL;
@@ -52,7 +56,10 @@ export function checkObsWsUrl(raw: string): string {
   if (u.protocol === 'wss:') return '';
   if (u.protocol !== 'ws:') return '地址只能以 ws:// 或 wss:// 开头';
   if (u.hostname === 'localhost' || u.hostname === '127.0.0.1') return '';
-  return '明文 ws:// 只允许连本机（localhost 或 127.0.0.1）；连别的机器请用 wss://';
+  if (allowPrivate && PRIVATE_V4.test(u.hostname)) return '';
+  return allowPrivate
+    ? '明文 ws:// 只允许连本机或局域网私网地址；连公网机器请用 wss://'
+    : '浏览器里明文 ws:// 只允许连本机（localhost 或 127.0.0.1）；局域网里别的机器请用桌面端';
 }
 
 const b64 = (buf: ArrayBuffer): string => {
@@ -196,8 +203,9 @@ export async function connectObs(
   password: string,
   factory: ObsSocketFactory = browserSocket,
   timeoutMs = 8000,
+  allowPrivate = false,
 ): Promise<ObsConn> {
-  const bad = checkObsWsUrl(url);
+  const bad = checkObsWsUrl(url, allowPrivate);
   if (bad) throw new Error(bad);
   let conn: ObsConn;
   try {

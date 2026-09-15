@@ -1,5 +1,6 @@
 // 「OBS 联动」：用 obs-websocket 5.x 直接把本频道的 WHIP 地址与令牌写进本机 OBS 并开播。
 // 只能配与浏览器同机的 OBS（地址限回环明文或 wss），密码只落本机 localStorage、不进日志与错误文案。
+import { inShell } from '../../bridge';
 import { createSignal, onCleanup, Show } from 'solid-js';
 import {
   connectObs,
@@ -99,7 +100,7 @@ export const ObsLink = (p: {
   const ensure = async (): Promise<ObsConn> => {
     const live = conn();
     if (live?.alive) return live;
-    const c = await connectObs(url(), password());
+    const c = await connectObs(url(), password(), undefined, undefined, inShell());
     c.onLost = () => {
       drop();
       setErr('OBS 连接已断开');

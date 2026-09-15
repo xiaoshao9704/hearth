@@ -35,6 +35,11 @@ test('地址白名单：只放行 ws://localhost、ws://127.0.0.1 与 wss://', (
   for (const bad of ['', 'ws://192.168.1.9:4455', 'ws://obs.example.com:4455', 'http://localhost:4455', 'localhost:4455', 'ws://[::1]:4455']) {
     assert.notEqual(checkObsWsUrl(bad), '', bad);
   }
+  assert.equal(checkObsWsUrl('ws://192.168.1.20:4455', true), '');
+  assert.notEqual(checkObsWsUrl('ws://192.168.1.20:4455', false), '');
+  assert.notEqual(checkObsWsUrl('ws://8.8.8.8:4455', true), '');
+  {
+  }
 });
 
 test('主版本号解析：取不到时给 0（不据此判不支持）', () => {
