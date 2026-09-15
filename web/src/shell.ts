@@ -1,5 +1,5 @@
 // 应用壳：左侧栏（频道导航 / 连接状态 / 用户栏）+ 内容区。大厅与房间共用。
-import { getUser, listChannels } from './api';
+import { getUser, listChannels, serverHost } from './api';
 import type { Channel } from './api';
 import { loadPrefs, savePrefs, notifyPrefsChanged, prefsBus } from './prefs';
 import { closeAccountMenu, openAccountMenu } from './account-menu';
@@ -34,7 +34,7 @@ export function renderShell(root: HTMLElement, opts: ShellOptions = {}): Shell {
             ${flameLogo()}
             <div style="display:flex;flex-direction:column;gap:1px;min-width:0">
               <div class="brand">HEARTH</div>
-              <div class="host mono">${esc(location.host || 'localhost')}</div>
+              <div class="host mono">${esc(serverHost())}</div>
             </div>
           </a>
         </div>

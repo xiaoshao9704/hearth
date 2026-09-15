@@ -1,4 +1,5 @@
 // 与 server 交互的 REST 客户端，会话 token 存 localStorage（MVP 简化处理）。
+import { inShell } from './bridge';
 import { setLeaveGuard } from './nav';
 import { toast } from './ui';
 
@@ -35,6 +36,17 @@ export function clearServerURL() {
 export const SERVER_URL: string = trimSlash(
   getServerURL() ?? window.__HEARTH_SERVER__ ?? import.meta.env.VITE_SERVER_URL ?? 'http://localhost:8080',
 );
+// 显示给用户看的服务器主机名：壳里网页的 origin 是 tauri://localhost，
+// location.host 只会显示 tauri.localhost，用户认的是自己连的那台服务器。
+export function serverHost(): string {
+  if (!inShell()) return location.host || 'localhost';
+  try {
+    return new URL(SERVER_URL).host;
+  } catch {
+    return SERVER_URL;
+  }
+}
+
 export const LIVEKIT_URL_FALLBACK: string =
   import.meta.env.VITE_LIVEKIT_URL ?? 'ws://localhost:7880';
 

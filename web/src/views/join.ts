@@ -1,7 +1,7 @@
 // 凭邀请链接进入：#/join/<code>。倒计时真跑，归零切过期态。
 // 三种形态由 inviteInfo 的 kind/allow_guest 决定：频道访客邀请只填展示名，
 // 勾了「允许先以访客进入」的注册邀请在注册表单下多一个次级入口，其余就是注册。
-import { ApiError, getToken, getUser, guestEntry, inviteInfo, register, siteInfo } from '../api';
+import { ApiError, getToken, getUser, guestEntry, inviteInfo, register, serverHost, siteInfo } from '../api';
 import { wireThemeButton } from '../theme';
 import { avatarHtml, esc, flameLogo, icon, pwBarsHtml, pwScore } from '../ui';
 
@@ -103,7 +103,7 @@ async function renderInviteFlow(root: HTMLElement, code: string, alive: () => bo
           ${avatarHtml(inviter || '?', 'avatar-lg avatar')}
           <div style="flex-grow:1;min-width:0">
             <div style="font-size:13.5px;line-height:1.5"><span style="font-weight:600">${esc(inviter || '有人')}</span> ${headline}</div>
-            <div class="mono" style="font-size:11px;color:var(--text-2);margin-top:3px">${esc(location.host)}</div>
+            <div class="mono" style="font-size:11px;color:var(--text-2);margin-top:3px">${esc(serverHost())}</div>
           </div>
           <div id="ttl-chip"></div>
         </div>

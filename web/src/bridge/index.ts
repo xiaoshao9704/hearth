@@ -9,8 +9,23 @@ export interface BridgeCaps {
   app_audio: boolean; // 原生投屏是否带所属应用的声音
   // 壳实际可用的硬编码器；旧壳没有此字段时按 H.264 兜底。
   publish_codecs?: Array<'h264' | 'h265'>;
+  // 各编码实际选中的硬编元素名（h265 → nvh265enc 之类），用来如实标注「在用哪个硬编」。
+  publish_encoders?: Partial<Record<'h264' | 'h265', string>>;
+  // 探测不到可用硬编时的全文原因（逐个候选），壳内设置页原样显示。
+  native_publish_error?: string | null;
   // 安装包里带了 hearth 服务端（可以「在本机运行服务器」）；旧壳没有此字段。
   local_server?: boolean;
+}
+
+// GStreamer 元素名 → 用户能看懂的硬编名字；不认识的元素直接回显元素名，不瞎猜。
+export function encoderDisplayName(element?: string): string {
+  if (!element) return '硬编';
+  if (element.startsWith('nv')) return 'NVENC 硬编';
+  if (element.startsWith('qsv')) return 'Intel QSV 硬编';
+  if (element.startsWith('amf')) return 'AMD AMF 硬编';
+  if (element.startsWith('mf')) return 'Media Foundation 硬编';
+  if (element.startsWith('vtenc')) return 'VideoToolbox 硬编';
+  return element;
 }
 
 export interface NativeSource {

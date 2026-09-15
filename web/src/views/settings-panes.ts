@@ -43,7 +43,8 @@ import {
   unsupportedReason,
 } from '../push';
 import { installMode, isStandalone, onInstallAvailable, promptInstall } from '../install';
-import { inShell } from '../bridge';
+import { capabilities, encoderDisplayName, inShell } from '../bridge';
+import type { BridgeCaps } from '../bridge';
 import { renderPasskeys, renderSessions } from './account-pane';
 import { avatarHtml, confirmDialog, copyText, esc, icon, pwBarsHtml, pwScore, slashIcon, timeAgo, toast } from '../ui';
 
@@ -942,10 +943,29 @@ function renderAV(body: HTMLElement): () => void {
 
 // ---- 投屏画质 ----
 
+// 壳的能力探一次就够（Rust 侧也是缓存的）；拿到后重画一次编码那一行。
+let shellCaps: BridgeCaps | null = null;
+
 function renderScreen(body: HTMLElement, goStream: () => void) {
   const prefs = loadPrefs();
 
   const paint = () => {
+    // 壳里投屏走原生管线，编码只有 h264/h265 两条路，标注一律用壳实测选中的编码器；
+    // 浏览器那套 MediaCapabilities 预测说的是浏览器自己怎么编，与原生管线无关。
+    const native = shellCaps?.native_publish === true;
+    const nativeCodec: ScreenCodec = prefs.screenCodec === 'h265' ? 'h265' : 'h264';
+    const codecOptions: Array<[string, string]> = native
+      ? (shellCaps?.publish_codecs ?? []).map((c) => [
+          c,
+          `${c === 'h264' ? 'H.264' : 'H.265'} · ${esc(encoderDisplayName(shellCaps?.publish_encoders?.[c]))}`,
+        ])
+      : [
+          ['vp9', 'VP9 · SVC'],
+          ['av1', 'AV1 · SVC'],
+          ['h265', 'HEVC 单层'],
+          ['h264', 'H.264 单层'],
+        ];
+    const codecOn = native ? nativeCodec : prefs.screenCodec;
     const lim = BR_LIMITS[prefs.res];
     const fpsAllowed = FPS_BY_RES[prefs.res] ?? [15, 30, 60];
     body.innerHTML = `
@@ -975,16 +995,24 @@ function renderScreen(body: HTMLElement, goStream: () => void) {
         <div class="kv-line">
           <span class="k">编码</span>
           <div class="seg-group" style="flex-grow:1">
-            ${([
-              ['vp9', 'VP9 · SVC'],
-              ['av1', 'AV1 · SVC'],
-              ['h265', 'HEVC 单层'],
-              ['h264', 'H.264 单层'],
-            ] as const)
-              .map(([v, label]) => `<button class="hit seg ${prefs.screenCodec === v ? 'on' : ''}" data-codec="${v}">${label}</button>`)
+            ${codecOptions
+              .map(([v, label]) => `<button class="hit seg ${codecOn === v ? 'on' : ''}" data-codec="${v}">${label}</button>`)
               .join('')}
           </div>
         </div>
+        ${
+          native
+            ? `<div class="mono" style="padding-left:66px;font-size:10.5px;color:var(--text-3);margin-top:-8px">桌面端投屏由本机硬编直发，上面是壳实测选中的编码器。H.265 更省带宽，但观众端需支持 HEVC 解码，不支持的观众看不到画面。</div>`
+            : ''
+        }
+        ${
+          inShell() && shellCaps && !native
+            ? `<div class="hint-card">
+          ${icon('warn', 15, 'var(--text-2)')}
+          <div>本机没有可用的原生硬编，投屏走浏览器：${esc(shellCaps.native_publish_error ?? '壳没有给出原因')}</div>
+        </div>`
+            : ''
+        }
         <div class="kv-line">
           <span class="k">内容类型</span>
           <div class="seg-group" style="flex-grow:1">
@@ -1042,14 +1070,16 @@ function renderScreen(body: HTMLElement, goStream: () => void) {
         paint();
       });
     });
-    // 按当前分辨率/帧率问浏览器：各编码档走不走硬件（MediaCapabilities 事前预测）
-    (['vp9', 'av1', 'h265', 'h264'] as ScreenCodec[]).forEach(async (c) => {
-      const hw = await probeHwEncode(c);
-      const btn = body.querySelector<HTMLButtonElement>(`[data-codec="${c}"]`);
-      if (btn && hw !== null && !btn.querySelector('.enc-tag')) {
-        btn.insertAdjacentHTML('beforeend', `<span class="enc-tag ${hw ? 'hw' : ''}">${hw ? '硬编' : '软编'}</span>`);
-      }
-    });
+    // 按当前分辨率/帧率问浏览器：各编码档走不走硬件（MediaCapabilities 事前预测）。
+    // 壳内投屏不经浏览器编码，这个预测会误导，不显示。
+    if (!native)
+      (['vp9', 'av1', 'h265', 'h264'] as ScreenCodec[]).forEach(async (c) => {
+        const hw = await probeHwEncode(c);
+        const btn = body.querySelector<HTMLButtonElement>(`[data-codec="${c}"]`);
+        if (btn && hw !== null && !btn.querySelector('.enc-tag')) {
+          btn.insertAdjacentHTML('beforeend', `<span class="enc-tag ${hw ? 'hw' : ''}">${hw ? '硬编' : '软编'}</span>`);
+        }
+      });
     body.querySelectorAll<HTMLButtonElement>('[data-codec]').forEach((btn) => {
       btn.addEventListener('click', () => {
         prefs.screenCodec = btn.dataset.codec as ScreenCodec;
@@ -1099,6 +1129,11 @@ function renderScreen(body: HTMLElement, goStream: () => void) {
     body.querySelector('#go-stream')!.addEventListener('click', goStream);
   };
   paint();
+  if (inShell() && !shellCaps)
+    void capabilities().then((caps) => {
+      shellCaps = caps;
+      if (body.isConnected) paint();
+    });
 }
 
 // ---- 推流 ----

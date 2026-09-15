@@ -12,6 +12,7 @@ mod publish;
 mod trust;
 mod whipproxy;
 
+use std::collections::BTreeMap;
 use std::sync::{atomic::AtomicBool, Arc, Mutex, OnceLock};
 
 use serde::Serialize;
@@ -32,6 +33,9 @@ pub struct Capabilities {
     app_audio: bool,
     native_publish_error: Option<String>,
     publish_codecs: Vec<String>,
+    /// 各编码实际选中的硬编元素名（如 h265 → nvh265enc）：设置页照这个标注，
+    /// 不再拿浏览器 MediaCapabilities 的预测冒充壳里的实际编码器。
+    publish_encoders: BTreeMap<String, String>,
     /// 这个安装包有没有带 hearth 服务端（「在本机运行服务器」的前提）
     local_server: bool,
 }
@@ -111,7 +115,7 @@ impl AppState {
 
 #[tauri::command(async)]
 fn capabilities() -> Capabilities {
-    static PROBE: OnceLock<Result<Vec<String>, String>> = OnceLock::new();
+    static PROBE: OnceLock<Result<Vec<(&'static str, &'static str)>, String>> = OnceLock::new();
     let result = PROBE.get_or_init(|| {
         publish::init_gst()?;
         if !publish::testsrc_mode() && !capture::available() {
@@ -147,7 +151,7 @@ fn capabilities() -> Capabilities {
                 },
                 false,
             ) {
-                Ok(_) => codecs.push(codec.to_owned()),
+                Ok(encoder) => codecs.push((codec, encoder.name)),
                 Err(e) => errors.push(e),
             }
         }
@@ -161,7 +165,18 @@ fn capabilities() -> Capabilities {
         platform: std::env::consts::OS,
         app_audio: capture::audio_available() && !publish::testsrc_mode(),
         native_publish_error: result.as_ref().err().cloned(),
-        publish_codecs: result.as_ref().cloned().unwrap_or_default(),
+        publish_codecs: result
+            .as_ref()
+            .map(|c| c.iter().map(|(codec, _)| (*codec).to_owned()).collect())
+            .unwrap_or_default(),
+        publish_encoders: result
+            .as_ref()
+            .map(|c| {
+                c.iter()
+                    .map(|(codec, name)| ((*codec).to_owned(), (*name).to_owned()))
+                    .collect()
+            })
+            .unwrap_or_default(),
         local_server: localserver::sidecar().is_some(),
     }
 }

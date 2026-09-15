@@ -12,7 +12,7 @@ import { startAfkWatch } from '../afk';
 import { ApiError, deviceId, fetchJoinCredentials, getCastTicket, getUser, guestTimeLeft, isGuest, kickUser, listChannels, muteUser, reportClientLog } from '../api';
 import type { ChannelRole, DataLine, EngineCred } from '../api';
 import { playCue } from '../audio';
-import { capabilities, listSources, onPublishState, startPublish, stopPublish, updatePublish } from '../bridge';
+import { capabilities, encoderDisplayName, listSources, onPublishState, startPublish, stopPublish, updatePublish } from '../bridge';
 import type { BridgeCaps, NativeSource } from '../bridge';
 import { deleteMessage, fetchMessages, postMessage, setReaction } from '../chat';
 import type { ChatMessage } from '../chat';
@@ -1495,11 +1495,21 @@ export async function renderRoom(root: HTMLElement, channel: string) {
     }
   }
 
+  // 只有用户显式选了 H.265 才发 H.265：HEVC 解码不是哪儿都有（壳里的 WebView2 自己
+  // 那一格就收不到），默认与 vp9/av1 一律落到 H.264，宁可多占带宽也别让人看不到画面。
   function nativePublishCodec(screenCodec: string): 'h264' | 'h265' {
     const supported = bridgeCaps()?.publish_codecs ?? ['h264'];
-    const preferred: 'h264' | 'h265' = screenCodec === 'h264' ? 'h264' : 'h265';
+    const preferred: 'h264' | 'h265' = screenCodec === 'h265' ? 'h265' : 'h264';
     if (supported.includes(preferred)) return preferred;
-    return supported.includes('h264') ? 'h264' : preferred;
+    return supported[0] ?? preferred;
+  }
+
+  // 选源面板上如实写一行「这次会用哪个编码器」
+  function nativeEncoderLabel(): string {
+    const caps = bridgeCaps();
+    if (!caps?.native_publish) return '';
+    const codec = nativePublishCodec(loadPrefs().screenCodec);
+    return `${codec === 'h264' ? 'H.264' : 'H.265'} · ${encoderDisplayName(caps.publish_encoders?.[codec])}`;
   }
 
   async function startNativeScreen(source: NativeSource, audio: boolean) {
@@ -1535,7 +1545,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
       setScreenOn(true);
       nativePublishConfig = { res: p.res, fps: p.fps, bitrate: p.bitrate, requestedCodec: p.screenCodec };
       nativeCodecNotice = '';
-      if (started.codec !== (p.screenCodec === 'h264' ? 'h264' : 'h265')) toast(`原生投屏使用 ${started.codec === 'h264' ? 'H.264' : 'HEVC'} 编码`, '', 3500);
+      if (started.codec !== codec) toast(`原生投屏使用 ${started.codec === 'h264' ? 'H.264' : 'HEVC'} 编码`, '', 3500);
       refreshMeta();
     } catch (err) {
       setScreenOn(false);
@@ -3242,6 +3252,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
           <NativeSourcePanel
             sources={sourcePick()!}
             appAudio={bridgeCaps()?.app_audio === true}
+            encoder={nativeEncoderLabel()}
             screenAudio={loadPrefs().screenAudio}
             onConfirm={(s, audio) => void startNativeScreen(s, audio)}
             onClose={() => setSourcePick(null)}

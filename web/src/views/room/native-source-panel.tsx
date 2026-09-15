@@ -8,6 +8,7 @@ import { el, icon } from '../../ui';
 export const NativeSourcePanel = (p: {
   sources: NativeSource[];
   appAudio: boolean;
+  encoder: string; // 这次投屏会用的编码器，空串表示壳没有原生能力
   screenAudio: boolean;
   onConfirm: (source: NativeSource, audio: boolean) => void;
   onClose: () => void;
@@ -152,6 +153,9 @@ export const NativeSourcePanel = (p: {
             <span>{audioLabel()}</span>
           </label>
           <div class="ig-tip">麦克风仍由通话控制；请选择画面后再确认共享。</div>
+          <Show when={p.encoder}>
+            <div class="ig-tip">编码器：{p.encoder}</div>
+          </Show>
         </div>
         <footer class="native-share-actions">
           <button type="button" class="hit btn" onClick={p.onClose}>取消</button>

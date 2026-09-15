@@ -1,6 +1,6 @@
 // 登录页：注册入口按 /api/site 的 policy 显隐（closed 不出；invite 提示要邀请链接；open 出自助注册表单）。
 // 站点名（site.name）用于品牌位与按钮文案，拉取失败按 closed + 默认名处理。
-import { deviceExchange, login, register, SERVER_URL, siteInfo } from '../api';
+import { deviceExchange, login, register, serverHost, SERVER_URL, siteInfo } from '../api';
 import { inShell, onDeepLink, openExternal } from '../bridge';
 import { hasConditionalMediation, isSupported, loginWithPasskey, passkeyErrorDetail, passkeyErrorText } from '../passkey';
 import { wireThemeButton } from '../theme';
@@ -89,7 +89,7 @@ export function renderLogin(root: HTMLElement) {
         <div class="auth-brand">
           ${flameLogo(38, 42)}
           <div class="word" id="lg-word">HEARTH</div>
-          <div class="host mono">${esc(location.host || 'localhost')}</div>
+          <div class="host mono">${esc(serverHost())}</div>
         </div>
         ${
           insecure

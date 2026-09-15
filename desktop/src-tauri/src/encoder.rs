@@ -5,6 +5,8 @@ use gstreamer as gst;
 
 pub struct Encoder {
     pub codec: &'static str,
+    /// 实际选中的 GStreamer 元素名：设置页据此告诉用户这台机器在用哪个硬编
+    pub name: &'static str,
     pub launch: String,
 }
 
@@ -64,6 +66,8 @@ pub fn select(
     for &codec in codecs {
         for name in candidates(codec) {
             let Some(factory) = gst::ElementFactory::find(name) else {
+                // 每个候选都要留下失败原因：用户看到的「没有硬编」必须能答出是哪一步没过
+                failures.push(format!("{name}: 插件未注册（缺插件或驱动不支持）"));
                 continue;
             };
             if name.starts_with("mf")
@@ -71,6 +75,7 @@ pub fn select(
                     .metadata("klass")
                     .is_some_and(|k| k.contains("Hardware"))
             {
+                failures.push(format!("{name}: 只有软件实现，不算硬编"));
                 continue;
             }
             let launch = description(name, settings);
@@ -100,7 +105,11 @@ pub fn select(
                 result.as_ref().map(|m| m.view()),
                 Some(gst::MessageView::Eos(_))
             ) {
-                return Ok(Encoder { codec, launch });
+                return Ok(Encoder {
+                    codec,
+                    name,
+                    launch,
+                });
             }
             failures.push(match result.as_ref().map(|m| m.view()) {
                 Some(gst::MessageView::Error(e)) => format!("{name}: {}", e.error()),

@@ -4,7 +4,7 @@
 //
 // 必须点「允许」才签码：这一页是授权确认，不是跳板。任何自动批准都等于让打开链接
 // 这个动作本身变成登录，那样就没有确认可言了。
-import { deviceApprove, getUser } from '../api';
+import { deviceApprove, getUser, serverHost } from '../api';
 import { wireThemeButton } from '../theme';
 import { esc, flameLogo, icon } from '../ui';
 
@@ -22,7 +22,7 @@ export function renderDeviceAuth(root: HTMLElement, challenge: string) {
         <div class="auth-brand">
           ${flameLogo(38, 42)}
           <div class="word">HEARTH</div>
-          <div class="host mono">${esc(location.host || 'localhost')}</div>
+          <div class="host mono">${esc(serverHost())}</div>
         </div>
         <div class="auth-form" id="da-body"></div>
       </div>
