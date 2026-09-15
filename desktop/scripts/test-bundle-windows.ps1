@@ -1,6 +1,8 @@
 #Requires -Version 7.0
 [CmdletBinding()]
-param()
+# -Native：包里带了 GStreamer 运行时（build:windows:native）才检查运行时清单与插件；
+# 默认的薄壳包里没有这些文件，检查等于必然失败。
+param([switch]$Native)
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
@@ -39,72 +41,78 @@ try {
     $exe = Join-Path $install 'hearth-desktop.exe'
     if (-not (Test-Path $exe)) { throw "安装后找不到主程序：$exe" }
 
-    # 校验真实安装结果，而不仅是 build 前的 staging 目录。
-    $manifest = Get-Content (Join-Path $logs 'runtime-manifest.json') -Raw | ConvertFrom-Json
-    foreach ($file in $manifest) {
-        $installed = Join-Path $install "gstreamer/$($file.path)"
-        if (-not (Test-Path $installed) -or (Get-FileHash $installed -Algorithm SHA256).Hash -ne $file.sha256) {
-            throw "安装后的运行时文件缺失或不一致：$($file.path)"
-        }
-        if ($file.path -match '^bin/[^/]+\.dll$') {
-            $besideExe = Join-Path $install ([IO.Path]::GetFileName($file.path))
-            if (-not (Test-Path $besideExe) -or (Get-FileHash $besideExe -Algorithm SHA256).Hash -ne $file.sha256) {
-                throw "主 exe 旁缺少启动 DLL 或版本不一致：$($file.path)"
-            }
-        }
-    }
-
     # 不继承构建机 SDK、全局 GStreamer PATH、插件路径或注册表缓存。
     foreach ($entry in $variables) { [Environment]::SetEnvironmentVariable($entry.Name, $null, 'Process') }
     $env:PATH = "$env:SystemRoot\System32;$env:SystemRoot;$env:SystemRoot\System32\Wbem"
-    $runtime = Join-Path $install 'gstreamer'
-    $env:GST_PLUGIN_SYSTEM_PATH_1_0 = Join-Path $runtime 'lib/gstreamer-1.0'
-    $env:GST_PLUGIN_PATH_1_0 = ''
-    $env:GST_PLUGIN_SCANNER_1_0 = Join-Path $runtime 'libexec/gstreamer-1.0/gst-plugin-scanner.exe'
-    $env:GST_REGISTRY_1_0 = Join-Path $logs 'gst-registry.bin'
-    $env:PATH = "$(Join-Path $runtime 'bin');$env:PATH"
-    $inspect = Join-Path $runtime 'bin/gst-inspect-1.0.exe'
-    # 裁剪后的包必须逐个元素可加载：清单漏一个插件，这里就是最早的暴露点。
-    foreach ($element in @('capsfilter', 'queue', 'identity', 'fakesink', 'appsrc', 'appsink',
-        'videotestsrc', 'audiotestsrc', 'videoconvert', 'videoscale', 'jpegenc',
-        'h264parse', 'h265parse', 'audioconvert', 'audioresample', 'opusenc',
-        'd3d11screencapturesrc', 'wasapi2src', 'whipclientsink', 'webrtcbin',
-        'rtph264pay', 'rtph265pay', 'rtpopuspay', 'rtpbin', 'srtpenc', 'dtlssrtpenc', 'nicesink')) {
-        & $inspect $element *> (Join-Path $logs "gst-$element.log")
-        if ($LASTEXITCODE -ne 0) { throw "打包运行时无法加载元素：$element" }
-    }
-    # 硬编候选（encoder.rs）：nv/qsv/amf 的插件 plugin_init 在没有对应硬件时直接失败，
-    # 连插件都不会注册，runner 无 GPU 时既列不出元素也 inspect 不了插件名。
-    # 因此这里只要求插件 DLL 随包发出（文件级），元素是否注册留给真机验收。
-    $hardware = [ordered]@{
-        'mfh264enc'  = 'gstmediafoundation.dll'; 'mfh265enc' = 'gstmediafoundation.dll'
-        'nvh264enc'  = 'gstnvcodec.dll'; 'nvh265enc' = 'gstnvcodec.dll'
-        'qsvh264enc' = 'gstqsv.dll'; 'qsvh265enc' = 'gstqsv.dll'
-        'amfh264enc' = 'gstamfcodec.dll'; 'amfh265enc' = 'gstamfcodec.dll'
-    }
-    $registered = [ordered]@{}
-    foreach ($element in $hardware.Keys) {
-        $plugin = Join-Path $runtime "lib/gstreamer-1.0/$($hardware[$element])"
-        if (-not (Test-Path $plugin)) { throw "安装包缺少硬编插件：$($hardware[$element])" }
-        & $inspect $element *> (Join-Path $logs "gst-$element.log")
-        $registered[$element] = ($LASTEXITCODE -eq 0)
-    }
-    $registered | ConvertTo-Json | Set-Content (Join-Path $logs 'hardware-encoders.json') -Encoding utf8
-    $available = @($registered.GetEnumerator() | Where-Object { $_.Value } | ForEach-Object { $_.Key })
-    Write-Host "构建机上注册的硬编元素：$($available -join '、')（无 GPU 时为空，不算失败）。"
 
-    $launch = Join-Path $runtime 'bin/gst-launch-1.0.exe'
-    & $launch -q videotestsrc num-buffers=5 '!' videoconvert '!' videoscale '!' 'video/x-raw,width=320,height=180' '!' fakesink *> (Join-Path $logs 'gst-scale-smoke.log')
-    if ($LASTEXITCODE -ne 0) { throw '打包运行时的视频转换/缩放管线检查失败。' }
-    & $launch -q videotestsrc num-buffers=5 '!' videoconvert '!' jpegenc '!' fakesink *> (Join-Path $logs 'gst-jpeg-smoke.log')
-    if ($LASTEXITCODE -ne 0) { throw '打包运行时的预览 JPEG 编码管线检查失败。' }
-    # MF 在没有硬件 MFT 的机器上仍可能有软件回落；注册了就必须跑通（跑不通说明依赖被裁漏），
-    # 没注册就跳过——真实硬编路径以真机验收为准。
-    if ($registered['mfh264enc']) {
-        & $launch -q videotestsrc num-buffers=10 '!' videoconvert '!' mfh264enc '!' h264parse '!' fakesink *> (Join-Path $logs 'gst-mfenc-smoke.log')
-        if ($LASTEXITCODE -ne 0) { throw '打包运行时的 Media Foundation 编码管线检查失败。' }
+    # 薄壳（默认 feature）里没有 GStreamer 运行时：清单、插件与管线检查整段只在 -Native 下跑。
+    if ($Native) {
+        # 校验真实安装结果，而不仅是 build 前的 staging 目录。
+        $manifest = Get-Content (Join-Path $logs 'runtime-manifest.json') -Raw | ConvertFrom-Json
+        foreach ($file in $manifest) {
+            $installed = Join-Path $install "gstreamer/$($file.path)"
+            if (-not (Test-Path $installed) -or (Get-FileHash $installed -Algorithm SHA256).Hash -ne $file.sha256) {
+                throw "安装后的运行时文件缺失或不一致：$($file.path)"
+            }
+            if ($file.path -match '^bin/[^/]+\.dll$') {
+                $besideExe = Join-Path $install ([IO.Path]::GetFileName($file.path))
+                if (-not (Test-Path $besideExe) -or (Get-FileHash $besideExe -Algorithm SHA256).Hash -ne $file.sha256) {
+                    throw "主 exe 旁缺少启动 DLL 或版本不一致：$($file.path)"
+                }
+            }
+        }
+
+        $runtime = Join-Path $install 'gstreamer'
+        $env:GST_PLUGIN_SYSTEM_PATH_1_0 = Join-Path $runtime 'lib/gstreamer-1.0'
+        $env:GST_PLUGIN_PATH_1_0 = ''
+        $env:GST_PLUGIN_SCANNER_1_0 = Join-Path $runtime 'libexec/gstreamer-1.0/gst-plugin-scanner.exe'
+        $env:GST_REGISTRY_1_0 = Join-Path $logs 'gst-registry.bin'
+        $env:PATH = "$(Join-Path $runtime 'bin');$env:PATH"
+        $inspect = Join-Path $runtime 'bin/gst-inspect-1.0.exe'
+        # 裁剪后的包必须逐个元素可加载：清单漏一个插件，这里就是最早的暴露点。
+        foreach ($element in @('capsfilter', 'queue', 'identity', 'fakesink', 'appsrc', 'appsink',
+            'videotestsrc', 'audiotestsrc', 'videoconvert', 'videoscale', 'jpegenc',
+            'h264parse', 'h265parse', 'audioconvert', 'audioresample', 'opusenc',
+            'd3d11screencapturesrc', 'wasapi2src', 'whipclientsink', 'webrtcbin',
+            'rtph264pay', 'rtph265pay', 'rtpopuspay', 'rtpbin', 'srtpenc', 'dtlssrtpenc', 'nicesink')) {
+            & $inspect $element *> (Join-Path $logs "gst-$element.log")
+            if ($LASTEXITCODE -ne 0) { throw "打包运行时无法加载元素：$element" }
+        }
+        # 硬编候选（encoder.rs）：nv/qsv/amf 的插件 plugin_init 在没有对应硬件时直接失败，
+        # 连插件都不会注册，runner 无 GPU 时既列不出元素也 inspect 不了插件名。
+        # 因此这里只要求插件 DLL 随包发出（文件级），元素是否注册留给真机验收。
+        $hardware = [ordered]@{
+            'mfh264enc'  = 'gstmediafoundation.dll'; 'mfh265enc' = 'gstmediafoundation.dll'
+            'nvh264enc'  = 'gstnvcodec.dll'; 'nvh265enc' = 'gstnvcodec.dll'
+            'qsvh264enc' = 'gstqsv.dll'; 'qsvh265enc' = 'gstqsv.dll'
+            'amfh264enc' = 'gstamfcodec.dll'; 'amfh265enc' = 'gstamfcodec.dll'
+        }
+        $registered = [ordered]@{}
+        foreach ($element in $hardware.Keys) {
+            $plugin = Join-Path $runtime "lib/gstreamer-1.0/$($hardware[$element])"
+            if (-not (Test-Path $plugin)) { throw "安装包缺少硬编插件：$($hardware[$element])" }
+            & $inspect $element *> (Join-Path $logs "gst-$element.log")
+            $registered[$element] = ($LASTEXITCODE -eq 0)
+        }
+        $registered | ConvertTo-Json | Set-Content (Join-Path $logs 'hardware-encoders.json') -Encoding utf8
+        $available = @($registered.GetEnumerator() | Where-Object { $_.Value } | ForEach-Object { $_.Key })
+        Write-Host "构建机上注册的硬编元素：$($available -join '、')（无 GPU 时为空，不算失败）。"
+
+        $launch = Join-Path $runtime 'bin/gst-launch-1.0.exe'
+        & $launch -q videotestsrc num-buffers=5 '!' videoconvert '!' videoscale '!' 'video/x-raw,width=320,height=180' '!' fakesink *> (Join-Path $logs 'gst-scale-smoke.log')
+        if ($LASTEXITCODE -ne 0) { throw '打包运行时的视频转换/缩放管线检查失败。' }
+        & $launch -q videotestsrc num-buffers=5 '!' videoconvert '!' jpegenc '!' fakesink *> (Join-Path $logs 'gst-jpeg-smoke.log')
+        if ($LASTEXITCODE -ne 0) { throw '打包运行时的预览 JPEG 编码管线检查失败。' }
+        # MF 在没有硬件 MFT 的机器上仍可能有软件回落；注册了就必须跑通（跑不通说明依赖被裁漏），
+        # 没注册就跳过——真实硬编路径以真机验收为准。
+        if ($registered['mfh264enc']) {
+            & $launch -q videotestsrc num-buffers=10 '!' videoconvert '!' mfh264enc '!' h264parse '!' fakesink *> (Join-Path $logs 'gst-mfenc-smoke.log')
+            if ($LASTEXITCODE -ne 0) { throw '打包运行时的 Media Foundation 编码管线检查失败。' }
+        } else {
+            Write-Host '构建机没有注册 mfh264enc，跳过编码管线检查；硬编只能在真机验收。'
+        }
     } else {
-        Write-Host '构建机没有注册 mfh264enc，跳过编码管线检查；硬编只能在真机验收。'
+        Write-Host '薄壳构建（未开 native-capture）：跳过 GStreamer 运行时清单与插件检查。'
     }
 
     # GUI 从纯系统 PATH 启动，不替 Rust 初始化补插件路径；验证应用自己的定位契约。
@@ -120,9 +128,13 @@ try {
     $process.Refresh()
     $modules = @($process.Modules | ForEach-Object { $_.FileName })
     $modules | Set-Content (Join-Path $logs 'loaded-modules.txt') -Encoding utf8
-    $gst = @($modules | Where-Object { [IO.Path]::GetFileName($_) -eq 'gstreamer-1.0-0.dll' })
-    if ($gst.Count -ne 1 -or -not $gst[0].StartsWith("$install\", [StringComparison]::OrdinalIgnoreCase)) {
-        throw 'GUI 未加载安装目录内的 GStreamer DLL。'
+    if ($Native) {
+        $gst = @($modules | Where-Object { [IO.Path]::GetFileName($_) -eq 'gstreamer-1.0-0.dll' })
+        if ($gst.Count -ne 1 -or -not $gst[0].StartsWith("$install\", [StringComparison]::OrdinalIgnoreCase)) {
+            throw 'GUI 未加载安装目录内的 GStreamer DLL。'
+        }
+    } elseif (@($modules | Where-Object { [IO.Path]::GetFileName($_) -like 'gst*.dll' }).Count -ne 0) {
+        throw '薄壳包不该加载任何 GStreamer DLL。'
     }
     if ($process.MainWindowHandle -eq 0) {
         throw 'GUI 进程仍存活但没有主窗口；不能判为启动通过，请在交互式 Windows 会话复核。'

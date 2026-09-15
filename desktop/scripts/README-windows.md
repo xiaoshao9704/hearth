@@ -1,5 +1,11 @@
 # Windows x64 桌面测试包
 
+> **默认构建为薄壳，原生采集为可选 feature。** 原生采集与 GStreamer 已收进 cargo feature
+> `native-capture`（默认关），默认安装包里没有 GStreamer 运行时、也不做插件检查。下文关于
+> 运行时裁剪、插件白名单、依赖闭包与逐元素 `gst-inspect` 的内容，只适用于原生形态：本地
+> `npm run build:windows:native` + `npm run test:windows:native`，CI 则是手动运行工作流时勾选
+> `native`。投屏在薄壳里改由网页端的 OBS 联动承担。
+
 状态：Windows x64 测试包构建流程已配置；Windows 编译、安装启动、原生采集和 GPU 验收仍待执行。
 
 ## 包内内容与限制

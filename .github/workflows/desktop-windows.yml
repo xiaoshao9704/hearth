@@ -2,6 +2,12 @@ name: desktop-windows
 
 on:
   workflow_dispatch:
+    inputs:
+      native:
+        # 默认构建薄壳；要验原生采集形态（GStreamer 运行时随包）才手动勾这个。
+        description: '带原生采集（cargo feature native-capture）'
+        type: boolean
+        default: false
   # 新工作流尚未进入默认分支时，也能从已审核的开发分支首次试打。
   push:
     branches: ['codex/**']
@@ -71,6 +77,7 @@ jobs:
             desktop/src-tauri/target/**/incremental
 
       - name: Install pinned GStreamer runtime and SDK
+        if: inputs.native
         run: ./desktop/scripts/setup-gst-windows.ps1
 
       - name: Build shared web UI
@@ -87,21 +94,40 @@ jobs:
         working-directory: desktop
         run: npm ci
 
-      - name: Prepare complete runtime with app-local CRT
-        working-directory: desktop
-        run: npm run bundle:windows
-
       - name: Check Windows Rust targets
+        if: ${{ !inputs.native }}
         working-directory: desktop/src-tauri
         run: cargo check --locked --all-targets --target x86_64-pc-windows-msvc
 
-      - name: Build NSIS test installer
+      - name: Build thin NSIS test installer
+        if: ${{ !inputs.native }}
         working-directory: desktop
         run: npm run build:windows
 
-      - name: Check installed files, plugins and GUI startup
+      - name: Check installed files and GUI startup
+        if: ${{ !inputs.native }}
         working-directory: desktop
         run: npm run test:windows
+
+      - name: Prepare complete runtime with app-local CRT
+        if: inputs.native
+        working-directory: desktop
+        run: npm run bundle:windows
+
+      - name: Check Windows Rust targets with native capture
+        if: inputs.native
+        working-directory: desktop/src-tauri
+        run: cargo check --locked --all-targets --features native-capture --target x86_64-pc-windows-msvc
+
+      - name: Build NSIS test installer with self-contained GStreamer
+        if: inputs.native
+        working-directory: desktop
+        run: npm run build:windows:native
+
+      - name: Check installed files, plugins and GUI startup
+        if: inputs.native
+        working-directory: desktop
+        run: npm run test:windows:native
 
       # 安装或 GUI 检查失败仍保存已编译依赖；精确命中时缓存不可覆盖，也无需重传。
       - name: Save Rust build cache

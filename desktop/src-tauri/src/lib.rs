@@ -4,19 +4,33 @@
 // CSP 现在是 null（不下发）：网页要连的是用户自己填的任意一台服务器，M1 阶段先不限制
 // connect-src。等「应用内信任」把服务器地址收敛成一份配置后，这里应当收紧成
 // 「只允许当前配置的那台服务器 + self」。
+//
+// 采集与推流整条链在 cargo feature `native-capture` 之后（默认关，见 Cargo.toml）：
+// 薄壳不带 GStreamer 运行时。命令仍然注册，只是一律返回 NO_NATIVE——网页按
+// capabilities() 隐藏入口，但旧网页仍可能调到，报「未知命令」比报原因更难懂。
+#[cfg(feature = "native-capture")]
 mod capture;
+#[cfg(feature = "native-capture")]
 mod encoder;
 mod localserver;
+#[cfg(feature = "native-capture")]
 mod preview;
+#[cfg(feature = "native-capture")]
 mod publish;
 mod trust;
+#[cfg(feature = "native-capture")]
 mod whipproxy;
 
 use std::collections::BTreeMap;
+#[cfg(feature = "native-capture")]
 use std::sync::{atomic::AtomicBool, Arc, Mutex, OnceLock};
 
 use serde::Serialize;
 use tauri::{Emitter, Manager, RunEvent, WindowEvent};
+
+/// 薄壳里所有原生采集命令的统一回答（也是 capabilities 的 native_publish_error）。
+#[cfg(not(feature = "native-capture"))]
+const NO_NATIVE: &str = "此版本未内置原生采集";
 
 /// 深链事件载荷：网页只认这一个字段（见 web/src/bridge 的 onDeepLink）
 #[derive(Clone, Serialize)]
@@ -40,11 +54,22 @@ pub struct Capabilities {
     local_server: bool,
 }
 
+#[cfg(feature = "native-capture")]
 #[derive(Default)]
 struct AppState {
     publisher: Mutex<Option<publish::Publisher>>,
 }
 
+#[cfg(not(feature = "native-capture"))]
+#[derive(Default)]
+struct AppState;
+
+#[cfg(not(feature = "native-capture"))]
+impl AppState {
+    fn stop(&self) {}
+}
+
+#[cfg(feature = "native-capture")]
 impl AppState {
     fn stop(&self) {
         if let Some(p) = self.publisher.lock().unwrap().take() {
@@ -113,6 +138,7 @@ impl AppState {
     }
 }
 
+#[cfg(feature = "native-capture")]
 #[tauri::command(async)]
 fn capabilities() -> Capabilities {
     static PROBE: OnceLock<Result<Vec<(&'static str, &'static str)>, String>> = OnceLock::new();
@@ -181,6 +207,21 @@ fn capabilities() -> Capabilities {
     }
 }
 
+#[cfg(not(feature = "native-capture"))]
+#[tauri::command(async)]
+fn capabilities() -> Capabilities {
+    Capabilities {
+        native_publish: false,
+        platform: std::env::consts::OS,
+        app_audio: false,
+        native_publish_error: Some(NO_NATIVE.to_string()),
+        publish_codecs: Vec::new(),
+        publish_encoders: BTreeMap::new(),
+        local_server: localserver::sidecar().is_some(),
+    }
+}
+
+#[cfg(feature = "native-capture")]
 #[tauri::command(async)]
 fn list_sources() -> Result<Vec<capture::Source>, String> {
     if publish::testsrc_mode() {
@@ -195,6 +236,7 @@ fn list_sources() -> Result<Vec<capture::Source>, String> {
     capture::list_sources()
 }
 
+#[cfg(feature = "native-capture")]
 #[tauri::command(async, rename_all = "snake_case")]
 fn start_publish(
     app: tauri::AppHandle,
@@ -252,11 +294,13 @@ fn start_publish(
     Ok(result)
 }
 
+#[cfg(feature = "native-capture")]
 #[derive(Serialize)]
 struct StartedPublish {
     codec: String,
 }
 
+#[cfg(feature = "native-capture")]
 #[tauri::command(async, rename_all = "snake_case")]
 fn update_publish(
     app: tauri::AppHandle,
@@ -295,23 +339,67 @@ fn update_publish(
     }
 }
 
+#[cfg(feature = "native-capture")]
 #[tauri::command(async, rename_all = "snake_case")]
 fn source_preview(source_id: String) -> Result<Option<String>, String> {
     preview::one_frame(&source_id)
 }
 
+#[cfg(feature = "native-capture")]
 #[tauri::command(async)]
 fn stop_publish(state: tauri::State<'_, AppState>) {
     state.stop();
 }
 
+#[cfg(feature = "native-capture")]
 #[tauri::command(async)]
 fn publish_stats(state: tauri::State<'_, AppState>) -> Option<publish::Stats> {
     state.publisher.lock().unwrap().as_ref().map(|p| p.stats())
 }
 
+#[cfg(not(feature = "native-capture"))]
+mod nonative {
+    use super::NO_NATIVE;
+
+    #[tauri::command(async)]
+    pub fn list_sources() -> Result<(), String> {
+        Err(NO_NATIVE.to_string())
+    }
+
+    #[tauri::command(async)]
+    pub fn start_publish() -> Result<(), String> {
+        Err(NO_NATIVE.to_string())
+    }
+
+    #[tauri::command(async)]
+    pub fn update_publish() -> Result<(), String> {
+        Err(NO_NATIVE.to_string())
+    }
+
+    #[tauri::command(async)]
+    pub fn source_preview() -> Result<(), String> {
+        Err(NO_NATIVE.to_string())
+    }
+
+    #[tauri::command(async)]
+    pub fn stop_publish() -> Result<(), String> {
+        Err(NO_NATIVE.to_string())
+    }
+
+    #[tauri::command(async)]
+    pub fn publish_stats() -> Result<(), String> {
+        Err(NO_NATIVE.to_string())
+    }
+}
+
+#[cfg(not(feature = "native-capture"))]
+use nonative::{
+    list_sources, publish_stats, source_preview, start_publish, stop_publish, update_publish,
+};
+
 pub fn run() {
     // 启动即初始化 GStreamer：运行时缺插件要第一时间暴露，不拖到用户点投屏才报
+    #[cfg(feature = "native-capture")]
     if let Err(e) = publish::init_gst() {
         eprintln!("{e}");
     }
