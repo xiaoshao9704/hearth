@@ -12,7 +12,13 @@ mod whipproxy;
 use std::sync::Mutex;
 
 use serde::Serialize;
-use tauri::{Manager, RunEvent, WindowEvent};
+use tauri::{Emitter, Manager, RunEvent, WindowEvent};
+
+/// 深链事件载荷：网页只认这一个字段（见 web/src/bridge 的 onDeepLink）
+#[derive(Clone, Serialize)]
+struct DeepLink {
+    url: String,
+}
 
 #[derive(Serialize)]
 pub struct Capabilities {
@@ -116,6 +122,8 @@ pub fn run() {
     }
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        // hearth:// 深链：浏览器跳转登录完成后由系统唤回本应用，URL 里只有一次性码
+        .plugin(tauri_plugin_deep_link::init())
         .manage(AppState::default())
         .invoke_handler(tauri::generate_handler![
             capabilities,
@@ -128,6 +136,22 @@ pub fn run() {
             trust::forget_server
         ])
         .setup(|app| {
+            // 深链只往 main 窗口透传，且只认 hearth://：系统 URL 分发是公共通道，
+            // 别的 scheme 一律不是给我们的。启动时带的 URL 也走这里（插件把
+            // RunEvent::Opened 转成同一个事件），但那种情况下网页可能还没挂上监听——
+            // 换会话本来就要壳内这次会话里的 verifier，冷启动重来一遍才是正确行为。
+            {
+                use tauri_plugin_deep_link::DeepLinkExt;
+                let handle = app.handle().clone();
+                app.deep_link().on_open_url(move |event| {
+                    for url in event.urls() {
+                        let url = url.to_string();
+                        if url.starts_with("hearth://") {
+                            let _ = handle.emit_to("main", "deep-link", DeepLink { url });
+                        }
+                    }
+                });
+            }
             // 信任配置放 app 配置目录；WebView 的证书回调与 Rust 侧出站 https 共用这一份
             let dir = app.path().app_config_dir().map_err(|e| format!("取配置目录失败：{e}"))?;
             let trust = trust::Trust::load(dir);
