@@ -43,6 +43,7 @@ import {
   unsupportedReason,
 } from '../push';
 import { installMode, isStandalone, onInstallAvailable, promptInstall } from '../install';
+import { inShell } from '../bridge';
 import { renderPasskeys, renderSessions } from './account-pane';
 import { avatarHtml, confirmDialog, copyText, esc, icon, pwBarsHtml, pwScore, slashIcon, timeAgo, toast } from '../ui';
 
@@ -391,10 +392,15 @@ function renderAppearance(body: HTMLElement) {
           ${tab('light', '浅色', 'sun')}${tab('dark', '深色', 'moon')}${tab('auto', '跟随系统', 'autoTheme')}
         </div>
         <div style="font-size:12px;line-height:1.6;color:var(--text-2)">${hint}</div>
-        <div class="card">
+        ${
+          // 桌面壳自己就是应用，没有可安装的东西，整张卡不出
+          inShell()
+            ? ''
+            : `<div class="card">
           <div style="font-size:13.5px;font-weight:600">安装为应用</div>
           <div id="install-state" style="margin-top:10px"></div>
-        </div>
+        </div>`
+        }
       </div>`;
     body.querySelectorAll<HTMLButtonElement>('[data-theme-pick]').forEach((btn) => {
       btn.addEventListener('click', () => {
@@ -402,10 +408,12 @@ function renderAppearance(body: HTMLElement) {
         paint();
       });
     });
-    const installEl = body.querySelector<HTMLElement>('#install-state')!;
-    paintInstallState(installEl);
-    // beforeinstallprompt 理论上可能在这块渲染之后才到——到达时状态从「说明文字」变成「装」按钮
-    onInstallAvailable(() => paintInstallState(installEl));
+    const installEl = body.querySelector<HTMLElement>('#install-state');
+    if (installEl) {
+      paintInstallState(installEl);
+      // beforeinstallprompt 理论上可能在这块渲染之后才到——到达时状态从「说明文字」变成「装」按钮
+      onInstallAvailable(() => paintInstallState(installEl));
+    }
   };
   paint();
 }

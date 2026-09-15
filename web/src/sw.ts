@@ -4,11 +4,15 @@
 // 打包器对 .ts 只会输出带 hash 的资源（且扩展名不是 .js），注册会被浏览器拒。
 // 这个 worker 不缓存任何东西，作用是让浏览器给出「安装」入口，并承接通知与离线推送。
 import { getToken } from './api';
+import { inShell } from './bridge';
 import { autoSubscribeIfAllowed, syncSubscription } from './push';
 
 const SW_URL = '/service-worker.js';
 
 export function registerServiceWorker() {
+  // 桌面壳：资源本来就是本地打包的，缓存没有意义；tauri:// 这类自定义 scheme 下
+  // 注册还会直接报错（也拿不到「安装」入口——壳自己就是应用）
+  if (inShell()) return;
   if (!('serviceWorker' in navigator)) return;
   // 点通知打开/聚焦窗口时 worker 会 postMessage 过来：切到那个频道
   // （只挂一次，路由是 hash，切频道不重建页面）

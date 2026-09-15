@@ -3,6 +3,8 @@
 // 必须在 main.ts 顶部尽早 import——beforeinstallprompt 在页面加载早期触发，
 // 模块加载晚了收不到（Safari/iOS 从不触发这个事件，只能给操作说明）。
 
+import { inShell } from './bridge';
+
 interface BeforeInstallPromptEvent extends Event {
   prompt(): Promise<void>;
   userChoice: Promise<{ outcome: 'accepted' | 'dismissed' }>;
@@ -23,8 +25,12 @@ window.addEventListener('appinstalled', () => {
   installed = true;
 });
 
+// 桌面壳就是独立窗口形态，且再没有「安装」这回事：三处调用方（installMode 的短路、
+// 大厅安装推荐卡、设置里的安装状态）在壳里要的答案都与「已装成应用」相同，
+// main.ts 用它决定是否早早备好通知权限也同理（壳里 notify 自己判不支持，不会误弹）。
 export function isStandalone(): boolean {
   return (
+    inShell() ||
     matchMedia('(display-mode: standalone)').matches ||
     (navigator as unknown as { standalone?: boolean }).standalone === true
   );
