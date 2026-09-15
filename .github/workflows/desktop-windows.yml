@@ -1,0 +1,113 @@
+name: desktop-windows
+
+on:
+  workflow_dispatch:
+  # 新工作流尚未进入默认分支时，也能从已审核的开发分支首次试打。
+  push:
+    branches: ['codex/**']
+    paths:
+      - 'desktop/**'
+      - 'web/**'
+      - '.github/workflows/desktop-windows.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-windows-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: windows-2022
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Validate PowerShell syntax
+        run: |
+          Get-ChildItem desktop/scripts/*windows*.ps1 | ForEach-Object {
+            $parseErrors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$null, [ref]$parseErrors) | Out-Null
+            if ($parseErrors.Count -gt 0) { throw ($parseErrors | Out-String) }
+          }
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.14.0'
+          cache: npm
+          cache-dependency-path: |
+            web/package-lock.json
+            desktop/package-lock.json
+
+      - name: Install Rust MSVC x64
+        run: |
+          rustup toolchain install 1.95.0 --profile minimal --target x86_64-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          rustup default 1.95.0
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          rustc --version
+          cargo --version
+
+      - name: Install pinned GStreamer runtime and SDK
+        run: ./desktop/scripts/setup-gst-windows.ps1
+
+      - name: Build shared web UI
+        working-directory: web
+        run: |
+          npm ci
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npx tsc --noEmit
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm run build
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Install desktop CLI
+        working-directory: desktop
+        run: npm ci
+
+      - name: Prepare complete runtime with app-local CRT
+        working-directory: desktop
+        run: npm run bundle:windows
+
+      - name: Check Windows Rust targets
+        working-directory: desktop/src-tauri
+        run: cargo check --locked --all-targets --target x86_64-pc-windows-msvc
+
+      - name: Build NSIS test installer
+        working-directory: desktop
+        run: npm run build:windows
+
+      - name: Check installed files, plugins and GUI startup
+        working-directory: desktop
+        run: npm run test:windows
+
+      - name: Upload test installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: hearth-windows-x64-${{ github.sha }}
+          path: |
+            desktop/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*-setup.exe
+            desktop/scripts/README-windows.md
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+
+      - name: Upload build and startup diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hearth-windows-x64-diagnostics-${{ github.sha }}
+          path: |
+            desktop/src-tauri/target/windows-logs/*.log
+            desktop/src-tauri/target/windows-logs/*.json
+            desktop/src-tauri/target/windows-logs/*.txt
+          if-no-files-found: warn
+          retention-days: 14

@@ -6,7 +6,11 @@
   "scripts": {
     "tauri": "tauri",
     "dev": "tauri dev",
-    "build": "tauri build"
+    "build": "tauri build",
+    "setup:windows": "pwsh -NoProfile -File scripts/setup-gst-windows.ps1",
+    "bundle:windows": "pwsh -NoProfile -File scripts/bundle-gst-windows.ps1",
+    "build:windows": "npm run bundle:windows && tauri build --target x86_64-pc-windows-msvc --bundles nsis -- --locked",
+    "test:windows": "pwsh -NoProfile -File scripts/test-bundle-windows.ps1"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.11.4"
