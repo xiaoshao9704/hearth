@@ -40,4 +40,6 @@ cargo test --lib runtime_update_keeps_sink_and_audio_and_continues_frames -- --i
 
 运行时测试用真实硬件编码和彩条，在 640×360/30 → 960×540/60 → 480×270/15 更新后继续产帧，检查 sink/音频支路/连接 pad 身份不变、GStreamer segment 换算后的 running-time 连续，并生成受限 JPEG 预览。测试以 fakesink 隔离网络，更新路径不消费 endpoint/token；它证明局部支路替换，**不等于真实 WHIP 接收端或超过十分钟会话的端到端验收**。
 
-尚需 Windows Actions 编译、Windows 真机 WGC/进程树音频/各硬编验证，以及两端真实 WHIP 更新接收、SCK 更新音频连续性和源预览关闭体验验证。本轮未改 Windows WebView2 私有 CA 支持，也未验收 macOS ad-hoc 签名或关闭库校验改动。
+Windows Actions 34931957820 已通过 `cargo check`、release/NSIS 构建、安装文件 manifest 与 exe 同目录 DLL 校验、插件检查及清除全局 GStreamer PATH 后的 GUI 启动检查；这些结果仅覆盖 CI 编译与安装启动。
+
+Windows 真机 WGC/进程树音频/各 GPU 硬编、两端真实 WHIP 热更新接收、SCK 更新音频连续性和源预览关闭体验仍未验证。Windows WebView2 私有 CA 信任尚未实现；上述测试也不涵盖 macOS ad-hoc 签名或关闭库校验改动的验收。
