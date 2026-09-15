@@ -4,6 +4,8 @@ param()
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+# 硬编元素在无 GPU 的构建机上本就 inspect 不到；退出码由脚本自己判，不转成终止错误。
+$PSNativeCommandUseErrorActionPreference = $false
 if (-not $IsWindows) { throw '安装包启动检查必须在 Windows 上运行。' }
 $target = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../src-tauri/target'))
 $logs = Join-Path $target 'windows-logs'
@@ -62,14 +64,48 @@ try {
     $env:GST_REGISTRY_1_0 = Join-Path $logs 'gst-registry.bin'
     $env:PATH = "$(Join-Path $runtime 'bin');$env:PATH"
     $inspect = Join-Path $runtime 'bin/gst-inspect-1.0.exe'
-    foreach ($element in @('d3d11screencapturesrc', 'wasapi2src', 'appsrc', 'appsink',
-        'videoconvert', 'videoscale', 'videorate', 'jpegenc', 'h264parse', 'h265parse',
-        'opusenc', 'whipclientsink')) {
+    # 裁剪后的包必须逐个元素可加载：清单漏一个插件，这里就是最早的暴露点。
+    foreach ($element in @('capsfilter', 'queue', 'identity', 'fakesink', 'appsrc', 'appsink',
+        'videotestsrc', 'audiotestsrc', 'videoconvert', 'videoscale', 'jpegenc',
+        'h264parse', 'h265parse', 'audioconvert', 'audioresample', 'opusenc',
+        'd3d11screencapturesrc', 'wasapi2src', 'whipclientsink', 'webrtcbin',
+        'rtph264pay', 'rtph265pay', 'rtpopuspay', 'rtpbin', 'srtpenc', 'dtlssrtpenc', 'nicesink')) {
         & $inspect $element *> (Join-Path $logs "gst-$element.log")
         if ($LASTEXITCODE -ne 0) { throw "打包运行时无法加载元素：$element" }
     }
-    & (Join-Path $runtime 'bin/gst-launch-1.0.exe') -q videotestsrc num-buffers=5 '!' videoconvert '!' videoscale '!' 'video/x-raw,width=320,height=180' '!' fakesink *> (Join-Path $logs 'gst-scale-smoke.log')
+    # 硬编候选（encoder.rs）：nv/qsv/amf 的插件 plugin_init 在没有对应硬件时直接失败，
+    # 连插件都不会注册，runner 无 GPU 时既列不出元素也 inspect 不了插件名。
+    # 因此这里只要求插件 DLL 随包发出（文件级），元素是否注册留给真机验收。
+    $hardware = [ordered]@{
+        'mfh264enc'  = 'gstmediafoundation.dll'; 'mfh265enc' = 'gstmediafoundation.dll'
+        'nvh264enc'  = 'gstnvcodec.dll'; 'nvh265enc' = 'gstnvcodec.dll'
+        'qsvh264enc' = 'gstqsv.dll'; 'qsvh265enc' = 'gstqsv.dll'
+        'amfh264enc' = 'gstamfcodec.dll'; 'amfh265enc' = 'gstamfcodec.dll'
+    }
+    $registered = [ordered]@{}
+    foreach ($element in $hardware.Keys) {
+        $plugin = Join-Path $runtime "lib/gstreamer-1.0/$($hardware[$element])"
+        if (-not (Test-Path $plugin)) { throw "安装包缺少硬编插件：$($hardware[$element])" }
+        & $inspect $element *> (Join-Path $logs "gst-$element.log")
+        $registered[$element] = ($LASTEXITCODE -eq 0)
+    }
+    $registered | ConvertTo-Json | Set-Content (Join-Path $logs 'hardware-encoders.json') -Encoding utf8
+    $available = @($registered.GetEnumerator() | Where-Object { $_.Value } | ForEach-Object { $_.Key })
+    Write-Host "构建机上注册的硬编元素：$($available -join '、')（无 GPU 时为空，不算失败）。"
+
+    $launch = Join-Path $runtime 'bin/gst-launch-1.0.exe'
+    & $launch -q videotestsrc num-buffers=5 '!' videoconvert '!' videoscale '!' 'video/x-raw,width=320,height=180' '!' fakesink *> (Join-Path $logs 'gst-scale-smoke.log')
     if ($LASTEXITCODE -ne 0) { throw '打包运行时的视频转换/缩放管线检查失败。' }
+    & $launch -q videotestsrc num-buffers=5 '!' videoconvert '!' jpegenc '!' fakesink *> (Join-Path $logs 'gst-jpeg-smoke.log')
+    if ($LASTEXITCODE -ne 0) { throw '打包运行时的预览 JPEG 编码管线检查失败。' }
+    # MF 在没有硬件 MFT 的机器上仍可能有软件回落；注册了就必须跑通（跑不通说明依赖被裁漏），
+    # 没注册就跳过——真实硬编路径以真机验收为准。
+    if ($registered['mfh264enc']) {
+        & $launch -q videotestsrc num-buffers=10 '!' videoconvert '!' mfh264enc '!' h264parse '!' fakesink *> (Join-Path $logs 'gst-mfenc-smoke.log')
+        if ($LASTEXITCODE -ne 0) { throw '打包运行时的 Media Foundation 编码管线检查失败。' }
+    } else {
+        Write-Host '构建机没有注册 mfh264enc，跳过编码管线检查；硬编只能在真机验收。'
+    }
 
     # GUI 从纯系统 PATH 启动，不替 Rust 初始化补插件路径；验证应用自己的定位契约。
     Get-ChildItem Env: | Where-Object { $_.Name -match '^(GST|GSTREAMER)' } |
