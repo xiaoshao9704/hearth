@@ -6,6 +6,7 @@
 // 「只允许当前配置的那台服务器 + self」。
 mod capture;
 mod encoder;
+mod localserver;
 mod preview;
 mod publish;
 mod trust;
@@ -31,6 +32,8 @@ pub struct Capabilities {
     app_audio: bool,
     native_publish_error: Option<String>,
     publish_codecs: Vec<String>,
+    /// 这个安装包有没有带 hearth 服务端（「在本机运行服务器」的前提）
+    local_server: bool,
 }
 
 #[derive(Default)]
@@ -159,6 +162,7 @@ fn capabilities() -> Capabilities {
         app_audio: capture::audio_available() && !publish::testsrc_mode(),
         native_publish_error: result.as_ref().err().cloned(),
         publish_codecs: result.as_ref().cloned().unwrap_or_default(),
+        local_server: localserver::sidecar().is_some(),
     }
 }
 
@@ -311,7 +315,10 @@ pub fn run() {
             publish_stats,
             trust::check_server,
             trust::pair_server,
-            trust::forget_server
+            trust::forget_server,
+            localserver::local_server_status,
+            localserver::local_server_start,
+            localserver::local_server_stop
         ])
         .setup(|app| {
             // 深链只往 main 窗口透传，且只认 hearth://：系统 URL 分发是公共通道，

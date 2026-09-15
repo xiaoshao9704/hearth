@@ -371,7 +371,7 @@ fn hex_lower(bytes: &[u8]) -> String {
 }
 
 /// 从 PEM 里取第一张证书的 DER。服务端 /ca.crt 就是一张根证书的 PEM。
-fn first_cert_der(body: &[u8]) -> Result<Vec<u8>, String> {
+pub fn first_cert_der(body: &[u8]) -> Result<Vec<u8>, String> {
     const BEGIN: &str = "-----BEGIN CERTIFICATE-----";
     const END: &str = "-----END CERTIFICATE-----";
     let text = std::str::from_utf8(body).map_err(|_| "根证书不是 PEM 文本".to_string())?;
