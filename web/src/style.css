@@ -1268,6 +1268,8 @@ body.theater-on { overscroll-behavior: none; }
 /* ---- 第 5 批：通行密钥 ---- */
 /* 登录页的「或 · 使用通行密钥登录」：分隔线用一条 line-soft 加中间的字，字背景压住线 */
 .auth-passkey { display: flex; flex-direction: column; gap: 13px; }
+/* 类规则的 display 会压过 hidden 属性的 UA 样式，登录页靠 hidden 切换这两块（通行密钥 / 浏览器登录），必须显式压回去 */
+.auth-passkey[hidden] { display: none; }
 /* 两侧各画半条线，中间留字：不用背景色去压线，深浅色与页面的渐变底都不会露痕 */
 .auth-or { display: flex; align-items: center; gap: 10px; font-size: 11.5px; color: var(--text-3); }
 .auth-or::before, .auth-or::after { content: ''; flex-grow: 1; height: 1px; background: var(--line-soft); }
