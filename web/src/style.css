@@ -1348,10 +1348,24 @@ body.theater-on { overscroll-behavior: none; }
 }
 .ingest-panel .ig-link:hover { color: var(--ember); }
 .ingest-panel .ig-link .ig-arrow { font-size: 12px; }
+.ingest-panel .ig-sep { height: 1px; background: var(--line-soft); }
+/* OBS 联动：obs-websocket 直连本机 OBS 写配置并开播 */
+.obs-link .obs-inputs { display: flex; flex-wrap: wrap; gap: 8px; }
+.obs-link .obs-in { flex-grow: 1; flex-basis: 190px; height: 34px; background: var(--bg-2); }
+.obs-link .obs-in input { font-size: 12.5px; }
+/* 触屏没有右键也没有 hover，三枚按钮一律常显 */
+.obs-link .obs-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.obs-link .obs-status { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; font-size: 12px; color: var(--text-1); }
+.obs-link .obs-dot { width: 7px; height: 7px; flex-shrink: 0; border-radius: 50%; background: var(--text-3); }
+.obs-link .obs-dot.idle { background: var(--text-2); }
+.obs-link .obs-dot.on { background: var(--ember); box-shadow: 0 0 0 3px var(--ember-tint); }
+.obs-link .obs-warn { color: var(--red); }
+.obs-link .obs-ver { margin-left: auto; font-size: 11px; color: var(--text-3); }
 @media (max-width: 560px) {
   .ingest-scrim { padding: 56px 12px 12px; }
   .ingest-panel { padding: 16px; }
   .ingest-panel .src-list { grid-template-columns: 1fr; }
+  .obs-link .obs-ver { margin-left: 0; flex-basis: 100%; }
 }
 
 /* ---- 连接质量读数面板（顶栏 conn-chip 点开）---- */

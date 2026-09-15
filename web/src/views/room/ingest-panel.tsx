@@ -4,6 +4,7 @@ import { createSignal, Show } from 'solid-js';
 import { getIngestToken, siteInfo } from '../../api';
 import type { IngestTokenInfo, SiteInfo } from '../../api';
 import { copyText, el, icon, toast } from '../../ui';
+import { ObsLink } from './obs-link';
 
 export const IngestPanel = (p: {
   channel: string;
@@ -138,6 +139,9 @@ export const IngestPanel = (p: {
           编码器 H.264 / HEVC / AV1 均可，服务端直通不转码。ffmpeg 等不支持 Bearer 的工具用路径模式：地址末尾再拼一段{' '}
           <span class="mono ig-em">/令牌</span>。
         </div>
+
+        <div class="ig-sep" />
+        <ObsLink server={addr} token={token} />
 
         <button type="button" id="ingest-go-settings" class="hit ig-link" onClick={p.onOpenSettings}>
           <span>令牌重置与设备标签在设置「推流」里</span>
