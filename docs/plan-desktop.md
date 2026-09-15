@@ -1,6 +1,6 @@
 # 方案：Windows / macOS 桌面端
 
-状态：**方向已定、关键假设已验证（2026-09-15），里程碑 1（macOS 纵切）代码已落地，待真机人工验收。**
+状态：**方向已定、关键假设已验证（2026-09-15），里程碑 1（macOS 纵切）代码已落地，待真机人工验收；M2 Windows 原生采集代码已落地，首轮 Actions 进行中，真机待验收。**
 对应 [roadmap](roadmap.md) 的提前技术验证节点，不指定发布版本号。
 下文「已验证」指本仓库 2026-09-15 的实测或官方文档核实，「未验证」项不得当作承诺。
 
@@ -81,8 +81,11 @@
 
 ### M2：Windows
 
-- 需要 Windows 机器实测。采集与回环改用 GStreamer 现成元素，编码器按 GPU 择一；WebView2 证书事件用 webview2-com 挂；确认 WebSocket 是否触发该事件。
-- 完成标准与 M1 相同，另加：进程树音频范围在多进程应用上正确。
+状态：WGC 窗口/显示器采集、进程树音频、源预览与音频开关、按画质设置热更新代码已落地。macOS 构建、单测及彩条硬编保留 sink 的热更新隔离测试已复跑通过；Windows Actions 首轮进行中，结果待确认。
+
+实现与验收细节见 [原生采集说明](desktop-native-capture.md)；打包操作见 [Windows 测试包说明](../desktop/scripts/README-windows.md)。
+
+Windows WebView2 私有 CA 信任尚未实现，证书事件对 WebSocket 的覆盖仍待验证；Windows 真机采集与 GPU 验收待完成。完成标准与 M1 相同，另加进程树音频范围在多进程应用上正确。
 
 ### M3：热键、本机服务、发行
 
