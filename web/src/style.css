@@ -1361,6 +1361,21 @@ body.theater-on { overscroll-behavior: none; }
 .obs-link .obs-dot.on { background: var(--ember); box-shadow: 0 0 0 3px var(--ember-tint); }
 .obs-link .obs-warn { color: var(--red); }
 .obs-link .obs-ver { margin-left: auto; font-size: 11px; color: var(--text-3); }
+/* 画质：三项一行，窄屏靠 flex-basis 自己折行 */
+.obs-link .obs-quality { display: flex; flex-direction: column; gap: 8px; }
+.obs-link .obs-q-row { display: flex; flex-wrap: wrap; gap: 8px; }
+.obs-link .obs-q-item { display: flex; flex-direction: column; gap: 4px; flex-grow: 1; flex-basis: 120px; min-width: 0; }
+.obs-link .obs-q-label { font-size: 11px; color: var(--text-2); }
+.obs-link .obs-select {
+  height: 34px; padding: 0 8px; border-radius: 9px;
+  border: 1px solid var(--line); background: var(--bg-2); color: var(--text-1); font-size: 12.5px;
+}
+.obs-link .obs-select:disabled { opacity: .5; cursor: not-allowed; }
+.obs-link .obs-q-bitrate { height: 34px; padding: 0 10px; background: var(--bg-2); }
+.obs-link .obs-q-bitrate input { font-size: 12.5px; }
+.obs-link .obs-q-bitrate input:disabled { opacity: .5; cursor: not-allowed; }
+.obs-link .obs-q-unit { font-size: 11px; color: var(--text-3); }
+.obs-link .obs-presets { display: flex; flex-wrap: wrap; gap: 8px; }
 @media (max-width: 560px) {
   .ingest-scrim { padding: 56px 12px 12px; }
   .ingest-panel { padding: 16px; }

@@ -1,9 +1,11 @@
-// 「OBS 联动」：用 obs-websocket 5.x 直接把本频道的 WHIP 地址与令牌写进本机 OBS 并开播。
+// 「OBS 联动」：用 obs-websocket 5.x 直接把本频道的 WHIP 地址与令牌写进本机 OBS 并开播，
+// 顺带读写 OBS 的输出画质（分辨率 / 帧率 / 码率）——那是 OBS 自己的设置，与 hearth 的投屏画质无关。
 // 只能配与浏览器同机的 OBS（地址限回环明文或 wss），密码只落本机 localStorage、不进日志与错误文案。
 import { inShell } from '../../bridge';
-import { createSignal, onCleanup, Show } from 'solid-js';
+import { createMemo, createSignal, For, onCleanup, Show } from 'solid-js';
 import {
   connectObs,
+  encoderLabel,
   OBS_WHIP_MIN_MAJOR,
   OBS_WS_DEFAULT_URL,
   obsMajor,
@@ -11,6 +13,7 @@ import {
   type ObsConn,
   type ObsStreamStatus,
   type ObsVersion,
+  type ObsVideoSettings,
 } from '../../obsws';
 import { confirmDialog, el, icon, toast } from '../../ui';
 
@@ -41,6 +44,24 @@ const fmtDur = (ms: number): string => {
 
 const fmtRate = (kbps: number): string => (kbps >= 1000 ? `${(kbps / 1000).toFixed(1)} Mbps` : `${Math.round(kbps)} kbps`);
 
+// 输出分辨率候选：只列常用档，OBS 里现设的值若不在表内会另行补进去
+const RES_OPTIONS = ['1920x1080', '1600x900', '1280x720', '960x540', '854x480'];
+// 帧率用 分子/分母 作值：OBS 的 fps 本来就是分数，59.94 这类值不能四舍五入回写
+const FPS_OPTIONS = ['60/1', '50/1', '30/1', '24/1'];
+const fpsLabel = (v: string): string => {
+  const [n, d] = v.split('/').map(Number);
+  if (!n || !d) return v;
+  return d === 1 ? `${n}` : (n / d).toFixed(2);
+};
+
+const PRESETS = [
+  { label: '1080p60 · 8000k', w: 1920, h: 1080, fps: 60, kbps: 8000 },
+  { label: '1080p30 · 6000k', w: 1920, h: 1080, fps: 30, kbps: 6000 },
+  { label: '720p60 · 4000k', w: 1280, h: 720, fps: 60, kbps: 4000 },
+];
+
+const SIMPLE_OUT = 'SimpleOutput';
+
 export const ObsLink = (p: {
   server: () => string; // 已含频道 id 的完整 WHIP 地址，空 = 还没算出来
   token: () => string;
@@ -51,8 +72,13 @@ export const ObsLink = (p: {
   const [ver, setVer] = createSignal<ObsVersion | null>(null);
   const [status, setStatus] = createSignal<ObsStreamStatus | null>(null);
   const [kbps, setKbps] = createSignal(0);
-  const [busy, setBusy] = createSignal<'' | 'test' | 'start' | 'stop'>('');
+  const [busy, setBusy] = createSignal<'' | 'test' | 'start' | 'stop' | 'quality'>('');
   const [err, setErr] = createSignal('');
+  // 画质：都以 OBS 里的现值为准，本地不留第二份真相
+  const [video, setVideo] = createSignal<ObsVideoSettings | null>(null);
+  const [bitrate, setBitrate] = createSignal('');
+  const [encoder, setEncoder] = createSignal('');
+  const [advOut, setAdvOut] = createSignal(false);
 
   // 码率 obs-websocket 不直接给，从相邻两次 outputBytes/outputDuration 的增量推
   let prevSample: { bytes: number; ms: number } | null = null;
@@ -65,6 +91,10 @@ export const ObsLink = (p: {
     setVer(null);
     setStatus(null);
     setKbps(0);
+    setVideo(null);
+    setBitrate('');
+    setEncoder('');
+    setAdvOut(false);
     prevSample = null;
   };
 
@@ -90,33 +120,53 @@ export const ObsLink = (p: {
     const c = conn();
     if (!c?.alive) return;
     try {
-      applyStatus(await c.request<ObsStreamStatus>('GetStreamStatus'));
+      applyStatus(await c.request('GetStreamStatus'));
     } catch {
       /* 轮询失败不打扰：连接真断了走 onLost */
     }
+  };
+
+  // 取 profile 参数：没设过就用 OBS 给的默认值
+  const profileParam = async (c: ObsConn, category: string, name: string): Promise<string> => {
+    const r = await c.request('GetProfileParameter', { parameterCategory: category, parameterName: name });
+    return r.parameterValue ?? r.defaultParameterValue ?? '';
+  };
+
+  const loadQuality = async (c: ObsConn) => {
+    setVideo(await c.request('GetVideoSettings'));
+    // 高级输出模式下码率藏在各编码器自己的设置里，形状因编码器而异，只提示不代写
+    const adv = (await profileParam(c, 'Output', 'Mode')) === 'Advanced';
+    setAdvOut(adv);
+    setEncoder(await profileParam(c, SIMPLE_OUT, 'StreamEncoder'));
+    setBitrate(adv ? '' : await profileParam(c, SIMPLE_OUT, 'VBitrate'));
   };
 
   // 复用活连接；断了或还没连就重新握手
   const ensure = async (): Promise<ObsConn> => {
     const live = conn();
     if (live?.alive) return live;
-    const c = await connectObs(url(), password(), undefined, undefined, inShell());
+    const c = await connectObs(url(), password(), inShell());
     c.onLost = () => {
       drop();
       setErr('OBS 连接已断开');
     };
-    const v = await c.request<ObsVersion>('GetVersion');
-    setVer(v);
+    setVer(await c.request('GetVersion'));
     setConn(c);
     if (!poll) poll = setInterval(() => void refresh(), 2000);
-    applyStatus(await c.request<ObsStreamStatus>('GetStreamStatus'));
+    applyStatus(await c.request('GetStreamStatus'));
+    // 画质是附加能力：读不到（老 obs-websocket、profile 参数缺失）也不该挡住推流那条主路
+    try {
+      await loadQuality(c);
+    } catch {
+      setVideo(null);
+    }
     return c;
   };
 
   // 停播后 OBS 的输出要一小会儿才真正落下来，立刻 StartStream 会被拒
   const waitIdle = async (c: ObsConn) => {
     for (let i = 0; i < 20; i++) {
-      const s = await c.request<ObsStreamStatus>('GetStreamStatus');
+      const s = await c.request('GetStreamStatus');
       applyStatus(s);
       if (!s.outputActive) return;
       await new Promise((r) => setTimeout(r, 300));
@@ -124,7 +174,7 @@ export const ObsLink = (p: {
     throw new Error('OBS 迟迟没有停下当前推流，请在 OBS 里手动停止后重试');
   };
 
-  const run = async (what: 'test' | 'start' | 'stop', fn: (c: ObsConn) => Promise<void>) => {
+  const run = async (what: 'test' | 'start' | 'stop' | 'quality', fn: (c: ObsConn) => Promise<void>) => {
     if (busy()) return;
     setBusy(what);
     setErr('');
@@ -184,6 +234,77 @@ export const ObsLink = (p: {
     return !!v && obsMajor(v.obsVersion) < OBS_WHIP_MIN_MAJOR;
   };
   const live = () => status()?.outputActive === true;
+
+  // ---- 画质 ----
+  const resValue = () => {
+    const v = video();
+    return v ? `${v.outputWidth}x${v.outputHeight}` : '';
+  };
+  const resList = createMemo(() => {
+    const cur = resValue();
+    return cur && !RES_OPTIONS.includes(cur) ? [cur, ...RES_OPTIONS] : RES_OPTIONS;
+  });
+  const fpsValue = () => {
+    const v = video();
+    return v ? `${v.fpsNumerator}/${v.fpsDenominator}` : '';
+  };
+  const fpsList = createMemo(() => {
+    const cur = fpsValue();
+    return cur && !FPS_OPTIONS.includes(cur) ? [cur, ...FPS_OPTIONS] : FPS_OPTIONS;
+  });
+  // 分辨率与帧率 OBS 在推流中一律拒改，禁用比让它报错好懂
+  const videoLocked = () => live();
+  const qualityBusy = () => busy() !== '';
+
+  const setVideoBits = (c: ObsConn, bits: { outputWidth?: number; outputHeight?: number; fpsNumerator?: number; fpsDenominator?: number }) =>
+    c.request('SetVideoSettings', bits);
+
+  const writeBitrate = (c: ObsConn, kbpsValue: number) =>
+    c.request('SetProfileParameter', {
+      parameterCategory: SIMPLE_OUT,
+      parameterName: 'VBitrate',
+      parameterValue: String(kbpsValue),
+    });
+
+  const onRes = (v: string) =>
+    void run('quality', async (c) => {
+      const [w, h] = v.split('x').map(Number);
+      if (!w || !h) return;
+      await setVideoBits(c, { outputWidth: w, outputHeight: h });
+      setVideo(await c.request('GetVideoSettings'));
+    });
+
+  const onFps = (v: string) =>
+    void run('quality', async (c) => {
+      const [n, d] = v.split('/').map(Number);
+      if (!n || !d) return;
+      await setVideoBits(c, { fpsNumerator: n, fpsDenominator: d });
+      setVideo(await c.request('GetVideoSettings'));
+    });
+
+  const onBitrate = (raw: string) =>
+    void run('quality', async (c) => {
+      const n = Math.round(Number(raw));
+      if (!Number.isFinite(n) || n <= 0) throw new Error('码率要填正整数（单位 kbps）');
+      await writeBitrate(c, n);
+      setBitrate(await profileParam(c, SIMPLE_OUT, 'VBitrate'));
+    });
+
+  const applyPreset = (preset: (typeof PRESETS)[number]) =>
+    void run('quality', async (c) => {
+      await setVideoBits(c, {
+        outputWidth: preset.w,
+        outputHeight: preset.h,
+        fpsNumerator: preset.fps,
+        fpsDenominator: 1,
+      });
+      setVideo(await c.request('GetVideoSettings'));
+      if (!advOut()) {
+        await writeBitrate(c, preset.kbps);
+        setBitrate(await profileParam(c, SIMPLE_OUT, 'VBitrate'));
+      }
+      toast(advOut() ? `已套用 ${preset.label} 的画面设置（码率见下方提示）` : `已套用 ${preset.label}`, 'ok', 1800);
+    });
 
   return (
     <div class="ig-field obs-link">
@@ -284,6 +405,81 @@ export const ObsLink = (p: {
           <span class="ig-note">
             OBS {ver()!.obsVersion} 没有 WHIP 输出（OBS {OBS_WHIP_MIN_MAJOR} 起才有），升级后才能一键推流。
           </span>
+        </div>
+      </Show>
+
+      <Show when={video()}>
+        <div class="obs-quality">
+          <div class="section-label">OBS 画质 · 改的是 OBS 自己的输出设置</div>
+          <div class="obs-q-row">
+            <label class="obs-q-item">
+              <span class="obs-q-label">分辨率</span>
+              <select
+                id="obs-res"
+                class="hit obs-select"
+                value={resValue()}
+                disabled={qualityBusy() || videoLocked()}
+                onChange={(ev) => onRes(ev.currentTarget.value)}
+              >
+                <For each={resList()}>{(o) => <option value={o}>{o.replace('x', ' × ')}</option>}</For>
+              </select>
+            </label>
+            <label class="obs-q-item">
+              <span class="obs-q-label">帧率</span>
+              <select
+                id="obs-fps"
+                class="hit obs-select"
+                value={fpsValue()}
+                disabled={qualityBusy() || videoLocked()}
+                onChange={(ev) => onFps(ev.currentTarget.value)}
+              >
+                <For each={fpsList()}>{(o) => <option value={o}>{fpsLabel(o)} fps</option>}</For>
+              </select>
+            </label>
+            <label class="obs-q-item">
+              <span class="obs-q-label">码率</span>
+              <div class="field obs-q-bitrate">
+                <input
+                  id="obs-bitrate"
+                  value={bitrate()}
+                  inputmode="numeric"
+                  placeholder="kbps"
+                  autocomplete="off"
+                  disabled={qualityBusy() || advOut()}
+                  aria-label="推流码率（kbps）"
+                  onChange={(ev) => onBitrate(ev.currentTarget.value)}
+                />
+                <span class="obs-q-unit">kbps</span>
+              </div>
+            </label>
+          </div>
+
+          <div class="obs-presets">
+            <For each={PRESETS}>
+              {(preset) => (
+                <button
+                  type="button"
+                  class="hit btn btn-sm"
+                  disabled={qualityBusy() || videoLocked()}
+                  onClick={() => applyPreset(preset)}
+                >
+                  {preset.label}
+                </button>
+              )}
+            </For>
+          </div>
+
+          <Show when={videoLocked()}>
+            <div class="ig-tip">推流中改不了分辨率与帧率，停止推流后才能改。</div>
+          </Show>
+          <Show when={advOut()}>
+            <div class="ig-tip">OBS 现在是高级输出模式，码率在编码器设置里，请在 OBS 里改。</div>
+          </Show>
+          <Show when={encoder()}>
+            <div class="ig-tip">
+              编码器：<span class="ig-em">{encoderLabel(encoder())}</span>，在 OBS 设置 → 输出里改。
+            </div>
+          </Show>
         </div>
       </Show>
 
