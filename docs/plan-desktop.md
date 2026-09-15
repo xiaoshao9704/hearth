@@ -83,7 +83,7 @@ Windows 真机对比：桌面端原生投屏不如 OBS 流畅（OBS 同样推 H.
 ### 调整后的顺序（2026-09-15 晚）
 
 1. **OBS 联动**（网页）：频道菜单「OBS 推流」面板加「配置并开始推流」：填 obs-websocket 地址与密码（密码只存本机），写入 WHIP 地址与推流令牌，启动/停止推流，显示 OBS 推流状态。
-2. **薄壳收缩**：原生采集与 GStreamer 收进 cargo feature `native-capture`（默认关），打包脚本与 CI 不再带运行时；桌面端保留：应用内信任、浏览器登录、单实例与深链、本机服务（macOS 已有；Windows 补 sidecar）。
+2. **薄壳收缩**（**已实现**）：原生采集与 GStreamer 收进 cargo feature `native-capture`（默认关），打包脚本与 CI 默认不带运行时（`build:*:native` 与工作流的 `native` 输入仍能打出原生形态）；桌面端保留：应用内信任、浏览器登录、单实例与深链、本机服务（macOS 已有；Windows 补 sidecar）。
 3. **全局热键按键说话 + 托盘**：薄壳的存在理由。
 4. 通行密钥原生回归、Developer ID 签名、发行：不变。
 

@@ -6,6 +6,29 @@ rust-version = "1.82"
 description = "Hearth 桌面端"
 publish = false
 
+[features]
+default = []
+# 原生采集与 WHIP 推流管线（capture / encoder / preview / publish / whipproxy）。
+# 默认关：GStreamer 运行时几十 MB，而投屏已改由网页端 OBS 联动承担，桌面端只发薄壳。
+# 代码不删，开了这个 feature 就还能编出原生采集形态（打包脚本另有 :native 入口）。
+native-capture = [
+    "dep:gstreamer",
+    "dep:gstreamer-app",
+    "dep:gstreamer-video",
+    "dep:gstreamer-audio",
+    "dep:gstreamer-webrtc",
+    "dep:hyper",
+    "dep:hyper-util",
+    "dep:http-body-util",
+    "dep:getrandom",
+    "dep:objc2-screen-capture-kit",
+    "dep:objc2-core-media",
+    "dep:objc2-core-video",
+    "dep:objc2-core-audio-types",
+    "dep:dispatch2",
+    "dep:windows-sys",
+]
+
 [lib]
 name = "hearth_desktop_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
@@ -17,20 +40,20 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = [] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-gstreamer = "0.25"
-gstreamer-app = "0.25"
-gstreamer-video = "0.25"
-gstreamer-audio = "0.25"
-gstreamer-webrtc = "0.25"
+gstreamer = { version = "0.25", optional = true }
+gstreamer-app = { version = "0.25", optional = true }
+gstreamer-video = { version = "0.25", optional = true }
+gstreamer-audio = { version = "0.25", optional = true }
+gstreamer-webrtc = { version = "0.25", optional = true }
 # 应用内信任与 WHIP 回环反代：reqwest 选 native-tls（macOS 上就是 Security.framework，
 # 与 WKWebView 的 SecTrust 同一套判定；加锚不会关掉系统根，见 pair/check 的注释）。
 reqwest = { version = "0.13", default-features = false, features = ["native-tls"] }
 sha2 = "0.10"
 base64 = "0.22"
-getrandom = "0.3"
-hyper = { version = "1", features = ["server", "http1"] }
-hyper-util = { version = "0.1", features = ["tokio"] }
-http-body-util = "0.1"
+getrandom = { version = "0.3", optional = true }
+hyper = { version = "1", features = ["server", "http1"], optional = true }
+hyper-util = { version = "0.1", features = ["tokio"], optional = true }
+http-body-util = { version = "0.1", optional = true }
 tokio = { version = "1", features = ["net", "rt", "time"] }
 # 外链交给系统默认浏览器：WebView 里 target=_blank / window.open 什么都不发生，
 # 直接导航又会把本地页面顶掉，回不来。
@@ -48,8 +71,8 @@ tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
 objc2 = "0.6"
 objc2-foundation = "0.3"
 objc2-core-foundation = "0.3"
-objc2-core-audio-types = "0.3"
-objc2-screen-capture-kit = { version = "0.3", features = [
+objc2-core-audio-types = { version = "0.3", optional = true }
+objc2-screen-capture-kit = { version = "0.3", optional = true, features = [
     "SCStream",
     "SCShareableContent",
     "SCError",
@@ -59,7 +82,7 @@ objc2-screen-capture-kit = { version = "0.3", features = [
     "objc2-core-foundation",
     "objc2-core-graphics",
 ] }
-objc2-core-media = { version = "0.3", features = [
+objc2-core-media = { version = "0.3", optional = true, features = [
     "CMBase",
     "CMBlockBuffer",
     "CMFormatDescription",
@@ -67,7 +90,7 @@ objc2-core-media = { version = "0.3", features = [
     "CMSync",
     "objc2-core-audio-types",
 ] }
-objc2-core-video = { version = "0.3", features = [
+objc2-core-video = { version = "0.3", optional = true, features = [
     "CVBase",
     "CVBuffer",
     "CVImageBuffer",
@@ -76,7 +99,7 @@ objc2-core-video = { version = "0.3", features = [
 ] }
 objc2-core-graphics = { version = "0.3", features = ["CGDirectDisplay"] }
 block2 = "0.6"
-dispatch2 = "0.3"
+dispatch2 = { version = "0.3", optional = true }
 objc2-security = { version = "0.3", default-features = false, features = [
     "std",
     "objc2",
@@ -87,7 +110,7 @@ objc2-security = { version = "0.3", default-features = false, features = [
 
 
 [target.'cfg(target_os = "windows")'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Dwm", "Win32_Graphics_Gdi", "Win32_UI_WindowsAndMessaging", "Win32_System_Threading", "Win32_Security", "Win32_System_SystemInformation", "Wdk_System_SystemServices"] }
+windows-sys = { version = "0.61", optional = true, features = ["Win32_Foundation", "Win32_Graphics_Dwm", "Win32_Graphics_Gdi", "Win32_UI_WindowsAndMessaging", "Win32_System_Threading", "Win32_Security", "Win32_System_SystemInformation", "Wdk_System_SystemServices"] }
 # 应用内信任在 Windows 侧要自己挂 WebView2 的证书错误事件（wry/Tauri 不暴露）：
 # 版本跟着 Tauri/wry 锁定的那套走，不另起一套，否则 COM 接口类型对不上。
 webview2-com = "0.38"

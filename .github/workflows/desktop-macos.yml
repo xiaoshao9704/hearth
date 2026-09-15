@@ -2,6 +2,12 @@ name: desktop-macos
 
 on:
   workflow_dispatch:
+    inputs:
+      native:
+        # 默认构建薄壳；要验原生采集形态（GStreamer 运行时随包）才手动勾这个。
+        description: '带原生采集（cargo feature native-capture）'
+        type: boolean
+        default: false
   # 新工作流尚未进入默认分支时，也能从已审核的开发分支首次试打。
   push:
     branches: ['codex/**']
@@ -65,6 +71,7 @@ jobs:
       # nice 插件在 Homebrew 的 gstreamer 里是悬空链接，libnice-gstreamer 才带真文件；
       # 打包脚本按 @rpath 顺着依赖走，缺它会在收集阶段直接失败。
       - name: Install GStreamer
+        if: inputs.native
         run: brew install gstreamer libnice-gstreamer
 
       - name: Build shared web UI
@@ -90,9 +97,15 @@ jobs:
 
       # /usr/bin 排在 Homebrew 之前：Homebrew 的 python 会把自己的 xattr 放进 PATH，
       # 那个 xattr 不认 -r，tauri 打包时调它会失败。
-      - name: Build app bundle with self-contained GStreamer
+      - name: Build thin app bundle
+        if: ${{ !inputs.native }}
         working-directory: desktop
         run: PATH=/usr/bin:/bin:/usr/sbin:/sbin:$PATH npm run build:mac
+
+      - name: Build app bundle with self-contained GStreamer
+        if: inputs.native
+        working-directory: desktop
+        run: PATH=/usr/bin:/bin:/usr/sbin:/sbin:$PATH npm run build:mac:native
 
       # 精确命中时缓存不可覆盖，也无需重传。
       - name: Save Rust build cache

@@ -4,10 +4,6 @@
     "targets": [
       "nsis"
     ],
-    "resources": {
-      "target/windows-gstreamer/": "gstreamer/",
-      "target/windows-root-dlls/": ""
-    },
     "windows": {
       "webviewInstallMode": {
         "type": "embedBootstrapper",
