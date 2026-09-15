@@ -1,0 +1,111 @@
+name: desktop-macos
+
+on:
+  workflow_dispatch:
+  # 新工作流尚未进入默认分支时，也能从已审核的开发分支首次试打。
+  push:
+    branches: ['codex/**']
+    paths:
+      - 'desktop/**'
+      - 'web/**'
+      - '.github/workflows/desktop-macos.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-macos-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 60
+    env:
+      CARGO_TERM_COLOR: always
+      RUST_TOOLCHAIN: '1.95.0'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Validate bundle script syntax
+        run: bash -n desktop/scripts/bundle-gst-macos.sh
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.14.0'
+          cache: npm
+          cache-dependency-path: |
+            web/package-lock.json
+            desktop/package-lock.json
+
+      - name: Install Rust aarch64-apple-darwin
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --target aarch64-apple-darwin
+          rustup default "$RUST_TOOLCHAIN"
+          rustc --version
+          cargo --version
+
+      - name: Restore Rust build cache
+        id: rust-cache
+        uses: actions/cache/restore@v4
+        with:
+          key: desktop-rust-v1-${{ runner.os }}-arm64-${{ env.RUST_TOOLCHAIN }}-${{ hashFiles('desktop/src-tauri/Cargo.lock') }}
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            desktop/src-tauri/target/**/.fingerprint
+            desktop/src-tauri/target/**/build
+            desktop/src-tauri/target/**/deps
+            desktop/src-tauri/target/**/incremental
+
+      # nice 插件在 Homebrew 的 gstreamer 里是悬空链接，libnice-gstreamer 才带真文件；
+      # 打包脚本按 @rpath 顺着依赖走，缺它会在收集阶段直接失败。
+      - name: Install GStreamer
+        run: brew install gstreamer libnice-gstreamer
+
+      - name: Build shared web UI
+        working-directory: web
+        run: |
+          npm ci
+          npx tsc --noEmit
+          npm run build
+
+      - name: Install desktop CLI
+        working-directory: desktop
+        run: npm ci
+
+      # /usr/bin 排在 Homebrew 之前：Homebrew 的 python 会把自己的 xattr 放进 PATH，
+      # 那个 xattr 不认 -r，tauri 打包时调它会失败。
+      - name: Build app bundle with self-contained GStreamer
+        working-directory: desktop
+        run: PATH=/usr/bin:/bin:/usr/sbin:/sbin:$PATH npm run build:mac
+
+      # 精确命中时缓存不可覆盖，也无需重传。
+      - name: Save Rust build cache
+        if: always() && steps.rust-cache.outputs.cache-primary-key != '' && steps.rust-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          key: ${{ steps.rust-cache.outputs.cache-primary-key }}
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            desktop/src-tauri/target/**/.fingerprint
+            desktop/src-tauri/target/**/build
+            desktop/src-tauri/target/**/deps
+            desktop/src-tauri/target/**/incremental
+
+      # ditto 而不是 zip：.app 里的符号链接与扩展属性要原样保留，签名才不会在解压后失效。
+      - name: Pack .app
+        working-directory: desktop/src-tauri/target/release/bundle/macos
+        run: ditto -c -k --keepParent Hearth.app Hearth-macos-arm64-adhoc.zip
+
+      - name: Upload app bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: hearth-macos-arm64-${{ github.sha }}
+          path: desktop/src-tauri/target/release/bundle/macos/Hearth-macos-arm64-adhoc.zip
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7

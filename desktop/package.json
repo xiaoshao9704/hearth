@@ -7,6 +7,8 @@
     "tauri": "tauri",
     "dev": "tauri dev",
     "build": "tauri build",
+    "bundle:mac": "bash scripts/bundle-gst-macos.sh",
+    "build:mac": "tauri build --bundles app && npm run bundle:mac",
     "setup:windows": "pwsh -NoProfile -File scripts/setup-gst-windows.ps1",
     "bundle:windows": "pwsh -NoProfile -File scripts/bundle-gst-windows.ps1",
     "build:windows": "npm run bundle:windows && tauri build --target x86_64-pc-windows-msvc --bundles nsis -- --locked",

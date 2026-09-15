@@ -28,12 +28,12 @@
 | 编码器约束 | 已验证 | `vtenc_*` 必须显式 `max-keyframe-interval`，否则会话建立后永远等关键帧；webrtcsink 拥塞控制不能驱动 `vtenc_*` 码率，固定码率正合需要，自适应要自写胶水。观众中途加入的按需 IDR（PLI 联动）未验证。 |
 | WHIP 轨道属性 | 已验证 | 进房轨道 `source` 固定为 CAMERA，前端按 `kind=ingest` 识别推流设备，不受影响。 |
 | macOS GStreamer 采集 | **不可用** | 上游无 ScreenCaptureKit 元素；`avfvideosrc capture-screen` 走已弃用的整屏 API，本机零帧（权限与 API 弃用两个因素未分离）；`osxaudiosrc` 无系统声回环。 |
-| GStreamer 分发 | 已验证 | Homebrew `gstreamer` 的 nice 插件是悬空链接，需 `libnice-gstreamer`；分发包必须自带。1.24 起官方 Windows/macOS 二进制含 gst-plugins-rs，Windows ARM64 除外。无官方最小裁剪配方，完整包约几十 MB。 |
+| GStreamer 分发 | 已验证 | Homebrew `gstreamer` 的 nice 插件是悬空链接，需 `libnice-gstreamer`；分发包必须自带。1.24 起官方 Windows/macOS 二进制含 gst-plugins-rs，Windows ARM64 除外。无官方最小裁剪配方，完整包约几十 MB。**macOS 已自包含**：`scripts/bundle-gst-macos.sh` 按实测加载清单挑插件、顺依赖搬库进 `.app`，`env -i` 隔离启动实测推流/预览通过，无 `/opt/homebrew` 运行时依赖。 |
 | WKWebView 证书回调 | **通过** | 页面 JS 的 `fetch` 与 `wss` 都走 `WKNavigationDelegate` 的 `didReceive challenge`；每条新 TLS 连接问一次，放行不缓存；`protectionSpace` 的 host/port 可靠，可精确限定目标。自签叶证书需 `CA:FALSE` + `serverAuth` EKU，hearth `selfca` 已满足。 |
 | Tauri 接线 | **通过** | `with_webview` 取到 WKWebView，读出原 delegate，挂一个只实现挑战方法、`respondsToSelector:` 与 `forwardingTargetForSelector:` 全部转发的代理对象。实测：wry 的 `decidePolicy`/`didFinish`/`didCommit`/`didBecomeDownload` 经代理仍答 YES，挑战方法只有代理答 YES，未知选择器答 NO；换上代理后 IPC 与页面加载照常。已配对的 host:port 走锚定评估放行，未配对（同一张证书换个 host 访问）走 performDefaultHandling，页面加载失败。 |
 | `whipclientsink` 的 CA 入口 | **没有** | signaller 只有 `whip-endpoint` / `auth-token` / `timeout` / `use-link-headers` / `manual-sdp-munging`，自签服务器的锚交不进去。因此 Rust 侧 https 推流走「只绑回环、随机端口、随机 secret 路径、只转发到当前服务器」的反代，由我们这一跳带锚出网（`desktop/src-tauri/src/whipproxy.rs`）。 |
 | 原生发布失败回报 | **通过** | ICE 失败/断开时 whipclientsink 不往 bus 上 post error。壳侧看门狗盯 webrtcbin 的 `ice-connection-state`/`connection-state`，连续坏满 5 秒即记错、`emit("publish-state")` 推给网页并收管线；另有「建流 15 秒还一帧没编出」的兜底。实测掐掉服务器后 webrtcbin 自己约 16 秒才转 disconnected，再 5 秒判定，端到端约 21 秒。事件订阅需要 `core:event:allow-listen` 能力（`capabilities/default.json`，只给本地 main 窗口），缺它 `plugin:event|listen` 会被 ACL 拒；事件已实测送达网页的监听回调，房间页据此复位按钮的那一步未在真实房间里点过。 |
-| WebView2 证书回调 | 文档核实 | `ServerCertificateErrorDetected` 覆盖全部 web resource，非导航请求走 DEFAULT 即拒绝；`ALWAYS_ALLOW` 按 host+证书在同 session 缓存，需 `ClearServerCertificateErrorActions` 撤销。wry 不暴露，需 webview2-com 直接挂。WebSocket 是否触发未实测。 |
+| WebView2 证书回调 | 文档核实 | `ServerCertificateErrorDetected` 覆盖全部 web resource，非导航请求走 DEFAULT 即拒绝；`ALWAYS_ALLOW` 按 host+证书在同 session 缓存，需 `ClearServerCertificateErrorActions` 撤销。wry 不暴露，需 webview2-com 直接挂。WebSocket 是否触发未实测。**已接线（Windows 未实测）**。 |
 | Windows GStreamer 采集与硬编 | 文档核实 | `d3d11screencapturesrc` 1.22 起支持 WGC 与 `window-handle`；`wasapi2src` 1.22 起支持进程树回环，要求 Windows 10 build 20348+；`mfh26*enc` / `nvd3d11h26*enc` / `qsvh26*enc` / `amfh26*enc` 直接吃 `D3D11Memory`。本机无 Windows，未实测。 |
 | ffmpeg whip muxer | 不采用 | answer 超过 8192 字节即失败，多地址机器必现；只收 H.264。 |
 
@@ -85,12 +85,13 @@
 
 实现与验收细节见 [原生采集说明](desktop-native-capture.md)；打包操作见 [Windows 测试包说明](../desktop/scripts/README-windows.md)。
 
-Windows WebView2 私有 CA 信任尚未实现，证书事件对 WebSocket 的覆盖仍待验证；Windows 真机 WGC、GPU/音频及两端真实 WHIP 热更新尚未验证，CI 安装启动检查不替代这些验收。完成标准与 M1 相同，另加进程树音频范围在多进程应用上正确。
+Windows WebView2 私有 CA 信任已实现待真机验证，证书事件对 WebSocket 的覆盖仍待验证；Windows 真机 WGC、GPU/音频及两端真实 WHIP 热更新尚未验证，CI 安装启动检查不替代这些验收。完成标准与 M1 相同，另加进程树音频范围在多进程应用上正确。
 
 ### M3：热键、本机服务、发行
 
 - 全局热键按键说话（含游戏全屏）；「在本机运行服务器」调用已安装 hearth 的 `service` CLI 并显示状态。
 - Windows 签名、WebView2 运行时、GStreamer 运行时打包；macOS 签名、公证、屏幕录制与麦克风权限归属用真实签名的包验证。
+- macOS 打包命令 `npm --prefix desktop run build:mac`（`tauri build --bundles app` 后跑 `scripts/bundle-gst-macos.sh` 把 GStreamer 搬进 `.app` 并重签）；前提是构建机装了 Homebrew 的 `gstreamer` 与 `libnice-gstreamer`，且 `PATH` 里 `/usr/bin` 排在 Homebrew 之前（Homebrew 的 `xattr` 不认 `-r`，tauri 打包会调它）。CI 见 `.github/workflows/desktop-macos.yml`。当前是 ad-hoc 签名、不开 hardened runtime（ad-hoc 没有 Team ID，库校验对它永远不成立）；换 Developer ID 后开 runtime，`Entitlements.plist` 仍保持空。
 - 通行密钥回归：壳内网页的 WebAuthn 不可用（origin 是 `tauri://localhost`，且 WKWebView 只对带浏览器 entitlement 的应用开放 WebAuthn），M1 起在壳内隐藏入口。M3 用原生 API 接回：macOS 走 `ASAuthorizationPlatformPublicKeyCredentialProvider`，RP ID 取用户选定的服务器域名，系统按该域名的 `/.well-known/apple-app-site-association` 核验 Team ID + bundle id，hearth 服务端内建该文件并写死官方桌面端标识；需要 Developer ID 签名（ad-hoc 无 Team ID）。Windows Hello 原生接口的域名关联规则待 M2 实测。网页侧 `passkey.ts` 在壳内把仪式改走桥，服务端挑战与验签接口不变。过渡方案：浏览器跳转登录已实现（PKCE 一次性码 + `hearth://` 深链），壳把系统浏览器指向服务器域名上的授权页，用户在浏览器里用通行密钥登录并批准。
 - 两端从干净系统完成安装、自签直连、邀请进房、原生投屏、升级与卸载后再定版本。
 
