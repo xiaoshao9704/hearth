@@ -13,6 +13,7 @@
 // 的 ViewModeControl：四态互斥，状态由这些 ctl 派生。
 import { createSignal, For, onCleanup, onMount, Show } from 'solid-js';
 import { Portal } from 'solid-js/web';
+import { inShell } from '../../bridge';
 import { loadPrefs, savePrefs } from '../../prefs';
 import { el, icon } from '../../ui';
 import type { PipCtl } from './pip';
@@ -362,7 +363,12 @@ function ViewModeMenu(p: {
         )}
       </For>
       <Show when={!elementFullscreenSupported()}>
-        <div class="um-note">此浏览器不支持网页全屏：全屏会打开系统播放器；添加到主屏幕后剧场模式即无地址栏</div>
+        {/* 壳里没有地址栏也没有系统播放器这回事：说法要对得上，替代是窗口自己的全屏 */}
+        <div class="um-note">
+          {inShell()
+            ? '桌面端的 WebView 不支持网页全屏：全屏只铺满应用窗口，要铺满屏幕请用窗口自己的全屏'
+            : '此浏览器不支持网页全屏：全屏会打开系统播放器；添加到主屏幕后剧场模式即无地址栏'}
+        </div>
       </Show>
     </div>
   );
