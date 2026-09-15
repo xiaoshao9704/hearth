@@ -10,7 +10,7 @@
 - `share` 只保留 `licenses`：Cerbero 将 `share/licenses` 归入 devel，脚本在开发安装完成后额外复制这个完整目录，携带各组件的 license/copyright 材料，**裁剪不得动它**。源码与版权信息以随包的官方材料为准。
 - 硬件编码器是否注册取决于实际 GPU 和驱动：`nvcodec`/`qsv`/`amfcodec` 的 `plugin_init` 在没有对应硬件的机器上直接失败，插件本身都不会注册。CI 只保证这些插件 DLL 随包发出、并记录构建机上实际注册了哪些元素（诊断 artifact 的 `hardware-encoders.json`），真实硬编路径不能由 CI runner 代替验证。
 - GStreamer 无需用户另装。MSVC CRT 从 Visual Studio 2022 官方 Redist 目录复制到包内；Windows 10/11 的系统组件和 GPU 驱动仍由系统提供。
-- WebView2 使用 Tauri 的 `offlineInstaller` 模式；构建时下载并嵌入 Microsoft Evergreen 离线安装器，安装时缺少 WebView2 会自动安装。这部分由上游滚动更新，未宣称整个包逐字节可复现。
+- WebView2 使用 Tauri 的 `embedBootstrapper` 模式：包内只嵌几 MB 的引导程序，安装时缺少 WebView2 才联网下载（Windows 11 自带，Windows 10 多已随 Edge 装好）。离线安装器要多带约 150 MB，对私人小圈子的分发不值。这部分由上游滚动更新，未宣称整个包逐字节可复现。
 - 测试包未配置代码签名，Windows 可能提示未知发布者。未生成 release、tag 或自动更新元数据。
 - Windows 原生采集与网页控制的支持范围以集成代码与实测结果为准。**Windows WebView2 的应用内私有 CA 信任尚未实现**；Rust 侧配对成功不能证明 WebView2 的 fetch/WSS 已信任。测试使用系统已信任且证书有效的 HTTPS。
 
