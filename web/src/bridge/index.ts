@@ -9,6 +9,8 @@ export interface BridgeCaps {
   app_audio: boolean; // 原生投屏是否带所属应用的声音
   // 壳实际可用的硬编码器；旧壳没有此字段时按 H.264 兜底。
   publish_codecs?: Array<'h264' | 'h265'>;
+  // 安装包里带了 hearth 服务端（可以「在本机运行服务器」）；旧壳没有此字段。
+  local_server?: boolean;
 }
 
 export interface NativeSource {
@@ -206,4 +208,30 @@ export function pairServer(url: string, fingerprint: string): Promise<void> {
 
 export function forgetServer(url: string): Promise<void> {
   return shellCall<void>('forget_server', { url });
+}
+
+// ---- 在本机运行服务器（壳里带了 hearth 服务端时才有）----
+export interface LocalServerStatus {
+  available: boolean; // 这个安装包带了服务端程序
+  installed: boolean; // 已装成本机服务
+  running: boolean;
+  url: string; // 起来之后网页要连的地址
+}
+
+export interface LocalServerStarted {
+  url: string;
+  initialized: boolean; // 本次新建了管理员账号，可以直接用这对用户名密码登录
+}
+
+export function localServerStatus(): Promise<LocalServerStatus> {
+  return shellCall<LocalServerStatus>('local_server_status');
+}
+
+// 用户名密码只在首次初始化时给：壳透传给服务端的 adduser（空库首个账号即管理员）
+export function localServerStart(username?: string, password?: string): Promise<LocalServerStarted> {
+  return shellCall<LocalServerStarted>('local_server_start', { username, password });
+}
+
+export function localServerStop(): Promise<void> {
+  return shellCall<void>('local_server_stop');
 }

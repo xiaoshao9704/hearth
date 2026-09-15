@@ -3,8 +3,18 @@
 //
 // 连之前先让壳探一次（check_server）：证书系统信任就直接进；自签则要用另一渠道拿到的
 // 根指纹配对一次（pair_server），配对只给这一台服务器加一条信任锚，不装系统 CA。
-import { clearServerURL, clearSession, getServerURL, setServerURL } from '../api';
-import { checkServer, forgetServer, inShell, pairServer } from '../bridge';
+import { clearServerURL, clearSession, getServerURL, loginTo, setServerURL } from '../api';
+import {
+  capabilities,
+  checkServer,
+  forgetServer,
+  inShell,
+  localServerStart,
+  localServerStatus,
+  localServerStop,
+  pairServer,
+  type LocalServerStatus,
+} from '../bridge';
 import { wireThemeButton } from '../theme';
 import { esc, flameLogo } from '../ui';
 
@@ -44,6 +54,25 @@ export function renderServerPick(root: HTMLElement) {
           <button type="submit" class="hit btn btn-primary btn-lg" id="sv-btn">连接</button>
           ${current ? '<button type="button" class="hit btn btn-sm" id="sv-forget">忘记此服务器</button>' : ''}
         </form>
+        <div id="ls-box" style="display:none;flex-direction:column;gap:9px;margin-top:18px;
+             padding-top:16px;border-top:1px solid var(--line)">
+          <div class="field-label">在本机运行服务器</div>
+          <p class="muted" id="ls-state" style="margin:0;font-size:12.5px"></p>
+          <div id="ls-creds" style="display:none;flex-direction:column;gap:7px">
+            <div class="field">
+              <input id="ls-user" placeholder="管理员用户名" autocapitalize="off" autocomplete="off" spellcheck="false" />
+            </div>
+            <div class="field">
+              <input id="ls-pass" type="password" placeholder="密码（至少 6 位）" autocomplete="new-password" />
+            </div>
+          </div>
+          <p class="error-text" id="ls-error" style="margin:0"></p>
+          <button type="button" class="hit btn btn-primary" id="ls-start">启动并创建管理员</button>
+          <button type="button" class="hit btn btn-sm" id="ls-stop" style="display:none">停止</button>
+          <p class="muted" style="margin:0;font-size:12.5px;line-height:1.6">
+            对外地址与端口映射见<a href="#/admin">管理后台</a>（管理员登录后可见）。
+          </p>
+        </div>
       </div>
     </div>
   `;
@@ -147,5 +176,105 @@ export function renderServerPick(root: HTMLElement) {
     })();
   });
 
+  wireLocalServer(root, commit);
   input.focus();
+}
+
+// 「在本机运行服务器」：壳里带了 hearth 服务端才显示。装/启/停全交给壳，
+// 起来之后就是一台普通的 hearth——地址存进本机存档后整页重载，后面与连远端没有区别。
+function wireLocalServer(root: HTMLElement, commit: (origin: string) => void) {
+  const box = root.querySelector<HTMLDivElement>('#ls-box')!;
+  const stateEl = root.querySelector<HTMLParagraphElement>('#ls-state')!;
+  const creds = root.querySelector<HTMLDivElement>('#ls-creds')!;
+  const userInput = root.querySelector<HTMLInputElement>('#ls-user')!;
+  const passInput = root.querySelector<HTMLInputElement>('#ls-pass')!;
+  const errEl = root.querySelector<HTMLParagraphElement>('#ls-error')!;
+  const startBtn = root.querySelector<HTMLButtonElement>('#ls-start')!;
+  const stopBtn = root.querySelector<HTMLButtonElement>('#ls-stop')!;
+
+  let status: LocalServerStatus | null = null;
+
+  function paint() {
+    if (!status?.available) {
+      box.style.display = 'none';
+      return;
+    }
+    box.style.display = 'flex';
+    stateEl.textContent = status.running
+      ? `运行中 · ${status.url}`
+      : status.installed
+        ? '已停止'
+        : '未安装（首次启动会在本机装成后台服务并创建管理员账号）';
+    // 没装过就是首次：这时才问账号，装过之后一律走正常登录
+    creds.style.display = status.installed ? 'none' : 'flex';
+    startBtn.textContent = status.running ? '进入' : status.installed ? '启动并进入' : '启动并创建管理员';
+    stopBtn.style.display = status.installed ? '' : 'none';
+    stopBtn.disabled = !status.running;
+  }
+
+  async function refresh() {
+    status = await localServerStatus();
+    paint();
+  }
+
+  function busy(on: boolean) {
+    startBtn.classList.toggle('loading', on);
+    startBtn.disabled = on;
+    stopBtn.disabled = on || !status?.running;
+  }
+
+  startBtn.addEventListener('click', () => {
+    const first = status !== null && !status.installed;
+    const username = first ? userInput.value.trim() : '';
+    const password = first ? passInput.value : '';
+    if (first && (!username || password.length < 6)) {
+      errEl.textContent = '填一个管理员用户名，密码至少 6 位';
+      return;
+    }
+    errEl.textContent = '';
+    busy(true);
+    void (async () => {
+      try {
+        const res = await localServerStart(username || undefined, password || undefined);
+        if (res.initialized) {
+          // 刚登录成功：不能走 commit()，它在换服务器时会 clearSession，把刚存的会话冲掉
+          await loginTo(res.url, username, password);
+          setServerURL(res.url);
+          location.hash = '#/lobby';
+          location.reload();
+        } else {
+          commit(res.url); // 没有新会话，换服务器等于换账号，走通用逻辑清旧会话再重载到登录页
+        }
+      } catch (err) {
+        errEl.textContent = err instanceof Error ? err.message : String(err);
+        busy(false);
+        void refresh();
+      }
+    })();
+  });
+
+  stopBtn.addEventListener('click', () => {
+    errEl.textContent = '';
+    busy(true);
+    void (async () => {
+      try {
+        await localServerStop();
+      } catch (err) {
+        errEl.textContent = err instanceof Error ? err.message : String(err);
+      }
+      busy(false);
+      await refresh();
+    })();
+  });
+
+  void (async () => {
+    const caps = await capabilities();
+    if (!caps.local_server) return;
+    try {
+      await refresh();
+    } catch (err) {
+      // 状态都查不到就不摆这块出来：本机服务不是连服务器的必经之路
+      console.warn('本机服务状态查询失败', err);
+    }
+  })();
 }

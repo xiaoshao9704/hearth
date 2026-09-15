@@ -224,6 +224,23 @@ export async function login(username: string, password: string): Promise<User> {
   return data.user;
 }
 
+// 指定地址登录并存会话：桌面壳「在本机运行服务器」刚建好账号时用。
+// SERVER_URL 在模块加载时就定死了，这一刻还是旧地址，只能显式给 origin。
+export async function loginTo(origin: string, username: string, password: string): Promise<void> {
+  const res = await fetch(`${trimSlash(origin)}/api/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username, password }),
+    signal: AbortSignal.timeout(REQ_TIMEOUT_MS),
+  });
+  if (!res.ok) {
+    const data = (await res.json().catch(() => null)) as { error?: string } | null;
+    throw new ApiError(res.status, data?.error ?? statusMessage(res.status));
+  }
+  const data = (await res.json()) as { token: string; user: User };
+  saveSession(data.token, data.user);
+}
+
 export async function logout(): Promise<void> {
   try {
     await req('/api/logout', { method: 'POST' });
