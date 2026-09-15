@@ -855,7 +855,9 @@ function renderAV(body: HTMLElement): () => void {
     const state = notifyState();
     notifyHint.textContent =
       state === 'unsupported'
-        ? '这个浏览器不支持系统通知，开关不会生效。'
+        ? inShell()
+          ? '桌面端的系统通知稍后提供，这几个开关暂不生效。'
+          : '这个浏览器不支持系统通知，开关不会生效。'
         : state === 'denied'
           ? '浏览器已拒绝本站的通知权限，要在地址栏的站点设置里改回「允许」。'
           : state === 'granted'

@@ -6,6 +6,7 @@
 //  2. **不支持就如实说明**：iPhone 上只有"添加到主屏幕"后的 PWA 才有推送权限，
 //     普通 Safari 标签页里连 PushManager 都没有，这时该给出理由而不是让开关静默失效。
 import { apiRequest } from './api';
+import { inShell } from './bridge';
 
 // 用户在设置里主动关过离线推送时写 '1'：自动订阅路径（授权瞬间、页面启动补订阅）看到就不再打扰。
 // 手动打开时清掉——这两个是本模块唯一的写点，键名不对外暴露。
@@ -38,7 +39,9 @@ function urlBase64ToUint8Array(base64: string): Uint8Array {
   return out;
 }
 
+// 壳里 Service Worker 不注册（见 sw.ts），推送也就无从谈起
 export function isSupported(): boolean {
+  if (inShell()) return false;
   return 'serviceWorker' in navigator && 'PushManager' in window && typeof Notification !== 'undefined';
 }
 
@@ -53,6 +56,7 @@ export function needsInstall(): boolean {
 // unsupportedReason 开关关不上时给用户的说法（null = 支持）
 export function unsupportedReason(): string | null {
   if (isSupported()) return null;
+  if (inShell()) return '桌面端的离线推送稍后提供。';
   if (needsInstall()) return '在 iPhone / iPad 上要先把网页「添加到主屏幕」，从那个图标打开后才能开离线推送。';
   if (!('serviceWorker' in navigator)) return '这个浏览器（或当前的 http 访问方式）不支持 Service Worker，收不到离线推送。';
   return '这个浏览器不支持 Web Push，收不到离线推送。';

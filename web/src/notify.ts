@@ -3,6 +3,7 @@
 //  1. 不在进页面时申请权限——那是最容易被永久拒掉的时机。第一条实时消息到达时才"备好"，
 //     真正的 requestPermission 尽量落在紧接着的一次用户手势上（Firefox 只在手势里允许申请）。
 //  2. 页面可见时一律不发通知：可见时该响的是提示音（audio.ts），通知只补"人不在这一页"的场景。
+import { inShell } from './bridge';
 import { loadPrefs } from './prefs';
 import { autoSubscribeIfAllowed } from './push';
 
@@ -10,7 +11,10 @@ import { autoSubscribeIfAllowed } from './push';
 const TAG_CHAT = 'hearth-chat';
 const TAG_JOIN = 'hearth-join';
 
-const supported = typeof Notification !== 'undefined';
+// 桌面壳里一律当不支持：WebView 即便挂着 Notification 也没有可用的权限来源，
+// requestPermission 只会拒或抛。这是本模块唯一的能力开关，armNotifyPermission、
+// show、notifyState 全经它短路，不会有未捕获异常。
+const supported = !inShell() && typeof Notification !== 'undefined';
 let armed = false; // 已经"备好"过申请（只做一次）
 let gestureWired = false;
 
