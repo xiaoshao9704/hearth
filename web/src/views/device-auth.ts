@@ -33,7 +33,9 @@ export function renderDeviceAuth(root: HTMLElement, challenge: string) {
   const body = root.querySelector<HTMLDivElement>('#da-body')!;
 
   // 收尾态：授权流程已经结束（允许 / 拒绝 / 参数不对），页面只剩一句说明
-  const finish = (title: string, detail: string) => {
+  // link：浏览器可能拦下页面脚本发起的自定义 scheme 跳转（要弹一次「打开 Hearth？」，
+  // 或 await 之后已丢掉用户手势），留一个真实的 <a> 让用户自己点，这一下一定算用户手势。
+  const finish = (title: string, detail: string, link?: string) => {
     body.innerHTML = `
       <div class="auth-note card" style="display:flex;gap:12px">
         <span style="flex-shrink:0;margin-top:1px">${icon('info', 17, 'var(--text-2)', 1.6)}</span>
@@ -41,7 +43,8 @@ export function renderDeviceAuth(root: HTMLElement, challenge: string) {
           <div style="font-size:12.5px;font-weight:600">${esc(title)}</div>
           <div style="font-size:12px;line-height:1.6;color:var(--text-2);text-wrap:pretty">${esc(detail)}</div>
         </div>
-      </div>`;
+      </div>
+      ${link ? `<a class="hit btn btn-primary btn-lg" style="margin-top:12px" href="${esc(link)}">打开 Hearth 桌面端</a>` : ''}`;
   };
 
   if (!CHALLENGE_RE.test(challenge)) {
@@ -76,8 +79,13 @@ export function renderDeviceAuth(root: HTMLElement, challenge: string) {
     try {
       const code = await deviceApprove(challenge);
       // 导航到自定义 scheme：系统把它交给桌面端。本页不会因此被顶掉，留一句说明即可。
-      location.href = `hearth://auth?code=${encodeURIComponent(code)}`;
-      finish('已跳回桌面端', '可以关闭此页。如果桌面端没有反应，回到桌面端重新点一次「在浏览器中登录」。');
+      const link = `hearth://auth?code=${encodeURIComponent(code)}`;
+      location.href = link;
+      finish(
+        '已跳回桌面端',
+        '浏览器问「是否打开 Hearth」时请选打开。没有反应就点下面的按钮；桌面端仍没动静，回到桌面端重新点一次「在浏览器中登录」。',
+        link,
+      );
     } catch (err) {
       errEl.textContent = (err as Error).message;
       allowBtn.disabled = false;
