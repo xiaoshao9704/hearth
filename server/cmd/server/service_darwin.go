@@ -147,39 +147,60 @@ func svcStop(system bool) error {
 	return nil
 }
 
-func svcStatus(system bool) error {
+func svcState(system bool) (serviceState, error) {
 	if system {
-		return errors.New("macOS 只支持用户级服务，去掉 --system 即可")
+		return serviceState{}, errors.New("macOS 只支持用户级服务，去掉 --system 即可")
+	}
+	plist, err := plistPath()
+	if err != nil {
+		return serviceState{}, err
+	}
+	if _, err := os.Stat(plist); os.IsNotExist(err) {
+		return serviceState{}, nil
+	}
+	st := serviceState{Installed: true, Detail: "未知"}
+	out, err := exec.Command("launchctl", "print", launchdTarget()).CombinedOutput()
+	if err != nil {
+		st.Detail = "未装载"
+		return st, nil
+	}
+	// print 输出里抠 state 与 pid 两行即可
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimSpace(line)
+		if v, ok := strings.CutPrefix(line, "state = "); ok {
+			st.Detail = v
+		}
+		if v, ok := strings.CutPrefix(line, "pid = "); ok {
+			st.PID, _ = strconv.Atoi(v)
+		}
+	}
+	// launchd 只在进程确实活着时打 pid；state 在刚拉起的瞬间可能还不是 running
+	st.Running = st.PID > 0 || st.Detail == "running"
+	return st, nil
+}
+
+func svcStatus(system bool) error {
+	st, err := svcState(system)
+	if err != nil {
+		return err
+	}
+	if !st.Installed {
+		fmt.Println("未安装（hearth service install 安装用户级 LaunchAgent）")
+		return nil
 	}
 	plist, err := plistPath()
 	if err != nil {
 		return err
 	}
-	if _, err := os.Stat(plist); os.IsNotExist(err) {
-		fmt.Println("未安装（hearth service install 安装用户级 LaunchAgent）")
-		return nil
-	}
 	fmt.Println("已安装: " + plist)
-	out, err := exec.Command("launchctl", "print", launchdTarget()).CombinedOutput()
-	if err != nil {
+	if st.Detail == "未装载" {
 		fmt.Println("状态: 未装载（未在运行；hearth service start 启动）")
 		return nil
 	}
-	// print 输出里抠 state 与 pid 两行即可
-	state, pid := "未知", ""
-	for _, line := range strings.Split(string(out), "\n") {
-		line = strings.TrimSpace(line)
-		if v, ok := strings.CutPrefix(line, "state = "); ok {
-			state = v
-		}
-		if v, ok := strings.CutPrefix(line, "pid = "); ok {
-			pid = v
-		}
-	}
-	if pid != "" {
-		fmt.Printf("状态: %s（pid %s）\n", state, pid)
+	if st.PID > 0 {
+		fmt.Printf("状态: %s（pid %d）\n", st.Detail, st.PID)
 	} else {
-		fmt.Println("状态: " + state)
+		fmt.Println("状态: " + st.Detail)
 	}
 	return nil
 }

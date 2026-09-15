@@ -165,21 +165,20 @@ func svcStop(system bool) error {
 	return nil
 }
 
-func svcStatus(system bool) error {
+func svcState(system bool) (serviceState, error) {
 	m, err := mgr.Connect()
 	if err != nil {
-		return err
+		return serviceState{}, err
 	}
 	defer m.Disconnect()
 	s, err := m.OpenService(serviceName)
 	if err != nil {
-		fmt.Println("未安装（以管理员身份运行 hearth service install）")
-		return nil
+		return serviceState{}, nil
 	}
 	defer s.Close()
 	st, err := s.Query()
 	if err != nil {
-		return err
+		return serviceState{}, err
 	}
 	state := map[svc.State]string{
 		svc.Running: "运行中", svc.Stopped: "已停止", svc.StartPending: "启动中", svc.StopPending: "停止中",
@@ -187,7 +186,19 @@ func svcStatus(system bool) error {
 	if state == "" {
 		state = fmt.Sprintf("状态码 %d", uint32(st.State))
 	}
-	fmt.Println("已安装，状态: " + state)
+	return serviceState{Installed: true, Running: st.State == svc.Running, Detail: state}, nil
+}
+
+func svcStatus(system bool) error {
+	st, err := svcState(system)
+	if err != nil {
+		return err
+	}
+	if !st.Installed {
+		fmt.Println("未安装（以管理员身份运行 hearth service install）")
+		return nil
+	}
+	fmt.Println("已安装，状态: " + st.Detail)
 	return nil
 }
 

@@ -12,3 +12,4 @@ func svcUninstall(cfg config.Config, system bool) error { return nil }
 func svcStart(system bool) error                        { return nil }
 func svcStop(system bool) error                         { return nil }
 func svcStatus(system bool) error                       { return nil }
+func svcState(system bool) (serviceState, error)        { return serviceState{}, nil }

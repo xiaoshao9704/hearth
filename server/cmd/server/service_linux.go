@@ -133,18 +133,35 @@ func svcStop(system bool) error {
 	return nil
 }
 
+func svcState(system bool) (serviceState, error) {
+	path, err := unitPath(system)
+	if err != nil {
+		return serviceState{}, err
+	}
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		return serviceState{}, nil
+	}
+	// is-active 在非 active 时退出码非 0，输出仍是状态词（inactive/failed/…），只看输出
+	active, _ := systemctl(system, "is-active", unitName).Output()
+	detail := strings.TrimSpace(string(active))
+	return serviceState{Installed: true, Running: detail == "active", Detail: detail}, nil
+}
+
 func svcStatus(system bool) error {
+	st, err := svcState(system)
+	if err != nil {
+		return err
+	}
+	if !st.Installed {
+		fmt.Println("未安装（hearth service install 安装" + map[bool]string{true: "系统级", false: "用户级"}[system] + " systemd 单元）")
+		return nil
+	}
 	path, err := unitPath(system)
 	if err != nil {
 		return err
 	}
-	if _, err := os.Stat(path); os.IsNotExist(err) {
-		fmt.Println("未安装（hearth service install 安装" + map[bool]string{true: "系统级", false: "用户级"}[system] + " systemd 单元）")
-		return nil
-	}
 	fmt.Println("已安装: " + path)
-	active, _ := systemctl(system, "is-active", unitName).Output()
 	enabled, _ := systemctl(system, "is-enabled", unitName).Output()
-	fmt.Printf("状态: %s（开机自启: %s）\n", strings.TrimSpace(string(active)), strings.TrimSpace(string(enabled)))
+	fmt.Printf("状态: %s（开机自启: %s）\n", st.Detail, strings.TrimSpace(string(enabled)))
 	return nil
 }

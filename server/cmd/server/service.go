@@ -3,6 +3,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
 	"os"
@@ -34,15 +35,32 @@ func redirectServiceLog(dataDir string) {
 	log.SetOutput(w)
 }
 
+// serviceState status 的机器可读形态：调用方（桌面壳）据此决定该装、该启还是已在跑。
+// 人读输出随平台措辞变，这三个字段是稳定契约，不要改名。
+type serviceState struct {
+	Installed bool   `json:"installed"` // 服务单元已写入（不代表在跑）
+	Running   bool   `json:"running"`
+	Detail    string `json:"detail,omitempty"` // 平台原文状态，仅供展示
+	PID       int    `json:"pid,omitempty"`
+}
+
 // runServiceCmd 分发 service 子命令；system = 带了 --system（仅 Linux 有意义）。返回退出码。
 func runServiceCmd(args []string, system bool, cfg config.Config) int {
-	action := ""
+	action, asJSON := "", false
 	for _, a := range args {
+		if a == "--json" {
+			asJSON = true
+			continue
+		}
 		if action == "" {
 			action = a
 			continue
 		}
 		fmt.Fprintln(os.Stderr, "无法识别的参数: "+a)
+		return 2
+	}
+	if asJSON && action != "status" {
+		fmt.Fprintln(os.Stderr, "--json 只能配 status 用")
 		return 2
 	}
 	if !serviceSupported {
@@ -60,9 +78,13 @@ func runServiceCmd(args []string, system bool, cfg config.Config) int {
 	case "stop":
 		err = svcStop(system)
 	case "status":
-		err = svcStatus(system)
+		if asJSON {
+			err = printServiceStateJSON(system)
+		} else {
+			err = svcStatus(system)
+		}
 	default:
-		fmt.Fprintln(os.Stderr, "用法: hearth service install [--system] | uninstall [--system] | start | stop | status")
+		fmt.Fprintln(os.Stderr, "用法: hearth service install [--system] | uninstall [--system] | start | stop | status [--json]")
 		fmt.Fprintln(os.Stderr, "（--system 仅 Linux：写系统级 systemd 单元；默认是用户级）")
 		return 2
 	}
@@ -71,6 +93,20 @@ func runServiceCmd(args []string, system bool, cfg config.Config) int {
 		return 1
 	}
 	return 0
+}
+
+// printServiceStateJSON 一行 json，供程序解析（桌面壳「在本机运行服务器」）。
+func printServiceStateJSON(system bool) error {
+	st, err := svcState(system)
+	if err != nil {
+		return err
+	}
+	b, err := json.Marshal(st)
+	if err != nil {
+		return err
+	}
+	fmt.Println(string(b))
+	return nil
 }
 
 // exePath 当前二进制的绝对路径（服务单元的 ExecStart / ProgramArguments 用它）。
