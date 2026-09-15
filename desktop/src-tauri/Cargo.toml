@@ -87,7 +87,7 @@ objc2-security = { version = "0.3", default-features = false, features = [
 
 
 [target.'cfg(target_os = "windows")'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_UI_WindowsAndMessaging", "Win32_System_Threading", "Win32_Security", "Win32_System_SystemInformation", "Wdk_System_SystemServices"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Dwm", "Win32_Graphics_Gdi", "Win32_UI_WindowsAndMessaging", "Win32_System_Threading", "Win32_Security", "Win32_System_SystemInformation", "Wdk_System_SystemServices"] }
 # 应用内信任在 Windows 侧要自己挂 WebView2 的证书错误事件（wry/Tauri 不暴露）：
 # 版本跟着 Tauri/wry 锁定的那套走，不另起一套，否则 COM 接口类型对不上。
 webview2-com = "0.38"

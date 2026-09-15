@@ -18,11 +18,12 @@ export const NativeSourcePanel = (p: {
   const [previews, setPreviews] = createSignal<Record<string, string | null>>({});
   const [audio, setAudio] = createSignal(p.screenAudio);
   let disposed = false;
-  const previewPending = new Set<string>();
-  const previewQueued = new Set<string>();
-  const previewQueue: Array<{ source: NativeSource; retry: number }> = [];
-  let previewActive = false;
-  let previewDelayTimer = 0;
+  // 预览按需取：壳里每张缩略图都是一条真的采集管线，几十个源全预取要等几十秒。
+  // 列表先画出来，只给视口内、悬停、选中的源排队，优先级 0 选中 > 1 悬停 > 2 视口内。
+  const order = new Map(p.sources.map((s, i) => [s.id, i] as const));
+  const queue = new Map<string, number>();
+  let active = false;
+  let pumpTimer = 0;
 
   const audioScope = () => selected()?.audio_scope ?? 'none';
   const canAudio = () => p.appAudio && audioScope() !== 'none';
@@ -32,71 +33,87 @@ export const NativeSourcePanel = (p: {
     if (!source || audioScope() === 'none') return '这个画面不能共享声音';
     return audioScope() === 'system' ? '共享整屏系统声音' : `共享 ${source.app || '所属应用'} 的声音`;
   };
-  const loadPreview = async (source: NativeSource, retry = 0) => {
-    previewPending.add(source.id);
-    previewActive = true;
-    try {
-      const preview = await sourcePreview(source.id);
-      if (!disposed) setPreviews((all) => ({ ...all, [source.id]: preview }));
-      // Rust 会为忙态排队，但采集源短暂切换时仍可能没有帧；初始缩略图再试两次。
-      if (!disposed && preview === null && retry < 2) queuePreview(source, false, retry + 1);
-    } catch {
-      // 缩略图只是辅助选择；壳较旧或暂时取不到时仍可正常共享。
-      if (!disposed) setPreviews((all) => ({ ...all, [source.id]: null }));
-      if (!disposed && retry < 2) queuePreview(source, false, retry + 1);
-    } finally {
-      previewPending.delete(source.id);
-      previewActive = false;
-      if (!disposed) previewDelayTimer = window.setTimeout(pumpPreviews, 550);
+  // 壳里的预览采集是全局单路，这里也只发一路；空了再等一小会儿，别把壳打满。
+  const pump = () => {
+    pumpTimer = 0;
+    if (disposed || active || !queue.size) return;
+    let id = '';
+    let best = Infinity;
+    for (const [candidate, priority] of queue) {
+      const rank = priority * 1e6 + (order.get(candidate) ?? 0);
+      if (rank < best) {
+        best = rank;
+        id = candidate;
+      }
     }
+    queue.delete(id);
+    active = true;
+    void sourcePreview(id)
+      .then((img) => {
+        if (!disposed) setPreviews((all) => ({ ...all, [id]: img }));
+      })
+      .catch(() => {
+        // 缩略图只是辅助选择；取不到就留占位图，不影响共享。
+        if (!disposed) setPreviews((all) => ({ ...all, [id]: all[id] ?? null }));
+      })
+      .finally(() => {
+        active = false;
+        if (!disposed) pumpTimer = window.setTimeout(pump, 120);
+      });
   };
-
-  // Rust 的预览采集本身是全局单路；这里也只发一路，选中项插队，初始任务不会被忙态吞掉。
-  const pumpPreviews = () => {
-    previewDelayTimer = 0;
-    if (disposed || previewActive || !previewQueue.length) return;
-    const task = previewQueue.shift()!;
-    previewQueued.delete(task.source.id);
-    if (!previewPending.has(task.source.id)) void loadPreview(task.source, task.retry);
-    else pumpPreviews();
+  const request = (id: string, priority: number) => {
+    if (disposed) return;
+    const queued = queue.get(id);
+    if (queued !== undefined && queued <= priority) return;
+    queue.set(id, priority);
+    if (!active && !pumpTimer) pump();
   };
-  const queuePreview = (source: NativeSource, priority = false, retry = 0) => {
-    if (disposed || previewPending.has(source.id)) return;
-    const queuedAt = previewQueue.findIndex((item) => item.source.id === source.id);
-    if (queuedAt >= 0) {
-      if (priority && queuedAt > 0) previewQueue.unshift(previewQueue.splice(queuedAt, 1)[0]);
-    } else {
-      previewQueued.add(source.id);
-      const task = { source, retry };
-      if (priority) previewQueue.unshift(task);
-      else previewQueue.push(task);
-    }
-    if (!previewDelayTimer) pumpPreviews();
-  };
-  p.sources.forEach((source) => queuePreview(source));
+  // 视口内才取：列表可以很长，滚到哪儿取哪儿。
+  const observer = new IntersectionObserver(
+    (entries) => {
+      for (const e of entries) {
+        const id = (e.target as HTMLElement).dataset.sourceId;
+        if (e.isIntersecting && id) request(id, 2);
+      }
+    },
+    { rootMargin: '120px' },
+  );
   createEffect(() => {
     const source = selected();
     if (!source) return;
-    queuePreview(source, true);
-    const timer = window.setInterval(() => queuePreview(source, true), 1000);
+    request(source.id, 0);
+    // 选中项保持刷新（准备共享的那一个要看得见动静），但不抢在别人前面重复排队。
+    const timer = window.setInterval(() => {
+      if (!active && !queue.size) request(source.id, 0);
+    }, 1500);
     onCleanup(() => window.clearInterval(timer));
   });
   onCleanup(() => {
     disposed = true;
-    previewQueue.length = 0;
-    window.clearTimeout(previewDelayTimer);
+    queue.clear();
+    observer.disconnect();
+    window.clearTimeout(pumpTimer);
   });
 
   const row = (s: NativeSource) => (
-    <button type="button" class="hit src-item" classList={{ selected: selected()?.id === s.id }} onClick={() => setSelected(s)}>
+    <button
+      type="button"
+      class="hit src-item"
+      classList={{ selected: selected()?.id === s.id }}
+      data-source-id={s.id}
+      ref={(node) => observer.observe(node)}
+      onMouseEnter={() => request(s.id, 1)}
+      onClick={() => setSelected(s)}
+    >
       <span class="src-preview">
         <Show when={previews()[s.id]} fallback={el(icon(s.kind === 'display' ? 'monitor' : 'grid', 20, 'var(--text-2)', 1.7))}>
           <img src={previews()[s.id] ?? ''} alt="" />
         </Show>
       </span>
+      {/* 窗口按应用名认人：标题五花八门，「是哪个程序」才是挑源时先看的那一行 */}
       <span class="src-copy">
-        <span class="src-name">{s.title}</span>
-        <span class="src-meta">{s.kind === 'display' ? '整个屏幕' : s.app || '窗口'}</span>
+        <span class="src-name">{s.kind === 'display' ? s.title : s.app || s.title}</span>
+        <span class="src-meta">{s.kind === 'display' ? '整个屏幕' : s.title}</span>
       </span>
     </button>
   );

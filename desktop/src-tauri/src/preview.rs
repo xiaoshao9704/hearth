@@ -32,11 +32,13 @@ pub fn one_frame(source_id: &str) -> Result<Option<String>, String> {
         std::thread::sleep(Duration::from_millis(25));
     };
     if let Some(previous) = *last {
-        if let Some(delay) = Duration::from_millis(500).checked_sub(previous.elapsed()) {
+        if let Some(delay) = Duration::from_millis(100).checked_sub(previous.elapsed()) {
             std::thread::sleep(delay);
         }
     }
     *last = Some(Instant::now());
+    // 单次预览的总时限：取不到帧的源只占这么久，后面排队的源不跟着一起卡住。
+    let deadline = Instant::now() + Duration::from_secs(3);
     publish::init_gst()?;
     let settings = capture::Settings {
         width: 480,
@@ -72,7 +74,8 @@ pub fn one_frame(source_id: &str) -> Result<Option<String>, String> {
         .pipeline
         .set_state(gst::State::Playing)
         .map_err(|e| format!("预览启动失败：{e}"))?;
-    let sample = sink.try_pull_sample(gst::ClockTime::from_seconds(3));
+    let left = deadline.saturating_duration_since(Instant::now());
+    let sample = sink.try_pull_sample(gst::ClockTime::from_nseconds(left.as_nanos() as u64));
     if let Some(e) = error.lock().unwrap().take() {
         return Err(e);
     }
