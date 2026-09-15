@@ -58,6 +58,9 @@ type API struct {
 	// 通行密钥：进行中的握手、按 (RP ID, origin) 缓存的 WebAuthn 实例、登录限频（见 passkey.go）
 	passkey passkeyState
 
+	// 桌面端浏览器跳转登录：已批准待换取的一次性码与换取限频（见 deviceauth.go）
+	deviceAuth deviceAuthState
+
 	// 离线推送（见 push.go）：VAPID 密钥的生成串行化；pushHTTP 非 nil 时替换投递用的
 	// HTTP 客户端（测试注入假推送网关）
 	webpushMu sync.Mutex
@@ -129,6 +132,8 @@ func (a *API) Router() *chi.Mux {
 	// 通行密钥登录：可发现凭证，未鉴权（还不知道是谁），按来源 IP 限频（见 passkey.go）
 	r.Post("/api/auth/passkey/login/begin", a.passkeyLoginBegin)
 	r.Post("/api/auth/passkey/login/finish", a.passkeyLoginFinish)
+	// 桌面端浏览器跳转登录的换取端：拿的就是会话，自然无鉴权，按来源 IP 限频（见 deviceauth.go）
+	r.Post("/api/auth/device/exchange", a.deviceExchange)
 
 	// 根证书下载与安装说明页：无鉴权——要装根证书的设备还没信任本站，也可能还在明文侧
 	r.Get("/ca.crt", a.caCert)
@@ -145,6 +150,8 @@ func (a *API) Router() *chi.Mux {
 		r.Use(a.touchSession) // 节流刷新会话最近活跃时间（会话列表用，见 account.go）
 		r.Post("/api/logout", a.logout)
 		r.Get("/api/me", a.me)
+		// 桌面端浏览器跳转登录的批准端：在浏览器里点了「允许」才调（见 deviceauth.go）
+		r.Post("/api/auth/device/approve", a.deviceApprove)
 		r.Post("/api/client-log", a.clientLog)
 		r.Get("/api/channels", a.listChannels)
 		// 离线推送订阅（见 push.go）：公钥、订阅、退订
@@ -406,10 +413,27 @@ func (a *API) requireChannelRole(need store.ChannelRole, msg string) func(http.H
 	}
 }
 
-// cors 跨域中间件：开发期前端在 vite dev server（不同端口）。
+// desktopOrigins 桌面壳里那份网页的本地 origin（macOS/Linux 是 tauri://localhost，
+// Windows 是 http(s)://tauri.localhost）。它们不是部署侧能预见的来源，内建放行，
+// 不受 CORS_ORIGIN 收紧影响——否则管理员一改配置就把所有桌面端打死。
+var desktopOrigins = []string{"tauri://localhost", "http://tauri.localhost", "https://tauri.localhost"}
+
+// corsOrigin 本次请求要回的 Allow-Origin：桌面壳的本地 origin 原样回，其余按配置。
+func (a *API) corsOrigin(r *http.Request) string {
+	origin := r.Header.Get("Origin")
+	for _, d := range desktopOrigins {
+		if origin == d {
+			return origin
+		}
+	}
+	return a.cfg.CORSOrigin
+}
+
+// cors 跨域中间件：开发期前端在 vite dev server（不同端口），桌面壳则是本地 origin。
 func (a *API) cors(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", a.cfg.CORSOrigin)
+		w.Header().Add("Vary", "Origin") // 回值随请求的 Origin 变，缓存不能混用
+		w.Header().Set("Access-Control-Allow-Origin", a.corsOrigin(r))
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Device-Id")
 		w.Header().Set("Access-Control-Expose-Headers", "X-Hearth-Version")
