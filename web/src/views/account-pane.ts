@@ -3,6 +3,7 @@
 // 这里是真的登录凭证——下线即刻生效，那台设备下一个请求就 401。
 import { clearSession, deleteMySession, listMySessions } from '../api';
 import type { SessionRecord } from '../api';
+import { inShell } from '../bridge';
 import { deletePasskey, isSupported, listPasskeys, passkeyErrorDetail, registerPasskey, renamePasskey } from '../passkey';
 import type { PasskeyRecord } from '../passkey';
 import { confirmDialog, esc, icon, timeAgo, toast } from '../ui';
@@ -156,8 +157,12 @@ export function renderPasskeys(host: HTMLElement) {
     <div style="font-size:11.5px;line-height:1.6;color:var(--text-2);margin-top:4px;text-wrap:pretty">用指纹、面容或设备密码登录，不用输密码。私钥留在设备里（或跟着系统账号同步），服务器只存公钥。</div>`;
 
   if (!isSupported()) {
+    // 壳里不是「浏览器太老」而是地址形态决定的（见 passkey.isSupported），说法要对得上
+    const why = inShell()
+      ? '桌面端暂不支持通行密钥（应用内的地址不是域名）。请用密码登录；在浏览器里添加的通行密钥不受影响。'
+      : '这个浏览器不支持通行密钥，换新版 Safari / Chrome / Edge 再来添加。已添加的凭钥不受影响。';
     host.innerHTML = `<div class="card">${head}
-      <div class="table-empty" style="margin-top:13px">这个浏览器不支持通行密钥，换新版 Safari / Chrome / Edge 再来添加。已添加的凭钥不受影响。</div>
+      <div class="table-empty" style="margin-top:13px">${why}</div>
     </div>`;
     return;
   }

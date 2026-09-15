@@ -9,6 +9,7 @@
 // 这些 API 比 TypeScript 自带的 DOM 声明新，所以这一层的类型断言比别处多；
 // 断言只用于「探测并调用」，不做类型推导。
 import type { PasskeyOptions, PasskeyRecord, User } from './api';
+import { inShell } from './bridge';
 import {
   deletePasskey,
   listPasskeys,
@@ -52,10 +53,13 @@ function pkc(): PKCStatic | undefined {
 }
 
 // isSupported 这台浏览器有没有 WebAuthn。
+// 桌面壳里一律 false：WebAuthn 的 RP ID 必须是域名，壳的 origin 是 tauri://localhost，
+// 仪式一定被浏览器拒（用户看到的就是「通行密钥无效」）。没有替代实现，入口全隐藏。
 // 刻意不查 isUserVerifyingPlatformAuthenticatorAvailable()：那是「本机有没有指纹/面容」，
 // 没有平台认证器时用手机扫码（浏览器自带的 hybrid 流程）照样能用，据此隐藏入口是误伤；
 // 而且它是异步的，渲染路径要的是一个同步判断。
 export function isSupported(): boolean {
+  if (inShell()) return false;
   return typeof window !== 'undefined' && !!pkc() && !!navigator.credentials?.create;
 }
 
