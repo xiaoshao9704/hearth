@@ -301,6 +301,22 @@ pub fn run() {
         eprintln!("{e}");
     }
     tauri::Builder::default()
+        // 单实例必须排在所有插件之前：第二个进程要在自己初始化出窗口之前就退掉。
+        // 桌面端只允许一个窗口——协议激活（Windows 的 hearth://）、再次双击图标都回到
+        // 这一个实例，否则会出现两个互不知情的窗口，登录态各算各的。
+        .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+            // 深链 URL 已由 feature deep-link 喂进深链插件（走 on_open_url 那条路），
+            // 这里只把窗口拉到前台并留一行可检索的痕迹；再 emit 一次会让一次性码作废。
+            if let Some(url) = args.iter().skip(1).find(|a| a.starts_with("hearth://")) {
+                let head = url.split('?').next().unwrap_or(url.as_str());
+                eprintln!("deep-link forwarded: {head}?<redacted>");
+            }
+            if let Some(win) = app.get_webview_window("main") {
+                let _ = win.show();
+                let _ = win.unminimize();
+                let _ = win.set_focus();
+            }
+        }))
         .plugin(tauri_plugin_opener::init())
         // hearth:// 深链：浏览器跳转登录完成后由系统唤回本应用，URL 里只有一次性码
         .plugin(tauri_plugin_deep_link::init())
@@ -328,14 +344,24 @@ pub fn run() {
             {
                 use tauri_plugin_deep_link::DeepLinkExt;
                 let handle = app.handle().clone();
+                let emit = move |url: String| {
+                    if url.starts_with("hearth://") {
+                        let _ = handle.emit_to("main", "deep-link", DeepLink { url });
+                    }
+                };
+                let forward = emit.clone();
                 app.deep_link().on_open_url(move |event| {
                     for url in event.urls() {
-                        let url = url.to_string();
-                        if url.starts_with("hearth://") {
-                            let _ = handle.emit_to("main", "deep-link", DeepLink { url });
-                        }
+                        forward(url.to_string());
                     }
                 });
+                // 冷启动带 URL：深链插件在自己的 setup 里就消化掉了命令行，上面的监听注册得晚，
+                // 补发一次。此时网页多半还没挂上监听，换会话仍要重来一次，不是回归。
+                if let Ok(Some(urls)) = app.deep_link().get_current() {
+                    for url in urls {
+                        emit(url.to_string());
+                    }
+                }
             }
             // 信任配置放 app 配置目录；WebView 的证书回调与 Rust 侧出站 https 共用这一份
             let dir = app

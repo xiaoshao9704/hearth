@@ -37,6 +37,10 @@ tokio = { version = "1", features = ["net", "rt", "time"] }
 tauri-plugin-opener = "2"
 # hearth:// 深链：浏览器跳转登录在浏览器里批准后，由系统把一次性码送回本应用。
 tauri-plugin-deep-link = "2"
+# 单实例：Windows/Linux 的协议激活与再次双击都会另起进程，没有它就会出现第二个
+# 互不知情的窗口（登录态各算各的）。feature deep-link 让它把转发来的 argv 直接喂给
+# 深链插件，深链只经那一条路送进网页，壳自己不再 emit（一次性码送两遍会提前作废）。
+tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
 
 # macOS 采集：直接用 objc2 的框架绑定（ScreenCaptureKit + CoreMedia/CoreVideo），
 # 不走第三方封装——SCStream 的音频样本与像素缓冲都要按原样拿到，封装层反而挡路。

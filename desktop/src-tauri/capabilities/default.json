@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "本地打包窗口的最小权限：放行事件订阅（壳把发布状态、hearth:// 深链推给网页）与用系统默认浏览器开 http(s) 外链。深链插件不需要额外权限——网页只订阅壳 emit 的事件，不调插件命令。自定义命令不在 ACL 内，默认就只有本地窗口能调，这里不放宽。",
+  "description": "本地打包窗口的最小权限：放行事件订阅（壳把发布状态、hearth:// 深链推给网页）与用系统默认浏览器开 http(s) 外链。深链与单实例插件不需要额外权限——网页只订阅壳 emit 的事件，不调这两个插件的命令。自定义命令不在 ACL 内，默认就只有本地窗口能调，这里不放宽。",
   "windows": ["main"],
   "permissions": [
     "core:event:allow-listen",
