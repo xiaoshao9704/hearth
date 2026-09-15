@@ -1,6 +1,7 @@
 // 账户菜单：账户设置 / 外观 / 管理后台（admin+）/ 退出登录。
 // 侧栏用户栏与房间、大厅顶栏的账户入口共用这一份（手机上侧栏是抽屉，顶栏那个才是能看见的入口）。
 import { getUser, logout } from './api';
+import { inShell } from './bridge';
 import { cycleTheme, getTheme, THEME_ICONS, type Theme } from './theme';
 import { confirmDialog, icon, toast } from './ui';
 import { openSettings } from './views/settings';
@@ -80,8 +81,9 @@ export function openAccountMenu(anchor: HTMLElement) {
   });
   box.querySelector('[data-act="admin"]')?.addEventListener('click', () => {
     closeAccountMenu();
-    // 房间里开的入口：管理后台走新标签页，别把正在通话的房间顶掉（与设置浮层同一口径）
-    if (location.hash.startsWith('#/room/')) window.open('#/admin', '_blank', 'noopener');
+    // 房间里开的入口：管理后台走新标签页，别把正在通话的房间顶掉（与设置浮层同一口径）。
+    // 壳里没有第二个标签页，window.open 什么都不会发生：就地跳，由 allowLeave 问一句
+    if (!inShell() && location.hash.startsWith('#/room/')) window.open('#/admin', '_blank', 'noopener');
     else location.hash = '#/admin';
   });
   box.querySelector('[data-act="logout"]')!.addEventListener('click', () => void doLogout());

@@ -132,6 +132,20 @@ export async function onPublishState(cb: (s: PublishState) => void): Promise<() 
   }
 }
 
+// openExternal 把外链交给系统默认浏览器。WebView 里 target=_blank 与 window.open
+// 什么都不发生，直接导航又会把本地打包的页面顶掉、回不来。
+// 返回是否已经接手：false = 不在壳里（或壳太老没有这个插件），调用方按网页原样走。
+export async function openExternal(url: string): Promise<boolean> {
+  const invoke = rawInvoke();
+  if (!invoke) return false;
+  try {
+    await invoke<null>('plugin:opener|open_url', { url });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 // ---- 应用内信任（只在桌面壳里可用，浏览器里这几条命令不存在）----
 // 与投屏能力无关：没有采集能力的机器也要能连服务器，所以不走 call() 的能力门槛。
 function shellCall<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {

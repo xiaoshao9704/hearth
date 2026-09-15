@@ -5,7 +5,16 @@
 import { createSignal, For, Show } from 'solid-js';
 import { getTls, rotateTlsCA, SERVER_URL, uploadTls } from '../../api';
 import type { ConfigItem, TlsStatus } from '../../api';
+import { inShell, openExternal } from '../../bridge';
 import { confirmDialog, copyText, el, icon, toast } from '../../ui';
+
+// 壳里的外链：WebView 直接导航会把本地打包的页面顶掉且回不来，target=_blank 又什么都不发生，
+// 一律交给系统默认浏览器。根证书本来就是拿去装到别的设备/系统信任库的东西。
+function openInBrowser(e: MouseEvent & { currentTarget: HTMLAnchorElement }) {
+  if (!inShell()) return;
+  e.preventDefault();
+  void openExternal(e.currentTarget.href);
+}
 
 const SOURCE_OPTS = ['off', 'self', 'file', 'upload'] as const;
 const SOURCE_LABELS: Record<string, string> = { off: '关闭', self: '自签', file: '证书文件', upload: '手动上传' };
@@ -321,10 +330,10 @@ export function TlsCard(props: {
                         </div>
                       </div>
                       <div style="display:flex;gap:9px;margin-top:11px;flex-wrap:wrap">
-                        <a class="hit btn btn-sm" href={`${SERVER_URL}/ca.crt`}>
+                        <a class="hit btn btn-sm" href={`${SERVER_URL}/ca.crt`} onClick={openInBrowser}>
                           {el(icon('install', 13))} 下载根证书
                         </a>
-                        <a class="hit btn btn-sm" href={`${SERVER_URL}/ca`} target="_blank" rel="noopener">
+                        <a class="hit btn btn-sm" href={`${SERVER_URL}/ca`} target="_blank" rel="noopener" onClick={openInBrowser}>
                           安装说明页
                         </a>
                         <button

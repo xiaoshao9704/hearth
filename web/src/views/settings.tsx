@@ -4,6 +4,7 @@
 import { createEffect, createResource, createSignal, onCleanup, For, Show } from 'solid-js';
 import { render } from 'solid-js/web';
 import { canInvite, getUser, isGuest, listChannels } from '../api';
+import { inShell } from '../bridge';
 import { el, icon } from '../ui';
 import { ChannelManage } from './manage';
 import { PERSONAL_PANES, renderPane } from './settings-panes';
@@ -89,8 +90,9 @@ function SettingsOverlay(p: { pane: Pane; ctx: SettingsContext }) {
               class="hit nav-row"
               onClick={() => {
                 closeSettings();
-                // 房间里开的设置：管理后台走新标签页，别把正在通话的房间顶掉
-                if (location.hash.startsWith('#/room/')) window.open('#/admin', '_blank', 'noopener');
+                // 房间里开的设置：管理后台走新标签页，别把正在通话的房间顶掉。
+                // 壳里没有第二个标签页，window.open 什么都不会发生：就地跳，由 allowLeave 问一句
+                if (!inShell() && location.hash.startsWith('#/room/')) window.open('#/admin', '_blank', 'noopener');
                 else location.hash = '#/admin';
               }}
             >

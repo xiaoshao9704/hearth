@@ -115,6 +115,7 @@ pub fn run() {
         eprintln!("{e}");
     }
     tauri::Builder::default()
+        .plugin(tauri_plugin_opener::init())
         .manage(AppState::default())
         .invoke_handler(tauri::generate_handler![
             capabilities,
