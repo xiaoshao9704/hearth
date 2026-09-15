@@ -9,7 +9,7 @@ import { createEffect, createMemo, createSignal, on, onCleanup, untrack, For, Sh
 import { render } from 'solid-js/web';
 import { closeAccountMenu, openAccountMenu } from '../account-menu';
 import { startAfkWatch } from '../afk';
-import { ApiError, deviceId, fetchJoinCredentials, getCastTicket, getUser, guestTimeLeft, isGuest, kickUser, listChannels, muteUser, reportClientLog } from '../api';
+import { ApiError, deviceId, fetchJoinCredentials, getCastTicket, getIngestToken, getUser, guestTimeLeft, isGuest, kickUser, listChannels, muteUser, reportClientLog, siteInfo } from '../api';
 import type { ChannelRole, DataLine, EngineCred } from '../api';
 import { playCue } from '../audio';
 import { capabilities, encoderDisplayName, listSources, onPublishState, startPublish, stopPublish, updatePublish } from '../bridge';
@@ -25,6 +25,8 @@ import { DATA_TOPIC_FILE, DATA_TOPIC_TEXT } from '../engine/types';
 import type { AVEngine, EPart, EngineCallbacks, TrackSource, VideoStats } from '../engine/types';
 import { wireLongPress } from '../longpress';
 import { clearLeaveGuard, setLeaveGuard } from '../nav';
+import { applyObsCapture, obsPlatform, whipServiceSettings } from '../obsws';
+import type { ObsConn, ObsStreamStatus, ObsTarget, ObsVersion, ObsWinMode } from '../obsws';
 import { encoderIsHw, loadPrefs, prefsBus, RES_DIMS, savePrefs } from '../prefs';
 import { notifyJoin, notifyMessage } from '../notify';
 import { renderShell } from '../shell';
@@ -36,8 +38,9 @@ import type { ConnRow } from './room/conn-panel';
 import { LatencyResult, measureTile, showTileMenu } from './room/latency-result';
 import type { LatencyState } from './room/latency-result';
 import { IngestBadge } from './room/ingest-badge';
-import { IngestPanel } from './room/ingest-panel';
+import { IngestPanel, whipServer } from './room/ingest-panel';
 import { NativeSourcePanel } from './room/native-source-panel';
+import { connectStoredObs, obsCaptureBlocker, ObsScreenPanel } from './room/obs-capture';
 import { createUnreadMarker } from './room/unread-divider';
 import { showMsgMenu } from './room/msg-menu';
 import { mergeReaction, ReactionBar } from './room/reactions';
@@ -282,6 +285,16 @@ export async function renderRoom(root: HTMLElement, channel: string) {
   const [bridgeCaps, setBridgeCaps] = createSignal<BridgeCaps | null>(null);
   const nativeScreen = createMemo(() => bridgeCaps()?.native_publish === true);
   const [sourcePick, setSourcePick] = createSignal<NativeSource[] | null>(null);
+  // 本机 OBS 联动：配过（且连得上）才有这条连接，「投屏」按钮据此多给一个 OBS 选项。
+  // OBS 是不是在推流一律现读 GetStreamStatus 的轮询结果，本地不留第二份布尔。
+  const [obsConn, setObsConn] = createSignal<ObsConn | null>(null);
+  const [obsVer, setObsVer] = createSignal<ObsVersion | null>(null);
+  const [obsStatus, setObsStatus] = createSignal<ObsStreamStatus | null>(null);
+  const [obsPick, setObsPick] = createSignal(false); // 浏览器里点「投屏」弹的那个面板
+  const [obsBusy, setObsBusy] = createSignal(false);
+  const obsLive = createMemo(() => obsStatus()?.outputActive === true);
+  // 「投屏中」= 本端在发布 或 本机 OBS 正推到本频道；两者都是各自的权威来源
+  const screening = createMemo(() => screenOn() || obsLive());
   let nativePublishConfig: NativePublishConfig | null = null;
   let nativeCodecNotice = '';
   void capabilities().then(setBridgeCaps);
@@ -1451,7 +1464,19 @@ export async function renderRoom(root: HTMLElement, channel: string) {
   }
 
   async function toggleScreen() {
+    // OBS 在推流时，「投屏」这个按钮管的就是那条流——再点一次即停
+    if (obsLive()) return stopObsScreen();
     if (nativeScreen()) return toggleNativeScreen();
+    // 配过 OBS 联动就先问一句走哪条：浏览器共享仍是原来那条路，OBS 只是多一个选择
+    if (!screenOn() && obsConn()?.alive) {
+      setObsPick(true);
+      return;
+    }
+    await startBrowserScreen();
+  }
+
+  // 浏览器投屏原路径：getDisplayMedia 由引擎自己弹系统选择器
+  async function startBrowserScreen() {
     const eng = stageEngine();
     if (!eng || !stageUp) {
       toast(stageHint(), '', 3000);
@@ -1466,6 +1491,90 @@ export async function renderRoom(root: HTMLElement, channel: string) {
       if (name !== 'NotAllowedError' && name !== 'AbortError') {
         toast(`投屏失败：${(err as Error)?.message ?? name}`, 'bad');
       }
+    }
+    refreshMeta();
+  }
+
+  // ---- 通过 OBS 投屏 ----
+  // 配过 OBS 联动的设备在进房时悄悄连一条，只为「投屏」能列出 OBS 的窗口；
+  // 连不上就当没配过，按钮行为与从前完全一致。
+  let obsPoll: ReturnType<typeof setInterval> | undefined;
+  const dropObs = () => {
+    clearInterval(obsPoll);
+    obsPoll = undefined;
+    setObsConn(null);
+    setObsVer(null);
+    setObsStatus(null);
+    setObsPick(false);
+  };
+  void (async () => {
+    try {
+      const c = await connectStoredObs();
+      if (!c) return;
+      if (leaving) return c.close();
+      const ver = await c.request('GetVersion');
+      if (obsCaptureBlocker(obsPlatform(ver.platform), ver.obsVersion)) return c.close();
+      c.onLost = dropObs;
+      setObsVer(ver);
+      setObsConn(c);
+      const poll = async () => {
+        if (!c.alive) return;
+        try {
+          setObsStatus(await c.request('GetStreamStatus'));
+        } catch {
+          /* 轮询失败不打扰：真断了走 onLost */
+        }
+      };
+      await poll();
+      obsPoll = setInterval(() => void poll(), 2000);
+    } catch {
+      /* OBS 没开或密码变了：静默降级，不弹提示打扰只想用浏览器投屏的人 */
+    }
+  })();
+  // 本频道的 WHIP 地址与令牌，与「OBS 推流」面板同一套算法
+  async function obsWhipTarget(): Promise<{ server: string; token: string }> {
+    const id = channelId();
+    if (!id) throw new Error('频道信息还没加载完，稍等一下再试');
+    const [info, site] = await Promise.all([getIngestToken(), siteInfo().catch(() => null)]);
+    const server = whipServer(info, site, id);
+    if (!server || !info.token) throw new Error('本服没有可用的推流入口');
+    return { server, token: info.token };
+  }
+
+  // 选中一个窗口/应用：建场景与源 → 切场景 → 写 WHIP 配置 → 开播，一步到位
+  async function startObsScreen(target: ObsTarget, mode: ObsWinMode) {
+    const c = obsConn();
+    const ver = obsVer();
+    if (!c?.alive || !ver) return toast('OBS 连接已断开', 'bad');
+    if (obsBusy()) return;
+    setObsBusy(true);
+    try {
+      const { server, token } = await obsWhipTarget();
+      const note = await applyObsCapture(c, obsPlatform(ver.platform), mode, target);
+      await c.request('SetStreamServiceSettings', whipServiceSettings(server, token));
+      await c.request('StartStream');
+      setObsStatus(await c.request('GetStreamStatus'));
+      setObsPick(false);
+      setSourcePick(null);
+      toast(`OBS 已开始投屏「${target.label}」`, 'ok');
+      if (note) toast(note, '', 6000);
+      refreshMeta();
+    } catch (err) {
+      toast(`OBS 投屏失败：${errText(err)}`, 'bad', 6000);
+    } finally {
+      setObsBusy(false);
+    }
+  }
+
+  async function stopObsScreen() {
+    const c = obsConn();
+    if (!c?.alive) return;
+    try {
+      await c.request('StopStream');
+      setObsStatus(await c.request('GetStreamStatus'));
+      toast('已让 OBS 停止投屏', 'ok', 1600);
+    } catch (err) {
+      toast(`停止投屏失败：${errText(err)}`, 'bad');
     }
     refreshMeta();
   }
@@ -1485,7 +1594,8 @@ export async function renderRoom(root: HTMLElement, channel: string) {
     }
     try {
       const sources = await listSources();
-      if (!sources.length) {
+      // 壳一个源都没报出来时，若本机 OBS 连着就照样开面板——OBS 那一节仍是条活路
+      if (!sources.length && !obsConn()?.alive) {
         toast('没找到可共享的显示器或窗口', 'bad', 4000);
         return;
       }
@@ -2849,13 +2959,13 @@ export async function renderRoom(root: HTMLElement, channel: string) {
                 <CameraFlipButton cameraOn={cameraOn} flip={() => stageEngine()?.flipCamera() ?? Promise.reject(new Error(stageHint()))} />
                 <button
                   class={'hit ctl-pill' + (canScreenShare ? '' : ' hidden')}
-                  classList={{ on: screenOn(), disabled: !stageOk() }}
+                  classList={{ on: screening(), disabled: !stageOk() }}
                   title={stageOk() ? '投屏' : stageHint()}
-                  aria-label={stageOk() ? (screenOn() ? '停止投屏' : '开始投屏') : stageHint()}
+                  aria-label={stageOk() ? (screening() ? '停止投屏' : '开始投屏') : stageHint()}
                   onClick={() => void toggleScreen()}
                 >
                   {el(icon('screen', 17, 'currentColor'))}
-                  <span class="pill-label">{screenOn() ? '投屏中' : '投屏'}</span>
+                  <span class="pill-label">{screening() ? (obsLive() ? 'OBS 投屏中' : '投屏中') : '投屏'}</span>
                 </button>
                 <ViewModeControl theater={theaterCtl} pip={pipCtl} hasStage={hasStageContent} />
               </div>
@@ -3254,8 +3364,33 @@ export async function renderRoom(root: HTMLElement, channel: string) {
             appAudio={bridgeCaps()?.app_audio === true}
             encoder={nativeEncoderLabel()}
             screenAudio={loadPrefs().screenAudio}
+            obs={
+              obsConn() && obsVer()
+                ? {
+                    conn: obsConn()!,
+                    obsVersion: obsVer()!.obsVersion,
+                    platform: obsVer()!.platform,
+                    busy: obsBusy(),
+                    onPick: (t, mode) => void startObsScreen(t, mode),
+                  }
+                : null
+            }
             onConfirm={(s, audio) => void startNativeScreen(s, audio)}
             onClose={() => setSourcePick(null)}
+          />
+        </Show>
+        <Show when={obsPick() && obsConn() && obsVer()}>
+          <ObsScreenPanel
+            conn={obsConn()!}
+            obsVersion={obsVer()!.obsVersion}
+            platform={obsVer()!.platform}
+            busy={obsBusy()}
+            onBrowser={() => {
+              setObsPick(false);
+              void startBrowserScreen();
+            }}
+            onPick={(t, mode) => void startObsScreen(t, mode)}
+            onClose={() => setObsPick(false)}
           />
         </Show>
         <Show when={ingestOpen()}>
@@ -3382,6 +3517,9 @@ export async function renderRoom(root: HTMLElement, channel: string) {
       leaving = true;
       // 原生发布在壳的进程里，不随页面卸载停：离房必须显式收回
       if (nativeScreen() && screenOn()) void stopPublish().catch(() => {});
+      // OBS 那条推流是 OBS 自己的进程在推，离房不替用户停；这里只收回本页的连接与轮询
+      clearInterval(obsPoll);
+      obsConn()?.close();
       unlistenPublish?.();
       closeChannelMenu(); // 两个浮层都挂在 body 上，房间视图卸载不会带走它们
       closeAccountMenu();

@@ -4,36 +4,23 @@
 import { inShell } from '../../bridge';
 import { createMemo, createSignal, For, onCleanup, Show } from 'solid-js';
 import {
+  applyObsCapture,
   connectObs,
   encoderLabel,
   OBS_WHIP_MIN_MAJOR,
   OBS_WS_DEFAULT_URL,
   obsMajor,
+  obsPlatform,
   whipServiceSettings,
   type ObsConn,
   type ObsStreamStatus,
+  type ObsTarget,
   type ObsVersion,
   type ObsVideoSettings,
+  type ObsWinMode,
 } from '../../obsws';
+import { LS_OBS_PASSWORD, LS_OBS_READY, LS_OBS_URL, obsLsGet, obsLsSet, ObsCaptureSection } from './obs-capture';
 import { confirmDialog, el, icon, toast } from '../../ui';
-
-const LS_URL = 'hearth_obsws_url';
-const LS_PASSWORD = 'hearth_obsws_password';
-
-const lsGet = (k: string, dflt = ''): string => {
-  try {
-    return localStorage.getItem(k) ?? dflt;
-  } catch {
-    return dflt;
-  }
-};
-const lsSet = (k: string, v: string): void => {
-  try {
-    localStorage.setItem(k, v);
-  } catch {
-    /* 隐私模式写不了就只在本次会话里有效 */
-  }
-};
 
 const fmtDur = (ms: number): string => {
   const t = Math.max(0, Math.floor(ms / 1000));
@@ -66,13 +53,16 @@ export const ObsLink = (p: {
   server: () => string; // 已含频道 id 的完整 WHIP 地址，空 = 还没算出来
   token: () => string;
 }) => {
-  const [url, setUrl] = createSignal(lsGet(LS_URL) || OBS_WS_DEFAULT_URL);
-  const [password, setPassword] = createSignal(lsGet(LS_PASSWORD));
+  const [url, setUrl] = createSignal(obsLsGet(LS_OBS_URL) || OBS_WS_DEFAULT_URL);
+  const [password, setPassword] = createSignal(obsLsGet(LS_OBS_PASSWORD));
   const [conn, setConn] = createSignal<ObsConn | null>(null);
   const [ver, setVer] = createSignal<ObsVersion | null>(null);
   const [status, setStatus] = createSignal<ObsStreamStatus | null>(null);
   const [kbps, setKbps] = createSignal(0);
-  const [busy, setBusy] = createSignal<'' | 'test' | 'start' | 'stop' | 'quality'>('');
+  const [busy, setBusy] = createSignal<'' | 'test' | 'start' | 'stop' | 'quality' | 'capture'>('');
+  // 「选好就开始推流」：勾上就把选源与开播串成一步，与房间页点「投屏」的体验对齐
+  const [chain, setChain] = createSignal(true);
+  const [captureNote, setCaptureNote] = createSignal('');
   const [err, setErr] = createSignal('');
   // 画质：都以 OBS 里的现值为准，本地不留第二份真相
   const [video, setVideo] = createSignal<ObsVideoSettings | null>(null);
@@ -152,6 +142,9 @@ export const ObsLink = (p: {
     };
     setVer(await c.request('GetVersion'));
     setConn(c);
+    // 连通过一次才算「这台设备配过 OBS 联动」：房间页据此决定要不要自动连，
+    // 没配过的人不该被去敲一遍 localhost:4455。
+    obsLsSet(LS_OBS_READY, '1');
     if (!poll) poll = setInterval(() => void refresh(), 2000);
     applyStatus(await c.request('GetStreamStatus'));
     // 画质是附加能力：读不到（老 obs-websocket、profile 参数缺失）也不该挡住推流那条主路
@@ -174,7 +167,7 @@ export const ObsLink = (p: {
     throw new Error('OBS 迟迟没有停下当前推流，请在 OBS 里手动停止后重试');
   };
 
-  const run = async (what: 'test' | 'start' | 'stop' | 'quality', fn: (c: ObsConn) => Promise<void>) => {
+  const run = async (what: Exclude<ReturnType<typeof busy>, ''>, fn: (c: ObsConn) => Promise<void>) => {
     if (busy()) return;
     setBusy(what);
     setErr('');
@@ -194,27 +187,36 @@ export const ObsLink = (p: {
       else toast('OBS 连上了', 'ok', 1600);
     });
 
-  const start = () =>
-    void run('start', async (c) => {
-      if (!p.server() || !p.token()) throw new Error('推流地址还没拿到，稍等一下再试');
-      const v = ver();
-      if (v && obsMajor(v.obsVersion) < OBS_WHIP_MIN_MAJOR)
-        throw new Error(`OBS ${v.obsVersion} 没有 WHIP 输出，需要 OBS ${OBS_WHIP_MIN_MAJOR} 或更新的版本`);
-      if (status()?.outputActive) {
-        const ok = await confirmDialog({
-          title: 'OBS 正在推流',
-          body: '要停掉 OBS 当前的推流，改推到本频道吗？',
-          confirmText: '停掉并改推',
-          danger: true,
-        });
-        if (!ok) return;
-        await c.request('StopStream');
-        await waitIdle(c);
-      }
-      await c.request('SetStreamServiceSettings', whipServiceSettings(p.server(), p.token()));
-      await c.request('StartStream');
-      await refresh();
-      toast('OBS 已开始推流', 'ok');
+  // 写直播服务设置并开播；「配置并开始推流」与「用这个投屏」共用这一段
+  const startOn = async (c: ObsConn) => {
+    if (!p.server() || !p.token()) throw new Error('推流地址还没拿到，稍等一下再试');
+    const v = ver();
+    if (v && obsMajor(v.obsVersion) < OBS_WHIP_MIN_MAJOR)
+      throw new Error(`OBS ${v.obsVersion} 没有 WHIP 输出，需要 OBS ${OBS_WHIP_MIN_MAJOR} 或更新的版本`);
+    if (status()?.outputActive) {
+      const ok = await confirmDialog({
+        title: 'OBS 正在推流',
+        body: '要停掉 OBS 当前的推流，改推到本频道吗？',
+        confirmText: '停掉并改推',
+        danger: true,
+      });
+      if (!ok) return;
+      await c.request('StopStream');
+      await waitIdle(c);
+    }
+    await c.request('SetStreamServiceSettings', whipServiceSettings(p.server(), p.token()));
+    await c.request('StartStream');
+    await refresh();
+    toast('OBS 已开始推流', 'ok');
+  };
+
+  const start = () => void run('start', startOn);
+
+  const pickTarget = (target: ObsTarget, mode: ObsWinMode) =>
+    void run('capture', async (c) => {
+      setCaptureNote(await applyObsCapture(c, obsPlatform(ver()?.platform), mode, target));
+      toast(`OBS 已切到「${target.label}」`, 'ok', 1800);
+      if (chain()) await startOn(c);
     });
 
   const stop = () =>
@@ -320,7 +322,7 @@ export const ObsLink = (p: {
             aria-label="obs-websocket 地址"
             onInput={(ev) => {
               setUrl(ev.currentTarget.value);
-              lsSet(LS_URL, ev.currentTarget.value);
+              obsLsSet(LS_OBS_URL, ev.currentTarget.value);
               resetConn();
             }}
           />
@@ -335,7 +337,7 @@ export const ObsLink = (p: {
             aria-label="obs-websocket 密码"
             onInput={(ev) => {
               setPassword(ev.currentTarget.value);
-              lsSet(LS_PASSWORD, ev.currentTarget.value);
+              obsLsSet(LS_OBS_PASSWORD, ev.currentTarget.value);
               resetConn();
             }}
           />
@@ -405,6 +407,25 @@ export const ObsLink = (p: {
           <span class="ig-note">
             OBS {ver()!.obsVersion} 没有 WHIP 输出（OBS {OBS_WHIP_MIN_MAJOR} 起才有），升级后才能一键推流。
           </span>
+        </div>
+      </Show>
+
+      <Show when={conn() && ver()}>
+        <div class="obs-cap-block">
+          <ObsCaptureSection
+            conn={conn()!}
+            obsVersion={ver()!.obsVersion}
+            platform={ver()!.platform}
+            busy={busy() !== ''}
+            onPick={pickTarget}
+          />
+          <label class="obs-cap-chain">
+            <input type="checkbox" checked={chain()} onChange={(ev) => setChain(ev.currentTarget.checked)} />
+            <span>选好就开始推流</span>
+          </label>
+          <Show when={captureNote()}>
+            <div class="ig-tip">{captureNote()}</div>
+          </Show>
         </div>
       </Show>
 

@@ -182,3 +182,171 @@ export function encoderLabel(raw: string): string {
   if (low.includes('amd') || low.includes('amf')) return 'AMD（硬件编码）';
   return id;
 }
+
+// ---- 快速配置采集源 ----
+// 只认这三个固定名字：建、复用、清理都只针对它们，用户自己的场景与源一概不碰。
+export const OBS_SCENE = 'Hearth 投屏';
+export const OBS_VIDEO_INPUT = 'Hearth 画面';
+export const OBS_AUDIO_INPUT = 'Hearth 声音';
+
+export type ObsPlatform = 'windows' | 'macos' | 'other';
+
+// GetVersion.platform 文档写明不保证是这几个值，认不出的一律当 other（功能不可用）
+export function obsPlatform(raw: string | undefined): ObsPlatform {
+  const s = String(raw ?? '').toLowerCase();
+  return s === 'windows' || s === 'macos' ? s : 'other';
+}
+
+/** 一个可采集的目标。value 原样来自属性列表的 itemValue：Windows 是串，macOS 窗口是数字 */
+export type ObsTarget = { kind: 'app' | 'window'; label: string; value: string | number };
+
+/** Windows 画面源两选一：独占全屏只有游戏捕获抓得到，抓不到的窗口退 WGC 窗口捕获 */
+export type ObsWinMode = 'game' | 'window';
+
+const WIN_VIDEO_GAME = 'game_capture';
+const WIN_VIDEO_WINDOW = 'window_capture';
+const WIN_AUDIO = 'wasapi_process_output_capture'; // OBS 28+ 的应用音频采集，按进程树取声
+const MAC_VIDEO = 'screen_capture'; // OBS 30+ 的 macOS 屏幕采集（ScreenCaptureKit）
+const MAC_AUDIO = 'sck_audio_capture'; // 同一族的应用音频采集，老 OBS 没有这个 kind
+// screen_capture / sck_audio_capture 共用的 type 枚举：0=显示器 1=窗口 2=应用
+const MAC_TYPE_WINDOW = 1;
+const MAC_TYPE_APP = 2;
+// window_capture 的 method：2 = WGC（Windows 10 2004 起），比 BitBlt 抓得到的窗口多
+const WIN_METHOD_WGC = 2;
+
+// 值只会是串/数/布尔：OBS 的源设置就这几种标量，也正好落在库的 JsonObject 里
+export type ObsInputSpec = { inputKind: string; inputSettings: Record<string, string | number | boolean> };
+
+/**
+ * 画面源的 kind 与设置。target 为 null = 还没选目标（得先把源建出来才能向 OBS 要清单）。
+ * displayUuid 只对 macOS 有意义，见 macDisplayUuid 的说明。
+ */
+export function obsVideoSpec(
+  platform: ObsPlatform,
+  mode: ObsWinMode,
+  target: ObsTarget | null,
+  displayUuid = '',
+): ObsInputSpec {
+  if (platform === 'windows') {
+    const window: Record<string, string> = target ? { window: String(target.value) } : {};
+    return mode === 'game'
+      ? { inputKind: WIN_VIDEO_GAME, inputSettings: { capture_mode: 'window', ...window } }
+      : { inputKind: WIN_VIDEO_WINDOW, inputSettings: { method: WIN_METHOD_WGC, ...window } };
+  }
+  const display: Record<string, string> = displayUuid ? { display_uuid: displayUuid } : {};
+  if (!target) return { inputKind: MAC_VIDEO, inputSettings: { type: MAC_TYPE_APP, ...display } };
+  return target.kind === 'app'
+    ? { inputKind: MAC_VIDEO, inputSettings: { type: MAC_TYPE_APP, application: String(target.value), ...display } }
+    : { inputKind: MAC_VIDEO, inputSettings: { type: MAC_TYPE_WINDOW, window: Number(target.value), ...display } };
+}
+
+/** 声音源的 kind 与设置；null = 这个平台/目标没有能按目标取声的源，只能让用户自己加 */
+export function obsAudioSpec(platform: ObsPlatform, target: ObsTarget): ObsInputSpec | null {
+  if (platform === 'windows') return { inputKind: WIN_AUDIO, inputSettings: { window: String(target.value) } };
+  // macOS 的 screen_capture 默认设置里没有任何「采集音频」布尔键（实测 OBS 32.1.2），
+  // 声音只能另起一个 sck_audio_capture，而它只认应用、不认单个窗口。
+  if (platform !== 'macos' || target.kind !== 'app') return null;
+  return { inputKind: MAC_AUDIO, inputSettings: { type: MAC_TYPE_APP, application: String(target.value) } };
+}
+
+const strField = (o: unknown, k: string): string => {
+  const v = (o as Record<string, unknown> | null)?.[k];
+  return typeof v === 'string' ? v : '';
+};
+
+/** 建或复用 Hearth 场景，并清掉里面由本功能建的那两个源（用户后来自己加的留着） */
+export async function ensureObsScene(c: ObsConn): Promise<void> {
+  const list = await c.request('GetSceneList');
+  if (!list.scenes.some((s) => strField(s, 'sceneName') === OBS_SCENE)) {
+    await c.request('CreateScene', { sceneName: OBS_SCENE });
+    return;
+  }
+  const items = await c.request('GetSceneItemList', { sceneName: OBS_SCENE });
+  for (const it of items.sceneItems) {
+    const name = strField(it, 'sourceName');
+    if (name === OBS_VIDEO_INPUT || name === OBS_AUDIO_INPUT) await c.request('RemoveInput', { inputName: name });
+  }
+}
+
+const listProp = async (c: ObsConn, propertyName: string, kind: ObsTarget['kind']): Promise<ObsTarget[]> => {
+  const r = await c.request('GetInputPropertiesListPropertyItems', { inputName: OBS_VIDEO_INPUT, propertyName });
+  const out: ObsTarget[] = [];
+  for (const raw of r.propertyItems) {
+    const item = raw as { itemName?: unknown; itemValue?: unknown; itemEnabled?: unknown };
+    if (item.itemEnabled === false) continue; // OBS 自己都点不了的项别摆出来
+    const value = item.itemValue;
+    if (typeof value !== 'string' && typeof value !== 'number') continue;
+    if (value === '' || value === 0) continue; // 属性列表里的空占位项
+    out.push({ kind, value, label: String(item.itemName ?? '') || String(value) });
+  }
+  return out;
+};
+
+/**
+ * 建好场景与画面源（目标还没选），返回 OBS 自己给的可选清单。
+ * 清单只能从一个已存在的源上问，所以这一步就得把源建出来；但此时不切场景，
+ * 用户中途放弃最多在 OBS 里留下一个静止的 Hearth 场景，别的什么都没动。
+ */
+/**
+ * macOS 上应用/窗口采集在 OBS 里仍绑定一块显示器：display_uuid 留空源就初始化不起来
+ * （OBS 日志 `init_screen_stream: Invalid target display ID: 0`），随后向它要应用列表
+ * 会把 OBS 整个带走（实测 OBS 32.1.2 / macOS 26.5 崩溃）。screen_capture 自己的默认值里
+ * 这个键是空串，就从老 kind display_capture 的默认值借一个主显示器。
+ */
+async function macDisplayUuid(c: ObsConn): Promise<string> {
+  try {
+    const d = await c.request('GetInputDefaultSettings', { inputKind: 'display_capture' });
+    const v = (d.defaultInputSettings as Record<string, unknown>).display_uuid;
+    return typeof v === 'string' ? v : '';
+  } catch {
+    return ''; // 借不到就照旧走，至少别在这一步就断
+  }
+}
+
+export async function prepareObsCapture(c: ObsConn, platform: ObsPlatform, mode: ObsWinMode): Promise<ObsTarget[]> {
+  await ensureObsScene(c);
+  const spec = obsVideoSpec(platform, mode, null, platform === 'macos' ? await macDisplayUuid(c) : '');
+  await c.request('CreateInput', {
+    sceneName: OBS_SCENE,
+    inputName: OBS_VIDEO_INPUT,
+    inputKind: spec.inputKind,
+    inputSettings: spec.inputSettings,
+  });
+  if (platform === 'windows') return listProp(c, 'window', 'window');
+  return [...(await listProp(c, 'application', 'app')), ...(await listProp(c, 'window', 'window'))];
+}
+
+/**
+ * 把选中的目标写进画面源、按需补一个声音源，并切成当前场景。
+ * 返回值是给用户看的补充说明（空串 = 画面与声音都配好了）：声音是附加项，
+ * 建不出来也不该挡住画面那条主路。
+ */
+export async function applyObsCapture(
+  c: ObsConn,
+  platform: ObsPlatform,
+  mode: ObsWinMode,
+  target: ObsTarget,
+): Promise<string> {
+  await c.request('SetInputSettings', {
+    inputName: OBS_VIDEO_INPUT,
+    inputSettings: obsVideoSpec(platform, mode, target).inputSettings,
+  });
+  const audio = obsAudioSpec(platform, target);
+  let note = '';
+  if (!audio) {
+    note = '这个目标没有能自动配的声音源，需要声音请在 OBS 里自己加一个音频采集。';
+  } else {
+    try {
+      await c.request('CreateInput', {
+        sceneName: OBS_SCENE,
+        inputName: OBS_AUDIO_INPUT,
+        inputKind: audio.inputKind,
+        inputSettings: audio.inputSettings,
+      });
+    } catch (e) {
+      note = `画面配好了，声音源没建成（${(e as Error).message}），请在 OBS 里手动加一个应用音频采集。`;
+    }
+  }
+  await c.request('SetCurrentProgramScene', { sceneName: OBS_SCENE });
+  return note;
+}

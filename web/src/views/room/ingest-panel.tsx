@@ -6,6 +6,19 @@ import type { IngestTokenInfo, SiteInfo } from '../../api';
 import { copyText, el, icon, toast } from '../../ui';
 import { ObsLink } from './obs-link';
 
+// 自签证书 OBS 不认：页面是 https 且证书来源是 self 时，把地址换成同主机的 http 端口
+// （path 与查询串不变，只动 scheme 与 host:port）。房间页的「通过 OBS 投屏」同用这一份。
+export function whipServer(info: IngestTokenInfo | null, site: SiteInfo | null, channelId: number): string {
+  if (!info || channelId <= 0) return '';
+  const full = `${info.base}${channelId}`;
+  if (!site || site.tls_source !== 'self' || location.protocol !== 'https:') return full;
+  try {
+    return `http://${location.hostname}:${site.http_port}${new URL(full).pathname}`;
+  } catch {
+    return full;
+  }
+}
+
 export const IngestPanel = (p: {
   channel: string;
   channelId: () => number; // 0 = 频道列表还没回来（地址拼不出，先显示加载中）
@@ -24,22 +37,8 @@ export const IngestPanel = (p: {
     .then(setSite)
     .catch(() => {}); // 拉不到就按非自签处理，地址照旧用页面 origin
 
-  // 自签证书 OBS 不认：页面是 https 且证书来源是 self 时，把地址换成同主机的 http 端口
-  // （path 与查询串不变，只动 scheme 与 host:port）
   const useHttpFallback = () => site()?.tls_source === 'self' && location.protocol === 'https:';
-  const addr = () => {
-    const i = info();
-    const id = p.channelId();
-    if (!i || id <= 0) return '';
-    const full = `${i.base}${id}`;
-    const s = site();
-    if (!useHttpFallback() || !s) return full;
-    try {
-      return `http://${location.hostname}:${s.http_port}${new URL(full).pathname}`;
-    } catch {
-      return full;
-    }
-  };
+  const addr = () => whipServer(info(), site(), p.channelId());
   const token = () => info()?.token ?? '';
   const masked = () => {
     const t = token();

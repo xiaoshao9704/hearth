@@ -3,13 +3,25 @@
 import { createEffect, createMemo, createSignal, For, onCleanup, Show } from 'solid-js';
 import { sourcePreview } from '../../bridge';
 import type { NativeSource } from '../../bridge';
+import type { ObsConn, ObsTarget, ObsWinMode } from '../../obsws';
+import { ObsCaptureSection } from './obs-capture';
 import { el, icon } from '../../ui';
+
+/** 本机 OBS 连上了才传：面板里多一节「通过 OBS 投屏」，原生那条路一行不变 */
+export type ObsShareOption = {
+  conn: ObsConn;
+  obsVersion: string;
+  platform: string;
+  busy: boolean;
+  onPick: (target: ObsTarget, mode: ObsWinMode) => void;
+};
 
 export const NativeSourcePanel = (p: {
   sources: NativeSource[];
   appAudio: boolean;
   encoder: string; // 这次投屏会用的编码器，空串表示壳没有原生能力
   screenAudio: boolean;
+  obs?: ObsShareOption | null;
   onConfirm: (source: NativeSource, audio: boolean) => void;
   onClose: () => void;
 }) => {
@@ -145,6 +157,19 @@ export const NativeSourcePanel = (p: {
               <For each={windows()}>{row}</For>
             </div>
           </div>
+        </Show>
+
+        <Show when={p.obs}>
+          <div class="ig-sep" />
+          <ObsCaptureSection
+            conn={p.obs!.conn}
+            obsVersion={p.obs!.obsVersion}
+            platform={p.obs!.platform}
+            busy={p.obs!.busy}
+            auto
+            onPick={p.obs!.onPick}
+          />
+          <div class="ig-sep" />
         </Show>
 
         <div class="native-share-options">
