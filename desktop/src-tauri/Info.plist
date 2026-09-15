@@ -4,5 +4,7 @@
 <dict>
   <key>NSMicrophoneUsageDescription</key>
   <string>用于按键说话与语音通话；投屏的应用声音由屏幕录制权限提供，不需要麦克风。</string>
+  <key>NSLocalNetworkUsageDescription</key>
+  <string>与同一局域网内的 Hearth 服务器建立媒体连接（投屏推流）。</string>
 </dict>
 </plist>

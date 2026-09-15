@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- 现阶段链接的是 Homebrew 的 GStreamer 动态库，与本 app 不同签名身份；hardened runtime 的
+       库校验会拒载。等 GStreamer 打进 Contents/Frameworks 并用同一身份重签后，此项应删除。 -->
+  <key>com.apple.security.cs.disable-library-validation</key>
+  <true/>
+</dict>
+</plist>
