@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use block2::RcBlock;
 use dispatch2::{DispatchQueue, DispatchQueueAttr, DispatchRetained};
+use gst::prelude::*;
 use gstreamer as gst;
 use gstreamer_video as gst_video;
 use objc2::rc::Retained;
@@ -30,11 +31,11 @@ use objc2_core_video::{
 };
 use objc2_foundation::{NSArray, NSError, NSObject, NSObjectProtocol};
 use objc2_screen_capture_kit::{
-    SCContentFilter, SCDisplay, SCShareableContent, SCStream, SCStreamConfiguration, SCStreamDelegate,
-    SCStreamOutput, SCStreamOutputType, SCWindow,
+    SCContentFilter, SCDisplay, SCShareableContent, SCStream, SCStreamConfiguration,
+    SCStreamDelegate, SCStreamOutput, SCStreamOutputType, SCWindow,
 };
 
-use super::{Geometry, Source, AUDIO_CHANNELS, AUDIO_RATE};
+use super::{AudioScope, Geometry, Settings, Source, AUDIO_CHANNELS, AUDIO_RATE};
 use crate::publish::Sink;
 
 // CoreAudio 的格式标志（objc2-core-audio-types 只给了结构体，标志位是 CoreAudioBaseTypes 的常量）
@@ -45,8 +46,15 @@ const FLAG_IS_NON_INTERLEAVED: u32 = 1 << 5;
 ///
 /// SCK 的 getShareableContent 在自己的队列上回调，调用线程阻塞等结果。指针在回调里
 /// retain 过一次，所有权随这个包装转移，转移前后都只有一个持有者，不存在并发访问。
-struct SendPtr<T>(*mut T);
-unsafe impl<T> Send for SendPtr<T> {}
+struct SendPtr<T: objc2::Message>(*mut T);
+impl<T: objc2::Message> Drop for SendPtr<T> {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            let _ = unsafe { Retained::from_raw(self.0) };
+        }
+    }
+}
+unsafe impl<T: objc2::Message> Send for SendPtr<T> {}
 
 pub fn available() -> bool {
     AnyClass::get(c"SCStream").is_some()
@@ -64,7 +72,7 @@ fn error_text(err: *mut NSError) -> String {
 }
 
 /// 取一份可采集内容快照（阻塞等回调）。
-fn shareable_content() -> Result<Retained<SCShareableContent>, String> {
+fn shareable_content(timeout: Duration) -> Result<Retained<SCShareableContent>, String> {
     if !available() {
         return Err("本机 macOS 版本不支持 ScreenCaptureKit（需要 12.3 及以上）".to_string());
     }
@@ -82,16 +90,17 @@ fn shareable_content() -> Result<Retained<SCShareableContent>, String> {
         );
     }
     let ptr = rx
-        .recv_timeout(Duration::from_secs(15))
+        .recv_timeout(timeout)
         .map_err(|_| "取采集源超时：多半是屏幕录制权限还没授予".to_string())??;
-    NonNull::new(ptr.0)
-        .map(|p| unsafe { Retained::from_raw(p.as_ptr()) })
-        .flatten()
+    let mut ptr = ptr;
+    let raw = std::mem::replace(&mut ptr.0, null_mut());
+    NonNull::new(raw)
+        .and_then(|p| unsafe { Retained::from_raw(p.as_ptr()) })
         .ok_or_else(|| "取采集源失败".to_string())
 }
 
 pub fn list_sources() -> Result<Vec<Source>, String> {
-    let content = shareable_content()?;
+    let content = shareable_content(Duration::from_secs(3))?;
     let mut out = Vec::new();
     for (i, display) in unsafe { content.displays() }.iter().enumerate() {
         out.push(Source {
@@ -99,6 +108,11 @@ pub fn list_sources() -> Result<Vec<Source>, String> {
             kind: "display".to_string(),
             title: format!("显示器 {}", i + 1),
             app: String::new(),
+            audio_scope: if audio_available() {
+                AudioScope::System
+            } else {
+                AudioScope::None
+            },
         });
     }
     for window in unsafe { content.windows() }.iter() {
@@ -106,7 +120,9 @@ pub fn list_sources() -> Result<Vec<Source>, String> {
         if unsafe { window.windowLayer() } != 0 {
             continue;
         }
-        let title = unsafe { window.title() }.map(|t| t.to_string()).unwrap_or_default();
+        let title = unsafe { window.title() }
+            .map(|t| t.to_string())
+            .unwrap_or_default();
         let frame = unsafe { window.frame() };
         if title.is_empty() || frame.size.width < 40.0 || frame.size.height < 40.0 {
             continue;
@@ -119,6 +135,11 @@ pub fn list_sources() -> Result<Vec<Source>, String> {
             kind: "window".to_string(),
             title,
             app,
+            audio_scope: if audio_available() {
+                AudioScope::Application
+            } else {
+                AudioScope::None
+            },
         });
     }
     Ok(out)
@@ -132,7 +153,10 @@ pub struct Prepared {
     pub geometry: Geometry,
 }
 
-fn find_filter(content: &SCShareableContent, source_id: &str) -> Result<Retained<SCContentFilter>, String> {
+fn find_filter(
+    content: &SCShareableContent,
+    source_id: &str,
+) -> Result<Retained<SCContentFilter>, String> {
     let (kind, raw) = source_id
         .split_once(':')
         .ok_or_else(|| "采集源标识格式不对".to_string())?;
@@ -144,45 +168,73 @@ fn find_filter(content: &SCShareableContent, source_id: &str) -> Result<Retained
                 .find(|d| unsafe { d.displayID() } == id)
                 .ok_or_else(|| "这块显示器已经不在了".to_string())?;
             let empty: Retained<NSArray<SCWindow>> = NSArray::new();
-            Ok(unsafe { SCContentFilter::initWithDisplay_excludingWindows(SCContentFilter::alloc(), &display, &empty) })
+            Ok(unsafe {
+                SCContentFilter::initWithDisplay_excludingWindows(
+                    SCContentFilter::alloc(),
+                    &display,
+                    &empty,
+                )
+            })
         }
         "window" => {
             let window: Retained<SCWindow> = unsafe { content.windows() }
                 .iter()
                 .find(|w| unsafe { w.windowID() } == id)
                 .ok_or_else(|| "这个窗口已经关了".to_string())?;
-            Ok(unsafe { SCContentFilter::initWithDesktopIndependentWindow(SCContentFilter::alloc(), &window) })
+            Ok(unsafe {
+                SCContentFilter::initWithDesktopIndependentWindow(SCContentFilter::alloc(), &window)
+            })
         }
         _ => Err("采集源标识格式不对".to_string()),
     }
 }
 
-pub fn prepare(source_id: &str, fps: u32) -> Result<Prepared, String> {
-    let content = shareable_content()?;
+pub fn prepare(source_id: &str, settings: Settings, audio: bool) -> Result<Prepared, String> {
+    if audio && !audio_available() {
+        return Err("当前 ScreenCaptureKit 不支持音频采集".into());
+    }
+    let content = shareable_content(Duration::from_secs(3))?;
     let filter = find_filter(&content, source_id)?;
 
     let info = unsafe { SCShareableContent::infoForFilter(&filter) };
     let rect = unsafe { info.contentRect() };
     let scale = unsafe { info.pointPixelScale() } as f64;
-    let geometry = Geometry::fit(rect.size.width, rect.size.height, if scale > 0.0 { scale } else { 1.0 });
+    let geometry = Geometry::fit(
+        rect.size.width * scale.max(1.0),
+        rect.size.height * scale.max(1.0),
+        settings,
+    )?;
 
+    let config = configuration(geometry, settings, audio);
+    Ok(Prepared {
+        filter,
+        config,
+        geometry,
+    })
+}
+
+fn configuration(
+    geometry: Geometry,
+    settings: Settings,
+    audio: bool,
+) -> Retained<SCStreamConfiguration> {
     let config = unsafe { SCStreamConfiguration::init(SCStreamConfiguration::alloc()) };
     unsafe {
         config.setWidth(geometry.width as usize);
         config.setHeight(geometry.height as usize);
-        config.setMinimumFrameInterval(CMTime::new(1, fps as i32));
+        config.setMinimumFrameInterval(CMTime::new(1, settings.fps as i32));
         config.setPixelFormat(kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange);
         config.setScalesToFit(true);
         config.setPreservesAspectRatio(true);
         config.setShowsCursor(true);
         config.setQueueDepth(5);
-        config.setCapturesAudio(true);
+        config.setCapturesAudio(audio);
         config.setSampleRate(AUDIO_RATE as isize);
         config.setChannelCount(AUDIO_CHANNELS as isize);
         // 本进程的声音（WebView 里的远端语音）不能进来，否则等于把房间的声音再发布一遍
         config.setExcludesCurrentProcessAudio(true);
     }
-    Ok(Prepared { filter, config, geometry })
+    config
 }
 
 pub struct Capture {
@@ -198,16 +250,33 @@ unsafe impl Send for Capture {}
 
 impl Capture {
     pub fn stop(self) {
+        drop(self);
+    }
+}
+
+impl Drop for Capture {
+    fn drop(&mut self) {
+        self.output.ivars().sink.deactivate();
         unsafe { self.stream.stopCaptureWithCompletionHandler(None) };
-        let sample_out: &ProtocolObject<dyn SCStreamOutput> = ProtocolObject::from_ref(&*self.output);
-        let _ = unsafe { self.stream.removeStreamOutput_type_error(sample_out, SCStreamOutputType::Screen) };
-        let _ = unsafe { self.stream.removeStreamOutput_type_error(sample_out, SCStreamOutputType::Audio) };
+        let sample_out: &ProtocolObject<dyn SCStreamOutput> =
+            ProtocolObject::from_ref(&*self.output);
+        let _ = unsafe {
+            self.stream
+                .removeStreamOutput_type_error(sample_out, SCStreamOutputType::Screen)
+        };
+        let _ = unsafe {
+            self.stream
+                .removeStreamOutput_type_error(sample_out, SCStreamOutputType::Audio)
+        };
     }
 }
 
 pub fn start(prepared: Prepared, sink: Sink) -> Result<Capture, String> {
     let queue = DispatchQueue::new("app.hearth.capture", DispatchQueueAttr::SERIAL);
-    let output = StreamOutput::new(Ivars { sink: sink.clone(), geometry: prepared.geometry });
+    let output = StreamOutput::new(Ivars {
+        sink: sink.clone(),
+        geometry: prepared.geometry,
+    });
     let sample_out: &ProtocolObject<dyn SCStreamOutput> = ProtocolObject::from_ref(&*output);
     let delegate: &ProtocolObject<dyn SCStreamDelegate> = ProtocolObject::from_ref(&*output);
 
@@ -221,26 +290,49 @@ pub fn start(prepared: Prepared, sink: Sink) -> Result<Capture, String> {
     };
     unsafe {
         stream
-            .addStreamOutput_type_sampleHandlerQueue_error(sample_out, SCStreamOutputType::Screen, Some(&queue))
+            .addStreamOutput_type_sampleHandlerQueue_error(
+                sample_out,
+                SCStreamOutputType::Screen,
+                Some(&queue),
+            )
             .map_err(|e| format!("挂画面输出失败：{}", e.localizedDescription()))?;
-        stream
-            .addStreamOutput_type_sampleHandlerQueue_error(sample_out, SCStreamOutputType::Audio, Some(&queue))
-            .map_err(|e| format!("挂音频输出失败：{}", e.localizedDescription()))?;
+        if sink.audio.is_some() {
+            stream
+                .addStreamOutput_type_sampleHandlerQueue_error(
+                    sample_out,
+                    SCStreamOutputType::Audio,
+                    Some(&queue),
+                )
+                .map_err(|e| format!("挂音频输出失败：{}", e.localizedDescription()))?;
+        }
     }
 
+    let capture = Capture {
+        stream,
+        output,
+        _queue: queue,
+    };
     // 启动是异步的：等它回一声，这样权限被拒能当场返回可读错误，而不是静默没画面
     let (tx, rx) = mpsc::channel::<Option<String>>();
     let handler = RcBlock::new(move |err: *mut NSError| {
-        let _ = tx.send(if err.is_null() { None } else { Some(error_text(err)) });
+        let _ = tx.send(if err.is_null() {
+            None
+        } else {
+            Some(error_text(err))
+        });
     });
-    unsafe { stream.startCaptureWithCompletionHandler(Some(&handler)) };
-    match rx.recv_timeout(Duration::from_secs(15)) {
+    unsafe {
+        capture
+            .stream
+            .startCaptureWithCompletionHandler(Some(&handler))
+    };
+    match rx.recv_timeout(Duration::from_secs(3)) {
         Ok(None) => {}
         Ok(Some(err)) => return Err(err),
         Err(_) => return Err("启动屏幕采集超时".to_string()),
     }
 
-    Ok(Capture { stream, output, _queue: queue })
+    Ok(capture)
 }
 
 struct Ivars {
@@ -259,10 +351,20 @@ define_class!(
 
     unsafe impl SCStreamOutput for StreamOutput {
         #[unsafe(method(stream:didOutputSampleBuffer:ofType:))]
-        unsafe fn did_output(&self, _stream: &SCStream, sbuf: &CMSampleBuffer, kind: SCStreamOutputType) {
+        unsafe fn did_output(
+            &self,
+            _stream: &SCStream,
+            sbuf: &CMSampleBuffer,
+            kind: SCStreamOutputType,
+        ) {
             let ivars = self.ivars();
+            if !ivars.sink.active() {
+                return;
+            }
             match kind {
-                SCStreamOutputType::Screen => unsafe { push_video(&ivars.sink, sbuf, ivars.geometry) },
+                SCStreamOutputType::Screen => unsafe {
+                    push_video(&ivars.sink, sbuf, ivars.geometry)
+                },
                 SCStreamOutputType::Audio => unsafe { push_audio(&ivars.sink, sbuf) },
                 _ => {}
             }
@@ -302,7 +404,9 @@ unsafe fn push_video(sink: &Sink, sbuf: &CMSampleBuffer, geometry: Geometry) {
         sink.fail("采集分辨率变了，请重新发起投屏");
         return;
     }
-    let Ok(info) = gst_video::VideoInfo::builder(gst_video::VideoFormat::Nv12, width, height).build() else {
+    let Ok(info) =
+        gst_video::VideoInfo::builder(gst_video::VideoFormat::Nv12, width, height).build()
+    else {
         sink.fail("视频格式信息构造失败");
         return;
     };
@@ -313,7 +417,11 @@ unsafe fn push_video(sink: &Sink, sbuf: &CMSampleBuffer, geometry: Geometry) {
     }
     let mut buffer = gst::Buffer::with_size(info.size()).expect("分配视频缓冲失败");
     {
-        let mut map = buffer.get_mut().unwrap().map_writable().expect("映射视频缓冲失败");
+        let mut map = buffer
+            .get_mut()
+            .unwrap()
+            .map_writable()
+            .expect("映射视频缓冲失败");
         let dst = map.as_mut_slice();
         // NV12：面 0 是全尺寸的 Y，面 1 是半高的交错 UV（每行字节数与 Y 面相同）
         for plane in 0..2 {
@@ -321,7 +429,11 @@ unsafe fn push_video(sink: &Sink, sbuf: &CMSampleBuffer, geometry: Geometry) {
             let src_stride = CVPixelBufferGetBytesPerRowOfPlane(&image, plane);
             let dst_stride = info.stride()[plane] as usize;
             let dst_offset = info.offset()[plane];
-            let rows = if plane == 0 { height as usize } else { height as usize / 2 };
+            let rows = if plane == 0 {
+                height as usize
+            } else {
+                height as usize / 2
+            };
             let row_bytes = dst_stride.min(src_stride);
             if src.is_null() {
                 continue;
@@ -342,6 +454,9 @@ unsafe fn push_video(sink: &Sink, sbuf: &CMSampleBuffer, geometry: Geometry) {
 
 /// CMSampleBuffer(Float32 平面) → 交错 F32LE 推进 appsrc。
 unsafe fn push_audio(sink: &Sink, sbuf: &CMSampleBuffer) {
+    let Some(audio) = &sink.audio else {
+        return;
+    };
     let Some(format) = (unsafe { sbuf.format_description() }) else {
         return;
     };
@@ -365,7 +480,15 @@ unsafe fn push_audio(sink: &Sink, sbuf: &CMSampleBuffer) {
     // 先问要多大，再照着分配；block buffer 管着数据的生命周期，用完就释放
     let mut needed = 0usize;
     unsafe {
-        sbuf.audio_buffer_list_with_retained_block_buffer(&mut needed, null_mut(), 0, None, None, 0, null_mut());
+        sbuf.audio_buffer_list_with_retained_block_buffer(
+            &mut needed,
+            null_mut(),
+            0,
+            None,
+            None,
+            0,
+            null_mut(),
+        );
     }
     if needed == 0 {
         return;
@@ -417,8 +540,71 @@ unsafe fn push_audio(sink: &Sink, sbuf: &CMSampleBuffer) {
         unsafe { std::ptr::copy_nonoverlapping(src, pcm.as_mut_ptr(), n) };
     }
 
-    let bytes: &[u8] = unsafe { std::slice::from_raw_parts(pcm.as_ptr() as *const u8, pcm.len() * 4) };
-    if sink.audio.push_buffer(gst::Buffer::from_slice(bytes.to_vec())).is_err() {
+    let bytes: &[u8] =
+        unsafe { std::slice::from_raw_parts(pcm.as_ptr() as *const u8, pcm.len() * 4) };
+    if audio
+        .push_buffer(gst::Buffer::from_slice(bytes.to_vec()))
+        .is_err()
+    {
         sink.fail("声音写入管线失败");
+    }
+}
+
+// 音频从 macOS 13 起可用；能力探测不触发屏幕或音频采集。
+pub fn audio_available() -> bool {
+    available()
+        && unsafe {
+            let config = SCStreamConfiguration::new();
+            config.respondsToSelector(objc2::sel!(setCapturesAudio:))
+        }
+}
+
+pub fn geometry(source_id: &str, settings: Settings) -> Result<Geometry, String> {
+    Ok(prepare(source_id, settings, false)?.geometry)
+}
+
+impl Prepared {
+    pub fn video_head(&self) -> String {
+        "appsrc name=vsrc is-live=true format=time do-timestamp=true max-buffers=3 leaky-type=downstream ! videoconvert".into()
+    }
+    pub fn audio_head(&self) -> Result<String, String> {
+        Ok("appsrc name=asrc is-live=true format=time do-timestamp=true max-buffers=32 leaky-type=downstream".into())
+    }
+    pub fn attach(
+        self,
+        pipeline: &gst::Pipeline,
+        settings: Settings,
+        error: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+    ) -> Result<Capture, String> {
+        let sink = Sink::from_pipeline(pipeline, self.geometry, settings.fps, error)?;
+        pipeline
+            .set_state(gst::State::Playing)
+            .map_err(|e| format!("采集管线启动失败：{e}"))?;
+        start(self, sink)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn config_respects_fps_geometry_and_disabled_audio() {
+        let geometry = Geometry {
+            width: 2560,
+            height: 1440,
+        };
+        let settings = Settings {
+            width: 2560,
+            height: 1440,
+            fps: 60,
+            bitrate_kbps: 8000,
+        };
+        let config = configuration(geometry, settings, false);
+        unsafe {
+            assert!(!config.capturesAudio());
+            assert_eq!(config.width(), 2560);
+            assert_eq!(config.height(), 1440);
+            assert_eq!(config.minimumFrameInterval().timescale, 60);
+        }
     }
 }

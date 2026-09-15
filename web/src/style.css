@@ -1318,17 +1318,27 @@ body.theater-on { overscroll-behavior: none; }
 }
 .ingest-panel .ig-em { color: var(--ember); }
 /* 原生投屏的采集源列表（桌面壳专用，浏览器走系统自带的选择器） */
-.ingest-panel .src-list { display: flex; flex-direction: column; gap: 4px; max-height: 46vh; overflow-y: auto; }
+.ingest-panel .src-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; max-height: 46vh; overflow-y: auto; }
 .ingest-panel .src-item {
-  display: flex; align-items: center; gap: 9px; width: 100%; padding: 8px 10px;
-  border-radius: 8px; border: 1px solid transparent; text-align: left;
+  display: flex; flex-direction: column; align-items: stretch; gap: 7px; width: 100%; padding: 7px;
+  border-radius: 8px; border: 1px solid var(--line-soft); text-align: left;
 }
 .ingest-panel .src-item:hover { background: var(--bg-3); border-color: var(--line-soft); }
+.ingest-panel .src-item.selected { border-color: var(--ember); background: var(--ember-tint); }
+.ingest-panel .src-preview { height: 92px; display: flex; align-items: center; justify-content: center; overflow: hidden; border-radius: 5px; background: var(--bg-3); }
+.ingest-panel .src-preview img { width: 100%; height: 100%; object-fit: cover; }
+.ingest-panel .src-copy { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .ingest-panel .src-item .src-name {
-  flex-grow: 1; min-width: 0; font-size: 12.5px; color: var(--text-0);
+  min-width: 0; font-size: 12.5px; color: var(--text-0);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.ingest-panel .src-item .src-app { flex-shrink: 0; font-size: 11px; color: var(--text-2); }
+.ingest-panel .src-item .src-meta { font-size: 11px; color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.native-share-options { display: flex; flex-direction: column; gap: 5px; }
+.native-audio-option { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--text-1); cursor: pointer; }
+.native-audio-option.disabled { color: var(--text-2); cursor: not-allowed; }
+.native-share-actions { display: flex; justify-content: flex-end; gap: 8px; }
+.native-share-actions .primary { background: var(--ember); color: #fff; border-color: var(--ember); }
+.native-share-actions .primary:disabled { opacity: .45; cursor: not-allowed; }
 .ingest-panel .ig-tip { font-size: 11.5px; line-height: 1.65; color: var(--text-2); text-wrap: pretty; }
 .ingest-panel .ig-link {
   display: flex; align-items: center; gap: 6px; align-self: flex-start;
@@ -1339,6 +1349,7 @@ body.theater-on { overscroll-behavior: none; }
 @media (max-width: 560px) {
   .ingest-scrim { padding: 56px 12px 12px; }
   .ingest-panel { padding: 16px; }
+  .ingest-panel .src-list { grid-template-columns: 1fr; }
 }
 
 /* ---- 连接质量读数面板（顶栏 conn-chip 点开）---- */

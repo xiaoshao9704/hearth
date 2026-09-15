@@ -12,7 +12,7 @@ import { startAfkWatch } from '../afk';
 import { ApiError, deviceId, fetchJoinCredentials, getCastTicket, getUser, guestTimeLeft, isGuest, kickUser, listChannels, muteUser, reportClientLog } from '../api';
 import type { ChannelRole, DataLine, EngineCred } from '../api';
 import { playCue } from '../audio';
-import { capabilities, listSources, onPublishState, startPublish, stopPublish } from '../bridge';
+import { capabilities, listSources, onPublishState, startPublish, stopPublish, updatePublish } from '../bridge';
 import type { BridgeCaps, NativeSource } from '../bridge';
 import { deleteMessage, fetchMessages, postMessage, setReaction } from '../chat';
 import type { ChatMessage } from '../chat';
@@ -25,7 +25,7 @@ import { DATA_TOPIC_FILE, DATA_TOPIC_TEXT } from '../engine/types';
 import type { AVEngine, EPart, EngineCallbacks, TrackSource, VideoStats } from '../engine/types';
 import { wireLongPress } from '../longpress';
 import { clearLeaveGuard, setLeaveGuard } from '../nav';
-import { encoderIsHw, loadPrefs, prefsBus, savePrefs } from '../prefs';
+import { encoderIsHw, loadPrefs, prefsBus, RES_DIMS, savePrefs } from '../prefs';
 import { notifyJoin, notifyMessage } from '../notify';
 import { renderShell } from '../shell';
 import { avatarHtml, confirmDialog, el, esc, fmtClock, icon, licon, menuButtonHtml, micIcon, slashIcon, toast, wireMenuButton } from '../ui';
@@ -57,6 +57,13 @@ interface Line {
   attempts: number;
   timer: number;
   inflight: boolean;
+}
+
+interface NativePublishConfig {
+  res: string;
+  fps: number;
+  bitrate: number;
+  requestedCodec: string;
 }
 
 // 视频卡片：引擎产出的命令式 video 元素 + 创建时刻的参与者快照（与旧版一致，名字不随名册热更新）
@@ -275,11 +282,14 @@ export async function renderRoom(root: HTMLElement, channel: string) {
   const [bridgeCaps, setBridgeCaps] = createSignal<BridgeCaps | null>(null);
   const nativeScreen = createMemo(() => bridgeCaps()?.native_publish === true);
   const [sourcePick, setSourcePick] = createSignal<NativeSource[] | null>(null);
+  let nativePublishConfig: NativePublishConfig | null = null;
+  let nativeCodecNotice = '';
   void capabilities().then(setBridgeCaps);
   // 原生发布失败（ICE 没建起来、没有画面、管线报错）由壳主动推过来：
   // 壳那边已经把管线收了，这里只负责复位按钮与提示。
   let unlistenPublish: (() => void) | null = null;
   void onPublishState((s) => {
+    if (leaving) return;
     if (!s.error) return;
     setScreenOn(false);
     setSourcePick(null);
@@ -1485,7 +1495,14 @@ export async function renderRoom(root: HTMLElement, channel: string) {
     }
   }
 
-  async function startNativeScreen(source: NativeSource) {
+  function nativePublishCodec(screenCodec: string): 'h264' | 'h265' {
+    const supported = bridgeCaps()?.publish_codecs ?? ['h264'];
+    const preferred: 'h264' | 'h265' = screenCodec === 'h264' ? 'h264' : 'h265';
+    if (supported.includes(preferred)) return preferred;
+    return supported.includes('h264') ? 'h264' : preferred;
+  }
+
+  async function startNativeScreen(source: NativeSource, audio: boolean) {
     setSourcePick(null);
     const id = channelId();
     if (!id) {
@@ -1496,19 +1513,33 @@ export async function renderRoom(root: HTMLElement, channel: string) {
       const info = await getCastTicket(id, deviceId());
       if (!info.base) throw new Error('本服没有可用的推流入口');
       const p = loadPrefs();
-      await startPublish({
+      const dims = RES_DIMS[p.res] ?? RES_DIMS['1080p'];
+      const codec = nativePublishCodec(p.screenCodec);
+      if (leaving) return;
+      const started = await startPublish({
         endpoint: `${info.base}${id}`,
         token: info.ticket,
         source_id: source.id,
         bitrate_kbps: Math.round(p.bitrate * 1000),
-        // 原生侧只有 VideoToolbox 的 H.264 / HEVC，vp9·av1 这类浏览器编码落到 HEVC
-        codec: p.screenCodec === 'h264' ? 'h264' : 'h265',
+        // 原生壳按 capabilities 选择实际存在的硬编码器，浏览器专用编码不会直接传过去。
+        codec,
+        width: dims.width,
+        height: dims.height,
+        fps: p.fps,
+        audio,
       });
+      if (leaving) {
+        await stopPublish().catch(() => {});
+        return;
+      }
       setScreenOn(true);
+      nativePublishConfig = { res: p.res, fps: p.fps, bitrate: p.bitrate, requestedCodec: p.screenCodec };
+      nativeCodecNotice = '';
+      if (started.codec !== (p.screenCodec === 'h264' ? 'h264' : 'h265')) toast(`原生投屏使用 ${started.codec === 'h264' ? 'H.264' : 'HEVC'} 编码`, '', 3500);
       refreshMeta();
     } catch (err) {
       setScreenOn(false);
-      toast(`投屏失败：${errText(err)}`, 'bad', 6000);
+      if (!leaving) toast(`投屏失败：${errText(err)}`, 'bad', 6000);
     }
   }
 
@@ -1989,8 +2020,19 @@ export async function renderRoom(root: HTMLElement, channel: string) {
           ?.switchCamera(p.camDeviceId)
           .catch((err) => toast(`切换摄像头失败：${(err as Error)?.message ?? ''}`, 'bad'));
     }
-    // 原生发布的码率是建流时定死的（固定码率），改画质要重新发起，不热应用
-    if (what === 'screen' && screenOn() && !nativeScreen()) applyScreenPrefsSoon();
+    if (what === 'screen' && screenOn()) {
+      if (!nativeScreen()) applyScreenPrefsSoon();
+      else {
+        const p = loadPrefs();
+        const current = nativePublishConfig;
+        if (!current) return;
+        if (p.screenCodec !== current.requestedCodec && nativeCodecNotice !== p.screenCodec) {
+          nativeCodecNotice = p.screenCodec;
+          toast('原生投屏编码将在下次投屏时生效', '', 3500);
+        }
+        if (p.res !== current.res || p.fps !== current.fps || p.bitrate !== current.bitrate) applyScreenPrefsSoon();
+      }
+    }
   };
   prefsBus.addEventListener('prefs', onPrefs);
 
@@ -2001,14 +2043,23 @@ export async function renderRoom(root: HTMLElement, channel: string) {
     window.clearTimeout(screenApplyTimer);
     screenApplyTimer = window.setTimeout(() => {
       screenApplyChain = screenApplyChain.then(async () => {
-        const eng = stageEngine();
-        if (!eng || !screenOn()) return;
+        if (leaving || !screenOn()) return;
         try {
-          if (await eng.applyScreenPrefs()) toast('投屏编码已切换，观众端会短暂重连', '', 3000);
+          if (nativeScreen()) {
+            const p = loadPrefs();
+            const dims = RES_DIMS[p.res] ?? RES_DIMS['1080p'];
+            await updatePublish({ width: dims.width, height: dims.height, fps: p.fps, bitrate_kbps: Math.round(p.bitrate * 1000) });
+            if (nativePublishConfig) nativePublishConfig = { ...nativePublishConfig, res: p.res, fps: p.fps, bitrate: p.bitrate };
+            if (!leaving) toast('投屏画质已更新', '', 3000);
+          } else {
+            const eng = stageEngine();
+            if (!eng) return;
+            if (await eng.applyScreenPrefs()) toast('投屏编码已切换，观众端会短暂重连', '', 3000);
+          }
         } catch (err) {
-          toast(`投屏画质应用失败：${err instanceof Error ? err.message : String(err)}`, 'bad');
+          if (!leaving) toast(`投屏画质应用失败：${err instanceof Error ? err.message : String(err)}`, 'bad');
         }
-        refreshMeta();
+        if (!leaving) refreshMeta();
       });
     }, 200);
   }
@@ -3191,7 +3242,8 @@ export async function renderRoom(root: HTMLElement, channel: string) {
           <NativeSourcePanel
             sources={sourcePick()!}
             appAudio={bridgeCaps()?.app_audio === true}
-            onPick={(s) => void startNativeScreen(s)}
+            screenAudio={loadPrefs().screenAudio}
+            onConfirm={(s, audio) => void startNativeScreen(s, audio)}
             onClose={() => setSourcePick(null)}
           />
         </Show>

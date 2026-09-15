@@ -81,3 +81,6 @@ objc2-security = { version = "0.3", default-features = false, features = [
     "SecCertificate",
 ] }
 
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_UI_WindowsAndMessaging", "Win32_System_Threading", "Win32_Security", "Win32_System_SystemInformation", "Wdk_System_SystemServices"] }

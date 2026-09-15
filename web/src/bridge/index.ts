@@ -7,6 +7,8 @@ export interface BridgeCaps {
   native_publish: boolean; // 能不能走原生投屏发布
   platform: string;
   app_audio: boolean; // 原生投屏是否带所属应用的声音
+  // 壳实际可用的硬编码器；旧壳没有此字段时按 H.264 兜底。
+  publish_codecs?: Array<'h264' | 'h265'>;
 }
 
 export interface NativeSource {
@@ -14,6 +16,8 @@ export interface NativeSource {
   kind: 'display' | 'window';
   title: string;
   app: string;
+  // application = 窗口所属应用；system = 整个显示器的系统声音；none = 该源不能带声音。
+  audio_scope: 'application' | 'system' | 'none';
 }
 
 export interface PublishStats {
@@ -43,6 +47,14 @@ export interface PublishArgs {
   token: string; // 推流令牌
   source_id: string;
   bitrate_kbps: number;
+  codec: 'h264' | 'h265';
+  width: number;
+  height: number;
+  fps: number;
+  audio: boolean;
+}
+
+export interface StartPublishResult {
   codec: 'h264' | 'h265';
 }
 
@@ -100,12 +112,20 @@ export function listSources(): Promise<NativeSource[]> {
   return call<NativeSource[]>('list_sources');
 }
 
-export function startPublish(args: PublishArgs): Promise<void> {
-  return call<void>('start_publish', { ...args });
+export function sourcePreview(sourceId: string): Promise<string | null> {
+  return call<string | null>('source_preview', { source_id: sourceId });
+}
+
+export function startPublish(args: PublishArgs): Promise<StartPublishResult> {
+  return call<StartPublishResult>('start_publish', { ...args });
 }
 
 export function stopPublish(): Promise<void> {
   return call<void>('stop_publish');
+}
+
+export function updatePublish(args: { width: number; height: number; fps: number; bitrate_kbps: number }): Promise<void> {
+  return call<void>('update_publish', args);
 }
 
 export function publishStats(): Promise<PublishStats | null> {
