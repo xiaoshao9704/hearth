@@ -9,7 +9,7 @@
 | 决定 | 内容 |
 | --- | --- |
 | 壳 | Rust + Tauri v2。`desktop/` 目录进主仓库，`frontendDist` 指向 `../web/dist`，不复制一份前端。 |
-| 原生投屏发布 | 走**现有 WHIP 入口** `/providers/{alias}/w/{channel}`：推流令牌 + `admitIngest`，标签 `desktop`，`kind=ingest`。服务端零改动。不用 LiveKit Rust SDK。 |
+| 原生投屏发布 | 走**现有 WHIP 入口** `/providers/{alias}/w/{channel}`：设备票（`POST /api/channels/{channel}/cast-ticket`，10 分钟、绑频道与设备，标签 `cast-{device_id}`）+ `admitIngest`，`kind=ingest`。与 OBS 的账号级推流令牌互不干扰。不用 LiveKit Rust SDK。 |
 | 媒体管线 | GStreamer（gstreamer-rs）。编码与 WHIP 全用现成元素：`vtenc_*` / `mfh26*enc` / `nvd3d11h26*enc` / `qsvh26*enc` / `amfh26*enc` + `whipclientsink`，`congestion-control=disabled` 固定码率，比照 OBS。 |
 | 采集 | Windows：`d3d11screencapturesrc capture-api=wgc`（整屏或 `window-handle`）+ `wasapi2src loopback-mode=include-process-tree loopback-target-pid=…`。macOS：**自写 ScreenCaptureKit 采集**（画面 + 所属应用音频）喂 `appsrc`；GStreamer 在 macOS 没有可用的屏幕与系统声采集。 |
 | 证书信任 | 应用内信任，不装系统 CA。WebView 与 Rust 各自的信任回调由桌面壳自己挂（wry 不暴露）。 |
@@ -41,7 +41,7 @@
 
 - **同一网页渐进增强**。WebView 加载本地打包的 `web` 产物，浏览器用同一份源码；不另写桌面路由、频道页或设置系统。网页通过桥能力检测得知原生能力，无桥时行为不变，可替代则降级，无替代则隐藏并说明。
 - **能力不等于权限**。显隐继续按服务端返回的 `role`/`my_role`，推流权由 `admitIngest` 最终判定。
-- **身份与展示**。原生发布的 identity 由服务端按推流令牌组装（`u{uid}-desktop`），展示按 `Meta.uid` 聚合，管制走 `MatchesUser`。客户端不签 JWT、不持有 LiveKit 密钥。断线重推回到 WHIP 入口重新判定。
+- **身份与展示**。原生发布的 identity 由服务端按设备票组装（`u{uid}-cast-{device_id}`），展示按 `Meta.uid` 聚合，管制走 `MatchesUser`。客户端不签 JWT、不持有 LiveKit 密钥。断线重推回到 WHIP 入口重新判定。
 - **单一职责的媒体组件**。麦克风与远端播放只由 WebView 负责；原生侧只发布投屏画面与所属应用音频，不订阅、不播放，也不把远端声音再发布。原生采集中断先停止并提示，不静默切到浏览器采集或扩大音频范围。
 - **音频范围如实表达**。Windows 说明覆盖进程树；macOS 说明「共享此窗口画面与所属应用声音」，单窗口独立声音不承诺。拒绝指定音频时不得改成全系统声音。
 - **采集在登录用户的客户端进程内**。Windows SCM 服务与 macOS LaunchAgent 只运行 hearth 服务器；客户端退出、注销、锁屏时采集停止。
@@ -69,7 +69,7 @@
 - SCK 真实出帧与所属应用音频：GUI 下授予屏幕录制权限后，浏览器观众看到画面并听到应用声音。
 - 同机/同网 ICE：未签名 app 发往局域网地址的 UDP 被 macOS 本地网络隐私门丢弃（信令成功、ICE 失败）。需签名后由用户在弹窗授权；连远端公网服务器不受影响。
 - 禁言/踢出切断原生发布、停止共享与退出回收轨道在真实房间里的走查。
-- 已知限制：推流令牌每用户一把且标签固定，桌面端与 OBS 同 identity，同时推会顶替（需服务端支持按设备的推流标签，另立项）；桌面 origin 是 `tauri://localhost`，部署侧把 `CORS_ORIGIN` 收紧会打死桌面端；失败判定端到端约 21 秒，瓶颈在 webrtcbin 的断连检测。
+- 已知限制：桌面 origin 是 `tauri://localhost`，部署侧把 `CORS_ORIGIN` 收紧会打死桌面端；失败判定端到端约 21 秒，瓶颈在 webrtcbin 的断连检测。
 
 原定内容：
 

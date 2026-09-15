@@ -41,7 +41,7 @@
 
 ### 入场判定（server/internal/api/admission.go）
 
-一条规则，两个执行点：`admitUser` 是唯一的"谁能进房、能否发布"决策函数（返回 `UID`/`Username`，identity 由调用方经 `rtc.Identity` 组），`joinToken`（凭证签发）与 `/providers/{alias}/w` POST（WHIP 推流拦截，统一走 `admitIngest`：令牌反查用户 + URL 取频道，换票反代到该实例自带 WHIP，definitive 404/403/503 无 fail-open）都调它。新增入口或新增入场约束时**只改这里**，不得在别处散落 `CanJoin`/`IsGagged` 组合。
+一条规则，两个执行点：`admitUser` 是唯一的"谁能进房、能否发布"决策函数（返回 `UID`/`Username`，identity 由调用方经 `rtc.Identity` 组），`joinToken`（凭证签发）与 `/providers/{alias}/w` POST（WHIP 推流拦截，统一走 `admitIngest`：令牌反查用户——账号级推流令牌或桌面端的设备票（`ct1.` 前缀，签发见 `castticket.go`），两族都在这里认——加 URL 取频道，换票反代到该实例自带 WHIP，definitive 404/403/503 无 fail-open）都调它。新增入口或新增入场约束时**只改这里**，不得在别处散落 `CanJoin`/`IsGagged` 组合。
 
 ### 动态配置（server/internal/api/dyncfg.go）
 
