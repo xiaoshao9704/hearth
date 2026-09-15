@@ -21,12 +21,21 @@ import type {
 } from 'livekit-client';
 import { RnnoisePipeline } from '../audio';
 import { RES_DIMS, loadPrefs } from '../prefs';
-import type { RoomPrefs, ScreenCodec } from '../prefs';
+import type { RoomPrefs, ScreenCodec, ScreenContent } from '../prefs';
 import { DATA_TOPIC_FILE, DATA_TOPIC_TEXT } from './types';
 import type { AVEngine, EPart, EngineCallbacks, LineStats, TrackSource, VideoStats } from './types';
 
 const toSource = (s: Track.Source): TrackSource | null =>
   s === Track.Source.Camera ? 'camera' : s === Track.Source.ScreenShare ? 'screen' : null;
+
+// 带宽不够时编码器往哪边让：文字要看清（丢帧保分辨率），游戏要动起来（缩分辨率保帧率）。
+// 真正决定降级方向的是 sender 的 degradationPreference，contentHint 只是给编码器的提示
+const degradationFor = (c: ScreenContent): RTCDegradationPreference => (c === 'game' ? 'maintain-framerate' : 'maintain-resolution');
+
+// SVC 投屏的 contentHint 只能是 motion：Chrome 走投屏专用路径时 L1T3 限到 5fps，
+// SDK 发布时会强制改成 motion 绕开，这里跟着它，免得热改把画面按回 5fps
+const contentHintFor = (p: RoomPrefs): 'detail' | 'motion' =>
+  p.screenContent === 'game' || p.screenCodec === 'vp9' || p.screenCodec === 'av1' ? 'motion' : 'detail';
 
 // 一条 candidate-pair 的格式化快照（endpoint 已按 `protocol/candidateType addr:port` 拼好）
 interface IcePairSnapshot {
@@ -703,6 +712,10 @@ export class LiveKitEngine implements AVEngine {
     if (!track) return false;
     const p = loadPrefs();
     const { publish } = this.screenOptions(p);
+    // 内容类型热改：contentHint 直接写采集轨，降级方向经 SDK 落到全部 sender
+    // （含备份编码），也更新 SDK 自己记的值，免得后续换 sender 时被旧值覆盖
+    track.mediaStreamTrack.contentHint = contentHintFor(p);
+    await track.setDegradationPreference(degradationFor(p.screenContent));
     if (p.screenCodec !== this.screenCodec) {
       // 编码在 SDP 协商时定死，只能重新发布；stopOnUnpublish=false 留住采集轨，不用重选窗口
       await this.room.localParticipant.unpublishTrack(track, false);
@@ -734,7 +747,7 @@ export class LiveKitEngine implements AVEngine {
       | undefined;
     const capture: ScreenShareCaptureOptions = {
       resolution: { width: d.width, height: d.height, frameRate: p.fps },
-      contentHint: 'detail', // 屏幕内容以文字/细节为主
+      contentHint: contentHintFor(p),
       systemAudio: 'include', // 让浏览器把系统声音摆进可选源；不支持的浏览器忽略
       selfBrowserSurface: 'exclude', // 别把 hearth 自己这个标签页列为候选（选中就成了镜中镜）
       preferCurrentTab: false,
@@ -777,7 +790,16 @@ export class LiveKitEngine implements AVEngine {
     }
     // 这次发布连带的投屏音轨（有就发）：128k 立体声，关 DTX 免得静音段断流吞掉音乐尾音，
     // 关 RED 免得为冗余多占上行。只作用于本次投屏发布，麦克风走 micPublishOptions
-    return { capture, publish: { ...publish, audioPreset: { maxBitrate: 128_000 }, dtx: false, red: false } };
+    return {
+      capture,
+      publish: {
+        ...publish,
+        degradationPreference: degradationFor(p.screenContent),
+        audioPreset: { maxBitrate: 128_000 },
+        dtx: false,
+        red: false,
+      },
+    };
   }
 
   dispose() {

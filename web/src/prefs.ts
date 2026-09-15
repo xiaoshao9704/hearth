@@ -26,6 +26,8 @@ export const THEATER_CORNERS: TheaterCorner[] = ['tl', 'tr', 'bl', 'br'];
 
 export type DenoiseMode = 'rnnoise' | 'browser' | 'off';
 export type ScreenCodec = 'h264' | 'h265' | 'vp9' | 'av1';
+// 投屏内容类型：决定带宽不够时牺牲清晰度还是牺牲帧率
+export type ScreenContent = 'text' | 'game';
 
 export interface RoomPrefs {
   mic: boolean;
@@ -37,6 +39,7 @@ export interface RoomPrefs {
   bitrateAuto: boolean;
   screenCodec: ScreenCodec; // 投屏编码：h264/h265 单层 / vp9·av1 走 SVC 分层
   screenCodecAuto: boolean; // true = 按本机能力自动选（硬编优先）；用户手选后置 false
+  screenContent: ScreenContent; // text = 保清晰度丢帧（文字/界面）；game = 保帧率缩分辨率（游戏/视频）
   screenAudio: boolean; // 投屏是否连带系统声音；改了要下次开始投屏才生效（采集参数在选窗口时定死）
   denoise: DenoiseMode; // 三选一：RNNoise / 浏览器自带 / 不降噪
   echoCancellation: boolean;
@@ -73,6 +76,7 @@ export function defaultPrefs(): RoomPrefs {
     bitrateAuto: true,
     screenCodec: 'vp9',
     screenCodecAuto: true,
+    screenContent: 'text',
     screenAudio: true,
     denoise: 'rnnoise',
     echoCancellation: true,
@@ -125,6 +129,7 @@ export function loadPrefs(): RoomPrefs {
       bitrateAuto: p.bitrateAuto !== false,
       screenCodec: p.screenCodec === 'h264' || p.screenCodec === 'h265' || p.screenCodec === 'av1' ? p.screenCodec : 'vp9',
       screenCodecAuto: p.screenCodecAuto !== false,
+      screenContent: p.screenContent === 'game' ? 'game' : def.screenContent,
       screenAudio: p.screenAudio !== false,
       denoise,
       echoCancellation: p.echoCancellation !== false,

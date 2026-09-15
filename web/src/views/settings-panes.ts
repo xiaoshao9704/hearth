@@ -31,7 +31,7 @@ import {
   probeHwEncode,
   savePrefs,
 } from '../prefs';
-import type { DenoiseMode, ScreenCodec } from '../prefs';
+import type { DenoiseMode, ScreenCodec, ScreenContent } from '../prefs';
 import { getTheme, setTheme } from '../theme';
 import type { Theme } from '../theme';
 import { armNotifyPermission, notifyState } from '../notify';
@@ -986,6 +986,21 @@ function renderScreen(body: HTMLElement, goStream: () => void) {
           </div>
         </div>
         <div class="kv-line">
+          <span class="k">内容类型</span>
+          <div class="seg-group" style="flex-grow:1">
+            ${([
+              ['text', '文字与界面'],
+              ['game', '游戏与视频'],
+            ] as const)
+              .map(
+                ([v, label]) =>
+                  `<button class="hit seg ${prefs.screenContent === v ? 'on' : ''}" data-content="${v}">${label}</button>`,
+              )
+              .join('')}
+          </div>
+        </div>
+        <div class="mono" style="padding-left:66px;font-size:10.5px;color:var(--text-3);margin-top:-8px">游戏模式在带宽不足时缩小画面保帧率，文字模式保清晰度可能掉帧</div>
+        <div class="kv-line">
           <span class="k">码率</span>
           <input class="range" type="range" min="${lim.min}" max="${lim.max}" step="0.5" value="${prefs.bitrate}" id="br-range" />
           <span class="mono" style="font-size:11.5px;color:var(--text-1);width:70px;text-align:right" id="br-label">${prefs.bitrate.toFixed(1)} Mbps</span>
@@ -1039,6 +1054,14 @@ function renderScreen(body: HTMLElement, goStream: () => void) {
       btn.addEventListener('click', () => {
         prefs.screenCodec = btn.dataset.codec as ScreenCodec;
         prefs.screenCodecAuto = false; // 手选后不再自动改
+        savePrefs(prefs);
+        notifyPrefsChanged('screen');
+        paint();
+      });
+    });
+    body.querySelectorAll<HTMLButtonElement>('[data-content]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        prefs.screenContent = btn.dataset.content as ScreenContent;
         savePrefs(prefs);
         notifyPrefsChanged('screen');
         paint();
