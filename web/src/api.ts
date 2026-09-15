@@ -619,6 +619,25 @@ export async function passkeyLoginFinish(ceremonyId: string, credential: unknown
   return data.user;
 }
 
+// ---- 桌面端浏览器跳转登录 ----
+// 壳把系统浏览器指向 #/device-auth，用户在浏览器里登录并点「允许」后签一次性码；
+// 壳收到 hearth:// 深链后拿码 + 自己手上的 verifier 换会话。
+
+export async function deviceApprove(challenge: string): Promise<string> {
+  const data = await req<{ code: string }>('/api/auth/device/approve', { method: 'POST', body: { challenge } });
+  return data.code;
+}
+
+// 与密码登录同一条签发路径，成功后本地会话按同样方式落地
+export async function deviceExchange(code: string, verifier: string): Promise<User> {
+  const data = await req<{ token: string; user: User }>('/api/auth/device/exchange', {
+    method: 'POST',
+    body: { code, verifier },
+  });
+  saveSession(data.token, data.user);
+  return data.user;
+}
+
 export async function listPasskeys(): Promise<PasskeyRecord[]> {
   const data = await req<{ passkeys: PasskeyRecord[] | null }>('/api/account/passkeys');
   return data.passkeys ?? [];

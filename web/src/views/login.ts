@@ -1,16 +1,77 @@
 // 登录页：注册入口按 /api/site 的 policy 显隐（closed 不出；invite 提示要邀请链接；open 出自助注册表单）。
 // 站点名（site.name）用于品牌位与按钮文案，拉取失败按 closed + 默认名处理。
-import { login, register, SERVER_URL, siteInfo } from '../api';
+import { deviceExchange, login, register, SERVER_URL, siteInfo } from '../api';
+import { inShell, onDeepLink, openExternal } from '../bridge';
 import { hasConditionalMediation, isSupported, loginWithPasskey, passkeyErrorDetail, passkeyErrorText } from '../passkey';
 import { wireThemeButton } from '../theme';
-import { esc, flameLogo, icon } from '../ui';
+import { esc, flameLogo, icon, toast } from '../ui';
 
 const LAST_USER_KEY = 'hearth_last_user';
 const NEXT_KEY = 'hearth_next';
 // 刚注册成功的一次性标记：大厅据此跳过这一次的通行密钥推荐（刚建完账号别再塞一个选择）
 const VIA_KEY = 'hearth_login_via';
+// 浏览器跳转登录的 PKCE verifier：只活在本壳的这次会话里，深链带回来的码要配上它才能换会话
+const VERIFIER_KEY = 'hearth_device_verifier';
 
 const USER_RE = /^[a-zA-Z0-9_-]{2,32}$/;
+
+// 登录成功后去哪：有回跳目标就回去，否则大厅
+function gotoNext() {
+  const next = sessionStorage.getItem(NEXT_KEY);
+  sessionStorage.removeItem(NEXT_KEY);
+  location.hash = next && next.startsWith('#/') ? next : '#/lobby';
+}
+
+// ---- 浏览器跳转登录（只在桌面壳里）----
+// 壳内网页的 origin 是 tauri://localhost，WKWebView 不给普通应用 WebAuthn，通行密钥用不了。
+// 改让系统浏览器去服务器真实域名上登录并授权，服务端签一次性码，经 hearth:// 深链送回来。
+
+function b64url(bytes: Uint8Array): string {
+  let s = '';
+  for (const b of bytes) s += String.fromCharCode(b);
+  return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+async function startBrowserLogin() {
+  if (!crypto.subtle) throw new Error('当前环境不支持这种登录方式');
+  const bytes = new Uint8Array(32);
+  crypto.getRandomValues(bytes);
+  const verifier = b64url(bytes);
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier));
+  sessionStorage.setItem(VERIFIER_KEY, verifier);
+  const url = `${SERVER_URL}/#/device-auth?ch=${b64url(new Uint8Array(digest))}`;
+  if (!(await openExternal(url))) throw new Error('打不开系统浏览器，请手动访问服务器地址登录');
+}
+
+// 深链只订阅一次：登录页可能被反复渲染，处理逻辑与页面局部状态无关
+let deepLinkWired = false;
+
+function wireDeepLinkOnce() {
+  if (deepLinkWired) return;
+  deepLinkWired = true;
+  void onDeepLink(async (raw) => {
+    let code: string | null = null;
+    try {
+      const u = new URL(raw);
+      if (u.protocol !== 'hearth:') return;
+      code = u.searchParams.get('code');
+    } catch {
+      return;
+    }
+    const verifier = sessionStorage.getItem(VERIFIER_KEY);
+    if (!code || !verifier) {
+      toast('授权信息已失效，请重新点「在浏览器中登录」', 'bad');
+      return;
+    }
+    sessionStorage.removeItem(VERIFIER_KEY); // 码是一次性的，verifier 也不留到下一轮
+    try {
+      await deviceExchange(code, verifier);
+      gotoNext();
+    } catch (err) {
+      toast((err as Error).message, 'bad');
+    }
+  });
+}
 
 export function renderLogin(root: HTMLElement) {
   let reveal = false;
@@ -63,6 +124,10 @@ export function renderLogin(root: HTMLElement) {
           <div class="auth-passkey" id="lg-passkey-wrap" hidden>
             <div class="auth-or"><span>或</span></div>
             <button type="button" class="hit btn btn-lg" id="lg-passkey">${icon('key', 16, 'var(--text-1)', 1.7)}使用通行密钥登录</button>
+          </div>
+          <div class="auth-passkey" id="lg-browser-wrap" hidden>
+            <div class="auth-or"><span>或</span></div>
+            <button type="button" class="hit btn btn-lg" id="lg-browser">${icon('key', 16, 'var(--text-1)', 1.7)}在浏览器中登录（支持通行密钥）</button>
           </div>
           <div style="text-align:center;font-size:12px" id="lg-switch" hidden><a href="" id="lg-switch-a">已有账号？去登录</a></div>
         </form>
@@ -177,10 +242,28 @@ export function renderLogin(root: HTMLElement) {
   // 进大厅；rememberUser 只在密码/注册路径为真（通行密钥登录时输入框是空的，别把它覆盖掉）
   const afterAuth = (rememberUser: boolean) => {
     if (rememberUser) localStorage.setItem(LAST_USER_KEY, userInput.value.trim());
-    const next = sessionStorage.getItem(NEXT_KEY);
-    sessionStorage.removeItem(NEXT_KEY);
-    location.hash = next && next.startsWith('#/') ? next : '#/lobby';
+    gotoNext();
   };
+
+  // ---- 浏览器跳转登录 ----
+  const browserWrap = root.querySelector<HTMLDivElement>('#lg-browser-wrap')!;
+  const browserBtn = root.querySelector<HTMLButtonElement>('#lg-browser')!;
+  if (inShell()) {
+    browserWrap.hidden = false;
+    wireDeepLinkOnce();
+    browserBtn.addEventListener('click', async () => {
+      if (busy) return;
+      errEl.textContent = '';
+      browserBtn.classList.add('loading');
+      try {
+        await startBrowserLogin();
+        toast('已在浏览器中打开授权页，点「允许」后会自动回到这里');
+      } catch (err) {
+        errEl.textContent = (err as Error).message;
+      }
+      browserBtn.classList.remove('loading');
+    });
+  }
 
   // ---- 通行密钥 ----
   // 两条入口：页面加载时静默发起一次 conditional（凭证出现在账号框的 autofill 里，

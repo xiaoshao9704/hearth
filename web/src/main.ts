@@ -8,6 +8,7 @@ import { isStandalone } from './install';
 import { allowLeave } from './nav';
 import { armNotifyPermission } from './notify';
 import { renderAdmin } from './views/admin';
+import { renderDeviceAuth } from './views/device-auth';
 import { renderJoin } from './views/join';
 import { renderLatency } from './views/latency';
 import { isLobbyHash, renderLobby } from './views/lobby';
@@ -82,6 +83,9 @@ function route() {
     document.title = '管理后台 · Hearth';
     const tab = hash.slice('#/admin'.length).replace(/^\//, '') || 'status';
     void renderAdmin(app, tab as Parameters<typeof renderAdmin>[1]);
+  } else if (hash.startsWith('#/device-auth')) {
+    // 桌面端授权页：未登录时已经被上面的判定记了回跳、先去登录页，回来还是这一页
+    renderDeviceAuth(app, new URLSearchParams(hash.slice(hash.indexOf('?') + 1)).get('ch') ?? '');
   } else if (hash.startsWith('#/login')) {
     document.title = '登录 · Hearth';
     renderLogin(app);

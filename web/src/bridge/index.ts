@@ -132,6 +132,27 @@ export async function onPublishState(cb: (s: PublishState) => void): Promise<() 
   }
 }
 
+// 深链订阅（浏览器跳转登录用）：壳只把 hearth:// 开头的 URL 透传过来。
+// 形状同 onPublishState——事件经 Tauri 的 event 插件，不引 @tauri-apps/api。
+export async function onDeepLink(cb: (url: string) => void): Promise<() => void> {
+  const api = internals();
+  const invoke = rawInvoke();
+  if (!invoke || typeof api?.transformCallback !== 'function') return () => {};
+  const handler = api.transformCallback((payload) => cb((payload as { payload: { url: string } }).payload.url));
+  try {
+    const id = await invoke<number>('plugin:event|listen', {
+      event: 'deep-link',
+      target: { kind: 'Any' },
+      handler,
+    });
+    return () => {
+      void invoke('plugin:event|unlisten', { event: 'deep-link', eventId: id }).catch(() => {});
+    };
+  } catch {
+    return () => {};
+  }
+}
+
 // openExternal 把外链交给系统默认浏览器。WebView 里 target=_blank 与 window.open
 // 什么都不发生，直接导航又会把本地打包的页面顶掉、回不来。
 // 返回是否已经接手：false = 不在壳里（或壳太老没有这个插件），调用方按网页原样走。
