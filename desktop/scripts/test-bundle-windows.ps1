@@ -130,6 +130,26 @@ try {
     if (Select-String -Path (Join-Path $logs 'hearth-stderr.log') -Pattern 'GStreamer 初始化失败|Failed to load plugin' -Quiet) {
         throw 'GUI 日志报告 GStreamer 初始化或插件加载失败。'
     }
+    # 单实例：再启动一次不能留下第二个进程。真机上出现过两个互不知情的窗口，登录态各算各的。
+    Start-Process $exe -WorkingDirectory $env:TEMP | Out-Null
+    Start-Sleep -Seconds 3
+    $instances = @(Get-Process -Name 'hearth-desktop' -ErrorAction SilentlyContinue)
+    if ($instances.Count -ne 1) { throw "再启动一次后应只剩 1 个 hearth-desktop 进程，实际 $($instances.Count) 个。" }
+
+    # hearth:// 协议激活：Windows 一定会另起进程，必须由已运行实例接手并自己退出。
+    $key = Get-Item -Path 'Registry::HKEY_CLASSES_ROOT\hearth\shell\open\command' -ErrorAction SilentlyContinue
+    $command = if ($key) { $key.GetValue('') } else { $null }
+    if (-not $command) { throw '安装包没有注册 hearth:// 协议，浏览器跳转登录回不到应用。' }
+    if ($command -notlike "*$install*") { throw "hearth:// 指向的不是本次安装的程序：$command" }
+    Start-Process 'hearth://auth?code=ci-probe'
+    Start-Sleep -Seconds 5
+    $instances = @(Get-Process -Name 'hearth-desktop' -ErrorAction SilentlyContinue)
+    if ($instances.Count -ne 1) { throw "协议激活后应只剩 1 个 hearth-desktop 进程，实际 $($instances.Count) 个。" }
+    if (-not (Select-String -Path (Join-Path $logs 'hearth-stderr.log') -Pattern 'deep-link forwarded: hearth://auth' -Quiet)) {
+        throw '协议激活没有被已运行实例接手：stderr 里没有 deep-link forwarded 标记。'
+    }
+    Write-Host '单实例与 hearth:// 转发通过（深链能否换出会话仍要真机验收）。'
+
     Write-Host "GUI 启动通过，窗口：$($process.MainWindowTitle)。此结果不代表 GPU 原生采集验收通过。"
 } finally {
     if ($process -and -not $process.HasExited) { Stop-Process -Id $process.Id -Force }

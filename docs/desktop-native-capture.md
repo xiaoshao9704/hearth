@@ -2,11 +2,11 @@
 
 ## 桥合同
 
-- `capabilities`：`native_publish`、`platform`、`app_audio`、`publish_codecs`（实际硬编产帧探测得到的 `h264` / `h265`）、`native_publish_error`。
-- `list_sources`：每项增加 `audio_scope: application | system | none`。源 ID 是不透明值。
+- `capabilities`：`native_publish`、`platform`、`app_audio`、`publish_codecs`（实际硬编产帧探测得到的 `h264` / `h265`）、`publish_encoders`（各编码实际选中的 GStreamer 元素名，如 `h265: nvh265enc`）、`native_publish_error`（探测失败时逐个候选的原因：插件未注册、只有软件实现、启动失败或超时）、`local_server`。壳内设置页的编码标注只看 `publish_encoders`，浏览器 `MediaCapabilities` 的软/硬编预测说的是浏览器自己怎么编，与原生管线无关。
+- `list_sources`：每项增加 `audio_scope: application | system | none`。源 ID 是不透明值。Windows 只列用户能认出、也能真的投出去的顶层窗口：cloaked（`DWMWA_CLOAKED`）、`WS_EX_TOOLWINDOW`、有属主且无 `WS_EX_APPWINDOW`、本进程、外壳类名（`Progman`/`WorkerW`/托盘/任务视图）与过小的窗口都不进列表，`EnumWindows` 的 Z 序保持不变。
 - `start_publish`：扁平参数 `endpoint, token, source_id, codec, width, height, fps, bitrate_kbps, audio`；返回 `{codec}`，表示实际编码。HEVC 不可用可回落 H.264。
 - `update_publish`：扁平参数 `width, height, fps, bitrate_kbps`。不改变音频范围、源或实际编码；编码偏好下次开始生效。
-- `source_preview`：扁平参数 `source_id`；返回 JPEG data URL 或 `null`。调用方串行按需请求，关闭面板后取消尚未发出的请求。
+- `source_preview`：扁平参数 `source_id`；返回 JPEG data URL 或 `null`。调用方串行按需请求，关闭面板后取消尚未发出的请求。列表不等预览，只给视口内、悬停、选中的源排队（优先级 选中 > 悬停 > 视口顺序）；壳侧两次预览最小间隔 100 ms，单次预览 3 秒上限，超时返回 `null` 让 UI 显占位图，不堵住后面的源。
 
 尺寸为上限，保持比例、不放大、NV12 向下取偶数。限制为宽 2–7680、高 2–4320、帧率 1–120、码率 500–100000 kbps；越界报错，不静默截断。
 
@@ -17,6 +17,8 @@
 Windows 使用 WGC 和 WASAPI 插件；HWND、PID、进程创建时间由 Rust 枚举并复验，视频/音频帧输出前检查目标是否仍有效。应用名来自进程文件名，读取失败为空。窗口音频只取所属进程树，失败不回落系统声；进程树音频需要 Windows build 20348+。整屏为默认播放设备的系统 loopback，可能包含其他应用声音。WGC 实际 CAPS 决定缩放尺寸，避免窗口边框与 DPI 的差异，并在 CAPS 变化时重新按上限缩放。
 
 macOS 使用 ScreenCaptureKit → appsrc；窗口音频属于应用，整屏音频属于系统，排除本进程音频。`audio=false` 不创建音频支路、不注册 SCK 音频输出，`capturesAudio=false`。内容尺寸低频复查后仅更新视频支路；SCK 流重启时复用原音频 appsrc，范围不变，可能有短暂音频间断。旧 SCK 回调停用后不能误报新流失败。
+
+桌面壳强制单实例（三平台一致）：协议激活与再次启动都会另起进程，单实例插件把 argv 转发回已运行实例后让新进程退出，壳只做 `show`/`unminimize`/`set_focus`；`hearth://` URL 由 single-instance 的 `deep-link` feature 交给深链插件，壳不重复 `emit`（一次性码送两遍会提前作废），转发时向 stderr 打一行 `deep-link forwarded: hearth://…`（不含码）。
 
 预览没有 WHIP 或音频支路：最大 480×270、2 fps、JPEG quality 65、单图原始 JPEG 不超过 128 KiB。队列限时等待，SCK 枚举/启动和取帧分别限时；每次函数返回前释放采集和管线，无后台持续预览。关闭 UI 时已发出的单次请求在期限内结束，后续请求由 UI 取消。
 

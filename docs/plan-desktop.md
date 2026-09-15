@@ -83,6 +83,8 @@
 
 状态：WGC 窗口/显示器采集、进程树音频、源预览与音频开关、按画质设置热更新代码已落地。macOS 构建、单测及彩条硬编保留 sink 的热更新隔离测试已复跑通过；Windows Actions 34931957820 的编译、NSIS 构建、安装文件与插件校验、GUI 启动检查通过。
 
+真机反馈三项已修（Windows 深链单实例转发、源过滤与按需预览、壳内编码器展示），待复测。
+
 实现与验收细节见 [原生采集说明](desktop-native-capture.md)；打包操作见 [Windows 测试包说明](../desktop/scripts/README-windows.md)。
 
 Windows WebView2 私有 CA 信任已实现待真机验证，证书事件对 WebSocket 的覆盖仍待验证；Windows 真机 WGC、GPU/音频及两端真实 WHIP 热更新尚未验证，CI 安装启动检查不替代这些验收。完成标准与 M1 相同，另加进程树音频范围在多进程应用上正确。
