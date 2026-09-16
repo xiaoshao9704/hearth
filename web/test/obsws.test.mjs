@@ -731,3 +731,13 @@ test('壳内选中即开播：声音源没建成（600）不挡住开播，画�
   conn.close();
   await obs.close();
 });
+
+test('macOS 的画面源必须带 display_uuid：应用采集底层也要绑显示器', () => {
+  const app = { kind: 'app', label: '访达', value: 'com.apple.finder' };
+  const withUuid = obsVideoSpec('macos', 'window', app, 'UUID-1');
+  assert.deepEqual(withUuid.inputSettings, { type: 2, application: 'com.apple.finder', display_uuid: 'UUID-1' });
+  // 借不到 UUID 时不写这个键，而不是写空串（空串会被 OBS 当成 0 号显示器）
+  assert.deepEqual(obsVideoSpec('macos', 'window', app).inputSettings, { type: 2, application: 'com.apple.finder' });
+  // Windows 不受影响
+  assert.equal('display_uuid' in obsVideoSpec('windows', 'game', null, 'UUID-1').inputSettings, false);
+});

@@ -278,6 +278,7 @@ const WIN_VIDEO_WINDOW = 'window_capture';
 const WIN_AUDIO = 'wasapi_process_output_capture'; // OBS 28+ 的应用音频采集，按进程树取声
 // OBS 30+ 的 macOS 屏幕采集（ScreenCaptureKit）；macOS 13+ 起它固定连所属应用的声音一起采
 const MAC_VIDEO = 'screen_capture';
+const MAC_DISPLAY_KIND = 'display_capture';
 // screen_capture 的 type 枚举：0=显示器 1=窗口 2=应用
 const MAC_TYPE_WINDOW = 1;
 const MAC_TYPE_APP = 2;
@@ -289,17 +290,29 @@ export type ObsInputSpec = { inputKind: string; inputSettings: Record<string, st
 
 
 /** 画面源的 kind 与设置。target 为 null = 不预设目标，由用户在 OBS 的源属性窗口里选。 */
-export function obsVideoSpec(platform: ObsPlatform, mode: ObsWinMode, target: ObsTarget | null): ObsInputSpec {
+/**
+ * macOS 的 screen_capture 即便是「按应用」采集，底层 SCStream 仍要绑一块显示器：
+ * 源码里应用分支同样走 `display.displayID == sc->display` 的查找，display_uuid 留空
+ * 就报 `init_screen_stream: Invalid target display ID: 0`，源一帧都不出（实测）。
+ * OBS 自己的属性窗口会把它填上，我们直写设置就得自己带。
+ */
+export function obsVideoSpec(
+  platform: ObsPlatform,
+  mode: ObsWinMode,
+  target: ObsTarget | null,
+  displayUuid = '',
+): ObsInputSpec {
   if (platform === 'windows') {
     const window: Record<string, string> = target ? { window: String(target.value) } : {};
     return mode === 'game'
       ? { inputKind: WIN_VIDEO_GAME, inputSettings: { capture_mode: 'window', ...window } }
       : { inputKind: WIN_VIDEO_WINDOW, inputSettings: { method: WIN_METHOD_WGC, ...window } };
   }
-  if (!target) return { inputKind: MAC_VIDEO, inputSettings: { type: MAC_TYPE_APP } };
+  const display: Record<string, string> = displayUuid ? { display_uuid: displayUuid } : {};
+  if (!target) return { inputKind: MAC_VIDEO, inputSettings: { type: MAC_TYPE_APP, ...display } };
   return target.kind === 'app'
-    ? { inputKind: MAC_VIDEO, inputSettings: { type: MAC_TYPE_APP, application: String(target.value) } }
-    : { inputKind: MAC_VIDEO, inputSettings: { type: MAC_TYPE_WINDOW, window: Number(target.value) } };
+    ? { inputKind: MAC_VIDEO, inputSettings: { type: MAC_TYPE_APP, application: String(target.value), ...display } }
+    : { inputKind: MAC_VIDEO, inputSettings: { type: MAC_TYPE_WINDOW, window: Number(target.value), ...display } };
 }
 
 /**
@@ -417,6 +430,18 @@ export type ObsSetupResult = { dialog: boolean; note: string };
  * openDialog 时再弹画面源的属性窗口让用户在 OBS 里选目标——浏览器里没有壳能列清单，
  * 只能这样；这一步不写直播服务设置、不开播，得等用户在 OBS 里选完才知道该不该推。
  */
+/** 主显示器的 UUID：screen_capture 的默认设置里这项是空的，从 display_capture 的默认值借一个 */
+async function macDisplayUuid(c: ObsConn, platform: ObsPlatform): Promise<string> {
+  if (platform !== 'macos') return '';
+  try {
+    const r = await c.request('GetInputDefaultSettings', { inputKind: MAC_DISPLAY_KIND });
+    const v = (r.defaultInputSettings as Record<string, unknown>).display_uuid;
+    return typeof v === 'string' ? v : '';
+  } catch {
+    return ''; // 借不到就照旧写，至少不比现在差
+  }
+}
+
 export async function setupObsCapture(
   c: ObsConn,
   platform: ObsPlatform,
@@ -424,7 +449,8 @@ export async function setupObsCapture(
   openDialog = true,
 ): Promise<ObsSetupResult> {
   await ensureObsScene(c);
-  await putObsInput(c, OBS_VIDEO_INPUT, obsVideoSpec(platform, mode, null));
+  const uuid = await macDisplayUuid(c, platform);
+  await putObsInput(c, OBS_VIDEO_INPUT, obsVideoSpec(platform, mode, null, uuid));
   const audio = obsAudioSetupSpec(platform);
   let note = '';
   if (!audio) {
@@ -480,7 +506,7 @@ export async function obsCaptureToTarget(
   const { note } = await setupObsCapture(c, platform, mode, false);
   await c.request('SetInputSettings', {
     inputName: OBS_VIDEO_INPUT,
-    inputSettings: obsVideoSpec(platform, mode, target).inputSettings,
+    inputSettings: obsVideoSpec(platform, mode, target, await macDisplayUuid(c, platform)).inputSettings,
   });
   // 目标定了才知道画面多大，适应画布只能排在这之后
   const fitNote = await fitObsSource(c).then(
