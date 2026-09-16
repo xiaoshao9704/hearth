@@ -13,6 +13,7 @@ mod capture;
 #[cfg(feature = "native-capture")]
 mod encoder;
 mod localserver;
+mod obstargets;
 #[cfg(feature = "native-capture")]
 mod preview;
 #[cfg(feature = "native-capture")]
@@ -52,6 +53,8 @@ pub struct Capabilities {
     publish_encoders: BTreeMap<String, String>,
     /// 这个安装包有没有带 hearth 服务端（「在本机运行服务器」的前提）
     local_server: bool,
+    /// 壳能不能自己列出可采集的应用/窗口（网页据此不再弹 OBS 的属性窗口）
+    obs_targets: bool,
 }
 
 #[cfg(feature = "native-capture")]
@@ -204,6 +207,7 @@ fn capabilities() -> Capabilities {
             })
             .unwrap_or_default(),
         local_server: localserver::sidecar().is_some(),
+        obs_targets: obstargets::available(),
     }
 }
 
@@ -218,6 +222,7 @@ fn capabilities() -> Capabilities {
         publish_codecs: Vec::new(),
         publish_encoders: BTreeMap::new(),
         local_server: localserver::sidecar().is_some(),
+        obs_targets: obstargets::available(),
     }
 }
 
@@ -432,6 +437,7 @@ pub fn run() {
             source_preview,
             stop_publish,
             publish_stats,
+            obstargets::list_obs_targets,
             trust::check_server,
             trust::pair_server,
             trust::forget_server,

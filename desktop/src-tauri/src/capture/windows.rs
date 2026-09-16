@@ -1,21 +1,17 @@
 // WGC 与 WASAPI 由 GStreamer 插件实现；Win32 仅枚举、校验目标身份和尺寸。
 // 属性依据 GStreamer d3d11screencapturesrc / wasapi2src 官方文档（1.22+）。
 use super::{AudioScope, Geometry, Settings, Source};
+use crate::obstargets::windows::{listable, process_path};
 use gst::prelude::*;
 use gstreamer as gst;
 use std::sync::{Arc, Mutex};
 use windows_sys::Win32::{
     Foundation::{CloseHandle, FILETIME, HWND, LPARAM, RECT},
-    Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_CLOAKED},
     Graphics::Gdi::{EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITORINFO},
-    System::Threading::{
-        GetCurrentProcessId, GetProcessTimes, OpenProcess, QueryFullProcessImageNameW,
-        PROCESS_QUERY_LIMITED_INFORMATION,
-    },
+    System::Threading::{GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION},
     UI::WindowsAndMessaging::{
-        EnumWindows, GetClassNameW, GetWindow, GetWindowLongPtrW, GetWindowRect, GetWindowTextW,
-        GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible, GWL_EXSTYLE, GW_OWNER,
-        WS_EX_APPWINDOW, WS_EX_TOOLWINDOW,
+        EnumWindows, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindow,
+        IsWindowVisible,
     },
 };
 
@@ -47,66 +43,12 @@ fn process_created(pid: u32) -> Result<u64, String> {
     }
 }
 
+// 列表里显示的是程序名，不带扩展名（OBS 那边要带的另算，见 obstargets::windows）
 fn process_name(pid: u32) -> String {
-    unsafe {
-        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
-        if handle.is_null() {
-            return String::new();
-        }
-        let mut path = vec![0u16; 32768];
-        let mut size = path.len() as u32;
-        let ok = QueryFullProcessImageNameW(handle, 0, path.as_mut_ptr(), &mut size);
-        CloseHandle(handle);
-        if ok == 0 {
-            return String::new();
-        }
-        std::path::Path::new(&String::from_utf16_lossy(&path[..size as usize]))
-            .file_stem()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_default()
-    }
-}
-
-// 桌面壳、托盘、任务视图这类窗口：类名是唯一稳的判据，它们都可见、有标题、不是工具窗口。
-const SHELL_CLASSES: [&str; 8] = [
-    "Progman",
-    "WorkerW",
-    "Shell_TrayWnd",
-    "Shell_SecondaryTrayWnd",
-    "Windows.UI.Core.CoreWindow",
-    "ForegroundStaging",
-    "MultitaskingViewFrame",
-    "XamlExplorerHostIslandWindow",
-];
-
-/// 用户能认出来、也能真的投出去的顶层窗口才进列表：EnumWindows 原样给的是整棵窗口树，
-/// 里面大量是后台 UWP、属主面板与外壳窗口，列出来只会让人翻不到自己要的那一个。
-unsafe fn listable(hwnd: HWND, pid: u32) -> bool {
-    if pid == GetCurrentProcessId() {
-        return false; // 自己的窗口：投出去就是无限镜像
-    }
-    let mut cloaked: u32 = 0;
-    if DwmGetWindowAttribute(
-        hwnd,
-        DWMWA_CLOAKED as u32,
-        &mut cloaked as *mut u32 as *mut core::ffi::c_void,
-        std::mem::size_of::<u32>() as u32,
-    ) == 0
-        && cloaked != 0
-    {
-        return false; // 挂起的 UWP、不在当前虚拟桌面：IsWindowVisible 仍为真，但画面取不到
-    }
-    let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32;
-    if ex & WS_EX_TOOLWINDOW != 0 {
-        return false;
-    }
-    if !GetWindow(hwnd, GW_OWNER).is_null() && ex & WS_EX_APPWINDOW == 0 {
-        return false; // 属主窗口的附属面板（提示条、弹出层），不是任务栏上那一个
-    }
-    let mut class = [0u16; 256];
-    let len = GetClassNameW(hwnd, class.as_mut_ptr(), class.len() as i32);
-    let class = String::from_utf16_lossy(&class[..len.max(0) as usize]);
-    !SHELL_CLASSES.contains(&class.as_str())
+    std::path::Path::new(&process_path(pid))
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default()
 }
 
 impl Target {
