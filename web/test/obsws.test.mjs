@@ -256,6 +256,10 @@ const sceneFake = (state) =>
       if (d.requestType === 'GetInputPropertiesListPropertyItems')
         return { data: { propertyItems: state.props?.[d.requestData.propertyName] ?? [] } };
       if (d.requestType === 'GetInputDefaultSettings') return { data: { defaultInputSettings: { display_uuid: 'DISPLAY-1' } } };
+      if (d.requestType === 'RemoveInput')
+        return state.items.includes(d.requestData.inputName)
+          ? {}
+          : { status: { result: false, code: 600, comment: 'No source was found by the name' } };
       if (d.requestType === 'CreateScene') return { data: { sceneUuid: 'u' } };
       if (d.requestType === 'CreateInput') {
         if (state.audioInputFails && d.requestData.inputName === 'Hearth 声音')
@@ -285,12 +289,15 @@ test('场景已存在时只清掉本功能的两个源，用户自己加的源�
   await obs.close();
 });
 
-test('场景不存在就建一个，且不去删任何源', async () => {
+test('场景不存在就建一个；两个固定名源按名清一遍，不存在（600）不算错', async () => {
   const obs = await sceneFake({ scenes: ['场景'], items: [] });
   const conn = await connectObs(obs.url, '');
   await ensureObsScene(conn);
   assert.deepEqual(sentOf(obs, 'CreateScene'), [{ sceneName: 'Hearth 投屏' }]);
-  assert.deepEqual(sentOf(obs, 'RemoveInput'), []);
+  assert.deepEqual(
+    sentOf(obs, 'RemoveInput').map((d) => d.inputName),
+    ['Hearth 画面', 'Hearth 声音'],
+  );
   conn.close();
   await obs.close();
 });
@@ -351,7 +358,9 @@ test('老版本 obs-websocket 弹不出属性窗口：给中文说明，已建�
   assert.match(r.note, /双击/, '改让用户自己在 OBS 里双击那个源');
   assert.match(r.note, /Unknown request type/, '把 OBS 给的理由带出来');
   assert.equal(sentOf(obs, 'CreateInput').length, 2, '源照样建着');
-  assert.deepEqual(sentOf(obs, 'RemoveInput'), [], '不回滚');
+  // 开头按名清理会先发两次 RemoveInput；弹窗失败之后不能再有删源动作
+  const order = orderOf(obs);
+  assert.equal(order.lastIndexOf('RemoveInput') < order.indexOf('CreateInput'), true, '不回滚');
   assert.deepEqual(sentOf(obs, 'SetCurrentProgramScene'), [{ sceneName: 'Hearth 投屏' }]);
   conn.close();
   await obs.close();

@@ -108,7 +108,9 @@ export class ObsConn {
     try {
       return await Promise.race([
         this.ws.call(requestType, requestData).catch((e: unknown) => {
-          throw new Error(callText(String(requestType), e));
+          const err = new Error(callText(String(requestType), e)) as Error & { code?: number };
+          err.code = (e as { code?: number })?.code; // 调用方按 OBS 的状态码分流（如 600 = 源不存在）
+          throw err;
         }),
         aborted,
       ]);
@@ -265,16 +267,22 @@ const strField = (o: unknown, k: string): string => {
 };
 
 /** 建或复用 Hearth 场景，并清掉里面由本功能建的那两个源（用户后来自己加的留着） */
+export const OBS_CODE_NOT_FOUND = 600;
+export const obsErrorCode = (e: unknown): number | undefined => (e as { code?: number } | null)?.code;
+
 export async function ensureObsScene(c: ObsConn): Promise<void> {
+  // 源名在 OBS 里是全局的：上一次中途崩溃可能留下不挂在任何场景里的同名源，
+  // 按场景项找不到它、再建就撞「已存在」。所以按固定名直接删，不存在（600）不算错。
+  for (const name of [OBS_VIDEO_INPUT, OBS_AUDIO_INPUT]) {
+    try {
+      await c.request('RemoveInput', { inputName: name });
+    } catch (e) {
+      if (obsErrorCode(e) !== OBS_CODE_NOT_FOUND) throw e;
+    }
+  }
   const list = await c.request('GetSceneList');
   if (!list.scenes.some((s) => strField(s, 'sceneName') === OBS_SCENE)) {
     await c.request('CreateScene', { sceneName: OBS_SCENE });
-    return;
-  }
-  const items = await c.request('GetSceneItemList', { sceneName: OBS_SCENE });
-  for (const it of items.sceneItems) {
-    const name = strField(it, 'sourceName');
-    if (name === OBS_VIDEO_INPUT || name === OBS_AUDIO_INPUT) await c.request('RemoveInput', { inputName: name });
   }
 }
 
