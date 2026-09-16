@@ -150,7 +150,9 @@ fn run_elevated(exe: &Path, data: &Path, args: &[&str], label: &str) -> Result<(
         nShow: 0, // SW_HIDE：服务端是控制台程序，别闪一个黑窗
         ..Default::default()
     };
-    let code = unsafe { ShellExecuteExW(&mut info) }.and_then(|()| unsafe {
+    // 分两句写：先结束对 info 的可变借用，再在闭包里读 hProcess。
+    let launched = unsafe { ShellExecuteExW(&mut info) };
+    let code = launched.and_then(|()| unsafe {
         let _ = WaitForSingleObject(info.hProcess, INFINITE);
         let mut code = 0u32;
         let got = GetExitCodeProcess(info.hProcess, &mut code);
