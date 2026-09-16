@@ -30,6 +30,7 @@ import type { ObsConn, ObsStreamStatus, ObsVersion } from '../obsws';
 import { encoderIsHw, loadPrefs, prefsBus, RES_DIMS, savePrefs } from '../prefs';
 import { notifyJoin, notifyMessage } from '../notify';
 import { renderShell } from '../shell';
+import { isStaleChunkError, reloadForStale, staleReloadUsed } from '../stale';
 import { avatarHtml, confirmDialog, el, esc, fmtClock, icon, licon, menuButtonHtml, micIcon, slashIcon, toast, wireMenuButton } from '../ui';
 import { CameraFlipButton } from './room/camera-flip';
 import { closeChannelMenu, openChannelMenu } from './room/channel-menu';
@@ -1107,6 +1108,18 @@ export async function renderRoom(root: HTMLElement, channel: string) {
       refreshMeta();
     } catch (err) {
       diag('error', 'connect_failed', role, { ...details, elapsed_ms: performance.now() - started, error: err });
+      // 发版后旧页面动态导入的引擎 chunk 已经不在服务端了：重连拿不回 404 的文件，只有刷新能恢复。
+      // 刷新一次会话只做一次，再遇到就改口头提示——否则导入失败另有原因时会刷个没完。
+      if (isStaleChunkError(err)) {
+        const stale = '页面版本已过期，请刷新页面';
+        if (!staleReloadUsed()) {
+          clearLeavePrompt(); // 这一次刷新是我们自己发起的，别再拦一道「离开当前房间」
+          if (reloadForStale()) return;
+        }
+        setStatusText(stale);
+        toast(stale, 'bad', 8000);
+        return;
+      }
       if (role === 'voice') {
         handleCredsError(err, first);
       } else {
