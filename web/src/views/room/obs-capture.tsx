@@ -8,6 +8,7 @@ import {
   OBS_AUDIO_INPUT,
   OBS_WHIP_MIN_MAJOR,
   OBS_WS_DEFAULT_URL,
+  obsAudioSetupSpec,
   obsMajor,
   obsPlatform,
   openObsInputProperties,
@@ -60,7 +61,7 @@ export function obsCaptureBlocker(platform: ObsPlatform, obsVersion: string): st
 }
 
 /**
- * 建源分区：点一下就在 OBS 里建好「Hearth 投屏」场景与画面/声音两个源、切成当前场景，
+ * 建源分区：点一下就在 OBS 里建好「Hearth 投屏」场景与画面（Windows 另加声音）源、切成当前场景，
  * 再弹 OBS 自己的源属性窗口让用户在 OBS 里挑要投的应用——hearth 不枚举窗口清单
  * （obs-websocket 5.7.3 枚举 macOS screen_capture 会让 OBS 段错误）。这一步不开播。
  */
@@ -104,7 +105,9 @@ export const ObsCaptureSection = (p: {
       .finally(() => setLoading(false));
   };
 
-  // 声音源的目标（抓哪个应用的声）同样在 OBS 里选，按钮只负责把那个窗口弹出来
+  // Windows 的声音是另一个源，抓哪个应用同样在 OBS 里选，按钮只负责把那个窗口弹出来；
+  // macOS 没有这个源（画面源自带所属应用的声音），按钮也就不摆。
+  const hasAudioInput = () => obsAudioSetupSpec(platform()) !== null;
   const openAudio = () => {
     if (loading()) return;
     setLoading(true);
@@ -166,7 +169,7 @@ export const ObsCaptureSection = (p: {
           >
             {el(icon('screen', 13, 'currentColor', 1.8))} {ready() ? '重新建采集源' : '在 OBS 里建采集源'}
           </button>
-          <Show when={ready()}>
+          <Show when={ready() && hasAudioInput()}>
             <button type="button" class="hit btn btn-sm" disabled={loading() || p.busy} onClick={openAudio}>
               选声音来源
             </button>
@@ -177,8 +180,9 @@ export const ObsCaptureSection = (p: {
           when={ready()}
           fallback={
             <div class="ig-tip">
-              会在 OBS 里建一个固定的「Hearth 投屏」场景（画面 + 声音两个源）并切过去，
-              然后弹出 OBS 自己的源属性窗口让你选要投的应用；你原有的场景与源不受影响。
+              会在 OBS 里建一个固定的「Hearth 投屏」场景（
+              {hasAudioInput() ? '画面 + 声音两个源' : '一个画面源，画面与所属应用声音一起采集'}
+              ）并切过去，然后弹出 OBS 自己的源属性窗口让你选要投的应用；你原有的场景与源不受影响。
             </div>
           }
         >

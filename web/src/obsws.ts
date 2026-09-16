@@ -260,9 +260,9 @@ export type ObsWinMode = 'game' | 'window';
 const WIN_VIDEO_GAME = 'game_capture';
 const WIN_VIDEO_WINDOW = 'window_capture';
 const WIN_AUDIO = 'wasapi_process_output_capture'; // OBS 28+ 的应用音频采集，按进程树取声
-const MAC_VIDEO = 'screen_capture'; // OBS 30+ 的 macOS 屏幕采集（ScreenCaptureKit）
-const MAC_AUDIO = 'sck_audio_capture'; // 同一族的应用音频采集，老 OBS 没有这个 kind
-// screen_capture / sck_audio_capture 共用的 type 枚举：0=显示器 1=窗口 2=应用
+// OBS 30+ 的 macOS 屏幕采集（ScreenCaptureKit）；macOS 13+ 起它固定连所属应用的声音一起采
+const MAC_VIDEO = 'screen_capture';
+// screen_capture 的 type 枚举：0=显示器 1=窗口 2=应用
 const MAC_TYPE_WINDOW = 1;
 const MAC_TYPE_APP = 2;
 // window_capture 的 method：2 = WGC（Windows 10 2004 起），比 BitBlt 抓得到的窗口多
@@ -297,13 +297,12 @@ export function obsVideoSpec(
 
 /**
  * 声音源的 kind：一律用这个 kind 的默认设置建，取哪个应用的声同样交给 OBS 的属性窗口。
- * null = 这个平台没有能按应用取声的源，只能让用户自己加。
+ * null = 这个平台不需要（或没有）单独的声音源，UI 据此不摆「选声音来源」。
  */
 export function obsAudioSetupSpec(platform: ObsPlatform): ObsInputSpec | null {
   if (platform === 'windows') return { inputKind: WIN_AUDIO, inputSettings: {} };
-  // macOS 的 screen_capture 默认设置里没有任何「采集音频」布尔键（实测 OBS 32.1.2），
-  // 声音只能另起一个 sck_audio_capture。
-  if (platform === 'macos') return { inputKind: MAC_AUDIO, inputSettings: {} };
+  // macOS 13+ 的 screen_capture 固定把所属应用的声音一起采（OBS 源码里 setCapturesAudio:YES，
+  // 没有开关键），再建一个 sck_audio_capture 等于把同一份声音采两遍。
   return null;
 }
 
@@ -341,7 +340,8 @@ export function openObsInputProperties(c: ObsConn, inputName: string): Promise<u
 export type ObsSetupResult = { dialog: boolean; note: string };
 
 /**
- * 建好场景与画面/声音两个源、切成当前场景，然后弹画面源的属性窗口让用户在 OBS 里选目标。
+ * 建好场景与源（Windows 画面 + 声音两个，macOS 只有画面）、切成当前场景，
+ * 然后弹画面源的属性窗口让用户在 OBS 里选目标。
  * 不写直播服务设置、不开播：选目标是 OBS 那边的交互，得等用户选完才知道该不该推。
  */
 export async function setupObsCapture(c: ObsConn, platform: ObsPlatform, mode: ObsWinMode): Promise<ObsSetupResult> {
@@ -356,7 +356,8 @@ export async function setupObsCapture(c: ObsConn, platform: ObsPlatform, mode: O
   const audio = obsAudioSetupSpec(platform);
   let note = '';
   if (!audio) {
-    note = '这个平台没有能按应用取声的源，需要声音请在 OBS 里自己加一个音频采集。';
+    // macOS 的画面源自带所属应用的声音，没有声音源要建也没什么要交代的
+    if (platform !== 'macos') note = '这个平台没有能按应用取声的源，需要声音请在 OBS 里自己加一个音频采集。';
   } else {
     try {
       await c.request('CreateInput', {
@@ -391,12 +392,10 @@ export async function setupObsCapture(c: ObsConn, platform: ObsPlatform, mode: O
 // （两次复现；给 screen_capture 补 display_uuid 无效，OBS 日志仍是 Invalid target display ID），
 // 所以 UI 一概不调用；Windows 侧没有真机验过，验过之前同样不启用。
 
-/** 声音源的 kind 与设置；null = 这个平台/目标没有能按目标取声的源 */
+/** 声音源的 kind 与设置；null = 这个平台不用单独的声音源（见 obsAudioSetupSpec） */
 export function obsAudioSpec(platform: ObsPlatform, target: ObsTarget): ObsInputSpec | null {
   if (platform === 'windows') return { inputKind: WIN_AUDIO, inputSettings: { window: String(target.value) } };
-  // sck_audio_capture 只认应用、不认单个窗口
-  if (platform !== 'macos' || target.kind !== 'app') return null;
-  return { inputKind: MAC_AUDIO, inputSettings: { type: MAC_TYPE_APP, application: String(target.value) } };
+  return null;
 }
 
 const listProp = async (c: ObsConn, propertyName: string, kind: ObsTarget['kind']): Promise<ObsTarget[]> => {
