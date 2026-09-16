@@ -40,7 +40,7 @@ jobs:
 
       - name: Validate PowerShell syntax
         run: |
-          Get-ChildItem desktop/scripts/*windows*.ps1 | ForEach-Object {
+          Get-ChildItem desktop/scripts/*.ps1 | ForEach-Object {
             $parseErrors = $null
             [System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$null, [ref]$parseErrors) | Out-Null
             if ($parseErrors.Count -gt 0) { throw ($parseErrors | Out-String) }
@@ -89,6 +89,16 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           npm run build
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      # sidecar（打进安装包的 hearth 服务端，「在本机运行服务器」用）要在 web 构建之后编：
+      # 前端产物得先拷进 server/internal/webui/dist 才 go build。薄壳与原生两个变体都要带。
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: server/go.mod
+          cache-dependency-path: server/go.sum
+
+      - name: Build hearth sidecar
+        run: ./desktop/scripts/build-sidecar.ps1
 
       - name: Install desktop CLI
         working-directory: desktop

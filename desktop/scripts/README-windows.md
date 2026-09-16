@@ -20,6 +20,24 @@
 - 测试包未配置代码签名，Windows 可能提示未知发布者。未生成 release、tag 或自动更新元数据。
 - Windows 原生采集与网页控制的支持范围以集成代码与实测结果为准。**Windows WebView2 的应用内私有 CA 信任尚未实现**；Rust 侧配对成功不能证明 WebView2 的 fetch/WSS 已信任。测试使用系统已信任且证书有效的 HTTPS。
 
+## 本机服务（在本机运行服务器）
+
+- 安装包带一个 sidecar：hearth 服务端 `hearth.exe`，与 `hearth-desktop.exe` 同级装进安装目录。
+  它由 `build-sidecar.ps1` 在前端构建之后编出（前端产物先拷进 `server/internal/webui/dist` 再
+  `go build`，否则起来只有 API 没有页面），文件名的 host triple 后缀由 Tauri 打包时去掉。
+- 界面入口在首屏「连哪台服务器」里：装好后地址是 `https://127.0.0.1:8080`，自签根由壳按本地
+  文件指纹自动配对，不装系统 CA。
+- **装/启/停要管理员**：这三件事都要连服务管理器（SCM），普通用户权限连不上。壳先按当前权限
+  跑一次，被拒后用 `ShellExecuteExW` 的 `runas` 动词重跑同一条命令，此时系统弹 UAC，点「是」
+  才继续；点「否」就是失败。提权进程的输出不回流到壳里，失败只剩退出码，具体原因看服务端日志。
+  查状态与创建首个账号不碰 SCM，不会弹 UAC。
+- 安装时顺带用 `netsh` 写入放行规则（HTTP 与媒体端口），卸载服务时删除。
+- 数据目录：`%APPDATA%\app.hearth.desktop\server`。数据库、日志 `hearth.log`、自签根
+  `tls\ca.crt` 都在里面。卸载桌面端不会自动卸载这个 Windows 服务，先在界面上停掉，或以管理员
+  身份执行 `hearth.exe --data "<上面那个目录>" service uninstall`。
+- 尚未在真实 Windows 设备上验收：UAC 弹窗与取消行为、SCM 安装与开机自启、防火墙规则实际写入、
+  服务拉起后网页能连上。CI 只保证 sidecar 随包装进安装目录。
+
 ## 构建和运行
 
 GitHub Actions 首次试打：维护者审阅并集成桌面端与网页改动后，将提交推送到 `codex/windows-desktop`。工作流只接收 `codex/**` 下相关路径的 push，以及 `workflow_dispatch`；不监听 tag，不创建 release，不需要写权限或签名 secrets。

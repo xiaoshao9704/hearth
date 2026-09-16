@@ -34,7 +34,7 @@ Windows 真机对比：桌面端原生投屏不如 OBS 流畅（OBS 同样推 H.
 | 采集 | Windows：`d3d11screencapturesrc capture-api=wgc`（整屏或 `window-handle`）+ `wasapi2src loopback-mode=include-process-tree loopback-target-pid=…`。macOS：**自写 ScreenCaptureKit 采集**（画面 + 所属应用音频）喂 `appsrc`；GStreamer 在 macOS 没有可用的屏幕与系统声采集。 |
 | 证书信任 | 应用内信任，不装系统 CA。WebView 与 Rust 各自的信任回调由桌面壳自己挂（wry 不暴露）。 |
 | 观看 / 语音 / 聊天 | 复用 WebView 里的现有网页与 LiveKit JS 引擎；原生侧只做投屏发布。 |
-| 本机服务 | 已实现（macOS）：sidecar + `service` CLI + `adduser` 首个账号 + 本地根自动配对；Windows 待 sidecar。 |
+| 本机服务 | 已实现（macOS / Windows）：sidecar + `service` CLI + `adduser` 首个账号 + 本地根自动配对；Windows 的装/启/停要管理员，壳按 UAC 提权跑同一套 CLI。 |
 | 首版目标 | 指定程序音频、外网稳定投屏、免系统 CA 的自签连接、全局热键按键说话（并入 roadmap 节点 5 的储备项）。硬编 CPU 降幅不作准入线。 |
 | 仓库与分支 | PoC 实验代码不进仓库。桌面端目录与网页桥能力锁步提交。 |
 
@@ -83,7 +83,7 @@ Windows 真机对比：桌面端原生投屏不如 OBS 流畅（OBS 同样推 H.
 ### 调整后的顺序（2026-09-15 晚）
 
 1. **OBS 联动**（网页）：频道菜单「OBS 推流」面板加「配置并开始推流」：填 obs-websocket 地址与密码（密码只存本机），写入 WHIP 地址与推流令牌，启动/停止推流，显示 OBS 推流状态。
-2. **薄壳收缩**（**已实现**）：原生采集与 GStreamer 收进 cargo feature `native-capture`（默认关），打包脚本与 CI 默认不带运行时（`build:*:native` 与工作流的 `native` 输入仍能打出原生形态）；桌面端保留：应用内信任、浏览器登录、单实例与深链、本机服务（macOS 已有；Windows 补 sidecar）。
+2. **薄壳收缩**（**已实现**）：原生采集与 GStreamer 收进 cargo feature `native-capture`（默认关），打包脚本与 CI 默认不带运行时（`build:*:native` 与工作流的 `native` 输入仍能打出原生形态）；桌面端保留：应用内信任、浏览器登录、单实例与深链、本机服务（macOS / Windows 两端都带 sidecar）。
 3. **全局热键按键说话 + 托盘**：薄壳的存在理由。
 4. 通行密钥原生回归、Developer ID 签名、发行：不变。
 
@@ -121,7 +121,7 @@ Windows WebView2 私有 CA 信任已实现待真机验证，证书事件对 WebS
 
 ### M3：热键、本机服务、发行
 
-- 全局热键按键说话（含游戏全屏）；「在本机运行服务器」已实现（macOS）：hearth 服务端作为 sidecar 打进 app，壳调它的 `service` CLI 装/启/停（状态读 `service status --json`），首个账号走 `adduser`，本机自签根按本地文件指纹自动配对；Windows 待 sidecar。
+- 全局热键按键说话（含游戏全屏）；「在本机运行服务器」已实现（macOS / Windows）：hearth 服务端作为 sidecar 打进安装包，壳调它的 `service` CLI 装/启/停（状态读 `service status --json`），首个账号走 `adduser`，本机自签根按本地文件指纹自动配对；Windows 上装/启/停要连 SCM（需管理员），普通执行被拒后壳用 `ShellExecuteExW` 的 `runas` 提权重跑，状态查询与建账号不提权。UAC 弹窗、SCM 安装、防火墙规则与真机启动待 Windows 真机验收。
 - Windows 签名、WebView2 运行时、GStreamer 运行时打包；macOS 签名、公证、屏幕录制与麦克风权限归属用真实签名的包验证。
 - macOS 打包命令 `npm --prefix desktop run build:mac`（`tauri build --bundles app` 后跑 `scripts/bundle-gst-macos.sh` 把 GStreamer 搬进 `.app` 并重签）；前提是构建机装了 Homebrew 的 `gstreamer` 与 `libnice-gstreamer`，且 `PATH` 里 `/usr/bin` 排在 Homebrew 之前（Homebrew 的 `xattr` 不认 `-r`，tauri 打包会调它）。CI 见 `.github/workflows/desktop-macos.yml`。当前是 ad-hoc 签名、不开 hardened runtime（ad-hoc 没有 Team ID，库校验对它永远不成立）；换 Developer ID 后开 runtime，`Entitlements.plist` 仍保持空。
 - 通行密钥回归：壳内网页的 WebAuthn 不可用（origin 是 `tauri://localhost`，且 WKWebView 只对带浏览器 entitlement 的应用开放 WebAuthn），M1 起在壳内隐藏入口。M3 用原生 API 接回：macOS 走 `ASAuthorizationPlatformPublicKeyCredentialProvider`，RP ID 取用户选定的服务器域名，系统按该域名的 `/.well-known/apple-app-site-association` 核验 Team ID + bundle id，hearth 服务端内建该文件并写死官方桌面端标识；需要 Developer ID 签名（ad-hoc 无 Team ID）。Windows Hello 原生接口的域名关联规则待 M2 实测。网页侧 `passkey.ts` 在壳内把仪式改走桥，服务端挑战与验签接口不变。过渡方案：浏览器跳转登录已实现（PKCE 一次性码 + `hearth://` 深链），壳把系统浏览器指向服务器域名上的授权页，用户在浏览器里用通行密钥登录并批准。

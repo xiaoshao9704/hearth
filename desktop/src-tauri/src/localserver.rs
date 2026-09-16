@@ -10,6 +10,8 @@
 //     一样只给这一台加信任锚，不装系统 CA。
 use std::fs;
 use std::io::{Read, Seek, SeekFrom};
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
@@ -40,11 +42,13 @@ fn base_url() -> String {
 }
 
 /// sidecar 可执行文件：Tauri 把 externalBin 放在主程序旁边（macOS 是 Contents/MacOS/），
-/// 文件名去掉 host triple 后缀。没打进去（如当前的 Windows 包）就是没有这项能力。
+/// 文件名去掉 host triple 后缀，Windows 上还带 .exe。没打进去就是没有这项能力。
 pub fn sidecar() -> Option<PathBuf> {
-    let exe = std::env::current_exe().ok()?;
-    let path = exe.parent()?.join("hearth");
-    path.is_file().then_some(path)
+    let dir = std::env::current_exe().ok()?.parent()?.to_path_buf();
+    ["hearth", "hearth.exe"]
+        .into_iter()
+        .map(|name| dir.join(name))
+        .find(|p| p.is_file())
 }
 
 fn data_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
@@ -59,14 +63,19 @@ fn data_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
         .map_err(|e| format!("取数据目录失败：{e}"))
 }
 
+/// 服务端是控制台程序，从 GUI 里起会闪一个黑框；查状态每次开界面都要跑一次，不能闪。
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
 /// 跑一次 sidecar 子命令。label 是出错时给用户看的名字——args 里可能有密码，不能进文案。
 fn run(exe: &Path, data: &Path, args: &[&str], label: &str) -> Result<String, String> {
-    let out = Command::new(exe)
-        .arg("--data")
-        .arg(data)
-        .args(args)
-        .output()
-        .map_err(|e| format!("{label}失败：{e}"))?;
+    let mut cmd = Command::new(exe);
+    cmd.arg("--data").arg(data).args(args);
+    #[cfg(windows)]
+    {
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    let out = cmd.output().map_err(|e| format!("{label}失败：{e}"))?;
     let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
     if !out.status.success() {
         let mut msg = String::from_utf8_lossy(&out.stderr).trim().to_string();
@@ -79,6 +88,131 @@ fn run(exe: &Path, data: &Path, args: &[&str], label: &str) -> Result<String, St
         return Err(format!("{label}失败：{msg}"));
     }
     Ok(stdout)
+}
+
+/// 会改服务状态的 service 子命令（install/uninstall/start/stop）走这里。Windows 上这几个
+/// 都要以 SC_MANAGER_ALL_ACCESS 连服务管理器，普通用户必然被拒，所以失败后提权重试一次。
+///
+/// 先普通执行再提权，而不是一上来就弹 UAC：一来壳自己已提权时根本不必弹，二来非权限原因的
+/// 失败（服务未安装、端口被占、netsh 写不进去）还能把服务端的原话带回界面——提权进程的
+/// stdout 不回流，成败只剩退出码。权限不足是在连 SCM 那一步返回的，此时还没改过任何状态，
+/// 这次重试没有副作用。查状态（status）与建账号（adduser）不碰 SCM，仍走普通执行。
+fn run_service(exe: &Path, data: &Path, args: &[&str], label: &str) -> Result<String, String> {
+    let err = match run(exe, data, args, label) {
+        Ok(out) => return Ok(out),
+        Err(e) => e,
+    };
+    #[cfg(windows)]
+    {
+        if needs_admin(&err) {
+            return run_elevated(exe, data, args, label).map(|()| String::new());
+        }
+    }
+    Err(err)
+}
+
+/// 提权重试的判据：服务端把连 SCM 失败统一带上「需要管理员权限」，系统原文随显示语言变
+/// （Access is denied. / 拒绝访问），一并认。
+#[cfg(windows)]
+fn needs_admin(err: &str) -> bool {
+    let e = err.to_ascii_lowercase();
+    e.contains("需要管理员权限") || e.contains("denied") || e.contains("拒绝访问")
+}
+
+/// 提权跑一次 sidecar：ShellExecuteExW 的 runas 动词会弹 UAC（壳已提权时直接跑、不弹）。
+/// 提权进程的 stdout 不回流，成败只看退出码，所以失败只能给方向性文案。
+#[cfg(windows)]
+fn run_elevated(exe: &Path, data: &Path, args: &[&str], label: &str) -> Result<(), String> {
+    use windows::core::PCWSTR;
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED};
+    use windows::Win32::System::Threading::{GetExitCodeProcess, WaitForSingleObject, INFINITE};
+    use windows::Win32::UI::Shell::{ShellExecuteExW, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW};
+
+    let mut line = format!("--data {}", quote_arg(&data.to_string_lossy()));
+    for a in args {
+        line.push(' ');
+        line.push_str(&quote_arg(a));
+    }
+    let verb = wide("runas");
+    let file = wide(&exe.to_string_lossy());
+    let params = wide(&line);
+
+    // ShellExecuteEx 可能派发给用 COM 的 Shell 扩展，文档要求线程先初始化 COM；这里跑在
+    // tauri 的异步线程上，套间得自己建。已经是别的套间（RPC_E_CHANGED_MODE）就不配对反初始化。
+    let com = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
+    let mut info = SHELLEXECUTEINFOW {
+        cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
+        fMask: SEE_MASK_NOCLOSEPROCESS,
+        lpVerb: PCWSTR(verb.as_ptr()),
+        lpFile: PCWSTR(file.as_ptr()),
+        lpParameters: PCWSTR(params.as_ptr()),
+        nShow: 0, // SW_HIDE：服务端是控制台程序，别闪一个黑窗
+        ..Default::default()
+    };
+    // 分两句写：先结束对 info 的可变借用，再在闭包里读 hProcess。
+    let launched = unsafe { ShellExecuteExW(&mut info) };
+    let code = launched.and_then(|()| unsafe {
+        let _ = WaitForSingleObject(info.hProcess, INFINITE);
+        let mut code = 0u32;
+        let got = GetExitCodeProcess(info.hProcess, &mut code);
+        let _ = CloseHandle(info.hProcess);
+        got.map(|()| code)
+    });
+    if com.is_ok() {
+        unsafe { CoUninitialize() };
+    }
+    match code {
+        Ok(0) => Ok(()),
+        // 起都没起来基本只有一种情况：UAC 弹窗被取消（ERROR_CANCELLED）。
+        Err(_) => Err(format!(
+            "{label}失败：需要管理员授权才能安装本机服务，请在弹出的窗口里点「是」"
+        )),
+        Ok(code) => Err(format!(
+            "{label}失败：以管理员身份执行仍失败（退出码 {code}），详情见 {}\\hearth.log",
+            data.display()
+        )),
+    }
+}
+
+/// 拼进 lpParameters 的参数按 CommandLineToArgvW 的规则转义：数据目录可能带空格。
+#[cfg(windows)]
+fn quote_arg(arg: &str) -> String {
+    if !arg.is_empty() && !arg.contains([' ', '\t', '"']) {
+        return arg.to_string();
+    }
+    let mut out = String::from("\"");
+    let mut slashes = 0;
+    for c in arg.chars() {
+        match c {
+            '\\' => {
+                slashes += 1;
+                out.push(c);
+            }
+            '"' => {
+                // 引号前的反斜杠要加倍，再补一个转义引号自身
+                for _ in 0..=slashes {
+                    out.push('\\');
+                }
+                slashes = 0;
+                out.push('"');
+            }
+            _ => {
+                slashes = 0;
+                out.push(c);
+            }
+        }
+    }
+    for _ in 0..slashes {
+        out.push('\\');
+    }
+    out.push('"');
+    out
+}
+
+#[cfg(windows)]
+fn wide(s: &str) -> Vec<u16> {
+    s.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
 /// `service status --json` 的解析结果；多出来的字段（detail/pid）只给人看，这里不要。
@@ -159,9 +293,9 @@ pub async fn local_server_start(
 
     // install 自带装载并拉起，装完不必再 start（再 start 会立刻重启一次）。
     if !st.installed {
-        run(&exe, &data, &["service", "install"], "安装本机服务")?;
+        run_service(&exe, &data, &["service", "install"], "安装本机服务")?;
     } else if !st.running {
-        run(&exe, &data, &["service", "start"], "启动本机服务")?;
+        run_service(&exe, &data, &["service", "start"], "启动本机服务")?;
     }
 
     wait_ready(&data).await?;
@@ -176,7 +310,7 @@ pub async fn local_server_start(
 pub async fn local_server_stop(app: tauri::AppHandle) -> Result<(), String> {
     let exe = sidecar().ok_or("这个安装包没有带服务端程序")?;
     let data = data_dir(&app)?;
-    run(&exe, &data, &["service", "stop"], "停止本机服务")?;
+    run_service(&exe, &data, &["service", "stop"], "停止本机服务")?;
     Ok(())
 }
 

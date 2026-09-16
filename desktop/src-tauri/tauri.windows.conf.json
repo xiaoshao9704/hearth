@@ -4,6 +4,9 @@
     "targets": [
       "nsis"
     ],
+    "externalBin": [
+      "binaries/hearth"
+    ],
     "windows": {
       "webviewInstallMode": {
         "type": "embedBootstrapper",
