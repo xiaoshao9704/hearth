@@ -12,7 +12,9 @@ export type ObsShareOption = {
   conn: ObsConn;
   obsVersion: string;
   platform: string;
+  start: () => Promise<void>;
   onReady: () => void;
+  onStarted: () => void;
 };
 
 export const NativeSourcePanel = (p: {
@@ -164,7 +166,9 @@ export const NativeSourcePanel = (p: {
             conn={p.obs!.conn}
             obsVersion={p.obs!.obsVersion}
             platform={p.obs!.platform}
+            start={p.obs!.start}
             onReady={p.obs!.onReady}
+            onStarted={p.obs!.onStarted}
           />
           <div class="ig-sep" />
         </Show>

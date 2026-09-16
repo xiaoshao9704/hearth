@@ -9,7 +9,7 @@ import {
   OBS_WHIP_MIN_MAJOR,
   OBS_WS_DEFAULT_URL,
   obsMajor,
-  whipServiceSettings,
+  startObsStream,
   type ObsConn,
   type ObsStreamStatus,
   type ObsVersion,
@@ -211,8 +211,7 @@ export const ObsLink = (p: {
       await c.request('StopStream');
       await waitIdle(c);
     }
-    await c.request('SetStreamServiceSettings', whipServiceSettings(p.server(), p.token()));
-    await c.request('StartStream');
+    await startObsStream(c, p.server(), p.token());
     await refresh();
     toast('OBS 已开始推流', 'ok');
   };
@@ -427,6 +426,7 @@ export const ObsLink = (p: {
           obsVersion={ver()!.obsVersion}
           platform={ver()!.platform}
           busy={busy() !== ''}
+          start={() => startOn(conn()!)}
         />
       </Show>
 

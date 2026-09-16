@@ -1382,6 +1382,21 @@ body.theater-on { overscroll-behavior: none; }
 .obs-cap-modetip { flex-basis: 100%; }
 .obs-cap-foot { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .obs-cap-browser { align-self: flex-start; }
+/* 壳内选源：壳自己列出本机应用/窗口，点一项就直接开播 */
+.obs-cap-search { height: 34px; background: var(--bg-2); }
+.obs-cap-search input { font-size: 12.5px; }
+.obs-cap-list { display: flex; flex-direction: column; gap: 4px; max-height: 34vh; overflow-y: auto; }
+.obs-cap-item {
+  display: flex; align-items: center; gap: 8px; width: 100%; padding: 7px 9px;
+  border-radius: 8px; border: 1px solid transparent; text-align: left;
+}
+.obs-cap-item:hover { background: var(--bg-3); border-color: var(--line-soft); }
+.obs-cap-item:disabled { opacity: .5; cursor: not-allowed; }
+.obs-cap-item-name {
+  flex: 1; min-width: 0; font-size: 12.5px; color: var(--text-0);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.obs-cap-item-kind { flex-shrink: 0; font-size: 11px; color: var(--text-3); }
 
 @media (max-width: 560px) {
   .ingest-scrim { padding: 56px 12px 12px; }

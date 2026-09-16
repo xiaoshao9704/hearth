@@ -3,6 +3,8 @@
 //
 // 命令集刻意保持最小：列采集源、开始/停止发布、低频统计。帧与音频不经 JS，
 // 控制之外的东西不往这里加。
+import type { ObsTarget } from '../obsws';
+
 export interface BridgeCaps {
   native_publish: boolean; // 能不能走原生投屏发布
   platform: string;
@@ -15,6 +17,8 @@ export interface BridgeCaps {
   native_publish_error?: string | null;
   // 安装包里带了 hearth 服务端（可以「在本机运行服务器」）；旧壳没有此字段。
   local_server?: boolean;
+  // 壳能自己列出可采集的应用/窗口（「通过 OBS 投屏」据此改成壳内选源）；旧壳没有此字段。
+  obs_targets?: boolean;
 }
 
 // GStreamer 元素名 → 用户能看懂的硬编名字；不认识的元素直接回显元素名，不瞎猜。
@@ -223,6 +227,12 @@ export function pairServer(url: string, fingerprint: string): Promise<void> {
 
 export function forgetServer(url: string): Promise<void> {
   return shellCall<void>('forget_server', { url });
+}
+
+// ---- 列本机可采集的应用/窗口（给「通过 OBS 投屏」用）----
+// 与原生投屏能力无关：薄壳不带采集管线也能列，所以不走 call() 的 native_publish 门槛。
+export function listObsTargets(): Promise<ObsTarget[]> {
+  return shellCall<ObsTarget[]>('list_obs_targets');
 }
 
 // ---- 在本机运行服务器（壳里带了 hearth 服务端时才有）----

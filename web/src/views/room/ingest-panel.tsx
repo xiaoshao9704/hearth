@@ -4,20 +4,8 @@ import { createSignal, Show } from 'solid-js';
 import { getIngestToken, siteInfo } from '../../api';
 import type { IngestTokenInfo, SiteInfo } from '../../api';
 import { copyText, el, icon, toast } from '../../ui';
+import { whipServer } from './obs-capture';
 import { ObsLink } from './obs-link';
-
-// 自签证书 OBS 不认：页面是 https 且证书来源是 self 时，把地址换成同主机的 http 端口
-// （path 与查询串不变，只动 scheme 与 host:port）。房间页的「通过 OBS 投屏」同用这一份。
-export function whipServer(info: IngestTokenInfo | null, site: SiteInfo | null, channelId: number): string {
-  if (!info || channelId <= 0) return '';
-  const full = `${info.base}${channelId}`;
-  if (!site || site.tls_source !== 'self' || location.protocol !== 'https:') return full;
-  try {
-    return `http://${location.hostname}:${site.http_port}${new URL(full).pathname}`;
-  } catch {
-    return full;
-  }
-}
 
 export const IngestPanel = (p: {
   channel: string;
