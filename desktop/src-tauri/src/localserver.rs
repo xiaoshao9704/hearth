@@ -10,6 +10,8 @@
 //     一样只给这一台加信任锚，不装系统 CA。
 use std::fs;
 use std::io::{Read, Seek, SeekFrom};
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
@@ -61,14 +63,19 @@ fn data_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
         .map_err(|e| format!("取数据目录失败：{e}"))
 }
 
+/// 服务端是控制台程序，从 GUI 里起会闪一个黑框；查状态每次开界面都要跑一次，不能闪。
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
 /// 跑一次 sidecar 子命令。label 是出错时给用户看的名字——args 里可能有密码，不能进文案。
 fn run(exe: &Path, data: &Path, args: &[&str], label: &str) -> Result<String, String> {
-    let out = Command::new(exe)
-        .arg("--data")
-        .arg(data)
-        .args(args)
-        .output()
-        .map_err(|e| format!("{label}失败：{e}"))?;
+    let mut cmd = Command::new(exe);
+    cmd.arg("--data").arg(data).args(args);
+    #[cfg(windows)]
+    {
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    let out = cmd.output().map_err(|e| format!("{label}失败：{e}"))?;
     let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
     if !out.status.success() {
         let mut msg = String::from_utf8_lossy(&out.stderr).trim().to_string();
