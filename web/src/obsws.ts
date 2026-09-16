@@ -247,6 +247,33 @@ export function encoderLabel(raw: string): string {
   return id;
 }
 
+/**
+ * 简单输出模式下可选的流编码器（OBS 的 SimpleOutput.StreamEncoder 取值）。
+ * OBS 没有「列出本机可用编码器」的请求，所以按平台给一份固定候选；机器没有对应显卡时
+ * OBS 会在开播那一步报错，我们把它的原话显示出来，而不是在这里假装知道支不支持。
+ */
+export function obsEncoderChoices(platform: ObsPlatform): Array<{ value: string; label: string }> {
+  if (platform === 'macos') {
+    return [
+      { value: 'apple_hevc', label: 'HEVC · VideoToolbox 硬件编码' },
+      { value: 'apple_h264', label: 'H.264 · VideoToolbox 硬件编码' },
+      { value: 'x264', label: 'H.264 · 软件编码（x264）' },
+    ];
+  }
+  if (platform === 'windows') {
+    return [
+      { value: 'nvenc_hevc', label: 'HEVC · NVENC（NVIDIA）' },
+      { value: 'nvenc', label: 'H.264 · NVENC（NVIDIA）' },
+      { value: 'qsv_hevc', label: 'HEVC · Intel QSV' },
+      { value: 'qsv', label: 'H.264 · Intel QSV' },
+      { value: 'amd_hevc', label: 'HEVC · AMD' },
+      { value: 'amd', label: 'H.264 · AMD' },
+      { value: 'x264', label: 'H.264 · 软件编码（x264）' },
+    ];
+  }
+  return [];
+}
+
 // ---- 在 OBS 里建采集源 ----
 // 「投哪个应用/窗口」不由 hearth 枚举再替用户选，而是把源建出来后弹 OBS 自己的属性窗口，
 // 让用户在 OBS 里选：obs-websocket 5.7.3 枚举 macOS screen_capture 的 application/window
@@ -522,7 +549,21 @@ export async function obsCaptureToTarget(
       if (obsErrorCode(e) !== OBS_CODE_NOT_FOUND) throw e;
     }
   }
-  return [note, fitNote].filter(Boolean).join(' ');
+  // macOS 上只写设置的源一帧都不出（实测）：ScreenCaptureKit 的可共享内容列表是异步取回的，
+  // 采集初始化只认那份列表，而它只在打开源属性时才重新拉（上游 mac-sck 的 properties 回调）。
+  // 所以属性窗口在 macOS 是功能必需，不是界面装饰；目标已经替用户选好，他确认一下即可。
+  // obs-websocket 的枚举请求本可以顺带触发列表重建，但它会崩 OBS（已提上游 PR #1355）。
+  const dialogNote = platform === 'macos' ? await macConfirmNote(c) : '';
+  return [note, fitNote, dialogNote].filter(Boolean).join(' ');
+}
+
+async function macConfirmNote(c: ObsConn): Promise<string> {
+  try {
+    await openObsInputProperties(c, OBS_VIDEO_INPUT);
+    return '已在 OBS 里打开源属性窗口并替你选好目标，确认后关掉它，画面才会开始采集。';
+  } catch (e) {
+    return `没能替你打开 OBS 的源属性窗口（${(e as Error).message}），请在 OBS 里双击「${OBS_VIDEO_INPUT}」确认一次，否则画面不会出图。`;
+  }
 }
 
 /**

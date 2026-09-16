@@ -6,6 +6,8 @@ import { createMemo, createSignal, For, onCleanup, Show } from 'solid-js';
 import {
   connectObs,
   encoderLabel,
+  obsEncoderChoices,
+  obsPlatform,
   OBS_WHIP_MIN_MAJOR,
   OBS_WS_DEFAULT_URL,
   obsMajor,
@@ -268,6 +270,18 @@ export const ObsLink = (p: {
       parameterValue: String(kbpsValue),
     });
 
+  // 编码器是简单输出模式下的一个配置项，浏览器里就能改；高级模式下它在编码器设置里，只回显。
+  const encoderList = () => {
+    const cur = encoder();
+    const list = obsEncoderChoices(obsPlatform(ver()?.platform));
+    return cur && !list.some((o) => o.value === cur) ? [{ value: cur, label: encoderLabel(cur) }, ...list] : list;
+  };
+  const onEncoder = (v: string) =>
+    void run('quality', async (c) => {
+      await c.request('SetProfileParameter', { parameterCategory: SIMPLE_OUT, parameterName: 'StreamEncoder', parameterValue: v });
+      setEncoder(await profileParam(c, SIMPLE_OUT, 'StreamEncoder'));
+    });
+
   const onRes = (v: string) =>
     void run('quality', async (c) => {
       const [w, h] = v.split('x').map(Number);
@@ -494,9 +508,24 @@ export const ObsLink = (p: {
           <Show when={advOut()}>
             <div class="ig-tip">OBS 现在是高级输出模式，码率在编码器设置里，请在 OBS 里改。</div>
           </Show>
-          <Show when={encoder()}>
+          <Show when={encoder() && !advOut() && encoderList().length > 0}>
+            <label class="obs-q-item">
+              <span class="obs-q-label">编码器</span>
+              <select
+                id="obs-encoder"
+                class="hit obs-select"
+                value={encoder()}
+                disabled={qualityBusy() || videoLocked()}
+                onChange={(ev) => onEncoder(ev.currentTarget.value)}
+              >
+                <For each={encoderList()}>{(o) => <option value={o.value}>{o.label}</option>}</For>
+              </select>
+            </label>
+            <div class="ig-tip">选了这台机器没有的硬件编码器，OBS 会在开播那一步报错，按它的提示换一个即可。</div>
+          </Show>
+          <Show when={encoder() && advOut()}>
             <div class="ig-tip">
-              编码器：<span class="ig-em">{encoderLabel(encoder())}</span>，在 OBS 设置 → 输出里改。
+              编码器：<span class="ig-em">{encoderLabel(encoder())}</span>，高级输出模式下请在 OBS 设置 → 输出里改。
             </div>
           </Show>
         </div>

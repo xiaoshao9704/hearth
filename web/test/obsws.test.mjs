@@ -19,6 +19,7 @@ import {
   obsAudioSetupSpec,
   obsAudioSpec,
   obsCaptureToTarget,
+  obsEncoderChoices,
   obsMajor,
   obsPresetVideoSettings,
   obsPlatform,
@@ -399,6 +400,9 @@ const sceneFake = (state) => {
         if (at >= 0) items.splice(at, 1);
         return {};
       }
+      // macOS 要从 display_capture 的默认值借主显示器 UUID，没有它源不出帧
+      if (d.requestType === 'GetInputDefaultSettings')
+        return { data: { defaultInputSettings: { display_uuid: 'DISPLAY-1' } } };
       if (d.requestType === 'CreateScene') return { data: { sceneUuid: 'u' } };
       if (d.requestType === 'CreateInput') {
         if (state.audioInputFails && name === 'Hearth 声音')
@@ -463,7 +467,7 @@ test('同名同 kind 的源直接复用，不删了重建（screen_capture 删�
   await setupObsCapture(conn, 'macos', 'game');
   assert.deepEqual(sentOf(obs, 'CreateInput'), [], '名字占着就不再建');
   assert.deepEqual(sentOf(obs, 'SetInputSettings'), [
-    { inputName: 'Hearth 画面', inputSettings: { type: 2 }, overlay: false },
+    { inputName: 'Hearth 画面', inputSettings: { type: 2, display_uuid: 'DISPLAY-1' }, overlay: false },
   ]);
   assert.deepEqual(sentOf(obs, 'CreateSceneItem'), [], '已经在场景里就不重复挂');
   assert.deepEqual(
@@ -533,7 +537,12 @@ test('建采集源：macOS 只建画面一个源 → 切场景 → 弹属性窗�
   const r = await setupObsCapture(conn, 'macos', 'game');
   assert.deepEqual(r, { dialog: true, note: '' }, '画面源与属性窗口都成了就没有补充说明');
   assert.deepEqual(sentOf(obs, 'CreateInput'), [
-    { sceneName: 'Hearth 投屏', inputName: 'Hearth 画面', inputKind: 'screen_capture', inputSettings: { type: 2 } },
+    {
+      sceneName: 'Hearth 投屏',
+      inputName: 'Hearth 画面',
+      inputKind: 'screen_capture',
+      inputSettings: { type: 2, display_uuid: 'DISPLAY-1' },
+    },
   ]);
   assert.deepEqual(sentOf(obs, 'SetCurrentProgramScene'), [{ sceneName: 'Hearth 投屏' }]);
   assert.deepEqual(sentOf(obs, 'OpenInputPropertiesDialog'), [{ inputName: 'Hearth 画面' }]);
@@ -626,7 +635,7 @@ test('声音源按目标取声：只有 Windows 有这么一个源', () => {
   assert.equal(obsAudioSpec('other', { kind: 'app', label: 'x', value: 'x' }), null);
 });
 
-test('壳内选中即开播：建源不弹窗 → 指到目标 → 写 WHIP 配置 → 开播', async () => {
+test('壳内选中：指到目标 → 适配画布 → 弹一次确认窗口 → 写 WHIP 配置 → 开播', async () => {
   const obs = await sceneFake({ scenes: ['Hearth 投屏'] });
   const conn = await connectObs(obs.url, '');
   // UI 就是这个顺序：选中目标先落进源，再拿本频道的地址与令牌开播
@@ -635,14 +644,16 @@ test('壳内选中即开播：建源不弹窗 → 指到目标 → 写 WHIP 配�
     label: '访达',
     value: 'com.apple.finder',
   });
-  assert.equal(note, '');
+  // macOS 上只写设置的源不出帧，属性窗口是功能必需，所以这里必然带一句提示
+  assert.match(note, /确认后关掉它/);
   await startObsStream(conn, 'https://h.example.com/providers/lkembed/w/7', 'tok');
-  // 目标落进源 → 按画布适配场景项 → 写 WHIP 配置 → 开播
-  assert.deepEqual(orderOf(obs).slice(-9), [
+  // 目标落进源 → 按画布适配场景项 → 弹确认窗口 → 开播前再适配一次 → 写 WHIP 配置 → 开播
+  assert.deepEqual(orderOf(obs).slice(-10), [
     'SetInputSettings',
     'GetVideoSettings',
     'GetSceneItemId',
     'SetSceneItemTransform',
+    'OpenInputPropertiesDialog',
     'GetVideoSettings',
     'GetSceneItemId',
     'SetSceneItemTransform',
@@ -678,13 +689,14 @@ test('壳内选中即开播：建源不弹窗 → 指到目标 → 写 WHIP 配�
   ]);
 
   assert.deepEqual(sentOf(obs, 'SetInputSettings'), [
-    { inputName: 'Hearth 画面', inputSettings: { type: 2, application: 'com.apple.finder' } },
+    // display_uuid 是 macOS 采集初始化的硬要求，从 display_capture 的默认值借来
+    { inputName: 'Hearth 画面', inputSettings: { type: 2, application: 'com.apple.finder', display_uuid: 'DISPLAY-1' } },
   ]);
   assert.deepEqual(sentOf(obs, 'SetStreamServiceSettings'), [
     whipServiceSettings('https://h.example.com/providers/lkembed/w/7', 'tok'),
   ]);
-  // 壳里目标是选好了才来的，弹属性窗口只会把 OBS 拉到前台挡住人
-  assert.deepEqual(sentOf(obs, 'OpenInputPropertiesDialog'), []);
+  // macOS 例外：只写设置的源一帧都不出，属性窗口是让 SCK 重建可共享内容列表的唯一安全手段
+  assert.deepEqual(sentOf(obs, 'OpenInputPropertiesDialog'), [{ inputName: 'Hearth 画面' }]);
   // 让 OBS 自己列清单会把它带走，任何平台都不调
   assert.deepEqual(sentOf(obs, 'GetInputPropertiesListPropertyItems'), []);
   conn.close();
@@ -740,4 +752,26 @@ test('macOS 的画面源必须带 display_uuid：应用采集底层也要绑显�
   assert.deepEqual(obsVideoSpec('macos', 'window', app).inputSettings, { type: 2, application: 'com.apple.finder' });
   // Windows 不受影响
   assert.equal('display_uuid' in obsVideoSpec('windows', 'game', null, 'UUID-1').inputSettings, false);
+});
+
+test('macOS 选好目标后仍要开一次属性窗口：只写设置的源不出帧', async () => {
+  const obs = await sceneFake({ scenes: ['Hearth 投屏'], items: [] });
+  const conn = await connectObs(obs.url, '');
+  const note = await obsCaptureToTarget(conn, 'macos', 'window', { kind: 'app', label: '访达', value: 'com.apple.finder' });
+  assert.deepEqual(sentOf(obs, 'OpenInputPropertiesDialog'), [{ inputName: 'Hearth 画面' }]);
+  assert.match(note, /确认后关掉它/);
+  // Windows 不需要这一步
+  const obs2 = await sceneFake({ scenes: ['Hearth 投屏'], items: [] });
+  const conn2 = await connectObs(obs2.url, '');
+  await obsCaptureToTarget(conn2, 'windows', 'game', { kind: 'window', label: 'x', value: 'a:b:c' });
+  assert.deepEqual(sentOf(obs2, 'OpenInputPropertiesDialog'), []);
+  conn.close(); await obs.close(); conn2.close(); await obs2.close();
+});
+
+test('编码器候选：按平台给，认不出的平台给空（界面据此只回显）', () => {
+  const mac = obsEncoderChoices('macos').map((o) => o.value);
+  assert.deepEqual(mac, ['apple_hevc', 'apple_h264', 'x264']);
+  const win = obsEncoderChoices('windows').map((o) => o.value);
+  assert.ok(win.includes('nvenc_hevc') && win.includes('qsv') && win.includes('x264'));
+  assert.deepEqual(obsEncoderChoices('other'), []);
 });
