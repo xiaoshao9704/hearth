@@ -9,7 +9,10 @@ export const OBS_RPC_VERSION = 1;
 // WHIP 输出是 OBS 30 才有的；低于此版本配了也推不动，提前说清楚
 export const OBS_WHIP_MIN_MAJOR = 30;
 
-const CONNECT_TIMEOUT_MS = 8000;
+export const CONNECT_TIMEOUT_MS = 8000;
+// 浏览器的「允许本站访问本地网络」提示还挂着时的宽限超时：断开在途连接会把那个提示一起收走，
+// 8 秒到点就断，用户看到「点允许后重试」时提示已经没了。挂住这条连接，点了允许握手会自己继续。
+export const CONNECT_PROMPT_TIMEOUT_MS = 60000;
 // 库在连接断开时不会拒掉在途请求，靠这条超时兜底（也兜 OBS 卡住不回的情况）
 const REQUEST_TIMEOUT_MS = 10000;
 
@@ -153,26 +156,37 @@ export class ObsConn {
   }
 }
 
+export type ConnectObsOpts = {
+  /** 常规超时；本地网络权限提示还挂着时改用 promptTimeoutMs */
+  timeoutMs?: number;
+  promptTimeoutMs?: number;
+  /** 正在等用户点浏览器的权限提示（这期间不会主动断开）：UI 据此说清楚在等什么 */
+  onWaiting?: (why: 'local-network') => void;
+};
+
 // 建连并等握手完成；地址白名单与超时都收口在这里
 export async function connectObs(
   url: string,
   password: string,
   allowPrivate = false,
-  timeoutMs = CONNECT_TIMEOUT_MS,
+  opts: ConnectObsOpts = {},
 ): Promise<ObsConn> {
   const bad = checkObsWsUrl(url, allowPrivate);
   if (bad) throw new Error(bad);
   const ws = new OBSWebSocket();
   // 连接前先记一次权限态：发起连接本身会让 Chrome 弹提示，事后再查分不清「浏览器不认识这个权限」
-  // 与「认识但还没批」。取不到新鲜结果时就用这一份兜底。
-  const before = localNetworkState();
+  // 与「认识但还没批」。取不到新鲜结果时就用这一份兜底；它同时决定这次等多久。
+  const before = await localNetworkState();
+  const prompting = before === 'prompt';
+  const limit = prompting ? (opts.promptTimeoutMs ?? CONNECT_PROMPT_TIMEOUT_MS) : (opts.timeoutMs ?? CONNECT_TIMEOUT_MS);
+  if (prompting) opts.onWaiting?.('local-network');
   let timer: ReturnType<typeof setTimeout> | undefined;
   let timedOut = false;
   const timeout = new Promise<never>((_, rej) => {
     timer = setTimeout(() => {
       timedOut = true;
       rej(new Error(TIMEOUT_OBS));
-    }, timeoutMs);
+    }, limit);
   });
   timeout.catch(() => {});
   try {
@@ -181,7 +195,7 @@ export async function connectObs(
     void ws.disconnect().catch(() => {});
     if (timedOut) {
       const now = await localNetworkState();
-      throw new Error(connectTimeoutText(now === 'unknown' ? await before : now));
+      throw new Error(connectTimeoutText(now === 'unknown' ? before : now));
     }
     throw new Error(connectText(e, password !== ''));
   } finally {

@@ -65,6 +65,8 @@ export const ObsLink = (p: {
   const [kbps, setKbps] = createSignal(0);
   const [busy, setBusy] = createSignal<'' | 'test' | 'start' | 'stop' | 'quality'>('');
   const [err, setErr] = createSignal('');
+  // 浏览器的本地网络权限提示挂着时，这条连接会一直等（不断开提示就不会消失），得说清楚在等什么
+  const [waitingLna, setWaitingLna] = createSignal(false);
   // 画质：都以 OBS 里的现值为准，本地不留第二份真相
   const [video, setVideo] = createSignal<ObsVideoSettings | null>(null);
   const [bitrate, setBitrate] = createSignal('');
@@ -136,7 +138,7 @@ export const ObsLink = (p: {
   const ensure = async (): Promise<ObsConn> => {
     const live = conn();
     if (live?.alive) return live;
-    const c = await connectObs(url(), password(), inShell());
+    const c = await connectObs(url(), password(), inShell(), { onWaiting: () => setWaitingLna(true) });
     c.onLost = () => {
       drop();
       setErr('OBS 连接已断开');
@@ -174,12 +176,14 @@ export const ObsLink = (p: {
     if (busy()) return;
     setBusy(what);
     setErr('');
+    setWaitingLna(false);
     try {
       await fn(await ensure());
     } catch (e) {
       setErr((e as Error).message);
     } finally {
       setBusy('');
+      setWaitingLna(false);
     }
   };
 
@@ -397,6 +401,13 @@ export const ObsLink = (p: {
         </Show>
       </div>
 
+      <Show when={waitingLna()}>
+        <div class="hint-card">
+          <span class="ig-note">
+            Chrome 正在询问是否允许本站访问本地网络，请在地址栏旁的提示里点「允许」，连接会自动继续。
+          </span>
+        </div>
+      </Show>
       <Show when={err()}>
         <div class="notice-bad">
           <span class="ig-note">{err()}</span>

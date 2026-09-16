@@ -11,6 +11,8 @@ import { WebSocketServer } from 'ws';
 import {
   applyObsCapture,
   checkObsWsUrl,
+  CONNECT_PROMPT_TIMEOUT_MS,
+  CONNECT_TIMEOUT_MS,
   connectObs,
   connectTimeoutText,
   encoderLabel,
@@ -84,10 +86,13 @@ const startFakeObs = async (opts = {}) => {
     handleProtocols: (protocols) => (protocols.has('obswebsocket.json') ? 'obswebsocket.json' : false),
   });
   await once(wss, 'listening');
-  const seen = { identify: null, requests: [] };
+  const seen = { identify: null, requests: [], closed: false };
   let sock = null;
   wss.on('connection', (s) => {
     sock = s;
+    s.on('close', () => {
+      seen.closed = true; // 客户端有没有主动断开：权限提示挂着时不能断
+    });
     if (opts.silent) return; // 不回 Hello：用来验超时
     s.send(JSON.stringify({ op: 0, d: { rpcVersion: 1, ...(opts.auth ? { authentication: { challenge: CHALLENGE, salt: SALT } } : {}) } }));
     s.on('message', (raw) => {
@@ -151,7 +156,7 @@ test('握手：填了密码仍被 4009 拒，文案是「密码不对」', async
 
 test('握手超时：服务器不回 Hello 时到点 reject', async () => {
   const obs = await startFakeObs({ silent: true });
-  await assert.rejects(connectObs(obs.url, '', false, 120), /超时/);
+  await assert.rejects(connectObs(obs.url, '', false, { timeoutMs: 120 }), /超时/);
   await obs.close();
 });
 
@@ -180,7 +185,7 @@ const navStub = (state) => ({
 test('握手超时：本地网络权限还没批（prompt）时，文案指向 Chrome 的允许提示', async () => {
   const obs = await startFakeObs({ silent: true });
   await withNavigator(navStub('prompt'), async () => {
-    await assert.rejects(connectObs(obs.url, '', false, 120), (e) => {
+    await assert.rejects(connectObs(obs.url, '', false, { timeoutMs: 120, promptTimeoutMs: 200 }), (e) => {
       assert.match(e.message, /本地网络/);
       assert.match(e.message, /允许/);
       assert.doesNotMatch(e.message, /WebSocket 服务器设置/, '别再把人引去查 OBS 的设置');
@@ -190,10 +195,57 @@ test('握手超时：本地网络权限还没批（prompt）时，文案指向 C
   await obs.close();
 });
 
+// 权限提示是「我们一断开它就没了」：常规超时到点就断，用户照着文案去点「允许」时提示已经消失。
+// 所以 prompt 态要挂住这条连接（默认 60 秒），并先通知 UI 说清楚在等什么。
+// 下面两条把两档超时缩小成毫秒级跑，真值另有一条断言兜着。
+const stillPending = async (p, ms) => {
+  const tick = Symbol('tick');
+  const r = await Promise.race([
+    p.then(
+      () => 'resolved',
+      () => 'rejected',
+    ),
+    new Promise((ok) => setTimeout(() => ok(tick), ms)),
+  ]);
+  return r === tick;
+};
+
+test('本地网络权限还没批：常规超时到点不断开，先回调通知 UI，最后仍报 prompt 文案', async () => {
+  const obs = await startFakeObs({ silent: true });
+  await withNavigator(navStub('prompt'), async () => {
+    const waits = [];
+    const p = connectObs(obs.url, '', false, {
+      timeoutMs: 100,
+      promptTimeoutMs: 1200,
+      onWaiting: (why) => waits.push(why),
+    });
+    assert.equal(await stillPending(p, 400), true, '常规超时（100ms）的四倍时间过去了也不能拒');
+    assert.deepEqual(waits, ['local-network'], 'UI 收到过一次「在等本地网络权限」');
+    assert.equal(obs.seen.closed, false, '在途连接没被我们断开，浏览器的权限提示才挂得住');
+    await assert.rejects(p, /本地网络/);
+  });
+  await obs.close();
+});
+
+test('本地网络权限已批（granted）：仍走常规超时，不白等宽限', async () => {
+  const obs = await startFakeObs({ silent: true });
+  await withNavigator(navStub('granted'), async () => {
+    const t = Date.now();
+    await assert.rejects(connectObs(obs.url, '', false, { timeoutMs: 100, promptTimeoutMs: 5000 }), /WebSocket 服务器设置/);
+    assert.ok(Date.now() - t < 2000, `按常规超时拒掉，实测 ${Date.now() - t}ms`);
+  });
+  await obs.close();
+});
+
+test('两档超时的默认值：常规 8 秒，等权限时至少 60 秒', () => {
+  assert.equal(CONNECT_TIMEOUT_MS, 8000);
+  assert.ok(CONNECT_PROMPT_TIMEOUT_MS >= 60000);
+});
+
 test('握手超时：本地网络权限被拒（denied）时，文案指向站点设置', async () => {
   const obs = await startFakeObs({ silent: true });
   await withNavigator(navStub('denied'), async () => {
-    await assert.rejects(connectObs(obs.url, '', false, 120), (e) => {
+    await assert.rejects(connectObs(obs.url, '', false, { timeoutMs: 120 }), (e) => {
       assert.match(e.message, /已拒绝/);
       assert.match(e.message, /站点设置/);
       return true;
@@ -205,7 +257,7 @@ test('握手超时：本地网络权限被拒（denied）时，文案指向站�
 test('握手超时：浏览器不认识这个权限名（query 抛）时，保留原来的 OBS 文案', async () => {
   const obs = await startFakeObs({ silent: true });
   await withNavigator(navStub('throw'), async () => {
-    await assert.rejects(connectObs(obs.url, '', false, 120), /WebSocket 服务器设置/);
+    await assert.rejects(connectObs(obs.url, '', false, { timeoutMs: 120 }), /WebSocket 服务器设置/);
   });
   await obs.close();
 });
