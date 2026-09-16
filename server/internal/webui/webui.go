@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"mime"
 	"net/http"
+	"strings"
 )
 
 //go:embed all:dist
@@ -27,5 +28,19 @@ func Handler() http.Handler {
 	if err != nil {
 		return nil
 	}
-	return http.FileServer(http.FS(sub))
+	return withCacheControl(http.FileServer(http.FS(sub)))
+}
+
+// withCacheControl 发版后老页面不能再拿旧壳：index.html 这类不带 hash 的入口不给浏览器
+// 做启发式缓存（no-cache = 每次回源校验），带 hash 的 assets/* 内容不变可长缓存。
+// 否则旧 index.html 引用的旧 chunk 已被新版删除，动态导入 404，房间页陷入无限重连。
+func withCacheControl(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/assets/") {
+			w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+		} else {
+			w.Header().Set("Cache-Control", "no-cache")
+		}
+		next.ServeHTTP(w, r)
+	})
 }
