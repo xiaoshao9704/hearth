@@ -20,6 +20,7 @@ import {
   obsAudioSpec,
   obsCaptureToTarget,
   obsMajor,
+  obsPresetVideoSettings,
   obsPlatform,
   obsVideoSpec,
   openObsInputProperties,
@@ -56,6 +57,17 @@ test('主版本号解析：取不到时给 0（不据此判不支持）', () => 
   assert.equal(obsMajor('31.0.0-beta1'), 31);
   assert.equal(obsMajor(''), 0);
   assert.equal(obsMajor('x.y.z'), 0);
+});
+
+test('画质预设：画布与输出一起设成同一档（只改输出等于把小画布放大，白费码率）', () => {
+  assert.deepEqual(obsPresetVideoSettings(1280, 720, 60), {
+    baseWidth: 1280,
+    baseHeight: 720,
+    outputWidth: 1280,
+    outputHeight: 720,
+    fpsNumerator: 60,
+    fpsDenominator: 1,
+  });
 });
 
 test('直播服务设置就是 whip_custom + server + bearer_token', () => {
@@ -373,6 +385,9 @@ const sceneFake = (state) => {
     reply: (d) => {
       const name = d.requestData?.inputName ?? d.requestData?.sourceName;
       if (d.requestType === 'GetSceneList') return { data: { scenes: state.scenes.map((sceneName) => ({ sceneName })) } };
+      if (d.requestType === 'GetVideoSettings')
+        return { data: { baseWidth: 1920, baseHeight: 1080, outputWidth: 1920, outputHeight: 1080, fpsNumerator: 60, fpsDenominator: 1 } };
+      if (d.requestType === 'GetSceneItemId') return items.includes(name) ? { data: { sceneItemId: 7 } } : NOT_FOUND;
       if (d.requestType === 'GetSceneItemList') return { data: { sceneItems: items.map((sourceName) => ({ sourceName })) } };
       if (d.requestType === 'GetInputSettings')
         return inputs[name] ? { data: { inputKind: inputs[name], inputSettings: {} } } : NOT_FOUND;
@@ -622,12 +637,46 @@ test('壳内选中即开播：建源不弹窗 → 指到目标 → 写 WHIP 配�
   });
   assert.equal(note, '');
   await startObsStream(conn, 'https://h.example.com/providers/lkembed/w/7', 'tok');
-  assert.deepEqual(orderOf(obs).slice(-4), [
-    'SetCurrentProgramScene',
+  // 目标落进源 → 按画布适配场景项 → 写 WHIP 配置 → 开播
+  assert.deepEqual(orderOf(obs).slice(-9), [
     'SetInputSettings',
+    'GetVideoSettings',
+    'GetSceneItemId',
+    'SetSceneItemTransform',
+    'GetVideoSettings',
+    'GetSceneItemId',
+    'SetSceneItemTransform',
     'SetStreamServiceSettings',
     'StartStream',
   ]);
+  assert.deepEqual(sentOf(obs, 'SetSceneItemTransform'), [
+    {
+      sceneName: 'Hearth 投屏',
+      sceneItemId: 7,
+      sceneItemTransform: {
+        positionX: 0,
+        positionY: 0,
+        boundsType: 'OBS_BOUNDS_SCALE_INNER',
+        boundsAlignment: 0,
+        boundsWidth: 1920,
+        boundsHeight: 1080,
+      },
+    },
+    // startObsStream 自己再适配一次：浏览器那条路是在 OBS 里选完目标才回来开播的
+    {
+      sceneName: 'Hearth 投屏',
+      sceneItemId: 7,
+      sceneItemTransform: {
+        positionX: 0,
+        positionY: 0,
+        boundsType: 'OBS_BOUNDS_SCALE_INNER',
+        boundsAlignment: 0,
+        boundsWidth: 1920,
+        boundsHeight: 1080,
+      },
+    },
+  ]);
+
   assert.deepEqual(sentOf(obs, 'SetInputSettings'), [
     { inputName: 'Hearth 画面', inputSettings: { type: 2, application: 'com.apple.finder' } },
   ]);
@@ -638,6 +687,16 @@ test('壳内选中即开播：建源不弹窗 → 指到目标 → 写 WHIP 配�
   assert.deepEqual(sentOf(obs, 'OpenInputPropertiesDialog'), []);
   // 让 OBS 自己列清单会把它带走，任何平台都不调
   assert.deepEqual(sentOf(obs, 'GetInputPropertiesListPropertyItems'), []);
+  conn.close();
+  await obs.close();
+});
+
+test('开播前适配画布：场景/源不是本功能建的（取不到场景项）也照样开播', async () => {
+  const obs = await sceneFake({ scenes: ['场景'] }); // 没有 Hearth 场景，GetSceneItemId 回 600
+  const conn = await connectObs(obs.url, '');
+  await startObsStream(conn, 'https://h.example.com/providers/lkembed/w/7', 'tok');
+  assert.deepEqual(sentOf(obs, 'SetSceneItemTransform'), [], '适配不了就跳过');
+  assert.deepEqual(orderOf(obs).slice(-2), ['SetStreamServiceSettings', 'StartStream'], '开播不受影响');
   conn.close();
   await obs.close();
 });

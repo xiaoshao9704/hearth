@@ -218,6 +218,22 @@ export function whipServiceSettings(server: string, token: string): OBSRequestTy
   };
 }
 
+/**
+ * 画质预设要写的 OBS 视频设置：画布（base）与输出（output）一起设成同一个分辨率。
+ * 只改 output 的话，画布若比它小就是把小画面放大到大分辨率再编码，白费码率。
+ * 手动改分辨率那条路仍只动 output——用户可能在画布上摆了自己的布局。
+ */
+export function obsPresetVideoSettings(width: number, height: number, fps: number): OBSRequestTypes['SetVideoSettings'] {
+  return {
+    baseWidth: width,
+    baseHeight: height,
+    outputWidth: width,
+    outputHeight: height,
+    fpsNumerator: fps,
+    fpsDenominator: 1,
+  };
+}
+
 // OBS 配置里的编码器 id → 人话；认不出的原样显示，别把没见过的编码器说成「未知」
 export function encoderLabel(raw: string): string {
   const id = raw.trim();
@@ -466,6 +482,11 @@ export async function obsCaptureToTarget(
     inputName: OBS_VIDEO_INPUT,
     inputSettings: obsVideoSpec(platform, mode, target).inputSettings,
   });
+  // 目标定了才知道画面多大，适应画布只能排在这之后
+  const fitNote = await fitObsSource(c).then(
+    () => '',
+    (e: unknown) => `画面没能自动适配 OBS 画布（${(e as Error).message}），可在 OBS 里选中源按 Ctrl+F。`,
+  );
   const audio = obsAudioSpec(platform, target);
   if (audio) {
     try {
@@ -475,11 +496,41 @@ export async function obsCaptureToTarget(
       if (obsErrorCode(e) !== OBS_CODE_NOT_FOUND) throw e;
     }
   }
-  return note;
+  return [note, fitNote].filter(Boolean).join(' ');
+}
+
+/**
+ * 把画面源「适应屏幕」：按画布尺寸给场景项设 bounds（等价 OBS 里的 Ctrl+F），
+ * 保持宽高比、居中、放不下就留黑边而不是裁切。
+ *
+ * 不做这一步的话场景项是 1:1 摆在左上角：4K 屏进 1080p 画布，观众只看得到左上角四分之一。
+ * 源的真实尺寸要等目标选定才知道，所以只能在源指到目标之后调。
+ */
+export async function fitObsSource(c: ObsConn): Promise<void> {
+  const video = await c.request('GetVideoSettings');
+  const { sceneItemId } = await c.request('GetSceneItemId', {
+    sceneName: OBS_SCENE,
+    sourceName: OBS_VIDEO_INPUT,
+  });
+  await c.request('SetSceneItemTransform', {
+    sceneName: OBS_SCENE,
+    sceneItemId,
+    sceneItemTransform: {
+      positionX: 0,
+      positionY: 0,
+      boundsType: 'OBS_BOUNDS_SCALE_INNER', // 按内接缩放 = 保持宽高比
+      boundsAlignment: 0, // OBS_ALIGN_CENTER
+      boundsWidth: video.baseWidth,
+      boundsHeight: video.baseHeight,
+    },
+  });
 }
 
 /** 把 hearth 的 WHIP 地址与令牌写进 OBS 的直播服务设置并开播 */
 export async function startObsStream(c: ObsConn, server: string, token: string): Promise<void> {
+  // 浏览器那条路是用户在 OBS 的属性窗口里选完目标才回来点开播的，适配只能赶在这会儿做；
+  // 场景/源不是本功能建的（用户用自己的场景推）就什么都别管，更不能挡住开播。
+  await fitObsSource(c).catch(() => {});
   await c.request('SetStreamServiceSettings', whipServiceSettings(server, token));
   await c.request('StartStream');
 }

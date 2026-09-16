@@ -9,6 +9,7 @@ import {
   OBS_WHIP_MIN_MAJOR,
   OBS_WS_DEFAULT_URL,
   obsMajor,
+  obsPresetVideoSettings,
   startObsStream,
   type ObsConn,
   type ObsStreamStatus,
@@ -293,12 +294,7 @@ export const ObsLink = (p: {
 
   const applyPreset = (preset: (typeof PRESETS)[number]) =>
     void run('quality', async (c) => {
-      await setVideoBits(c, {
-        outputWidth: preset.w,
-        outputHeight: preset.h,
-        fpsNumerator: preset.fps,
-        fpsDenominator: 1,
-      });
+      await c.request('SetVideoSettings', obsPresetVideoSettings(preset.w, preset.h, preset.fps));
       setVideo(await c.request('GetVideoSettings'));
       if (!advOut()) {
         await writeBitrate(c, preset.kbps);
@@ -476,6 +472,7 @@ export const ObsLink = (p: {
             </label>
           </div>
 
+          <div class="ig-tip">分辨率与帧率只改输出；下面的预设会同时把 OBS 的画布分辨率调成同一档。</div>
           <div class="obs-presets">
             <For each={PRESETS}>
               {(preset) => (
