@@ -40,7 +40,7 @@ import type { LatencyState } from './room/latency-result';
 import { IngestBadge } from './room/ingest-badge';
 import { IngestPanel } from './room/ingest-panel';
 import { NativeSourcePanel } from './room/native-source-panel';
-import { connectStoredObs, OBS_SETUP_HINT, obsCaptureBlocker, ObsScreenPanel } from './room/obs-capture';
+import { connectStoredObs, OBS_READY_EVENT, OBS_SETUP_HINT, obsCaptureBlocker, ObsScreenPanel } from './room/obs-capture';
 import { createUnreadMarker } from './room/unread-divider';
 import { showMsgMenu } from './room/msg-menu';
 import { mergeReaction, ReactionBar } from './room/reactions';
@@ -1506,11 +1506,14 @@ export async function renderRoom(root: HTMLElement, channel: string) {
     setObsStatus(null);
     setObsPick(false);
   };
-  void (async () => {
+  let obsDialing = false; // 只防同时发两次握手，连接态本身仍只看 obsConn
+  async function dialObs() {
+    if (obsDialing || obsConn()?.alive || leaving) return;
+    obsDialing = true;
     try {
       const c = await connectStoredObs();
       if (!c) return;
-      if (leaving) return c.close();
+      if (leaving || obsConn()?.alive) return c.close();
       const ver = await c.request('GetVersion');
       if (obsCaptureBlocker(obsPlatform(ver.platform), ver.obsVersion)) return c.close();
       c.onLost = dropObs;
@@ -1528,8 +1531,14 @@ export async function renderRoom(root: HTMLElement, channel: string) {
       obsPoll = setInterval(() => void poll(), 2000);
     } catch {
       /* OBS 没开或密码变了：静默降级，不弹提示打扰只想用浏览器投屏的人 */
+    } finally {
+      obsDialing = false;
     }
-  })();
+  }
+  void dialObs();
+  // 设置里刚把 OBS 联动配通：不用退出重进也能拿到「通过 OBS 投屏」
+  const onObsReady = () => void dialObs();
+  window.addEventListener(OBS_READY_EVENT, onObsReady);
   // 源建好了：目标由用户在 OBS 弹出的属性窗口里选，选完回「OBS 推流」面板点开播。
   // 这一步不写直播服务设置、不 StartStream——这会儿画面里投的还不知道是什么。
   function obsCaptureReady() {
@@ -3486,6 +3495,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
       // 原生发布在壳的进程里，不随页面卸载停：离房必须显式收回
       if (nativeScreen() && screenOn()) void stopPublish().catch(() => {});
       // OBS 那条推流是 OBS 自己的进程在推，离房不替用户停；这里只收回本页的连接与轮询
+      window.removeEventListener(OBS_READY_EVENT, onObsReady);
       clearInterval(obsPoll);
       obsConn()?.close();
       unlistenPublish?.();

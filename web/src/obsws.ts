@@ -59,6 +59,30 @@ const callText = (what: string, e: unknown): string => {
   return `${what} 失败：${(e as Error | undefined)?.message ?? '未知错误'}`;
 };
 
+// Chrome 142+ 把 https 页面访问 localhost/私网纳入 Local Network Access 权限：用户没点「允许」
+// 之前 WebSocket 会一直停在 CONNECTING，表现就是我们这边超时。此时把人引去查 OBS 的设置是错的，
+// 所以超时文案要按权限态分流。权限名是新的，不认识它的浏览器（以及 node）query 会抛，一律当 unknown。
+export type LnaState = 'granted' | 'denied' | 'prompt' | 'unknown';
+
+export async function localNetworkState(): Promise<LnaState> {
+  try {
+    const st = await navigator.permissions.query({ name: 'local-network-access' as PermissionName });
+    return st.state === 'granted' || st.state === 'denied' || st.state === 'prompt' ? st.state : 'unknown';
+  } catch {
+    return 'unknown';
+  }
+}
+
+const TIMEOUT_OBS = '连接 OBS 超时：确认 OBS 已开启「工具 → WebSocket 服务器设置」并勾选启用';
+
+export function connectTimeoutText(lna: LnaState): string {
+  if (lna === 'prompt')
+    return '连接 OBS 超时：Chrome 正在询问是否允许本站访问本地网络，请在地址栏旁的提示里点「允许」后重试';
+  if (lna === 'denied')
+    return '连接 OBS 超时：Chrome 已拒绝本站访问本地网络，请在地址栏的站点设置里把「本地网络访问」改为允许后重试';
+  return TIMEOUT_OBS;
+}
+
 export type ObsVersion = OBSResponseTypes['GetVersion'];
 export type ObsStreamStatus = OBSResponseTypes['GetStreamStatus'];
 export type ObsVideoSettings = OBSResponseTypes['GetVideoSettings'];
@@ -139,18 +163,26 @@ export async function connectObs(
   const bad = checkObsWsUrl(url, allowPrivate);
   if (bad) throw new Error(bad);
   const ws = new OBSWebSocket();
+  // 连接前先记一次权限态：发起连接本身会让 Chrome 弹提示，事后再查分不清「浏览器不认识这个权限」
+  // 与「认识但还没批」。取不到新鲜结果时就用这一份兜底。
+  const before = localNetworkState();
   let timer: ReturnType<typeof setTimeout> | undefined;
+  let timedOut = false;
   const timeout = new Promise<never>((_, rej) => {
-    timer = setTimeout(
-      () => rej(new Error('连接 OBS 超时：确认 OBS 已开启「工具 → WebSocket 服务器设置」并勾选启用')),
-      timeoutMs,
-    );
+    timer = setTimeout(() => {
+      timedOut = true;
+      rej(new Error(TIMEOUT_OBS));
+    }, timeoutMs);
   });
   timeout.catch(() => {});
   try {
     await Promise.race([ws.connect(url.trim(), password, { rpcVersion: OBS_RPC_VERSION }), timeout]);
   } catch (e) {
     void ws.disconnect().catch(() => {});
+    if (timedOut) {
+      const now = await localNetworkState();
+      throw new Error(connectTimeoutText(now === 'unknown' ? await before : now));
+    }
     throw new Error(connectText(e, password !== ''));
   } finally {
     clearTimeout(timer);

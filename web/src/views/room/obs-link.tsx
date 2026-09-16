@@ -15,7 +15,15 @@ import {
   type ObsVersion,
   type ObsVideoSettings,
 } from '../../obsws';
-import { LS_OBS_PASSWORD, LS_OBS_READY, LS_OBS_URL, obsLsGet, obsLsSet, ObsCaptureSection } from './obs-capture';
+import {
+  LS_OBS_PASSWORD,
+  LS_OBS_READY,
+  LS_OBS_URL,
+  OBS_READY_EVENT,
+  obsLsGet,
+  obsLsSet,
+  ObsCaptureSection,
+} from './obs-capture';
 import { confirmDialog, el, icon, toast } from '../../ui';
 
 const fmtDur = (ms: number): string => {
@@ -138,6 +146,8 @@ export const ObsLink = (p: {
     // 连通过一次才算「这台设备配过 OBS 联动」：房间页据此决定要不要自动连，
     // 没配过的人不该被去敲一遍 localhost:4455。
     obsLsSet(LS_OBS_READY, '1');
+    // 房间页只在进房时自动连一次，首次在这里配好的得靠这一声才不用退出重进
+    window.dispatchEvent(new CustomEvent(OBS_READY_EVENT));
     if (!poll) poll = setInterval(() => void refresh(), 2000);
     applyStatus(await c.request('GetStreamStatus'));
     // 画质是附加能力：读不到（老 obs-websocket、profile 参数缺失）也不该挡住推流那条主路
@@ -335,7 +345,7 @@ export const ObsLink = (p: {
           type="button"
           id="obs-test"
           class="hit btn btn-sm"
-          classList={{ loading: busy() === 'test' }}
+          classList={{ loading: busy() === 'test', 'btn-primary': !conn() }}
           disabled={busy() !== ''}
           onClick={test}
         >
@@ -344,12 +354,16 @@ export const ObsLink = (p: {
         <button
           type="button"
           id="obs-start"
-          class="hit btn btn-sm btn-primary"
-          classList={{ loading: busy() === 'start' }}
+          class="hit btn btn-sm"
+          // 未连接时它仍然可点（点了会先握手），但主按钮让给「测试连接」：
+          // 连不上时错误只会从这里冒出来，不如让人先按那条更短的路。
+          classList={{ loading: busy() === 'start', 'btn-primary': !!conn() }}
           disabled={busy() !== '' || !p.server() || !p.token()}
+          title={conn() ? '' : '还没连上 OBS，点这里会先连一次再配置推流'}
           onClick={start}
         >
-          {el(icon('stream', 13, 'var(--on-ember)', 1.9))} 配置并开始推流
+          {/* 主次样式会随连接态切换，图标跟着按钮文字色走 */}
+          {el(icon('stream', 13, 'currentColor', 1.9))} 配置并开始推流
         </button>
         <button
           type="button"

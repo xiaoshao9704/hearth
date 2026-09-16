@@ -23,6 +23,9 @@ export const LS_OBS_PASSWORD = 'hearth_obsws_password';
 // 「这台设备上的 OBS 联动确实连通过」：房间页据此才去自动连一条，
 // 否则每个开房间的人都会去敲一遍 localhost:4455。
 export const LS_OBS_READY = 'hearth_obsws_ready';
+// 「OBS 联动」刚连通（LS_OBS_READY 刚写上）时派给 window：房间页据此补连一条，
+// 否则首次配好的人得退出重进才看得到「通过 OBS 投屏」。
+export const OBS_READY_EVENT = 'hearth:obs-ready';
 
 /** 建完源之后该怎么办：两处入口说的是同一句话 */
 export const OBS_SETUP_HINT = '已在 OBS 里打开源属性窗口：选好要投的应用后回来点「配置并开始推流」。';

@@ -12,6 +12,7 @@ import {
   applyObsCapture,
   checkObsWsUrl,
   connectObs,
+  connectTimeoutText,
   encoderLabel,
   ensureObsScene,
   obsAudioSetupSpec,
@@ -152,6 +153,66 @@ test('握手超时：服务器不回 Hello 时到点 reject', async () => {
   const obs = await startFakeObs({ silent: true });
   await assert.rejects(connectObs(obs.url, '', false, 120), /超时/);
   await obs.close();
+});
+
+// Chrome 142+ 的 Local Network Access：没批权限时 WebSocket 一直 CONNECTING，最后表现成我们的超时。
+// 浏览器没有的东西在 node 里靠桩：navigator.permissions.query 三种结果各验一次文案。
+const withNavigator = async (stub, fn) => {
+  const had = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+  Object.defineProperty(globalThis, 'navigator', { value: stub, configurable: true, writable: true });
+  try {
+    await fn();
+  } finally {
+    if (had) Object.defineProperty(globalThis, 'navigator', had);
+    else delete globalThis.navigator;
+  }
+};
+const navStub = (state) => ({
+  permissions: {
+    query: async ({ name }) => {
+      assert.equal(name, 'local-network-access', '只问这一个权限');
+      if (state === 'throw') throw new TypeError(`Unknown permission name: ${name}`); // 老浏览器不认识这个名字
+      return { state };
+    },
+  },
+});
+
+test('握手超时：本地网络权限还没批（prompt）时，文案指向 Chrome 的允许提示', async () => {
+  const obs = await startFakeObs({ silent: true });
+  await withNavigator(navStub('prompt'), async () => {
+    await assert.rejects(connectObs(obs.url, '', false, 120), (e) => {
+      assert.match(e.message, /本地网络/);
+      assert.match(e.message, /允许/);
+      assert.doesNotMatch(e.message, /WebSocket 服务器设置/, '别再把人引去查 OBS 的设置');
+      return true;
+    });
+  });
+  await obs.close();
+});
+
+test('握手超时：本地网络权限被拒（denied）时，文案指向站点设置', async () => {
+  const obs = await startFakeObs({ silent: true });
+  await withNavigator(navStub('denied'), async () => {
+    await assert.rejects(connectObs(obs.url, '', false, 120), (e) => {
+      assert.match(e.message, /已拒绝/);
+      assert.match(e.message, /站点设置/);
+      return true;
+    });
+  });
+  await obs.close();
+});
+
+test('握手超时：浏览器不认识这个权限名（query 抛）时，保留原来的 OBS 文案', async () => {
+  const obs = await startFakeObs({ silent: true });
+  await withNavigator(navStub('throw'), async () => {
+    await assert.rejects(connectObs(obs.url, '', false, 120), /WebSocket 服务器设置/);
+  });
+  await obs.close();
+});
+
+test('超时文案：granted 与探测不出来时都是原来那句', () => {
+  assert.match(connectTimeoutText('granted'), /WebSocket 服务器设置/);
+  assert.match(connectTimeoutText('unknown'), /WebSocket 服务器设置/);
 });
 
 test('地址不合法时根本不建连', async () => {
