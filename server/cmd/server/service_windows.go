@@ -19,6 +19,7 @@ import (
 	"hearth/server/internal/config"
 	"hearth/server/internal/store"
 
+	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/svc"
 	"golang.org/x/sys/windows/svc/mgr"
 )
@@ -132,7 +133,7 @@ func svcUninstall(cfg config.Config, system bool) error {
 func svcStart(system bool) error {
 	m, err := mgr.Connect()
 	if err != nil {
-		return err
+		return errors.New("连不上服务管理器（需要管理员权限运行 start）: " + err.Error())
 	}
 	defer m.Disconnect()
 	s, err := m.OpenService(serviceName)
@@ -150,7 +151,7 @@ func svcStart(system bool) error {
 func svcStop(system bool) error {
 	m, err := mgr.Connect()
 	if err != nil {
-		return err
+		return errors.New("连不上服务管理器（需要管理员权限运行 stop）: " + err.Error())
 	}
 	defer m.Disconnect()
 	s, err := m.OpenService(serviceName)
@@ -165,16 +166,23 @@ func svcStop(system bool) error {
 	return nil
 }
 
+// svcState 只读，所以不走 mgr.Connect：那个要 SC_MANAGER_ALL_ACCESS（只有管理员拿得到），
+// 而「装没装、在不在跑」是桌面壳每次开界面都要问的，不该为此要提权。
 func svcState(system bool) (serviceState, error) {
-	m, err := mgr.Connect()
+	scm, err := windows.OpenSCManager(nil, nil, windows.SC_MANAGER_CONNECT)
 	if err != nil {
 		return serviceState{}, err
 	}
-	defer m.Disconnect()
-	s, err := m.OpenService(serviceName)
+	defer windows.CloseServiceHandle(scm)
+	name, err := windows.UTF16PtrFromString(serviceName)
 	if err != nil {
-		return serviceState{}, nil
+		return serviceState{}, err
 	}
+	h, err := windows.OpenService(scm, name, windows.SERVICE_QUERY_STATUS)
+	if err != nil {
+		return serviceState{}, nil // 打不开就当未安装，与旧行为一致
+	}
+	s := &mgr.Service{Name: serviceName, Handle: h}
 	defer s.Close()
 	st, err := s.Query()
 	if err != nil {

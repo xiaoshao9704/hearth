@@ -40,6 +40,9 @@ try {
     if ($setup.ExitCode -ne 0) { throw "NSIS 静默安装失败：exit=$($setup.ExitCode)" }
     $exe = Join-Path $install 'hearth-desktop.exe'
     if (-not (Test-Path $exe)) { throw "安装后找不到主程序：$exe" }
+    # sidecar 是「在本机运行服务器」的前提：没装进来这项能力在界面上直接消失，不报错也不提示。
+    $sidecar = Join-Path $install 'hearth.exe'
+    if (-not (Test-Path $sidecar)) { throw "安装后找不到服务端 sidecar：$sidecar" }
 
     # 不继承构建机 SDK、全局 GStreamer PATH、插件路径或注册表缓存。
     foreach ($entry in $variables) { [Environment]::SetEnvironmentVariable($entry.Name, $null, 'Process') }
