@@ -108,5 +108,16 @@ test('累计：本地面板的总数逐次相加', () => {
   let t = emptyWatchTotals();
   t = addWatch(t, sample({ freezes: 1, freeze_ms: 300, keyframes: 2, lost: 5, pli: 1, nack: 2 }));
   t = addWatch(t, sample({ freezes: 2, freeze_ms: 700, keyframes: 1, lost: 3, pli: 0, nack: 1 }));
-  assert.deepEqual(t, { samples: 2, freezes: 3, freeze_ms: 1000, keyframes: 3, lost: 8, pli: 1, nack: 3 });
+  // 前半是累计，后半（kbps/fps/宽高）是最近一次采样的瞬时值，只覆盖不相加
+  assert.deepEqual(t, {
+    samples: 2, freezes: 3, freeze_ms: 1000, keyframes: 3, lost: 8, pli: 1, nack: 3,
+    kbps: 1000, fps: 30, width: 1920, height: 1080,
+  });
+  // 瞬时值跟着最后一次采样走
+  t = addWatch(t, sample({ kbps: 4200, fps: 59, width: 1280, height: 720 }));
+  assert.deepEqual(
+    { kbps: t.kbps, fps: t.fps, width: t.width, height: t.height },
+    { kbps: 4200, fps: 59, width: 1280, height: 720 },
+  );
+  assert.equal(t.samples, 3, '累计项照常累加');
 });
