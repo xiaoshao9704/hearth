@@ -794,11 +794,26 @@ export interface SiteInfo {
   policy: string;
   tls_source: 'off' | 'self' | 'file' | 'upload'; // 当前生效的证书来源
   http_port: number; // ADDR 的端口号；合并模式下与页面端口相同
+  watch_diag: boolean; // 观看诊断总开关（服务端 cfg_watch_diag），客户端只听这一份
 }
 
 // 登录页与邀请页只需要站点名和注册策略；首启流程不在本发布线。
 export function siteInfo(): Promise<SiteInfo> {
   return req('/api/site');
+}
+
+// 房间里多处要站点配置（观看诊断开关、拼 WHIP 地址），共用同一次请求。
+// 取舍：一次页面生命周期内只取一次，管理员在后台改完要刷新或重新进房才生效——
+// 为一个排查用的开关加轮询或推送不值当。失败不留缓存，下次调用重试。
+let sitePromise: Promise<SiteInfo> | null = null;
+export function siteInfoCached(): Promise<SiteInfo> {
+  if (!sitePromise) {
+    sitePromise = siteInfo().catch((e) => {
+      sitePromise = null;
+      throw e;
+    });
+  }
+  return sitePromise;
 }
 
 // ---- 管理后台 ----

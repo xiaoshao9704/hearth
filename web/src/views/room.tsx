@@ -9,7 +9,7 @@ import { createEffect, createMemo, createSignal, on, onCleanup, untrack, For, Sh
 import { render } from 'solid-js/web';
 import { closeAccountMenu, openAccountMenu } from '../account-menu';
 import { startAfkWatch } from '../afk';
-import { ApiError, deviceId, fetchJoinCredentials, getCastTicket, getIngestToken, getUser, guestTimeLeft, isGuest, kickUser, listChannels, muteUser, reportClientLog, siteInfo } from '../api';
+import { ApiError, deviceId, fetchJoinCredentials, getCastTicket, getIngestToken, getUser, guestTimeLeft, isGuest, kickUser, listChannels, muteUser, reportClientLog, siteInfoCached } from '../api';
 import type { ChannelRole, DataLine, EngineCred } from '../api';
 import { playCue } from '../audio';
 import { capabilities, encoderDisplayName, listSources, onPublishState, startPublish, stopPublish, updatePublish } from '../bridge';
@@ -28,7 +28,7 @@ import { clearLeaveGuard, setLeaveGuard } from '../nav';
 import { obsPlatform, startObsStream } from '../obsws';
 import type { ObsConn, ObsStreamStatus, ObsVersion } from '../obsws';
 import { encoderIsHw, loadPrefs, prefsBus, RES_DIMS, savePrefs } from '../prefs';
-import { addWatch, diffWatch, emptyWatchTotals, shouldReportWatch, watchDiagOn, watchLevel } from '../watchdiag';
+import { addWatch, diffWatch, emptyWatchTotals, shouldReportWatch, watchLevel } from '../watchdiag';
 import type { WatchTotals } from '../watchdiag';
 import { notifyJoin, notifyMessage } from '../notify';
 import { renderShell } from '../shell';
@@ -377,9 +377,13 @@ export async function renderRoom(root: HTMLElement, channel: string) {
   const [latency, setLatency] = createSignal<LatencyState | null>(null);
   let connAnchor: HTMLElement | null = null; // 面板的定位锚（点开那一下的 chip 元素）
 
-  // 观看诊断开关（localStorage，设置页改完经 prefsBus 通知）与进房以来的累计读数；
-  // 关着时 totals 为 null，面板那一行连同采集一起消失
-  const [watchDiag, setWatchDiag] = createSignal(watchDiagOn());
+  // 观看诊断开关由服务端统一下发（cfg_watch_diag → /api/site 的 watch_diag），不是每人一份的
+  // 本地开关：管理员在后台改完，客户端下次进房或刷新生效——不为一个排查开关做实时推送。
+  // 关着（含站点配置没取到）时 totals 为 null，面板那一行连同采集一起消失
+  const [watchDiag, setWatchDiag] = createSignal(false);
+  void siteInfoCached()
+    .then((site) => setWatchDiag(site.watch_diag === true))
+    .catch(() => {});
   const [watchTotals, setWatchTotals] = createSignal<WatchTotals | null>(null);
   const watchLine = (): string => {
     const t = watchTotals();
@@ -1586,7 +1590,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
     if (!c?.alive) throw new Error('OBS 连接已断开，请重新配置 OBS 联动');
     const id = channelId();
     if (!id) throw new Error('频道还没就绪，稍等一下再试');
-    const [info, site] = await Promise.all([getIngestToken(), siteInfo().catch(() => null)]);
+    const [info, site] = await Promise.all([getIngestToken(), siteInfoCached().catch(() => null)]);
     const server = whipServer(info, site, id);
     if (!server || !info.token) throw new Error('推流地址还没拿到，稍等一下再试');
     await startObsStream(c, server, info.token);
@@ -2148,7 +2152,6 @@ export async function renderRoom(root: HTMLElement, channel: string) {
   // ---- 设置页偏好热应用 ----
   const onPrefs = async (ev: Event) => {
     const what = (ev as CustomEvent).detail as string;
-    if (what === 'watchdiag') setWatchDiag(watchDiagOn());
     if (what === 'volume' || what === 'speaker') applyAudioPrefs();
     if (what === 'mirror') {
       const id = stageEngine()?.localIdentity() ?? '';
@@ -3530,7 +3533,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
     lineDiagTimer = window.setInterval(() => void lineDiag(), 60000);
   }, 10000);
 
-  // ---- 观看诊断（默认关，开关在设置的「投屏画质」）----
+  // ---- 观看诊断（默认关，开关在管理后台的 watch_diag）----
   // 观众侧秒级采样：60 秒一条的 line_stats 落不进几秒的冻结。开关关着时这里一个定时器都不建，
   // 也就一次 getStats 都不多调；开着时也只在房间里真有别人的投屏轨时才读。
   const watchState = new Map<string, { prev: WatchCounters; reportedAt: number }>();
