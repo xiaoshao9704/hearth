@@ -16,6 +16,7 @@ import {
   connectTimeoutText,
   encoderLabel,
   ensureObsScene,
+  listObsWindows,
   obsAudioSetupSpec,
   obsAudioSpec,
   obsCaptureToTarget,
@@ -26,6 +27,7 @@ import {
   obsVideoSpec,
   openObsInputProperties,
   setupObsCapture,
+  splitObsWindowLabel,
   startObsStream,
   whipServiceSettings,
 } from './tmp/obsws.js';
@@ -427,6 +429,9 @@ const sceneFake = (state) => {
         return {};
       }
       if (d.requestType === 'SetInputSettings' && !inputs[name]) return NOT_FOUND;
+      // 属性清单：state.props 按属性名给列表项，没配的属性一律空（真 OBS 会回空列表）
+      if (d.requestType === 'GetInputPropertiesListPropertyItems')
+        return { data: { propertyItems: state.props?.[d.requestData.propertyName] ?? [] } };
       // 老版本 obs-websocket 没有这个请求，回 UnknownRequestType
       if (d.requestType === 'OpenInputPropertiesDialog' && state.noDialog)
         return { status: { result: false, code: 204, comment: 'Unknown request type' } };
@@ -552,7 +557,7 @@ test('建采集源：macOS 只建画面一个源 → 切场景 → 弹属性窗�
     ['Hearth 声音'],
     '老场景里残留的声音源清掉，不存在（600）不算错',
   );
-  // 目标一概不预设：浏览器里 hearth 不枚举窗口清单（那会把 OBS 带走），也就没有 SetInputSettings
+  // 「到 OBS 里自己选」这条路目标一概不预设，也不枚举属性清单
   assert.deepEqual(sentOf(obs, 'GetInputPropertiesListPropertyItems'), []);
   assert.deepEqual(sentOf(obs, 'SetInputSettings'), []);
   conn.close();
@@ -608,8 +613,9 @@ test('单独弹声音源的属性窗口', async () => {
   await obs.close();
 });
 
-// ---- 壳内「选中即开播」 ----
-// 清单由桌面壳给（bridge 的 listObsTargets），网页一概不调 OBS 的属性清单请求。
+// ---- 从清单里选中即开播 ----
+// 清单两个来源：桌面壳（bridge 的 listObsTargets）与 OBS 自己（listObsWindows，只有 macOS）。
+// 属性清单请求只许打 screen_capture 的 window：application/display_uuid 的占位项是空指针，会崩 OBS。
 
 test('画面源规格带目标时的键名（Windows 串、macOS 窗口是数字）', () => {
   const t = { kind: 'window', label: 'Game', value: '某游戏:UnrealWindow:game.exe' };
@@ -635,7 +641,7 @@ test('声音源按目标取声：只有 Windows 有这么一个源', () => {
   assert.equal(obsAudioSpec('other', { kind: 'app', label: 'x', value: 'x' }), null);
 });
 
-test('壳内选中：指到目标 → 适配画布 → 弹一次确认窗口 → 写 WHIP 配置 → 开播', async () => {
+test('选中即开播：指到目标 → 适配画布 → 写 WHIP 配置 → 开播，全程不弹属性窗口', async () => {
   const obs = await sceneFake({ scenes: ['Hearth 投屏'] });
   const conn = await connectObs(obs.url, '');
   // UI 就是这个顺序：选中目标先落进源，再拿本频道的地址与令牌开播
@@ -644,16 +650,15 @@ test('壳内选中：指到目标 → 适配画布 → 弹一次确认窗口 →
     label: '访达',
     value: 'com.apple.finder',
   });
-  // macOS 上只写设置的源不出帧，属性窗口是功能必需，所以这里必然带一句提示
-  assert.match(note, /确认后关掉它/);
+  // 目标已经替用户选好，没别的要交代
+  assert.equal(note, '');
   await startObsStream(conn, 'https://h.example.com/providers/lkembed/w/7', 'tok');
-  // 目标落进源 → 按画布适配场景项 → 弹确认窗口 → 开播前再适配一次 → 写 WHIP 配置 → 开播
-  assert.deepEqual(orderOf(obs).slice(-10), [
+  // 目标落进源 → 按画布适配场景项 → 开播前再适配一次 → 写 WHIP 配置 → 开播
+  assert.deepEqual(orderOf(obs).slice(-9), [
     'SetInputSettings',
     'GetVideoSettings',
     'GetSceneItemId',
     'SetSceneItemTransform',
-    'OpenInputPropertiesDialog',
     'GetVideoSettings',
     'GetSceneItemId',
     'SetSceneItemTransform',
@@ -695,9 +700,9 @@ test('壳内选中：指到目标 → 适配画布 → 弹一次确认窗口 →
   assert.deepEqual(sentOf(obs, 'SetStreamServiceSettings'), [
     whipServiceSettings('https://h.example.com/providers/lkembed/w/7', 'tok'),
   ]);
-  // macOS 例外：只写设置的源一帧都不出，属性窗口是让 SCK 重建可共享内容列表的唯一安全手段
-  assert.deepEqual(sentOf(obs, 'OpenInputPropertiesDialog'), [{ inputName: 'Hearth 画面' }]);
-  // 让 OBS 自己列清单会把它带走，任何平台都不调
+  // 投什么已经定了，再把 OBS 拉到前台只会挡住人
+  assert.deepEqual(sentOf(obs, 'OpenInputPropertiesDialog'), []);
+  // 清单是上一步（listObsWindows）拉的，这一步不再枚举
   assert.deepEqual(sentOf(obs, 'GetInputPropertiesListPropertyItems'), []);
   conn.close();
   await obs.close();
@@ -754,18 +759,79 @@ test('macOS 的画面源必须带 display_uuid：应用采集底层也要绑显�
   assert.equal('display_uuid' in obsVideoSpec('windows', 'game', null, 'UUID-1').inputSettings, false);
 });
 
-test('macOS 选好目标后仍要开一次属性窗口：只写设置的源不出帧', async () => {
+test('选好目标后哪个平台都不弹属性窗口：SCK 的内容列表由列窗口那一步顺带重建', async () => {
   const obs = await sceneFake({ scenes: ['Hearth 投屏'], items: [] });
   const conn = await connectObs(obs.url, '');
-  const note = await obsCaptureToTarget(conn, 'macos', 'window', { kind: 'app', label: '访达', value: 'com.apple.finder' });
-  assert.deepEqual(sentOf(obs, 'OpenInputPropertiesDialog'), [{ inputName: 'Hearth 画面' }]);
-  assert.match(note, /确认后关掉它/);
-  // Windows 不需要这一步
+  const note = await obsCaptureToTarget(conn, 'macos', 'window', { kind: 'window', label: '[访达] 下载', value: 42 });
+  assert.deepEqual(sentOf(obs, 'OpenInputPropertiesDialog'), []);
+  assert.equal(note, '');
   const obs2 = await sceneFake({ scenes: ['Hearth 投屏'], items: [] });
   const conn2 = await connectObs(obs2.url, '');
   await obsCaptureToTarget(conn2, 'windows', 'game', { kind: 'window', label: 'x', value: 'a:b:c' });
   assert.deepEqual(sentOf(obs2, 'OpenInputPropertiesDialog'), []);
   conn.close(); await obs.close(); conn2.close(); await obs2.close();
+});
+
+test('列窗口：滤掉占位项/空名/禁用项，且只枚举 window 这一个属性', async () => {
+  const obs = await sceneFake({
+    scenes: ['Hearth 投屏'],
+    props: {
+      window: [
+        { itemName: ' ', itemValue: 0, itemEnabled: true }, // OBS 给「未选择」留的占位项
+        { itemName: '[OBS Studio] OBS 32.1.2 - 场景: 未命名', itemValue: 101, itemEnabled: true },
+        { itemName: '', itemValue: 102, itemEnabled: true }, // 名字空的不给用户看
+        { itemName: '[控制中心] Clock', itemValue: 103, itemEnabled: false }, // OBS 标了不可选
+        { itemName: '[控制中心] Clock', itemValue: 104, itemEnabled: true },
+        { itemName: '没有方括号前缀的窗口', itemValue: 105, itemEnabled: true },
+        { itemName: '[访达] 下载', itemValue: null, itemEnabled: true }, // 值取不到
+      ],
+    },
+  });
+  const conn = await connectObs(obs.url, '');
+  assert.deepEqual(await listObsWindows(conn, 'macos'), [
+    { kind: 'window', label: '[OBS Studio] OBS 32.1.2 - 场景: 未命名', value: 101 },
+    { kind: 'window', label: '[控制中心] Clock', value: 104 },
+    { kind: 'window', label: '没有方括号前缀的窗口', value: 105 },
+  ]);
+  // application / display_uuid 是字符串格式的列表、占位项是空指针，枚举它们会让 OBS 段错误
+  assert.deepEqual(
+    sentOf(obs, 'GetInputPropertiesListPropertyItems').map((d) => d.propertyName),
+    ['window'],
+  );
+  // 属性清单挂在源上，所以源要先建；但列个清单不该把 OBS 拉到前台、也不该切用户的场景
+  assert.deepEqual(
+    sentOf(obs, 'CreateInput').map((d) => d.inputName),
+    ['Hearth 画面'],
+  );
+  assert.deepEqual(sentOf(obs, 'OpenInputPropertiesDialog'), []);
+  assert.deepEqual(sentOf(obs, 'SetCurrentProgramScene'), []);
+  conn.close();
+  await obs.close();
+});
+
+test('列窗口：只有 macOS 走这条，别的平台返回空数组且一个请求都不发', async () => {
+  const obs = await sceneFake({ scenes: ['Hearth 投屏'], props: { window: [{ itemName: 'x', itemValue: 1 }] } });
+  const conn = await connectObs(obs.url, '');
+  for (const plat of ['windows', 'other']) {
+    assert.deepEqual(await listObsWindows(conn, plat), [], plat);
+  }
+  // Windows 的 window_capture/game_capture 属性清单是字符串格式的，没验过空指针占位项，一概不碰
+  assert.deepEqual(orderOf(obs), []);
+  conn.close();
+  await obs.close();
+});
+
+test('窗口条目名拆成「应用 + 标题」：认不出前缀的原样保留，不丢条目', () => {
+  assert.deepEqual(splitObsWindowLabel('[控制中心] Clock'), { app: '控制中心', title: 'Clock' });
+  assert.deepEqual(splitObsWindowLabel('[OBS Studio] OBS 32.1.2 - 配置文件: hearth-test - 场景: 未命名'), {
+    app: 'OBS Studio',
+    title: 'OBS 32.1.2 - 配置文件: hearth-test - 场景: 未命名',
+  });
+  assert.deepEqual(splitObsWindowLabel('[Xcode] [main] App.swift'), { app: 'Xcode', title: '[main] App.swift' });
+  assert.deepEqual(splitObsWindowLabel('[访达]'), { app: '访达', title: '无标题窗口' });
+  assert.deepEqual(splitObsWindowLabel('某个窗口'), { app: '', title: '某个窗口' });
+  assert.deepEqual(splitObsWindowLabel('[] 只有空括号'), { app: '', title: '[] 只有空括号' });
+  assert.deepEqual(splitObsWindowLabel('com.apple.finder'), { app: '', title: 'com.apple.finder' });
 });
 
 test('编码器候选：按平台给，认不出的平台给空（界面据此只回显）', () => {

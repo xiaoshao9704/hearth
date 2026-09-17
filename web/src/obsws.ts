@@ -275,9 +275,9 @@ export function obsEncoderChoices(platform: ObsPlatform): Array<{ value: string;
 }
 
 // ---- 在 OBS 里建采集源 ----
-// 「投哪个应用/窗口」不由 hearth 枚举再替用户选，而是把源建出来后弹 OBS 自己的属性窗口，
-// 让用户在 OBS 里选：obs-websocket 5.7.3 枚举 macOS screen_capture 的 application/window
-// 会让 OBS 整个段错误（实测 OBS 32.1.2 两次复现，崩在插件内的 _platform_strlen）。
+// 「投哪个应用/窗口」有三条路，优先级与可见条件写在 obs-capture.tsx 的 ObsCaptureSection：
+// 桌面壳给的清单（listObsTargets，应用级）、问 OBS 要窗口清单（listObsWindows，只有 macOS 安全）、
+// 以及退路「建好源后弹 OBS 自己的属性窗口，让用户在 OBS 里选」。
 // 只认这三个固定名字：建、复用、清理都只针对它们，用户自己的场景与源一概不碰。
 export const OBS_SCENE = 'Hearth 投屏';
 export const OBS_VIDEO_INPUT = 'Hearth 画面';
@@ -293,7 +293,8 @@ export function obsPlatform(raw: string | undefined): ObsPlatform {
 
 /**
  * 一个可采集的目标。value 原样写进源设置：Windows 是 OBS 的 window 串，
- * macOS 应用是 bundle id、窗口是 CGWindowID（数字）。清单由桌面壳给（bridge 的 listObsTargets）。
+ * macOS 应用是 bundle id、窗口是 CGWindowID（数字）。
+ * 清单来自桌面壳（bridge 的 listObsTargets）或 OBS 自己（listObsWindows）。
  */
 export type ObsTarget = { kind: 'app' | 'window'; label: string; value: string | number };
 
@@ -509,10 +510,57 @@ export async function setupObsCapture(
   return { dialog: true, note };
 }
 
-// ---- 壳内「选中即开播」 ----
-// 桌面壳自己枚举本机的应用/窗口（bridge 的 listObsTargets），选中的目标由下面写进源，
-// 接着就能直接开播，不用再弹 OBS 的属性窗口。一概不调 GetInputPropertiesListPropertyItems：
-// obs-websocket 5.7.3 碰到空名列表项会 strlen(NULL)，整个 OBS 段错误（任何平台都别调）。
+/**
+ * macOS 的窗口条目名形如 `[应用名] 窗口标题`，拆出应用名好按应用分组：SCK 的声音是按应用过滤的，
+ * 用户真正要选的是「投哪个应用」，窗口只是选中它的手段，同一应用多个窗口也该一眼可辨。
+ * 认不出这个前缀的条目不猜：app 留空、标题原样返回，界面照原样列出来，不丢条目。
+ */
+export function splitObsWindowLabel(label: string): { app: string; title: string } {
+  const m = /^\[([^\]]+)\]\s*(.*)$/.exec(label);
+  const app = m ? m[1].trim() : '';
+  if (!m || !app) return { app: '', title: label };
+  return { app, title: m[2].trim() || '无标题窗口' };
+}
+
+/**
+ * 问 OBS 要一份它自己看得到的窗口清单（只有 macOS 走这条，别的平台一律返回空数组）。
+ *
+ * 只枚举 screen_capture 的 `window` 属性：它是整数格式的列表，占位项是 `{itemName: ' ', itemValue: 0}`，
+ * 实测安全（OBS 不崩；屏幕录制授权正常时能列出十几项，授权失效就只剩那个占位项）。
+ * 同一个请求打到 `application` 或 `display_uuid` 会让 OBS 整个
+ * 段错误——那两个是字符串格式的列表，占位项的值是空指针，obs-websocket 5.7.3/5.7.4 没判空
+ * （已提上游 PR https://github.com/obsproject/obs-websocket/pull/1355）。**任何情况下都不要枚举那两个属性。**
+ * Windows 的 window_capture/game_capture 的 `window` 同样是字符串格式的列表，含不含空指针占位项没验过，
+ * 所以那边不走这条，退回壳的清单或「到 OBS 里自己选」。
+ *
+ * 这个请求走的是 obs_source_properties()，与打开源属性窗口同一条回调：macOS 上 SCK 的可共享内容列表
+ * 就在这时重建，所以列过窗口之后写设置的源能出帧，不必再弹一次属性窗口（见 obsCaptureToTarget）。
+ */
+export async function listObsWindows(c: ObsConn, platform: ObsPlatform): Promise<ObsTarget[]> {
+  if (platform !== 'macos') return [];
+  // 属性清单挂在源上，源得先在；但列个清单不该把 OBS 拉到前台，所以不切场景、不弹窗。
+  // mode 在 macOS 上不影响 spec（那是 Windows 的游戏/窗口捕获二选一），随便给一个。
+  await ensureObsScene(c);
+  await putObsInput(c, OBS_VIDEO_INPUT, obsVideoSpec(platform, 'game', null, await macDisplayUuid(c, platform)));
+  const r = await c.request('GetInputPropertiesListPropertyItems', {
+    inputName: OBS_VIDEO_INPUT,
+    propertyName: 'window',
+  });
+  const out: ObsTarget[] = [];
+  for (const raw of (r.propertyItems ?? []) as Array<Record<string, unknown> | null>) {
+    if (raw?.itemEnabled === false) continue;
+    const label = typeof raw?.itemName === 'string' ? raw.itemName.trim() : '';
+    const value = Number(raw?.itemValue);
+    // itemValue 为 0/非数字、或名字是空白的，都是 OBS 给「未选择」留的占位项，不给用户看
+    if (!label || !Number.isFinite(value) || value === 0) continue;
+    out.push({ kind: 'window', label, value });
+  }
+  return out;
+}
+
+// ---- 选中即开播 ----
+// 目标已经从清单里选好（壳的 listObsTargets 或上面的 listObsWindows），下面把它写进源就能直接开播，
+// 不用再弹 OBS 的属性窗口。枚举属性清单只许打 `window` 这一个属性，理由见 listObsWindows。
 
 /** 声音源的 kind 与设置；null = 这个平台不用单独的声音源（见 obsAudioSetupSpec） */
 export function obsAudioSpec(platform: ObsPlatform, target: ObsTarget): ObsInputSpec | null {
@@ -549,21 +597,10 @@ export async function obsCaptureToTarget(
       if (obsErrorCode(e) !== OBS_CODE_NOT_FOUND) throw e;
     }
   }
-  // macOS 上只写设置的源一帧都不出（实测）：ScreenCaptureKit 的可共享内容列表是异步取回的，
-  // 采集初始化只认那份列表，而它只在打开源属性时才重新拉（上游 mac-sck 的 properties 回调）。
-  // 所以属性窗口在 macOS 是功能必需，不是界面装饰；目标已经替用户选好，他确认一下即可。
-  // obs-websocket 的枚举请求本可以顺带触发列表重建，但它会崩 OBS（已提上游 PR #1355）。
-  const dialogNote = platform === 'macos' ? await macConfirmNote(c) : '';
-  return [note, fitNote, dialogNote].filter(Boolean).join(' ');
-}
-
-async function macConfirmNote(c: ObsConn): Promise<string> {
-  try {
-    await openObsInputProperties(c, OBS_VIDEO_INPUT);
-    return '已在 OBS 里打开源属性窗口并替你选好目标，确认后关掉它，画面才会开始采集。';
-  } catch (e) {
-    return `没能替你打开 OBS 的源属性窗口（${(e as Error).message}），请在 OBS 里双击「${OBS_VIDEO_INPUT}」确认一次，否则画面不会出图。`;
-  }
+  // 不弹 OBS 的属性窗口：投什么已经替用户选好了，再把 OBS 拉到前台只会挡住人。
+  // macOS 上「只写设置的源不出帧」是 SCK 的可共享内容列表没重建，那件事由列窗口那一步顺带做掉
+  // （listObsWindows 与打开属性窗口同走 obs_source_properties()）。
+  return [note, fitNote].filter(Boolean).join(' ');
 }
 
 /**
