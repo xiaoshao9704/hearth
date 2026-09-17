@@ -955,7 +955,7 @@ function renderScreen(body: HTMLElement, goStream: () => void) {
       <div class="sq-mount"></div>
       <div class="hint-card">
         ${icon('volume', 15, 'var(--text-2)')}
-        <div>投屏带不带声音由浏览器自己的选择框决定：Chrome 只有共享「标签页」时才有那个勾选框，整屏与单个窗口没有。</div>
+        <div>投屏带不带声音由浏览器自己的选择框决定：Chrome 只有共享「标签页」时才有那个勾选框，整屏与单个窗口没有。若共享后听到回音（自己这边传出去的语音又绕回来），把「语音与视频」里的扬声器切到与系统默认不同的输出设备，采集到的系统声音里就不再有别人的语音。</div>
       </div>
     </div>`;
   renderScreenQuality(body.querySelector<HTMLElement>('.sq-mount')!, {
