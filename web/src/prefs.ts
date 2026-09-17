@@ -14,10 +14,42 @@ export const BR_LIMITS: Record<string, { min: number; max: number }> = {
 };
 export const VOICE_BITRATES = [32000, 64000, 96000, 128000]; // bps
 
-// 按 bpp 模型推导默认码率（宽×高×帧率×0.07）
+// 按 bpp 模型推导默认码率上限（宽×高×帧率×0.07）
 export function autoBitrate(res: string, fps: number): number {
   const d = RES_DIMS[res] ?? RES_DIMS['1080p'];
   return Math.round(((d.width * d.height * fps * 0.07) / 1e6) * 10) / 10;
+}
+
+/** 下限的绝对下界（Mbps）：再低就不是「保住画面」而是留一片马赛克。 */
+export const BITRATE_FLOOR = 0.5;
+/** 下限最多到上限的这个比例：留出 25% 余量，不给带宽估计留一段无处可降的死区。 */
+export const BITRATE_MIN_RATIO = 0.8;
+/** 自动下限取上限的这个比例。 */
+const AUTO_MIN_RATIO = 0.4;
+
+const round1 = (n: number) => Math.round(n * 10) / 10;
+// 推挤后的值按 0.1 取整：被推的一侧总往「更宽松」的方向取，免得取整后又踩回禁区
+const floor1 = (n: number) => Math.floor(n * 10) / 10;
+const ceil1 = (n: number) => Math.ceil(n * 10) / 10;
+
+/** 自动模式下由上限推下限。 */
+export function autoBitrateMin(max: number): number {
+  return round1(Math.max(BITRATE_FLOOR, max * AUTO_MIN_RATIO));
+}
+
+/**
+ * 把「下限 + 上限」收进合法区间：下限不低于绝对下界，且不高于上限的 BITRATE_MIN_RATIO。
+ * anchor 是用户刚拖动的那一侧（保持不动），另一侧被推开——所以拖高下限会顶高上限，
+ * 拖低上限会压低下限，两个滑块都不会出现「拖不动」的手感。
+ */
+export function clampBitrateRange(min: number, max: number, anchor: 'min' | 'max' = 'max'): { min: number; max: number } {
+  let lo = round1(Math.max(BITRATE_FLOOR, min));
+  let hi = round1(Math.max(ceil1(BITRATE_FLOOR / BITRATE_MIN_RATIO), max));
+  if (lo > hi * BITRATE_MIN_RATIO) {
+    if (anchor === 'min') hi = ceil1(lo / BITRATE_MIN_RATIO);
+    else lo = floor1(hi * BITRATE_MIN_RATIO);
+  }
+  return { min: lo, max: hi };
 }
 
 // 剧场浮动名册的停靠角：左上/右上/左下/右下
@@ -35,8 +67,9 @@ export interface RoomPrefs {
   layout: 'grid' | 'spotlight';
   res: string;
   fps: number;
-  bitrate: number; // Mbps
-  bitrateAuto: boolean;
+  bitrateMax: number; // Mbps，网络好时最多发多少
+  bitrateMin: number; // Mbps，网络差时最少也要发多少（见 engine/sdp-floor.ts）
+  bitrateAuto: boolean; // 用户没手动拖过码率，两端都跟着分辨率/帧率自动算
   screenCodec: ScreenCodec; // 投屏编码：h264/h265 单层 / vp9·av1 走 SVC 分层
   screenCodecAuto: boolean; // true = 按本机能力自动选（硬编优先）；用户手选后置 false
   screenContent: ScreenContent; // text = 保清晰度丢帧（文字/界面）；game = 保帧率缩分辨率（游戏/视频）
@@ -72,7 +105,8 @@ export function defaultPrefs(): RoomPrefs {
     layout: 'grid',
     res: '1080p',
     fps: 60,
-    bitrate: autoBitrate('1080p', 60),
+    bitrateMax: autoBitrate('1080p', 60),
+    bitrateMin: autoBitrateMin(autoBitrate('1080p', 60)),
     bitrateAuto: true,
     screenCodec: 'vp9',
     screenCodecAuto: true,
@@ -104,6 +138,7 @@ export function defaultPrefs(): RoomPrefs {
 interface LegacyPrefs {
   rnnoise?: boolean;
   noiseSuppression?: boolean;
+  bitrate?: number; // 旧存档里的单值码率 = 现在的上限
 }
 
 export function loadPrefs(): RoomPrefs {
@@ -119,13 +154,24 @@ export function loadPrefs(): RoomPrefs {
     } else if (typeof p.rnnoise === 'boolean') {
       denoise = p.rnnoise ? 'rnnoise' : p.noiseSuppression !== false ? 'browser' : 'off';
     }
+    // 旧存档只有单值 bitrate：读成上限，下限按比例补出来
+    const rawMax =
+      typeof p.bitrateMax === 'number' && p.bitrateMax >= 1 && p.bitrateMax <= 15
+        ? p.bitrateMax
+        : typeof p.bitrate === 'number' && p.bitrate >= 1 && p.bitrate <= 15
+          ? p.bitrate
+          : def.bitrateMax;
+    const rawMin =
+      typeof p.bitrateMin === 'number' && p.bitrateMin >= BITRATE_FLOOR && p.bitrateMin <= 15 ? p.bitrateMin : autoBitrateMin(rawMax);
+    const br = clampBitrateRange(rawMin, rawMax);
     return {
       mic: p.mic === true,
       camera: p.camera === true,
       layout: p.layout === 'spotlight' ? 'spotlight' : 'grid',
       res: RES_DIMS[p.res ?? ''] ? (p.res as string) : def.res,
       fps: (FPS_BY_RES[p.res ?? '1080p'] ?? [15, 30, 60]).includes(p.fps as number) ? (p.fps as number) : def.fps,
-      bitrate: typeof p.bitrate === 'number' && p.bitrate >= 1 && p.bitrate <= 15 ? p.bitrate : def.bitrate,
+      bitrateMax: br.max,
+      bitrateMin: br.min,
       bitrateAuto: p.bitrateAuto !== false,
       screenCodec: p.screenCodec === 'h264' || p.screenCodec === 'h265' || p.screenCodec === 'av1' ? p.screenCodec : 'vp9',
       screenCodecAuto: p.screenCodecAuto !== false,
@@ -169,6 +215,18 @@ export function notifyPrefsChanged(what: string) {
   prefsBus.dispatchEvent(new CustomEvent('prefs', { detail: what }));
 }
 
+// 房间视图在浏览器投屏进行中登记「重开投屏」的动作，设置浮层关闭时据此让新的码率范围生效
+// （码率范围只能重开发布才生效）。两边没有直接引用关系，这个模块是它们唯一的共同依赖。
+let screenRepublish: (() => void) | null = null;
+
+export function setScreenRepublish(fn: (() => void) | null) {
+  screenRepublish = fn;
+}
+
+export function screenRepublishHook(): (() => void) | null {
+  return screenRepublish;
+}
+
 
 // ---- 投屏编码的软/硬编探测 ----
 
@@ -197,7 +255,7 @@ export async function probeHwEncode(codec: ScreenCodec): Promise<boolean | null>
         width: d.width,
         height: d.height,
         framerate: p.fps,
-        bitrate: Math.round(p.bitrate * 1e6),
+        bitrate: Math.round(p.bitrateMax * 1e6),
         ...(codec === 'h264' || codec === 'h265' ? {} : { scalabilityMode: 'L2T2_KEY' }),
       },
     });
