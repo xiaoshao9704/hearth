@@ -253,8 +253,8 @@ export function renderScreenQuality(body: HTMLElement, opts: ScreenQualityOpts =
     const paintRail = () => {
       const span = lim.max - BITRATE_FLOOR;
       const pct = (v: number) => Math.min(100, Math.max(0, ((v - BITRATE_FLOOR) / span) * 100));
-      // 按 input 的值画而不是 prefs：自动档推出的上限（如 8.7）不落在步进刻度上，
-      // range 读值时会被浏览器夹到刻度（8.5），拿 prefs 画色段会与拇指差出几个像素
+      // 按 input 的值画而不是 prefs：浏览器会把 value 夹到步进刻度上，照它画色段才与拇指严格对齐。
+      // prefs 里的值现在也都落在刻度上（prefs.ts 的 roundStep），两者等价，但这里不依赖那个不变量
       const lo = pct(parseFloat(brMin.value));
       const cap = Math.max(lo, pct(parseFloat(brMax.value) * BITRATE_MIN_RATIO));
       const hi = Math.max(cap, pct(parseFloat(brMax.value)));
