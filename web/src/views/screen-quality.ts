@@ -34,7 +34,8 @@ export interface ScreenQualityOpts {
 
 // 两侧码率合成一个区间读数
 function brLabel(p: { bitrateMin: number; bitrateMax: number }): string {
-  return `${p.bitrateMin.toFixed(1)} – ${p.bitrateMax.toFixed(1)} Mbps`;
+  // 破折号两侧不留空格：留了这行在紧凑版窄屏放不下会折成两行
+  return `${p.bitrateMin.toFixed(1)}–${p.bitrateMax.toFixed(1)} Mbps`;
 }
 
 export function renderScreenQuality(body: HTMLElement, opts: ScreenQualityOpts = {}) {
@@ -279,7 +280,11 @@ export function renderScreenQuality(body: HTMLElement, opts: ScreenQualityOpts =
         if (v !== prefs.bitrateMax) markDirty();
         prefs.bitrateMax = v;
         brMax.value = String(v);
-        if (pinned(v, b.maxMin)) hit = '上限已被下限顶住——要再降先调低下限';
+        if (pinned(v, b.maxMin))
+          hit =
+            b.maxMinBy === 'floor'
+              ? `上限已到 ${prefs.res} 的建议下界——再低这个分辨率就糊得没法看了`
+              : '上限已被下限顶住——要再降先调低下限';
       }
       prefs.bitrateAuto = false;
       savePrefs(prefs);

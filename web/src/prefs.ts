@@ -61,12 +61,20 @@ export const BITRATE_STEP = 0.5;
  * 边界必须对齐步进：range 的刻度是从 min 属性起算的，min 一旦落在步进之外，
  * 整条刻度就跟着移位，值会漂成 8.9 / 12.2 这种数。
  */
-export function bitrateSliderBounds(min: number, max: number, lim: { min: number; max: number }): { minMax: number; maxMin: number } {
+export function bitrateSliderBounds(
+  min: number,
+  max: number,
+  lim: { min: number; max: number },
+): { minMax: number; maxMin: number; maxMinBy: 'floor' | 'range' } {
   const floorStep = (n: number) => Math.floor(n / BITRATE_STEP) * BITRATE_STEP;
   const ceilStep = (n: number) => Math.ceil(n / BITRATE_STEP) * BITRATE_STEP;
+  const byRange = ceilStep(min / BITRATE_MIN_RATIO);
   return {
     minMax: Math.max(BITRATE_FLOOR, Math.min(lim.max, floorStep(max * BITRATE_MIN_RATIO))),
-    maxMin: Math.min(lim.max, Math.max(lim.min, ceilStep(min / BITRATE_MIN_RATIO))),
+    maxMin: Math.min(lim.max, Math.max(lim.min, byRange)),
+    // 上限见底可能是两回事：被下限顶住（byRange 较大），还是撞上这个分辨率的建议下界（lim.min 较大）。
+    // 两者的解法相反——前者要先调低下限，后者调下限没用，只能降分辨率，所以提示文案必须分开。相等算前者。
+    maxMinBy: byRange >= lim.min ? 'range' : 'floor',
   };
 }
 

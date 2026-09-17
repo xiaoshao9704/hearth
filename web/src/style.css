@@ -706,6 +706,16 @@ body {
   pointer-events: auto; width: 15px; height: 15px; border-radius: 50%; background: var(--ember);
   border: 2px solid var(--bg-1); box-shadow: 0 0 0 1px var(--line); cursor: pointer;
 }
+/* 焦点环画在拇指上：input 铺满整条轨道，走通用的 .range:focus-visible 会在整条轨道外面框一圈，
+   看不出焦点落在哪个拇指上。焦点的那一侧同时抬到最上层，免得光环被另一个 input 的拇指盖掉。 */
+.br-thumb:focus-visible { outline: none; }
+.br-range .br-thumb:focus-visible { z-index: 3; }
+.br-thumb:focus-visible::-webkit-slider-thumb {
+  box-shadow: 0 0 0 1px var(--line), 0 0 0 4px color-mix(in srgb, var(--ember) 45%, transparent);
+}
+.br-thumb:focus-visible::-moz-range-thumb {
+  box-shadow: 0 0 0 1px var(--line), 0 0 0 4px color-mix(in srgb, var(--ember) 45%, transparent);
+}
 /* 下限恒在上限左侧，只有两个都被挤到刻度高位才会叠住：那时把下限翻到上面，不然它再也抓不到 */
 .br-range .br-hi { z-index: 1; }
 .br-range.min-top .br-lo { z-index: 2; }
@@ -1459,7 +1469,8 @@ body.theater-on { overscroll-behavior: none; }
   .ingest-panel { padding: 16px; }
   .ingest-panel .src-list { grid-template-columns: 1fr; }
   .sq-compact .seg { padding: 5px 6px; font-size: 11px; }
-  .sq-compact .br-readout { width: 84px; font-size: 11px; }
+  /* 94px 是 11px 等宽字体下 12.0–15.0 Mbps 的不折行宽度（84px 放不下最长的那档） */
+  .sq-compact .br-readout { width: 94px; font-size: 11px; }
   .sq-compact .br-range { min-width: 72px; }
   .obs-link .obs-ver { margin-left: 0; flex-basis: 100%; }
 }
