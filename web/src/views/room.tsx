@@ -2982,6 +2982,18 @@ export async function renderRoom(root: HTMLElement, channel: string) {
                   {el(icon('screen', 17, 'currentColor'))}
                   <span class="pill-label">{screening() ? (obsLive() ? 'OBS 投屏中' : '投屏中') : '投屏'}</span>
                 </button>
+                <Show when={!guestLeft()}>
+                  <button
+                    class="hit ctl-pill"
+                    classList={{ on: ingestOpen() }}
+                    title="推流设置：OBS 地址、令牌与本机 OBS 联动"
+                    aria-label="推流设置"
+                    onClick={() => setIngestOpen(!ingestOpen())}
+                  >
+                    {el(icon('broadcast', 17, 'currentColor'))}
+                    <span class="pill-label">推流</span>
+                  </button>
+                </Show>
                 <ViewModeControl theater={theaterCtl} pip={pipCtl} hasStage={hasStageContent} />
               </div>
               <div class="spacer"></div>
