@@ -64,8 +64,8 @@ const LIM_1080 = { min: 2.5, max: 15 };
 const LIM_720 = { min: 1, max: 6 };
 
 test('滑块边界：下限的可拖上界随上限收紧，上限的可拖下界随下限抬高', () => {
-  assert.deepEqual(bitrateSliderBounds(3.5, 8.7, LIM_1080), { minMax: 6.5, maxMin: 4.5 }); // 边界对齐步进
-  assert.deepEqual(bitrateSliderBounds(0.5, 1, LIM_1080), { minMax: 0.5, maxMin: 2.5 }); // 下界不低于绝对下界与建议区间下沿
+  assert.deepEqual(bitrateSliderBounds(3.5, 8.7, LIM_1080), { minMax: 6.5, maxMin: 4.5, maxMinBy: 'range' }); // 边界对齐步进
+  assert.deepEqual(bitrateSliderBounds(0.5, 1, LIM_1080), { minMax: 0.5, maxMin: 2.5, maxMinBy: 'floor' }); // 下界不低于绝对下界与建议区间下沿
 });
 
 test('滑块边界落在步进刻度上（min 属性歪了整条刻度都会移位）', () => {
@@ -78,9 +78,24 @@ test('滑块边界落在步进刻度上（min 属性歪了整条刻度都会移�
 });
 
 test('滑块边界不越出建议区间与绝对下界', () => {
-  assert.deepEqual(bitrateSliderBounds(3.5, 8.7, LIM_720), { minMax: 6, maxMin: 4.5 }); // 上限的档位比 1080p 窄
-  assert.deepEqual(bitrateSliderBounds(12, 15, LIM_1080), { minMax: 12, maxMin: 15 });
+  assert.deepEqual(bitrateSliderBounds(3.5, 8.7, LIM_720), { minMax: 6, maxMin: 4.5, maxMinBy: 'range' }); // 上限的档位比 1080p 窄
+  assert.deepEqual(bitrateSliderBounds(12, 15, LIM_1080), { minMax: 12, maxMin: 15, maxMinBy: 'range' });
   assert.equal(bitrateSliderBounds(0.5, 0.5, LIM_1080).minMax, 0.5); // 再小也不低于绝对下界
+});
+
+test('上限见底的原因分得清：分辨率建议下界 vs 被下限顶住', () => {
+  // 1080p 建议下界 2.5：下限已在绝对地板上，上限停在 2.5 与下限无关，提示得说是分辨率拦的
+  const low = bitrateSliderBounds(0.5, 15, LIM_1080);
+  assert.equal(low.maxMin, 2.5);
+  assert.equal(low.maxMinBy, 'floor');
+  // 下限抬到 4：上限见底 5 是下限除以 0.8 的结果，这时调低下限才有用
+  const high = bitrateSliderBounds(4, 15, LIM_1080);
+  assert.equal(high.maxMin, 5);
+  assert.equal(high.maxMinBy, 'range');
+  // 恰好相等（720p 建议下界 1，下限 0.5 → 0.5/0.8 进位也是 1）算「被下限顶住」
+  const tie = bitrateSliderBounds(0.5, 6, LIM_720);
+  assert.equal(tie.maxMin, 1);
+  assert.equal(tie.maxMinBy, 'range');
 });
 
 test('拖到边界上的值本身就是合法区间（界面拦住的正是 clamp 会推挤的那一步）', () => {
