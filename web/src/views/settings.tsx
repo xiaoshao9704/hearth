@@ -7,7 +7,7 @@ import { canInvite, getUser, isGuest, listChannels } from '../api';
 import { inShell } from '../bridge';
 import { el, icon } from '../ui';
 import { ChannelManage } from './manage';
-import { PERSONAL_PANES, renderPane } from './settings-panes';
+import { flushScreenBitrateRange, PERSONAL_PANES, renderPane } from './settings-panes';
 import type { PersonalPane } from './settings-panes';
 
 export type Pane = PersonalPane | 'channel';
@@ -32,6 +32,9 @@ export function openSettings(pane: Pane = 'av', ctx: SettingsContext = {}) {
 }
 
 export function closeSettings() {
+  // 投屏画质里改过的码率范围在浮层关闭这一刻统一生效（重开一次投屏）；
+  // pane 之间跳转走的是 setPane，不经这里，不会打断在途投屏
+  flushScreenBitrateRange();
   dispose?.();
   dispose = null;
 }

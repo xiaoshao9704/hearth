@@ -23,15 +23,19 @@ import {
 } from '../api';
 import type { Invite } from '../api';
 import {
+  BITRATE_FLOOR,
   BR_LIMITS,
   FPS_BY_RES,
   autoBitrate,
+  autoBitrateMin,
+  clampBitrateRange,
   loadPrefs,
   notifyPrefsChanged,
   probeHwEncode,
   savePrefs,
+  screenRepublishHook,
 } from '../prefs';
-import type { DenoiseMode, ScreenCodec, ScreenContent } from '../prefs';
+import type { DenoiseMode, RoomPrefs, ScreenCodec, ScreenContent } from '../prefs';
 import { getTheme, setTheme } from '../theme';
 import type { Theme } from '../theme';
 import { armNotifyPermission, notifyState } from '../notify';
@@ -946,6 +950,32 @@ function renderAV(body: HTMLElement): () => void {
 // 壳的能力探一次就够（Rust 侧也是缓存的）；拿到后重画一次编码那一行。
 let shellCaps: BridgeCaps | null = null;
 
+// 码率范围（上限写编码参数、下限写会话描述）只在发布那一刻定死，拖动期间不重连：
+// 这里只记脏，等设置浮层真正关闭时统一重开一次投屏，观众最多被打断一次。
+// pane 之间跳转不经 closeSettings，因此不会误触发。
+let bitrateRangeDirty = false;
+
+/** 设置浮层关闭时调用：码率范围变过且正在投屏（房间视图登记了动作）才重开一次。 */
+export function flushScreenBitrateRange() {
+  if (!bitrateRangeDirty) return;
+  bitrateRangeDirty = false;
+  screenRepublishHook()?.();
+}
+
+// 两侧码率合成一个区间读数
+function brLabel(p: { bitrateMin: number; bitrateMax: number }): string {
+  return `${p.bitrateMin.toFixed(1)} – ${p.bitrateMax.toFixed(1)} Mbps`;
+}
+
+// 自动档：上限按分辨率/帧率推，下限跟着上限走（改分辨率/帧率同样动到码率范围，一并记脏）
+function setAutoBitrate(p: RoomPrefs, res: string, fps: number) {
+  const max = autoBitrate(res, fps);
+  if (max !== p.bitrateMax) bitrateRangeDirty = true;
+  p.bitrateMax = max;
+  p.bitrateMin = autoBitrateMin(max);
+  p.bitrateAuto = true;
+}
+
 function renderScreen(body: HTMLElement, goStream: () => void) {
   const prefs = loadPrefs();
 
@@ -1017,8 +1047,8 @@ function renderScreen(body: HTMLElement, goStream: () => void) {
           <span class="k">内容类型</span>
           <div class="seg-group" style="flex-grow:1">
             ${([
-              ['game', '游戏与视频'],
-              ['text', '文字与界面'],
+              ['game', '流畅优先（默认）'],
+              ['text', '清晰优先（文档与代码）'],
             ] as const)
               .map(
                 ([v, label]) =>
@@ -1027,13 +1057,18 @@ function renderScreen(body: HTMLElement, goStream: () => void) {
               .join('')}
           </div>
         </div>
-        <div class="mono" style="padding-left:66px;font-size:10.5px;color:var(--text-3);margin-top:-8px">默认游戏模式：带宽不足时缩小画面、保住帧率。文字模式反过来保清晰度，画面复杂时帧率会掉到个位数，只适合看文档与代码</div>
+        <div class="mono" style="padding-left:66px;font-size:10.5px;color:var(--text-3);margin-top:-8px">流畅优先：带宽不够时缩小画面、保住帧率。清晰优先反过来保住分辨率，帧率会掉——画面复杂时掉到个位数，只在滚动代码、看文档这类小字场景才用</div>
         <div class="kv-line">
-          <span class="k">码率</span>
-          <input class="range" type="range" min="${lim.min}" max="${lim.max}" step="0.5" value="${prefs.bitrate}" id="br-range" />
-          <span class="mono" style="font-size:11.5px;color:var(--text-1);width:70px;text-align:right" id="br-label">${prefs.bitrate.toFixed(1)} Mbps</span>
+          <span class="k">码率下限</span>
+          <input class="range" type="range" min="${BITRATE_FLOOR}" max="${lim.max}" step="0.5" value="${prefs.bitrateMin}" id="br-min" />
+          <span class="mono" style="font-size:11.5px;color:var(--text-1);width:96px;text-align:right" id="br-label">${brLabel(prefs)}</span>
         </div>
-        <div class="mono" style="padding-left:66px;font-size:10.5px;color:var(--text-3);margin-top:-8px">${prefs.res} · ${prefs.fps}fps 建议 ${lim.min}–${lim.max} Mbps${prefs.bitrateAuto ? '（当前为自动推荐值）' : ''}</div>
+        <div class="kv-line">
+          <span class="k">码率上限</span>
+          <input class="range" type="range" min="${lim.min}" max="${lim.max}" step="0.5" value="${prefs.bitrateMax}" id="br-max" />
+          <span class="mono" style="font-size:11.5px;color:var(--text-3);width:96px;text-align:right">${prefs.res} · ${prefs.fps}fps 建议 ${lim.min}–${lim.max}</span>
+        </div>
+        <div class="mono" style="padding-left:66px;font-size:10.5px;color:var(--text-3);margin-top:-8px">上限 = 网络好时最多发多少${prefs.bitrateAuto ? '（当前为自动推荐值）' : ''}；下限 = 网络差时最少也要发多少，低于它宁可丢包也不再降。下限设太高，真拥堵时画面就不是变糊而是花屏，一般留在上限的四成左右。投屏时关闭设置后会重开一次投屏，画面会断一下</div>
         <button class="hit switch-row" id="screen-audio-row" style="width:100%;text-align:left">
           <div style="flex-grow:1">
             <div class="s-title">共享系统声音</div>
@@ -1063,8 +1098,7 @@ function renderScreen(body: HTMLElement, goStream: () => void) {
           return;
         }
         prefs.res = r;
-        prefs.bitrate = autoBitrate(r, prefs.fps);
-        prefs.bitrateAuto = true;
+        setAutoBitrate(prefs, r, prefs.fps);
         savePrefs(prefs);
         notifyPrefsChanged('screen');
         paint();
@@ -1105,21 +1139,29 @@ function renderScreen(body: HTMLElement, goStream: () => void) {
           return;
         }
         prefs.fps = f;
-        prefs.bitrate = autoBitrate(prefs.res, f);
-        prefs.bitrateAuto = true;
+        setAutoBitrate(prefs, prefs.res, f);
         savePrefs(prefs);
         notifyPrefsChanged('screen');
         paint();
       });
     });
-    const brRange = body.querySelector<HTMLInputElement>('#br-range')!;
-    brRange.addEventListener('input', () => {
-      prefs.bitrate = parseFloat(brRange.value);
+    // 拖任一侧都把另一侧推开（见 clampBitrateRange），免得滑块拖到一半突然「拖不动」
+    const brMin = body.querySelector<HTMLInputElement>('#br-min')!;
+    const brMax = body.querySelector<HTMLInputElement>('#br-max')!;
+    const dragBitrate = (anchor: 'min' | 'max') => {
+      const r = clampBitrateRange(parseFloat(brMin.value), parseFloat(brMax.value), anchor);
+      if (r.min !== prefs.bitrateMin || r.max !== prefs.bitrateMax) bitrateRangeDirty = true;
+      prefs.bitrateMin = r.min;
+      prefs.bitrateMax = r.max;
       prefs.bitrateAuto = false;
       savePrefs(prefs);
       notifyPrefsChanged('screen');
-      body.querySelector('#br-label')!.textContent = `${prefs.bitrate.toFixed(1)} Mbps`;
-    });
+      if (anchor === 'min') brMax.value = String(r.max);
+      else brMin.value = String(r.min);
+      body.querySelector('#br-label')!.textContent = brLabel(prefs);
+    };
+    brMin.addEventListener('input', () => dragBitrate('min'));
+    brMax.addEventListener('input', () => dragBitrate('max'));
     const screenAudioSwitch = body.querySelector<HTMLDivElement>('#screen-audio-switch')!;
     body.querySelector('#screen-audio-row')!.addEventListener('click', () => {
       prefs.screenAudio = !prefs.screenAudio;
