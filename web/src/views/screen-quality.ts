@@ -3,13 +3,13 @@
 // 完整版是「我平时希望怎么投屏」，带说明与提示卡；紧凑版是开始投屏前的快速调整，少字、只摆常改项。
 import {
   BITRATE_FLOOR,
+  BITRATE_MIN_RATIO,
   BITRATE_STEP,
   BR_LIMITS,
   FPS_BY_RES,
   autoBitrate,
   autoBitrateMin,
   bitrateSliderBounds,
-  clampBitrateRange,
   loadPrefs,
   notifyPrefsChanged,
   probeHwEncode,
@@ -84,7 +84,8 @@ export function renderScreenQuality(body: HTMLElement, opts: ScreenQualityOpts =
     // 紧凑版只摆走得通的档位：够不着的分辨率/帧率留给设置页去解释
     const resOptions = compact ? ['720p', '1080p'] : ['720p', '1080p', '1440p', '4K'];
     const fpsOptions = compact ? fpsAllowed : [15, 30, 60, 120];
-    const bounds = bitrateSliderBounds(prefs.bitrateMin, prefs.bitrateMax, lim);
+    // 建议区间常显在滑块下面（原来挂在「码率上限」行右侧，合成一行后没位置了）；顶住时临时换成提示
+    const brHint = compact ? `建议 ${lim.min}–${lim.max}` : `${prefs.res} · ${prefs.fps}fps 建议 ${lim.min}–${lim.max}`;
     body.innerHTML = `
       <div class="${compact ? 'sq-compact' : 'pane-col pane-narrow'}">
         <div class="kv-line">
@@ -157,16 +158,15 @@ export function renderScreenQuality(body: HTMLElement, opts: ScreenQualityOpts =
             : `<div class="mono" style="padding-left:66px;font-size:10.5px;color:var(--text-3);margin-top:-8px">流畅优先：带宽不够时缩小画面、保住帧率。清晰优先反过来保住分辨率，帧率会掉——画面复杂时掉到个位数，只在滚动代码、看文档这类小字场景才用</div>`
         }
         <div class="kv-line">
-          <span class="k">码率下限</span>
-          <input class="range" type="range" min="${BITRATE_FLOOR}" max="${bounds.minMax}" step="${BITRATE_STEP}" value="${prefs.bitrateMin}" id="br-min" />
+          <span class="k">码率</span>
+          <div class="br-range" id="br-range">
+            <div class="br-rail"></div>
+            <input class="range br-thumb br-lo" type="range" aria-label="码率下限" min="${BITRATE_FLOOR}" max="${lim.max}" step="${BITRATE_STEP}" value="${prefs.bitrateMin}" id="br-min" />
+            <input class="range br-thumb br-hi" type="range" aria-label="码率上限" min="${BITRATE_FLOOR}" max="${lim.max}" step="${BITRATE_STEP}" value="${prefs.bitrateMax}" id="br-max" />
+          </div>
           <span class="mono br-readout" id="br-label">${brLabel(prefs)}</span>
         </div>
-        <div class="kv-line">
-          <span class="k">码率上限</span>
-          <input class="range" type="range" min="${bounds.maxMin}" max="${lim.max}" step="${BITRATE_STEP}" value="${prefs.bitrateMax}" id="br-max" />
-          <span class="mono br-hint">${compact ? `建议 ${lim.min}–${lim.max}` : `${prefs.res} · ${prefs.fps}fps 建议 ${lim.min}–${lim.max}`}</span>
-        </div>
-        <div class="br-note" id="br-note"></div>
+        <div class="br-note" id="br-note">${brHint}</div>
         ${
           compact
             ? ''
@@ -237,41 +237,63 @@ export function renderScreenQuality(body: HTMLElement, opts: ScreenQualityOpts =
         paint();
       });
     });
-    // 两侧互为边界（见 bitrateSliderBounds）：拖到头是被另一侧顶住，界面上说出来，
-    // 不让滑块无声地停住。clampBitrateRange 仍兜底，自动档改档位时还会用到推挤。
+    // 两个滑块共用一条轨道、同一量程（min/max/step 完全相同），拇指位置才能横向比较——
+    // 所以边界不再写进 input 属性，而是拖动时夹住被拖的那一侧，另一侧一动不动。
+    // 推挤（clampBitrateRange）只剩存档读取在用：单轨之后「拖一侧顶走另一侧」太刺眼。
+    const brRange = body.querySelector<HTMLElement>('#br-range')!;
     const brMin = body.querySelector<HTMLInputElement>('#br-min')!;
     const brMax = body.querySelector<HTMLInputElement>('#br-max')!;
     const brLabelEl = body.querySelector<HTMLElement>('#br-label')!;
     const brNote = body.querySelector<HTMLElement>('#br-note')!;
     let noteTimer = 0;
     const pinned = (v: number, at: number) => Math.abs(v - at) < 0.05;
+    // 轨道分四段画出「必须留出的余量」：余量段跟着上限实时移动，
+    // 用户撞上限制之前就看得见限制在哪。三个百分比必须单调不减，否则色标翻转会画出乱色。
+    const paintRail = () => {
+      const span = lim.max - BITRATE_FLOOR;
+      const pct = (v: number) => Math.min(100, Math.max(0, ((v - BITRATE_FLOOR) / span) * 100));
+      // 按 input 的值画而不是 prefs：自动档推出的上限（如 8.7）不落在步进刻度上，
+      // range 读值时会被浏览器夹到刻度（8.5），拿 prefs 画色段会与拇指差出几个像素
+      const lo = pct(parseFloat(brMin.value));
+      const cap = Math.max(lo, pct(parseFloat(brMax.value) * BITRATE_MIN_RATIO));
+      const hi = Math.max(cap, pct(parseFloat(brMax.value)));
+      brRange.style.setProperty('--lo', `${lo}%`);
+      brRange.style.setProperty('--cap', `${cap}%`);
+      brRange.style.setProperty('--hi', `${hi}%`);
+      // 下限拇指恒在上限左侧，只有两个都被挤到刻度高位才会叠住：过了中点就让下限压在上面
+      brRange.classList.toggle('min-top', lo > 50);
+    };
+    paintRail();
     const dragBitrate = (anchor: 'min' | 'max') => {
-      const r = clampBitrateRange(parseFloat(brMin.value), parseFloat(brMax.value), anchor);
-      if (r.min !== prefs.bitrateMin || r.max !== prefs.bitrateMax) markDirty();
-      prefs.bitrateMin = r.min;
-      prefs.bitrateMax = r.max;
+      // 边界按「拖动前」的另一侧值算，夹完写回 input：拖到头就停死，另一侧的值与拇指都不动
+      const b = bitrateSliderBounds(prefs.bitrateMin, prefs.bitrateMax, lim);
+      let hit = '';
+      if (anchor === 'min') {
+        const v = Math.min(parseFloat(brMin.value), b.minMax);
+        if (v !== prefs.bitrateMin) markDirty();
+        prefs.bitrateMin = v;
+        brMin.value = String(v);
+        if (pinned(v, b.minMax)) hit = '下限已到上限的八成——再高就没有降码率的余地了，先抬高上限';
+      } else {
+        const v = Math.max(parseFloat(brMax.value), b.maxMin);
+        if (v !== prefs.bitrateMax) markDirty();
+        prefs.bitrateMax = v;
+        brMax.value = String(v);
+        if (pinned(v, b.maxMin)) hit = '上限已被下限顶住——要再降先调低下限';
+      }
       prefs.bitrateAuto = false;
       savePrefs(prefs);
       notifyPrefsChanged('screen');
-      brMin.value = String(r.min);
-      brMax.value = String(r.max);
-      const b = bitrateSliderBounds(r.min, r.max, lim);
-      brMin.max = String(b.minMax);
-      brMax.min = String(b.maxMin);
       brLabelEl.textContent = brLabel(prefs);
-      const hit =
-        anchor === 'min' && pinned(r.min, b.minMax)
-          ? '下限已到上限的八成——再高就没有降码率的余地了，先抬高上限'
-          : anchor === 'max' && pinned(r.max, b.maxMin)
-            ? '上限已被下限顶住——要再降先调低下限'
-            : '';
-      brNote.textContent = hit;
+      paintRail();
+      brNote.textContent = hit || brHint;
       brNote.classList.toggle('on', !!hit);
       brLabelEl.classList.toggle('pinned', !!hit);
       window.clearTimeout(noteTimer);
       if (hit)
         noteTimer = window.setTimeout(() => {
           if (!body.isConnected) return;
+          brNote.textContent = brHint;
           brNote.classList.remove('on');
           brLabelEl.classList.remove('pinned');
         }, 2200);

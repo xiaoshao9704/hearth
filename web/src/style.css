@@ -670,13 +670,45 @@ body {
 
 .kv-line { display: flex; align-items: center; gap: 14px; }
 .kv-line .k { font-size: 12.5px; color: var(--text-1); width: 52px; flex-shrink: 0; }
-/* 投屏画质的码率两行：读数 + 「被另一侧顶住」的即时反馈（设置页与投屏浮窗共用） */
-.br-readout, .br-hint { width: 108px; flex-shrink: 0; text-align: right; font-size: 11.5px; }
-.br-readout { color: var(--text-1); }
-.br-hint { color: var(--text-3); }
+/* 投屏画质的码率区间：读数 + 「被另一侧顶住」的即时反馈（设置页与投屏浮窗共用） */
+.br-readout { width: 108px; flex-shrink: 0; text-align: right; font-size: 11.5px; color: var(--text-1); }
 .br-readout.pinned { color: var(--ember); font-weight: 600; }
-.br-note { font-size: 11px; line-height: 1.5; color: var(--ember); opacity: 0; }
-.br-note.on { opacity: 1; }
+/* 常显建议区间，顶住时就地换成提示并转橙——不淡出，免得这行高度忽有忽无 */
+.br-note { font-size: 11px; line-height: 1.5; color: var(--text-3); }
+.br-note.on { color: var(--ember); }
+/* 双拇指区间滑块：两个 input 同量程（min/max/step 相同）叠在同一条自绘轨道上，
+   拇指位置才能横向比较。代价是点空白轨道不再跳值（点中间该动哪个拇指本就有歧义），只有拇指可拖。 */
+.br-range { position: relative; flex-grow: 1; min-width: 96px; height: 24px; --lo: 0%; --cap: 100%; --hi: 100%; }
+.br-rail {
+  position: absolute; left: 0; right: 0; top: 50%; transform: translateY(-50%);
+  height: 4px; border-radius: 2px;
+  /* 四段硬切：下限以下 / 工作区间 / 下限必须留出的余量（随上限实时移动，撞上限制前就看得见）/ 上限以上 */
+  background: linear-gradient(
+    to right,
+    var(--bg-4) var(--lo), var(--ember) var(--lo),
+    var(--ember) var(--cap), color-mix(in srgb, var(--ember) 32%, var(--bg-4)) var(--cap),
+    color-mix(in srgb, var(--ember) 32%, var(--bg-4)) var(--hi), var(--bg-4) var(--hi)
+  );
+}
+/* 轨道由 .br-rail 画，input 自己整个透明；只有拇指接事件，否则上面那个 input 会挡住下面的拇指 */
+.br-thumb {
+  position: absolute; inset: 0; width: 100%; height: 100%; margin: 0;
+  background: transparent; -webkit-appearance: none; appearance: none;
+  pointer-events: none; touch-action: none; /* 触屏拖拇指时别让页面滚动抢走手势 */
+}
+.br-thumb::-moz-range-track { background: transparent; border: 0; }
+.br-thumb::-webkit-slider-thumb {
+  -webkit-appearance: none; appearance: none; pointer-events: auto;
+  width: 15px; height: 15px; border-radius: 50%; background: var(--ember);
+  border: 2px solid var(--bg-1); box-shadow: 0 0 0 1px var(--line); cursor: pointer;
+}
+.br-thumb::-moz-range-thumb {
+  pointer-events: auto; width: 15px; height: 15px; border-radius: 50%; background: var(--ember);
+  border: 2px solid var(--bg-1); box-shadow: 0 0 0 1px var(--line); cursor: pointer;
+}
+/* 下限恒在上限左侧，只有两个都被挤到刻度高位才会叠住：那时把下限翻到上面，不然它再也抓不到 */
+.br-range .br-hi { z-index: 1; }
+.br-range.min-top .br-lo { z-index: 2; }
 .copy-line {
   display: flex; align-items: center; gap: 8px; height: 42px; padding: 0 6px 0 14px;
   border-radius: 9px; background: var(--bg-1); border: 1px solid var(--line);
@@ -1427,7 +1459,8 @@ body.theater-on { overscroll-behavior: none; }
   .ingest-panel { padding: 16px; }
   .ingest-panel .src-list { grid-template-columns: 1fr; }
   .sq-compact .seg { padding: 5px 6px; font-size: 11px; }
-  .sq-compact .br-readout, .sq-compact .br-hint { width: 84px; font-size: 11px; }
+  .sq-compact .br-readout { width: 84px; font-size: 11px; }
+  .sq-compact .br-range { min-width: 72px; }
   .obs-link .obs-ver { margin-left: 0; flex-basis: 100%; }
 }
 
