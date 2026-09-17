@@ -116,8 +116,12 @@ function SettingsOverlay(p: { pane: Pane; ctx: SettingsContext }) {
         <header class="topbar">
           <h1>{meta().label}</h1>
           <span class="sub">{meta().sub}</span>
-          <Show when={pane() === 'av' || pane() === 'screen' || pane() === 'appearance'}>
+          <Show when={pane() === 'av' || pane() === 'appearance'}>
             <span class="tag tag-sage">改动立即保存并生效</span>
+          </Show>
+          {/* 投屏画质里码率范围是建连参数，得关掉浮层重开一次发布才算数，不能说「立即生效」 */}
+          <Show when={pane() === 'screen'}>
+            <span class="tag tag-sage">改动立即保存，码率范围关掉设置后生效</span>
           </Show>
           <div class="spacer"></div>
           <button class="hit btn btn-icon" onClick={closeSettings}>
