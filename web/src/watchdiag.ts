@@ -55,10 +55,15 @@ export interface WatchTotals {
   lost: number;
   pli: number;
   nack: number;
+  // 下面几项是「最近一次采样」的瞬时值，不累计：看现在收得怎么样，累计值回答的是这一场累计出过多少事
+  kbps: number;
+  fps: number;
+  width: number;
+  height: number;
 }
 
 export function emptyWatchTotals(): WatchTotals {
-  return { samples: 0, freezes: 0, freeze_ms: 0, keyframes: 0, lost: 0, pli: 0, nack: 0 };
+  return { samples: 0, freezes: 0, freeze_ms: 0, keyframes: 0, lost: 0, pli: 0, nack: 0, kbps: 0, fps: 0, width: 0, height: 0 };
 }
 
 const delta = (cur: number | undefined, prev: number | undefined): number => {
@@ -108,6 +113,10 @@ export function addWatch(t: WatchTotals, s: WatchSample): WatchTotals {
     lost: t.lost + s.lost,
     pli: t.pli + s.pli,
     nack: t.nack + s.nack,
+    kbps: s.kbps,
+    fps: s.fps,
+    width: s.width,
+    height: s.height,
   };
 }
 

@@ -384,7 +384,9 @@ export async function renderRoom(root: HTMLElement, channel: string) {
   const watchLine = (): string => {
     const t = watchTotals();
     if (!watchDiag() || !t) return '';
-    return `冻结 ${t.freezes} 次 · ${(t.freeze_ms / 1000).toFixed(1)} s · 关键帧 ${t.keyframes} · 丢包 ${t.lost}`;
+    // 前半是此刻收得怎么样，后半是这一场累计出过多少事
+    const live = t.width > 0 ? `${(t.kbps / 1000).toFixed(1)} Mbps · ${Math.round(t.fps)} fps · ${t.width}×${t.height}` : '等待画面';
+    return `${live} ｜ 冻结 ${t.freezes} 次 · ${(t.freeze_ms / 1000).toFixed(1)} s · 关键帧 ${t.keyframes} · 丢包 ${t.lost}`;
   };
 
   // 面板行：合并形态两种角色同一条连接，只出一行
