@@ -1,6 +1,14 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { autoBitrate, autoBitrateMin, bitrateSliderBounds, clampBitrateRange, defaultPrefs, loadPrefs } from './tmp/prefs.js';
+import {
+  autoBitrate,
+  autoBitrateMin,
+  BITRATE_MIN_RATIO,
+  bitrateSliderBounds,
+  clampBitrateRange,
+  defaultPrefs,
+  loadPrefs,
+} from './tmp/prefs.js';
 
 // loadPrefs 只在调用时读 localStorage，桩一份就够
 function withStored(obj, fn) {
@@ -39,6 +47,13 @@ test('自动下限取上限的四成，且不低于绝对下界', () => {
   assert.equal(autoBitrateMin(1), 0.5);
 });
 
+test('自动推荐码率落在 0.5 的滑块步进上（否则 range 会把拇指夹到别处）', () => {
+  // 1920*1080*60*0.07/1e6 ≈ 8.70912，最近的 0.5 刻度是 8.5
+  assert.equal(autoBitrate('1080p', 60), 8.5);
+  // 1280*720*30*0.07/1e6 ≈ 1.93536，最近的 0.5 刻度是 2
+  assert.equal(autoBitrate('720p', 30), 2);
+});
+
 test('默认值本身满足约束', () => {
   const d = defaultPrefs();
   assert.deepEqual(clampBitrateRange(d.bitrateMin, d.bitrateMax), { min: d.bitrateMin, max: d.bitrateMax });
@@ -47,7 +62,17 @@ test('默认值本身满足约束', () => {
 test('旧存档只有 bitrate：读成上限并补出下限', () => {
   const p = withStored({ bitrate: 6, bitrateAuto: false }, loadPrefs);
   assert.equal(p.bitrateMax, 6);
-  assert.equal(p.bitrateMin, 2.4);
+  // autoBitrateMin(6) = 6*0.4 = 2.4，对齐到 0.5 步进后是 2.5（不再是刻度外的 2.4）
+  assert.equal(p.bitrateMin, 2.5);
+});
+
+test('旧存档里落在步进刻度外的值经 loadPrefs 后被对齐（下限下取整、上限上取整）', () => {
+  const p = withStored({ bitrateMin: 3.4, bitrateMax: 8.7 }, loadPrefs);
+  assert.equal(p.bitrateMin, 3);
+  assert.equal(p.bitrateMax, 9);
+  assert.equal(p.bitrateMin * 2, Math.round(p.bitrateMin * 2), `${p.bitrateMin} 不在 0.5 刻度上`);
+  assert.equal(p.bitrateMax * 2, Math.round(p.bitrateMax * 2), `${p.bitrateMax} 不在 0.5 刻度上`);
+  assert.ok(p.bitrateMin <= p.bitrateMax * BITRATE_MIN_RATIO, `${p.bitrateMin} / ${p.bitrateMax} 余量不足`);
 });
 
 test('存档里的非法下限被收进区间，缺字段回落默认', () => {

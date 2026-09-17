@@ -14,10 +14,16 @@ export const BR_LIMITS: Record<string, { min: number; max: number }> = {
 };
 export const VOICE_BITRATES = [32000, 64000, 96000, 128000]; // bps
 
-// 按 bpp 模型推导默认码率上限（宽×高×帧率×0.07）
+/** 码率滑块的步进（Mbps）。 */
+export const BITRATE_STEP = 0.5;
+// 四舍五入到最近的步进刻度：input[type=range] 会把 value 夹到刻度上，推荐值不对齐会
+// 出现「读数 8.7、拇指停在 8.5」这种错位，所以自动推荐值必须直接落在刻度上。
+const roundStep = (n: number) => Math.round(n / BITRATE_STEP) * BITRATE_STEP;
+
+// 按 bpp 模型推导默认码率上限（宽×高×帧率×0.07），对齐到滑块步进
 export function autoBitrate(res: string, fps: number): number {
   const d = RES_DIMS[res] ?? RES_DIMS['1080p'];
-  return Math.round(((d.width * d.height * fps * 0.07) / 1e6) * 10) / 10;
+  return roundStep((d.width * d.height * fps * 0.07) / 1e6);
 }
 
 /** 下限的绝对下界（Mbps）：再低就不是「保住画面」而是留一片马赛克。 */
@@ -32,9 +38,9 @@ const round1 = (n: number) => Math.round(n * 10) / 10;
 const floor1 = (n: number) => Math.floor(n * 10) / 10;
 const ceil1 = (n: number) => Math.ceil(n * 10) / 10;
 
-/** 自动模式下由上限推下限。 */
+/** 自动模式下由上限推下限，对齐到滑块步进（理由同 autoBitrate）。 */
 export function autoBitrateMin(max: number): number {
-  return round1(Math.max(BITRATE_FLOOR, max * AUTO_MIN_RATIO));
+  return roundStep(Math.max(BITRATE_FLOOR, max * AUTO_MIN_RATIO));
 }
 
 /**
@@ -51,9 +57,6 @@ export function clampBitrateRange(min: number, max: number, anchor: 'min' | 'max
   }
   return { min: lo, max: hi };
 }
-
-/** 码率滑块的步进（Mbps）。 */
-export const BITRATE_STEP = 0.5;
 
 /**
  * 两侧滑块各自的可拖边界：把 clampBitrateRange 的约束摆到界面上——下限最高只到上限的
@@ -188,14 +191,20 @@ export function loadPrefs(): RoomPrefs {
     const rawMin =
       typeof p.bitrateMin === 'number' && p.bitrateMin >= BITRATE_FLOOR && p.bitrateMin <= 15 ? p.bitrateMin : autoBitrateMin(rawMax);
     const br = clampBitrateRange(rawMin, rawMax);
+    // clampBitrateRange 按 0.1 取整，值不一定落在滑块 0.5 的步进刻度上（旧存档里可能存着
+    // 对齐前的 autoBitrate 算出来的 8.7 这类值）。这里再对齐一次：下限向下取整、上限向上
+    // 取整——两个方向都只会让「下限 ≤ 上限 × BITRATE_MIN_RATIO」这个约束更宽松，不会把刚
+    // 推挤合法的区间又逼回禁区；反过来做（下限 ceil、上限 floor）会让区间变窄，可能再次非法。
+    const alignedMin = Math.max(BITRATE_FLOOR, Math.floor(br.min / BITRATE_STEP) * BITRATE_STEP);
+    const alignedMax = Math.ceil(br.max / BITRATE_STEP) * BITRATE_STEP;
     return {
       mic: p.mic === true,
       camera: p.camera === true,
       layout: p.layout === 'spotlight' ? 'spotlight' : 'grid',
       res: RES_DIMS[p.res ?? ''] ? (p.res as string) : def.res,
       fps: (FPS_BY_RES[p.res ?? '1080p'] ?? [15, 30, 60]).includes(p.fps as number) ? (p.fps as number) : def.fps,
-      bitrateMax: br.max,
-      bitrateMin: br.min,
+      bitrateMax: alignedMax,
+      bitrateMin: alignedMin,
       bitrateAuto: p.bitrateAuto !== false,
       screenCodec: p.screenCodec === 'h264' || p.screenCodec === 'h265' || p.screenCodec === 'av1' ? p.screenCodec : 'vp9',
       screenCodecAuto: p.screenCodecAuto !== false,
