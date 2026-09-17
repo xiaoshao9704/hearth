@@ -24,7 +24,7 @@ import { RES_DIMS, loadPrefs } from '../prefs';
 import type { RoomPrefs, ScreenCodec, ScreenContent } from '../prefs';
 import { installScreenBitrateFloor } from './sdp-floor';
 import { DATA_TOPIC_FILE, DATA_TOPIC_TEXT } from './types';
-import type { AVEngine, EPart, EngineCallbacks, LineStats, TrackSource, VideoStats } from './types';
+import type { AVEngine, EPart, EngineCallbacks, LineStats, TrackSource, VideoStats, WatchCounters } from './types';
 
 const toSource = (s: Track.Source): TrackSource | null =>
   s === Track.Source.Camera ? 'camera' : s === Track.Source.ScreenShare ? 'screen' : null;
@@ -573,6 +573,63 @@ export class LiveKitEngine implements AVEngine {
     const track = p?.getTrackPublication(src)?.track;
     if (!track) return null;
     return this.pickVideoStats(await track.getRTCStatsReport(), 'inbound-rtp', `${identity}:${source}`);
+  }
+
+  async remoteWatchCounters(identity: string, source: TrackSource): Promise<WatchCounters | null> {
+    const p = this.room.getParticipantByIdentity(identity);
+    const src = source === 'screen' ? Track.Source.ScreenShare : Track.Source.Camera;
+    const track = p?.getTrackPublication(src)?.track;
+    if (!track) return null;
+    return this.pickWatchCounters(await track.getRTCStatsReport());
+  }
+
+  // 观看诊断：原样抄走 inbound-rtp 的累计计数（差分在 watchdiag.ts），顺带记选中候选对的
+  // RTT 与「协议/候选类型」——地址不取，日志里也就不可能出现 IP
+  private pickWatchCounters(report: RTCStatsReport | undefined): WatchCounters | null {
+    if (!report) return null;
+    const byID = new Map<string, Record<string, unknown>>();
+    const pairs: Record<string, unknown>[] = [];
+    let selectedPairID = '';
+    let inbound: Record<string, unknown> | undefined;
+    report.forEach((raw) => {
+      const stat = raw as unknown as Record<string, unknown>;
+      const id = String(stat.id ?? '');
+      if (id) byID.set(id, stat);
+      if (stat.type === 'transport') selectedPairID = String(stat.selectedCandidatePairId ?? '');
+      if (stat.type === 'candidate-pair') pairs.push(stat);
+      if (stat.type === 'inbound-rtp' && stat.kind === 'video') inbound = stat;
+    });
+    if (!inbound) return null;
+    const num = (v: unknown): number | undefined => (typeof v === 'number' && Number.isFinite(v) ? v : undefined);
+    const out: WatchCounters = {
+      at: num(inbound.timestamp) ?? Date.now(),
+      framesDecoded: num(inbound.framesDecoded),
+      keyFramesDecoded: num(inbound.keyFramesDecoded),
+      freezeCount: num(inbound.freezeCount),
+      totalFreezesDuration: num(inbound.totalFreezesDuration),
+      packetsLost: num(inbound.packetsLost),
+      packetsReceived: num(inbound.packetsReceived),
+      pliCount: num(inbound.pliCount),
+      nackCount: num(inbound.nackCount),
+      jitter: num(inbound.jitter),
+      frameWidth: num(inbound.frameWidth),
+      frameHeight: num(inbound.frameHeight),
+      bytesReceived: num(inbound.bytesReceived),
+      jitterBufferDelay: num(inbound.jitterBufferDelay),
+      jitterBufferEmittedCount: num(inbound.jitterBufferEmittedCount),
+    };
+    const pair =
+      (selectedPairID ? byID.get(selectedPairID) : undefined) ??
+      pairs.find((x) => x.selected === true) ??
+      pairs.find((x) => x.nominated === true && x.state === 'succeeded');
+    if (pair) {
+      out.rtt = num(pair.currentRoundTripTime);
+      const kind = (stat: Record<string, unknown> | undefined): string | undefined =>
+        stat ? `${String(stat.protocol ?? '?')}/${String(stat.candidateType ?? '?')}` : undefined;
+      out.local = kind(byID.get(String(pair.localCandidateId ?? '')));
+      out.remote = kind(byID.get(String(pair.remoteCandidateId ?? '')));
+    }
+    return out;
   }
 
   localMicTrack(): MediaStreamTrack | null {

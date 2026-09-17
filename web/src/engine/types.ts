@@ -19,6 +19,30 @@ export interface VideoStats {
   limitation?: 'none' | 'cpu' | 'bandwidth' | 'other'; // 发侧：画质受限原因
 }
 
+// 观看诊断的原始累计值（远端视频轨的 inbound-rtp + 选中候选对）：引擎只抄读数不算增量，
+// 差分与节流在 watchdiag.ts。候选只带 `协议/候选类型`，按隐私要求不带地址。
+// 浏览器缺的字段一律 undefined（差分时按 0 增量处理），时间单位沿用 getStats 原始单位（秒）
+export interface WatchCounters {
+  at: number; // 采样时刻（inbound-rtp 的 timestamp，缺失时退回 Date.now）
+  framesDecoded?: number;
+  keyFramesDecoded?: number;
+  freezeCount?: number;
+  totalFreezesDuration?: number; // 秒
+  packetsLost?: number;
+  packetsReceived?: number;
+  pliCount?: number;
+  nackCount?: number;
+  jitter?: number; // 秒
+  frameWidth?: number;
+  frameHeight?: number;
+  bytesReceived?: number;
+  jitterBufferDelay?: number; // 秒
+  jitterBufferEmittedCount?: number;
+  rtt?: number; // 秒，candidate-pair 的 currentRoundTripTime
+  local?: string;
+  remote?: string;
+}
+
 // 一条线（语音 / 舞台）到服务器的连接读数：从引擎已有的 transport 快照派生，
 // 不另开一路 getStats。at = 快照采样时刻（Date.now），展示层据此判断新鲜度
 export interface LineStats {
@@ -105,6 +129,8 @@ export interface AVEngine {
   screenStats(): Promise<VideoStats | null>;
   // 远端视频轨的本端实测接收数据（SVC 下反映本端实际拿到的层）；无该轨或引擎无视频返回 null
   remoteVideoStats(identity: string, source: TrackSource): Promise<VideoStats | null>;
+  // 观看诊断用的原始累计读数；无该轨或拿不到报表返回 null。只在用户打开观看诊断时调用
+  remoteWatchCounters(identity: string, source: TrackSource): Promise<WatchCounters | null>;
   // 本线到服务器的连接读数（取引擎内周期刷新的 transport 快照）；未连接或拿不到返回 null
   lineStats(): LineStats | null;
   switchCamera(deviceId: string): Promise<void>;
