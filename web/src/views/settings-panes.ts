@@ -32,7 +32,6 @@ import {
   savePrefs,
 } from '../prefs';
 import type { DenoiseMode, ScreenCodec, ScreenContent } from '../prefs';
-import { setWatchDiag, watchDiagOn } from '../watchdiag';
 import { getTheme, setTheme } from '../theme';
 import type { Theme } from '../theme';
 import { armNotifyPermission, notifyState } from '../notify';
@@ -1050,13 +1049,6 @@ function renderScreen(body: HTMLElement, goStream: () => void) {
           ${icon('volume', 15, 'var(--text-2)')}
           <div>只想带某一个页面的声音（放视频、听音乐）：在浏览器的选择窗口里选「标签页」，勾上那一栏的共享声音。若某个平台仍有回音——听到自己这边传出去的语音绕回来——把「语音与视频」里的扬声器切到与系统默认不同的输出设备，采集到的系统声音里就不再有别人的语音。</div>
         </div>
-        <button class="hit switch-row" id="watch-diag-row" style="width:100%;text-align:left">
-          <div style="flex-grow:1">
-            <div class="s-title">观看诊断</div>
-            <div class="s-desc">看别人投屏时画面卡顿、掉帧，打开它排查：每 5 秒记一次你这边的解码帧率、冻结次数、丢包与网络抖动，写进本站服务器的日志供管理员查看。只有这些统计数字，不含画面、声音与聊天内容，也不记你的 IP 与位置。默认关闭，不开就一次都不采。</div>
-          </div>
-          <div class="switch ${watchDiagOn() ? 'on' : ''}" id="watch-diag-switch"><div class="knob"></div></div>
-        </button>
         <div class="hint-card">
           ${icon('cube', 15, 'var(--text-2)')}
           <div>VP9/AV1 走 SVC 分层：弱网观众自动降到低分辨率层，不拖累全场，也让上行带宽决定的观众数上限变成软性劣化；AV1 压缩率最高但软编极吃 CPU（实验）。H.264 单层兼容性最好。浏览器软编到 1080p60 为止——再往上是编码器的物理上限。<button class="hit" id="go-stream" style="color:var(--ember)">2K / 4K / 120fps 走 OBS 推流 →</button></div>
@@ -1133,13 +1125,6 @@ function renderScreen(body: HTMLElement, goStream: () => void) {
       prefs.screenAudio = !prefs.screenAudio;
       screenAudioSwitch.classList.toggle('on', prefs.screenAudio);
       savePrefs(prefs); // 不发 prefs 事件：采集参数没法热改，下次投屏才读得到
-    });
-    const watchDiagSwitch = body.querySelector<HTMLDivElement>('#watch-diag-switch')!;
-    body.querySelector('#watch-diag-row')!.addEventListener('click', () => {
-      const on = !watchDiagOn();
-      setWatchDiag(on);
-      watchDiagSwitch.classList.toggle('on', on);
-      notifyPrefsChanged('watchdiag'); // 已打开的房间页据此启停采集
     });
     body.querySelector('#go-stream')!.addEventListener('click', goStream);
   };

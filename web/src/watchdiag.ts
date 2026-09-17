@@ -1,29 +1,11 @@
 // 观看诊断（默认关）：观众侧投屏轨的秒级采样，用来定位「画面阶段性 0 帧、卡一下再恢复」。
 // 60 秒一条的 line_stats 采样太粗，几秒的冻结落不进任何一条读数里。
-// 开关在设置的「投屏画质」，关着时房间一次 getStats 都不多调。
+// 开关由服务端统一下发（cfg_watch_diag → GET /api/site 的 watch_diag），关着时房间
+// 一次 getStats 都不多调；客户端不各自记一份本地开关。
 //
-// 本文件只做「累计值 → 区间增量」与上报节流判定，不碰 DOM（除两个 localStorage 存取），
-// 纯函数部分有 node 单测。
+// 本文件只做「累计值 → 区间增量」与上报节流判定，不碰 DOM 也不引其他模块：
+// npm test 单独用 tsc 编译它跑 node 单测，带上 api/DOM 依赖就编不过。
 import type { WatchCounters } from './engine/types';
-
-const WATCH_DIAG_KEY = 'hearth_watch_diag';
-
-export function watchDiagOn(): boolean {
-  try {
-    return localStorage.getItem(WATCH_DIAG_KEY) === '1';
-  } catch {
-    return false; // 隐私模式下读不到：按关处理
-  }
-}
-
-export function setWatchDiag(on: boolean): void {
-  try {
-    if (on) localStorage.setItem(WATCH_DIAG_KEY, '1');
-    else localStorage.removeItem(WATCH_DIAG_KEY);
-  } catch {
-    // 存不下就只在本次会话生效，不值得打扰用户
-  }
-}
 
 // 相邻两次采样的差分结果：上报与本地面板共用这一份，不各算一遍
 export interface WatchSample {
