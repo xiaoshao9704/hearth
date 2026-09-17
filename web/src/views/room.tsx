@@ -27,7 +27,7 @@ import { wireLongPress } from '../longpress';
 import { clearLeaveGuard, setLeaveGuard } from '../nav';
 import { obsPlatform, startObsStream } from '../obsws';
 import type { ObsConn, ObsStreamStatus, ObsVersion } from '../obsws';
-import { encoderIsHw, loadPrefs, prefsBus, RES_DIMS, savePrefs } from '../prefs';
+import { encoderIsHw, loadPrefs, prefsBus, RES_DIMS, savePrefs, setScreenRepublish } from '../prefs';
 import { addWatch, diffWatch, emptyWatchTotals, shouldReportWatch, watchLevel } from '../watchdiag';
 import type { WatchTotals } from '../watchdiag';
 import { notifyJoin, notifyMessage } from '../notify';
@@ -584,7 +584,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
       const p = loadPrefs();
       specTip = () =>
         part.isLocal
-          ? `目标 ${p.res} · ${p.fps}fps · 上限 ${p.bitrate.toFixed(1)}M · ${p.screenCodec === 'h264' ? 'H.264 单层' : p.screenCodec === 'h265' ? 'HEVC 单层' : p.screenCodec.toUpperCase() + ' SVC'}`
+          ? `目标 ${p.res} · ${p.fps}fps · ${p.bitrateMin.toFixed(1)}–${p.bitrateMax.toFixed(1)}M · ${p.screenCodec === 'h264' ? 'H.264 单层' : p.screenCodec === 'h265' ? 'HEVC 单层' : p.screenCodec.toUpperCase() + ' SVC'}`
           : '你实际接收到的规格（SVC 按你的带宽选层，与他人可能不同）';
       // 实测轮询（getStats 差分）；本地附带编码器真值（硬编/软编，降级时跟着变）
       const refresh = async () => {
@@ -1673,7 +1673,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
         endpoint: `${info.base}${id}`,
         token: info.ticket,
         source_id: source.id,
-        bitrate_kbps: Math.round(p.bitrate * 1000),
+        bitrate_kbps: Math.round(p.bitrateMax * 1000),
         // 原生壳按 capabilities 选择实际存在的硬编码器，浏览器专用编码不会直接传过去。
         codec,
         width: dims.width,
@@ -1686,7 +1686,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
         return;
       }
       setScreenOn(true);
-      nativePublishConfig = { res: p.res, fps: p.fps, bitrate: p.bitrate, requestedCodec: p.screenCodec };
+      nativePublishConfig = { res: p.res, fps: p.fps, bitrate: p.bitrateMax, requestedCodec: p.screenCodec };
       nativeCodecNotice = '';
       if (started.codec !== codec) toast(`原生投屏使用 ${started.codec === 'h264' ? 'H.264' : 'HEVC'} 编码`, '', 3500);
       refreshMeta();
@@ -2183,7 +2183,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
           nativeCodecNotice = p.screenCodec;
           toast('原生投屏编码将在下次投屏时生效', '', 3500);
         }
-        if (p.res !== current.res || p.fps !== current.fps || p.bitrate !== current.bitrate) applyScreenPrefsSoon();
+        if (p.res !== current.res || p.fps !== current.fps || p.bitrateMax !== current.bitrate) applyScreenPrefsSoon();
       }
     }
   };
@@ -2201,8 +2201,8 @@ export async function renderRoom(root: HTMLElement, channel: string) {
           if (nativeScreen()) {
             const p = loadPrefs();
             const dims = RES_DIMS[p.res] ?? RES_DIMS['1080p'];
-            await updatePublish({ width: dims.width, height: dims.height, fps: p.fps, bitrate_kbps: Math.round(p.bitrate * 1000) });
-            if (nativePublishConfig) nativePublishConfig = { ...nativePublishConfig, res: p.res, fps: p.fps, bitrate: p.bitrate };
+            await updatePublish({ width: dims.width, height: dims.height, fps: p.fps, bitrate_kbps: Math.round(p.bitrateMax * 1000) });
+            if (nativePublishConfig) nativePublishConfig = { ...nativePublishConfig, res: p.res, fps: p.fps, bitrate: p.bitrateMax };
             if (!leaving) toast('投屏画质已更新', '', 3000);
           } else {
             const eng = stageEngine();
@@ -2216,6 +2216,23 @@ export async function renderRoom(root: HTMLElement, channel: string) {
       });
     }, 200);
   }
+
+  // 码率上下限是建连参数，只有重开发布会话才生效（见 engine/sdp-floor.ts）：投屏期间把
+  // 「重开」这个动作登记给设置浮层，由它在关闭那一刻统一调一次——拖动期间不重连，观众
+  // 最多被打断一次。原生壳投屏不在此列，它的码率由壳的编码器热改，走 applyScreenPrefsSoon。
+  function republishScreenNow() {
+    screenApplyChain = screenApplyChain.then(async () => {
+      if (leaving || !screenOn()) return;
+      try {
+        if (await stageEngine()?.republishScreen()) toast('投屏已按新画质重开，观众端会短暂重连', '', 3000);
+      } catch (err) {
+        if (!leaving) toast(`重开投屏失败：${err instanceof Error ? err.message : String(err)}`, 'bad');
+      }
+      if (!leaving) refreshMeta();
+    });
+  }
+  createEffect(() => setScreenRepublish(screenOn() && !nativeScreen() ? republishScreenNow : null));
+  onCleanup(() => setScreenRepublish(null));
 
   // ---- 视图组件 ----
 

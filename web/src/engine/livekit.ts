@@ -22,7 +22,7 @@ import type {
 import { RnnoisePipeline } from '../audio';
 import { RES_DIMS, loadPrefs } from '../prefs';
 import type { RoomPrefs, ScreenCodec, ScreenContent } from '../prefs';
-import { installScreenBitrateFloor } from './sdp-floor';
+import { installScreenBitrateFloor, setScreenBitrateFloorKbps } from './sdp-floor';
 import { DATA_TOPIC_FILE, DATA_TOPIC_TEXT } from './types';
 import type { AVEngine, EPart, EngineCallbacks, LineStats, TrackSource, VideoStats, WatchCounters } from './types';
 
@@ -759,6 +759,8 @@ export class LiveKitEngine implements AVEngine {
   async setScreen(on: boolean) {
     const p = loadPrefs();
     const { capture, publish } = this.screenOptions(p);
+    // 下限写进会话描述，只在这次协商定死：发布之前设一次，停止投屏时清掉
+    setScreenBitrateFloorKbps(on ? p.bitrateMin * 1000 : 0);
     await this.room.localParticipant.setScreenShareEnabled(on, on ? capture : undefined, on ? publish : undefined);
     this.screenCodec = on ? p.screenCodec : null;
     if (on) this.watchEnded('screen', this.screenTrack()?.mediaStreamTrack);
@@ -768,33 +770,41 @@ export class LiveKitEngine implements AVEngine {
     return this.room.localParticipant.getTrackPublication(Track.Source.ScreenShare)?.videoTrack;
   }
 
-  async applyScreenPrefs(): Promise<boolean> {
+  // 按当前 prefs 重开发布会话：编码与码率范围都在这一刻定死
+  async republishScreen(): Promise<boolean> {
     const track = this.screenTrack();
     if (!track) return false;
     const p = loadPrefs();
     const { publish } = this.screenOptions(p);
+    setScreenBitrateFloorKbps(p.bitrateMin * 1000);
+    // stopOnUnpublish=false 留住采集轨，不用重选窗口
+    await this.room.localParticipant.unpublishTrack(track, false);
+    await this.room.localParticipant.publishTrack(track, publish);
+    this.screenCodec = p.screenCodec;
+    return true;
+  }
+
+  // 码率范围（上限写 screenShareEncoding、下限写会话描述）属于建连参数，这里一概不碰：
+  // 下限本来就只能重协商生效，若上限继续用 setParameters 热改，同一组设置就一半立刻生效
+  // 一半要等下次投屏，用户无从预期。要改码率走 republishScreen。
+  async applyScreenPrefs(): Promise<boolean> {
+    const track = this.screenTrack();
+    if (!track) return false;
+    const p = loadPrefs();
     // 内容类型热改：contentHint 直接写采集轨，降级方向经 SDK 落到全部 sender
     // （含备份编码），也更新 SDK 自己记的值，免得后续换 sender 时被旧值覆盖
     track.mediaStreamTrack.contentHint = contentHintFor(p);
     await track.setDegradationPreference(degradationFor(p.screenContent));
-    if (p.screenCodec !== this.screenCodec) {
-      // 编码在 SDP 协商时定死，只能重新发布；stopOnUnpublish=false 留住采集轨，不用重选窗口
-      await this.room.localParticipant.unpublishTrack(track, false);
-      await this.room.localParticipant.publishTrack(track, publish);
-      this.screenCodec = p.screenCodec;
-      return true;
-    }
+    // 编码在 SDP 协商时定死，只能重新发布
+    if (p.screenCodec !== this.screenCodec) return this.republishScreen();
     const d = RES_DIMS[p.res];
     await track.mediaStreamTrack.applyConstraints({ width: { ideal: d.width }, height: { ideal: d.height }, frameRate: { ideal: p.fps } });
-    // 主编码与 h264 备份编码的发送参数一起改；SDK 的层开关只动 active，不会覆盖这里的码率
+    // 主编码与 h264 备份编码的发送参数一起改；SDK 的层开关只动 active，不会覆盖这里的帧率
     const senders = [track.sender, ...[...track.simulcastCodecs.values()].map((c) => c.sender)];
     for (const sender of senders) {
       if (!sender) continue;
       const params = sender.getParameters();
-      for (const e of params.encodings) {
-        e.maxBitrate = Math.round(p.bitrate * 1e6);
-        e.maxFramerate = p.fps;
-      }
+      for (const e of params.encodings) e.maxFramerate = p.fps;
       await sender.setParameters(params);
     }
     return false;
@@ -825,7 +835,7 @@ export class LiveKitEngine implements AVEngine {
           }
         : false,
     };
-    const encoding = { maxBitrate: Math.round(p.bitrate * 1e6), maxFramerate: p.fps };
+    const encoding = { maxBitrate: Math.round(p.bitrateMax * 1e6), maxFramerate: p.fps };
     let publish: TrackPublishOptions;
     if (p.screenCodec === 'h264') {
       // 单层：H.264 无 SVC；simulcast 双编码会把软编 CPU 拖垮，维持单层

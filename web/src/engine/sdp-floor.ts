@@ -5,20 +5,31 @@
 // 上不去、内网却没事，同一条链路 OBS 固定码率很稳」。LiveKit 只写 x-google-start-bitrate
 // （投屏不封顶，取目标的 90%），整个客户端里没有任何地方设下限。
 //
+// 下限是多少由用户定（设置里的「码率下限」），不是这里算出来的比例：顶得太高，真拥堵时就从
+// 「画面变糊」变成「丢包花屏」，这个取舍只能交给看得见自己链路的人。未设定（0）时一个字节都不改。
+//
 // 只改投屏、不碰摄像头：LiveKit 给摄像头的起始码率封顶 1000 kbps，投屏那条不封顶，所以
 // 「起始码率 > 1000」就是一个干净的判据，不必去猜哪条媒体段是投屏。
 //
 // 这是会话描述改写，属于绕过 SDK 的手段：一旦 LiveKit 自己支持设下限就该删掉这个文件。
 
-/** 下限取起始码率的这个比例。起始是目标的 90%，所以下限约为目标的一半。 */
-const FLOOR_RATIO = 0.55;
 /** 摄像头的起始码率被 LiveKit 封在 1000，超过这个数的只可能是投屏。 */
 const SCREEN_START_MIN = 1000;
 
 let installed = false;
+let floorKbps = 0;
+
+/**
+ * 设定下一次协商要注入的下限（kbps）。0 或非法值 = 不注入，行为与没装这个补丁一致。
+ * 只在发布投屏之前设：写进去的是会话描述，改完要重新协商才生效。
+ */
+export function setScreenBitrateFloorKbps(kbps: number): void {
+  floorKbps = Number.isFinite(kbps) && kbps > 0 ? Math.round(kbps) : 0;
+}
 
 /** 把下限写进 fmtp 行；返回改写后的描述文本，没有可改的就原样返回。 */
 export function addScreenBitrateFloor(sdp: string): string {
+  if (floorKbps <= 0) return sdp;
   let touched = false;
   const out = sdp.split(/\r?\n/).map((line) => {
     if (!line.startsWith('a=fmtp:')) return line;
@@ -28,7 +39,7 @@ export function addScreenBitrateFloor(sdp: string): string {
     const start = Number(m[1]);
     if (!Number.isFinite(start) || start <= SCREEN_START_MIN) return line;
     touched = true;
-    return `${line};x-google-min-bitrate=${Math.round(start * FLOOR_RATIO)}`;
+    return `${line};x-google-min-bitrate=${floorKbps}`;
   });
   return touched ? out.join('\r\n') : sdp;
 }

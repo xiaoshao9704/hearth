@@ -117,9 +117,13 @@ export interface AVEngine {
   setMic(on: boolean): Promise<void>;
   setCamera(on: boolean): Promise<void>;
   setScreen(on: boolean): Promise<void>;
-  // 投屏进行中按 prefs 重设画质：码率/帧率/分辨率就地改在途轨，换编码则重新发布
-  //（采集轨保留，不用重选窗口；观众端短暂重订阅）。返回是否发生了重新发布；未投屏返回 false
+  // 投屏进行中按 prefs 重设画质：帧率/分辨率/内容类型就地改在途轨，换编码则重新发布
+  //（采集轨保留，不用重选窗口；观众端短暂重订阅）。返回是否发生了重新发布；未投屏返回 false。
+  // 码率范围不在此列——它是建连参数，只能走 republishScreen
   applyScreenPrefs(): Promise<boolean>;
+  // 按当前 prefs 重开发布会话（留住采集轨，不用重选窗口）：码率上下限只在发布这一刻定死，
+  // 改了要经这里才生效。返回是否真的重开；未投屏返回 false
+  republishScreen(): Promise<boolean>;
   restartMic(): Promise<void>; // 开麦状态下设备/处理链变更：重启采集
   localMicTrack(): MediaStreamTrack | null; // 当前发布中的本地麦克风轨（本地电平表用；未开麦为 null）
   // 投屏实际生效的编码器（getStats 运行时真值）；未投屏或引擎无视频返回 null。
