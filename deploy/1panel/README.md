@@ -9,7 +9,7 @@ hearth/
 ├── logo.png              180x180 图标
 ├── README.md             中文应用说明（面板里展示）
 ├── README_en.md          英文应用说明
-└── 0.10.3/               版本目录
+└── 0.10.4/               版本目录
     ├── data.yml          安装表单（formFields）
     ├── docker-compose.yml
     ├── data/             持久化目录（挂到容器 /data）
