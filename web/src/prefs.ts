@@ -76,7 +76,7 @@ export function defaultPrefs(): RoomPrefs {
     bitrateAuto: true,
     screenCodec: 'vp9',
     screenCodecAuto: true,
-    screenContent: 'text',
+    screenContent: 'game', // 默认保帧率：实测高熵画面下「保清晰度」会把帧率压到个位数，游戏/视频场景是主用途
     screenAudio: true,
     denoise: 'rnnoise',
     echoCancellation: true,
@@ -129,7 +129,7 @@ export function loadPrefs(): RoomPrefs {
       bitrateAuto: p.bitrateAuto !== false,
       screenCodec: p.screenCodec === 'h264' || p.screenCodec === 'h265' || p.screenCodec === 'av1' ? p.screenCodec : 'vp9',
       screenCodecAuto: p.screenCodecAuto !== false,
-      screenContent: p.screenContent === 'game' ? 'game' : def.screenContent,
+      screenContent: p.screenContent === 'text' || p.screenContent === 'game' ? p.screenContent : def.screenContent,
       screenAudio: p.screenAudio !== false,
       denoise,
       echoCancellation: p.echoCancellation !== false,

@@ -1017,8 +1017,8 @@ function renderScreen(body: HTMLElement, goStream: () => void) {
           <span class="k">内容类型</span>
           <div class="seg-group" style="flex-grow:1">
             ${([
-              ['text', '文字与界面'],
               ['game', '游戏与视频'],
+              ['text', '文字与界面'],
             ] as const)
               .map(
                 ([v, label]) =>
@@ -1027,7 +1027,7 @@ function renderScreen(body: HTMLElement, goStream: () => void) {
               .join('')}
           </div>
         </div>
-        <div class="mono" style="padding-left:66px;font-size:10.5px;color:var(--text-3);margin-top:-8px">游戏模式在带宽不足时缩小画面保帧率，文字模式保清晰度可能掉帧</div>
+        <div class="mono" style="padding-left:66px;font-size:10.5px;color:var(--text-3);margin-top:-8px">默认游戏模式：带宽不足时缩小画面、保住帧率。文字模式反过来保清晰度，画面复杂时帧率会掉到个位数，只适合看文档与代码</div>
         <div class="kv-line">
           <span class="k">码率</span>
           <input class="range" type="range" min="${lim.min}" max="${lim.max}" step="0.5" value="${prefs.bitrate}" id="br-range" />
