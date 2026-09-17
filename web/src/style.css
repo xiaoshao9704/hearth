@@ -670,6 +670,13 @@ body {
 
 .kv-line { display: flex; align-items: center; gap: 14px; }
 .kv-line .k { font-size: 12.5px; color: var(--text-1); width: 52px; flex-shrink: 0; }
+/* 投屏画质的码率两行：读数 + 「被另一侧顶住」的即时反馈（设置页与投屏浮窗共用） */
+.br-readout, .br-hint { width: 108px; flex-shrink: 0; text-align: right; font-size: 11.5px; }
+.br-readout { color: var(--text-1); }
+.br-hint { color: var(--text-3); }
+.br-readout.pinned { color: var(--ember); font-weight: 600; }
+.br-note { font-size: 11px; line-height: 1.5; color: var(--ember); opacity: 0; }
+.br-note.on { opacity: 1; }
 .copy-line {
   display: flex; align-items: center; gap: 8px; height: 42px; padding: 0 6px 0 14px;
   border-radius: 9px; background: var(--bg-1); border: 1px solid var(--line);
@@ -1377,6 +1384,15 @@ body.theater-on { overscroll-behavior: none; }
 .obs-link .obs-q-unit { font-size: 11px; color: var(--text-3); }
 .obs-link .obs-presets { display: flex; flex-wrap: wrap; gap: 8px; }
 
+/* 投屏浮窗里的紧凑画质：与设置页同一批控件，只是行更密、字更小 */
+.sq-compact { display: flex; flex-direction: column; gap: 9px; }
+.sq-compact .kv-line { gap: 10px; }
+.sq-compact .kv-line .k { width: 46px; font-size: 11.5px; color: var(--text-2); }
+.sq-compact .seg { padding: 5px 8px; font-size: 11.5px; }
+.obs-cap-qhead { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+/* 开始投屏是这个浮窗的主按钮：浏览器的选源框由它同步拉起 */
+.obs-cap-start { width: 100%; margin-top: 3px; }
+
 /* 在 OBS 里建采集源：这一节同时挂在设置面板与点「投屏」弹出的面板里 */
 .obs-cap-modes { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .obs-cap-modetip { flex-basis: 100%; }
@@ -1410,6 +1426,8 @@ body.theater-on { overscroll-behavior: none; }
   .ingest-scrim { padding: 56px 12px 12px; }
   .ingest-panel { padding: 16px; }
   .ingest-panel .src-list { grid-template-columns: 1fr; }
+  .sq-compact .seg { padding: 5px 6px; font-size: 11px; }
+  .sq-compact .br-readout, .sq-compact .br-hint { width: 84px; font-size: 11px; }
   .obs-link .obs-ver { margin-left: 0; flex-basis: 100%; }
 }
 

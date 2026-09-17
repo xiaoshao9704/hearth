@@ -23,6 +23,7 @@ import {
   type ObsWinMode,
 } from '../../obsws';
 import { el, icon } from '../../ui';
+import { renderScreenQuality } from '../screen-quality';
 
 export const LS_OBS_URL = 'hearth_obsws_url';
 export const LS_OBS_PASSWORD = 'hearth_obsws_password';
@@ -365,14 +366,16 @@ export const ObsCaptureSection = (p: {
 };
 
 /**
- * 浏览器里点「投屏」弹的面板：原来的浏览器共享仍是第一选项，OBS 只是多一节。
- * 桌面壳走的是原生选源面板，那边把同一个分区接进去。
+ * 浏览器里点「投屏」弹的面板：开始之前先把画质调顺手，再由浏览器弹自己的选源框。
+ * 画质是紧凑版（完整版在设置浮层的「投屏画质」，同一份 prefs）；OBS 那一节配过联动才出现。
+ * 「开始投屏」到 getDisplayMedia 之间不能夹任何网络请求，否则用户手势失效。
  */
 export const ObsScreenPanel = (p: {
-  conn: ObsConn;
-  obsVersion: string;
-  platform: string;
+  conn?: ObsConn | null;
+  obsVersion?: string;
+  platform?: string;
   onBrowser: () => void;
+  onMoreSettings?: () => void;
   start?: () => Promise<void>;
   onReady?: () => void;
   onStarted?: () => void;
@@ -382,29 +385,40 @@ export const ObsScreenPanel = (p: {
     <div class="ingest-panel card" onClick={(ev) => ev.stopPropagation()}>
       <header class="ig-head">
         {el(icon('screen', 16, 'var(--ember)', 1.7))}
-        <div class="ig-title">选择要共享的画面</div>
+        <div class="ig-title">投屏</div>
         <button type="button" class="hit btn btn-icon" aria-label="关闭" onClick={p.onClose}>
           {el(icon('close', 15, 'var(--text-1)', 1.8))}
         </button>
       </header>
 
       <div class="ig-field">
-        <div class="section-label">本机浏览器</div>
-        <button type="button" class="hit btn btn-sm btn-primary obs-cap-browser" onClick={p.onBrowser}>
-          {el(icon('screen', 13, 'var(--on-ember)', 1.8))} 用浏览器选窗口共享
+        <div class="obs-cap-qhead">
+          <div class="section-label">画质</div>
+          <Show when={p.onMoreSettings}>
+            <button type="button" class="hit ig-link" onClick={() => p.onMoreSettings!()}>
+              更多设置 <span class="ig-arrow">→</span>
+            </button>
+          </Show>
+        </div>
+        {/* 命令式控件：与设置浮层同一份渲染函数，挂进来就行，不重建 */}
+        <div ref={(node) => renderScreenQuality(node, { compact: true })} />
+        <button type="button" class="hit btn btn-primary obs-cap-start" onClick={p.onBrowser}>
+          {el(icon('screen', 14, 'var(--on-ember)', 1.8))} 开始投屏
         </button>
-        <div class="ig-tip">浏览器自带的共享选择器，和以前一样。</div>
+        <div class="ig-tip">点了之后由浏览器弹出自己的选择框挑窗口；要不要带声音也在那里勾（Chrome 只有共享「标签页」才有）。</div>
       </div>
 
-      <div class="ig-sep" />
-      <ObsCaptureSection
-        conn={p.conn}
-        obsVersion={p.obsVersion}
-        platform={p.platform}
-        start={p.start}
-        onReady={p.onReady}
-        onStarted={p.onStarted}
-      />
+      <Show when={p.conn && p.obsVersion && p.platform}>
+        <div class="ig-sep" />
+        <ObsCaptureSection
+          conn={p.conn!}
+          obsVersion={p.obsVersion!}
+          platform={p.platform!}
+          start={p.start}
+          onReady={p.onReady}
+          onStarted={p.onStarted}
+        />
+      </Show>
     </div>
   </div>
 );

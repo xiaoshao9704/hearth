@@ -52,6 +52,24 @@ export function clampBitrateRange(min: number, max: number, anchor: 'min' | 'max
   return { min: lo, max: hi };
 }
 
+/** 码率滑块的步进（Mbps）。 */
+export const BITRATE_STEP = 0.5;
+
+/**
+ * 两侧滑块各自的可拖边界：把 clampBitrateRange 的约束摆到界面上——下限最高只到上限的
+ * BITRATE_MIN_RATIO，上限最低只到下限除以它。拖到头是「被另一侧顶住」，不是悄悄停住。
+ * 边界必须对齐步进：range 的刻度是从 min 属性起算的，min 一旦落在步进之外，
+ * 整条刻度就跟着移位，值会漂成 8.9 / 12.2 这种数。
+ */
+export function bitrateSliderBounds(min: number, max: number, lim: { min: number; max: number }): { minMax: number; maxMin: number } {
+  const floorStep = (n: number) => Math.floor(n / BITRATE_STEP) * BITRATE_STEP;
+  const ceilStep = (n: number) => Math.ceil(n / BITRATE_STEP) * BITRATE_STEP;
+  return {
+    minMax: Math.max(BITRATE_FLOOR, Math.min(lim.max, floorStep(max * BITRATE_MIN_RATIO))),
+    maxMin: Math.min(lim.max, Math.max(lim.min, ceilStep(min / BITRATE_MIN_RATIO))),
+  };
+}
+
 // 剧场浮动名册的停靠角：左上/右上/左下/右下
 export type TheaterCorner = 'tl' | 'tr' | 'bl' | 'br';
 export const THEATER_CORNERS: TheaterCorner[] = ['tl', 'tr', 'bl', 'br'];

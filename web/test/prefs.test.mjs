@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { autoBitrate, autoBitrateMin, clampBitrateRange, defaultPrefs, loadPrefs } from './tmp/prefs.js';
+import { autoBitrate, autoBitrateMin, bitrateSliderBounds, clampBitrateRange, defaultPrefs, loadPrefs } from './tmp/prefs.js';
 
 // loadPrefs 只在调用时读 localStorage，桩一份就够
 function withStored(obj, fn) {
@@ -58,6 +58,40 @@ test('存档里的非法下限被收进区间，缺字段回落默认', () => {
   const p = withStored({ bitrateMin: 'x', bitrateMax: 99 }, loadPrefs);
   assert.equal(p.bitrateMax, def.bitrateMax);
   assert.equal(p.bitrateMin, def.bitrateMin);
+});
+
+const LIM_1080 = { min: 2.5, max: 15 };
+const LIM_720 = { min: 1, max: 6 };
+
+test('滑块边界：下限的可拖上界随上限收紧，上限的可拖下界随下限抬高', () => {
+  assert.deepEqual(bitrateSliderBounds(3.5, 8.7, LIM_1080), { minMax: 6.5, maxMin: 4.5 }); // 边界对齐步进
+  assert.deepEqual(bitrateSliderBounds(0.5, 1, LIM_1080), { minMax: 0.5, maxMin: 2.5 }); // 下界不低于绝对下界与建议区间下沿
+});
+
+test('滑块边界落在步进刻度上（min 属性歪了整条刻度都会移位）', () => {
+  for (let max = 1; max <= 15; max += 0.5)
+    for (const lim of [LIM_1080, LIM_720]) {
+      const b = bitrateSliderBounds(1.5, max, lim);
+      assert.equal(b.minMax * 2, Math.round(b.minMax * 2), `${b.minMax} 不在 0.5 刻度上`);
+      assert.equal(b.maxMin * 2, Math.round(b.maxMin * 2), `${b.maxMin} 不在 0.5 刻度上`);
+    }
+});
+
+test('滑块边界不越出建议区间与绝对下界', () => {
+  assert.deepEqual(bitrateSliderBounds(3.5, 8.7, LIM_720), { minMax: 6, maxMin: 4.5 }); // 上限的档位比 1080p 窄
+  assert.deepEqual(bitrateSliderBounds(12, 15, LIM_1080), { minMax: 12, maxMin: 15 });
+  assert.equal(bitrateSliderBounds(0.5, 0.5, LIM_1080).minMax, 0.5); // 再小也不低于绝对下界
+});
+
+test('拖到边界上的值本身就是合法区间（界面拦住的正是 clamp 会推挤的那一步）', () => {
+  for (let max = 1; max <= 15; max += 0.5) {
+    const b = bitrateSliderBounds(1, max, LIM_1080);
+    assert.deepEqual(clampBitrateRange(b.minMax, max, 'min'), { min: b.minMax, max }, `上限 ${max} 处下限顶格仍被推挤`);
+  }
+  for (let min = 0.5; min <= 12; min += 0.5) {
+    const b = bitrateSliderBounds(min, 15, LIM_1080);
+    assert.deepEqual(clampBitrateRange(min, b.maxMin, 'max'), { min, max: b.maxMin }, `下限 ${min} 处上限见底仍被推挤`);
+  }
 });
 
 test('系统声音交还浏览器后：旧存档里的 screenAudio 只是被忽略', () => {

@@ -22,20 +22,8 @@ import {
   updateUsername,
 } from '../api';
 import type { Invite } from '../api';
-import {
-  BITRATE_FLOOR,
-  BR_LIMITS,
-  FPS_BY_RES,
-  autoBitrate,
-  autoBitrateMin,
-  clampBitrateRange,
-  loadPrefs,
-  notifyPrefsChanged,
-  probeHwEncode,
-  savePrefs,
-  screenRepublishHook,
-} from '../prefs';
-import type { DenoiseMode, RoomPrefs, ScreenCodec, ScreenContent } from '../prefs';
+import { loadPrefs, notifyPrefsChanged, savePrefs, screenRepublishHook } from '../prefs';
+import type { DenoiseMode } from '../prefs';
 import { getTheme, setTheme } from '../theme';
 import type { Theme } from '../theme';
 import { armNotifyPermission, notifyState } from '../notify';
@@ -47,9 +35,9 @@ import {
   unsupportedReason,
 } from '../push';
 import { installMode, isStandalone, onInstallAvailable, promptInstall } from '../install';
-import { capabilities, encoderDisplayName, inShell } from '../bridge';
-import type { BridgeCaps } from '../bridge';
+import { inShell } from '../bridge';
 import { renderPasskeys, renderSessions } from './account-pane';
+import { renderScreenQuality } from './screen-quality';
 import { avatarHtml, confirmDialog, copyText, esc, icon, pwBarsHtml, pwScore, slashIcon, timeAgo, toast } from '../ui';
 
 export type PersonalPane = 'av' | 'screen' | 'stream' | 'devices' | 'invites' | 'account' | 'appearance';
@@ -947,9 +935,6 @@ function renderAV(body: HTMLElement): () => void {
 
 // ---- 投屏画质 ----
 
-// 壳的能力探一次就够（Rust 侧也是缓存的）；拿到后重画一次编码那一行。
-let shellCaps: BridgeCaps | null = null;
-
 // 码率范围（上限写编码参数、下限写会话描述）只在发布那一刻定死，拖动期间不重连：
 // 这里只记脏，等设置浮层真正关闭时统一重开一次投屏，观众最多被打断一次。
 // pane 之间跳转不经 closeSettings，因此不会误触发。
@@ -962,203 +947,23 @@ export function flushScreenBitrateRange() {
   screenRepublishHook()?.();
 }
 
-// 两侧码率合成一个区间读数
-function brLabel(p: { bitrateMin: number; bitrateMax: number }): string {
-  return `${p.bitrateMin.toFixed(1)} – ${p.bitrateMax.toFixed(1)} Mbps`;
-}
-
-// 自动档：上限按分辨率/帧率推，下限跟着上限走（改分辨率/帧率同样动到码率范围，一并记脏）
-function setAutoBitrate(p: RoomPrefs, res: string, fps: number) {
-  const max = autoBitrate(res, fps);
-  if (max !== p.bitrateMax) bitrateRangeDirty = true;
-  p.bitrateMax = max;
-  p.bitrateMin = autoBitrateMin(max);
-  p.bitrateAuto = true;
-}
-
+// 控件本体与点「投屏」弹的浮窗共用（views/screen-quality.ts）：这里是完整版，
+// 带说明与提示卡；浮窗那份是紧凑版。两处读写同一份 prefs。
 function renderScreen(body: HTMLElement, goStream: () => void) {
-  const prefs = loadPrefs();
-
-  const paint = () => {
-    // 壳里投屏走原生管线，编码只有 h264/h265 两条路，标注一律用壳实测选中的编码器；
-    // 浏览器那套 MediaCapabilities 预测说的是浏览器自己怎么编，与原生管线无关。
-    const native = shellCaps?.native_publish === true;
-    const nativeCodec: ScreenCodec = prefs.screenCodec === 'h265' ? 'h265' : 'h264';
-    const codecOptions: Array<[string, string]> = native
-      ? (shellCaps?.publish_codecs ?? []).map((c) => [
-          c,
-          `${c === 'h264' ? 'H.264' : 'H.265'} · ${esc(encoderDisplayName(shellCaps?.publish_encoders?.[c]))}`,
-        ])
-      : [
-          ['vp9', 'VP9 · SVC'],
-          ['av1', 'AV1 · SVC'],
-          ['h265', 'HEVC 单层'],
-          ['h264', 'H.264 单层'],
-        ];
-    const codecOn = native ? nativeCodec : prefs.screenCodec;
-    const lim = BR_LIMITS[prefs.res];
-    const fpsAllowed = FPS_BY_RES[prefs.res] ?? [15, 30, 60];
-    body.innerHTML = `
-      <div class="pane-col pane-narrow">
-        <div class="kv-line">
-          <span class="k">分辨率</span>
-          <div class="seg-group" style="flex-grow:1">
-            ${['720p', '1080p', '1440p', '4K']
-              .map((r) => {
-                const enabled = r === '720p' || r === '1080p';
-                return `<button class="hit seg ${prefs.res === r ? 'on' : ''} ${enabled ? '' : 'off'}" data-res="${r}">${r}</button>`;
-              })
-              .join('')}
-          </div>
-        </div>
-        <div class="kv-line">
-          <span class="k">帧率</span>
-          <div class="seg-group" style="flex-grow:1">
-            ${[15, 30, 60, 120]
-              .map(
-                (f) =>
-                  `<button class="hit seg ${prefs.fps === f ? 'on' : ''} ${fpsAllowed.includes(f) ? '' : 'off'}" data-fps="${f}">${f}</button>`,
-              )
-              .join('')}
-          </div>
-        </div>
-        <div class="kv-line">
-          <span class="k">编码</span>
-          <div class="seg-group" style="flex-grow:1">
-            ${codecOptions
-              .map(([v, label]) => `<button class="hit seg ${codecOn === v ? 'on' : ''}" data-codec="${v}">${label}</button>`)
-              .join('')}
-          </div>
-        </div>
-        ${
-          native
-            ? `<div class="mono" style="padding-left:66px;font-size:10.5px;color:var(--text-3);margin-top:-8px">桌面端投屏由本机硬编直发，上面是壳实测选中的编码器。H.265 更省带宽，但观众端需支持 HEVC 解码，不支持的观众看不到画面。</div>`
-            : ''
-        }
-        ${
-          inShell() && shellCaps && !native
-            ? `<div class="hint-card">
-          ${icon('warn', 15, 'var(--text-2)')}
-          <div>本机没有可用的原生硬编，投屏走浏览器：${esc(shellCaps.native_publish_error ?? '壳没有给出原因')}</div>
-        </div>`
-            : ''
-        }
-        <div class="kv-line">
-          <span class="k">内容类型</span>
-          <div class="seg-group" style="flex-grow:1">
-            ${([
-              ['game', '流畅优先（默认）'],
-              ['text', '清晰优先（文档与代码）'],
-            ] as const)
-              .map(
-                ([v, label]) =>
-                  `<button class="hit seg ${prefs.screenContent === v ? 'on' : ''}" data-content="${v}">${label}</button>`,
-              )
-              .join('')}
-          </div>
-        </div>
-        <div class="mono" style="padding-left:66px;font-size:10.5px;color:var(--text-3);margin-top:-8px">流畅优先：带宽不够时缩小画面、保住帧率。清晰优先反过来保住分辨率，帧率会掉——画面复杂时掉到个位数，只在滚动代码、看文档这类小字场景才用</div>
-        <div class="kv-line">
-          <span class="k">码率下限</span>
-          <input class="range" type="range" min="${BITRATE_FLOOR}" max="${lim.max}" step="0.5" value="${prefs.bitrateMin}" id="br-min" />
-          <span class="mono" style="font-size:11.5px;color:var(--text-1);width:96px;text-align:right" id="br-label">${brLabel(prefs)}</span>
-        </div>
-        <div class="kv-line">
-          <span class="k">码率上限</span>
-          <input class="range" type="range" min="${lim.min}" max="${lim.max}" step="0.5" value="${prefs.bitrateMax}" id="br-max" />
-          <span class="mono" style="font-size:11.5px;color:var(--text-3);width:96px;text-align:right">${prefs.res} · ${prefs.fps}fps 建议 ${lim.min}–${lim.max}</span>
-        </div>
-        <div class="mono" style="padding-left:66px;font-size:10.5px;color:var(--text-3);margin-top:-8px">上限 = 网络好时最多发多少${prefs.bitrateAuto ? '（当前为自动推荐值）' : ''}；下限 = 网络差时最少也要发多少，低于它宁可丢包也不再降。下限设太高，真拥堵时画面就不是变糊而是花屏，一般留在上限的四成左右。投屏时关闭设置后会重开一次投屏，画面会断一下</div>
-        <div class="hint-card">
-          ${icon('volume', 15, 'var(--text-2)')}
-          <div>投屏带不带声音由浏览器自己的选择框决定：Chrome 只有共享「标签页」时才有那个勾选框，整屏与单个窗口没有。</div>
-        </div>
-        <div class="hint-card">
-          ${icon('cube', 15, 'var(--text-2)')}
-          <div>VP9/AV1 走 SVC 分层：弱网观众自动降到低分辨率层，不拖累全场，也让上行带宽决定的观众数上限变成软性劣化；AV1 压缩率最高但软编极吃 CPU（实验）。H.264 单层兼容性最好。浏览器软编到 1080p60 为止——再往上是编码器的物理上限。<button class="hit" id="go-stream" style="color:var(--ember)">2K / 4K / 120fps 走 OBS 推流 →</button></div>
-        </div>
-      </div>`;
-
-    body.querySelectorAll<HTMLButtonElement>('[data-res]').forEach((btn) => {
-      btn.addEventListener('click', () => {
-        const r = btn.dataset.res!;
-        if (r !== '720p' && r !== '1080p') {
-          toast('浏览器投屏最高 1080p60，更高走 OBS 推流', '', 2600);
-          return;
-        }
-        prefs.res = r;
-        setAutoBitrate(prefs, r, prefs.fps);
-        savePrefs(prefs);
-        notifyPrefsChanged('screen');
-        paint();
-      });
-    });
-    // 按当前分辨率/帧率问浏览器：各编码档走不走硬件（MediaCapabilities 事前预测）。
-    // 壳内投屏不经浏览器编码，这个预测会误导，不显示。
-    if (!native)
-      (['vp9', 'av1', 'h265', 'h264'] as ScreenCodec[]).forEach(async (c) => {
-        const hw = await probeHwEncode(c);
-        const btn = body.querySelector<HTMLButtonElement>(`[data-codec="${c}"]`);
-        if (btn && hw !== null && !btn.querySelector('.enc-tag')) {
-          btn.insertAdjacentHTML('beforeend', `<span class="enc-tag ${hw ? 'hw' : ''}">${hw ? '硬编' : '软编'}</span>`);
-        }
-      });
-    body.querySelectorAll<HTMLButtonElement>('[data-codec]').forEach((btn) => {
-      btn.addEventListener('click', () => {
-        prefs.screenCodec = btn.dataset.codec as ScreenCodec;
-        prefs.screenCodecAuto = false; // 手选后不再自动改
-        savePrefs(prefs);
-        notifyPrefsChanged('screen');
-        paint();
-      });
-    });
-    body.querySelectorAll<HTMLButtonElement>('[data-content]').forEach((btn) => {
-      btn.addEventListener('click', () => {
-        prefs.screenContent = btn.dataset.content as ScreenContent;
-        savePrefs(prefs);
-        notifyPrefsChanged('screen');
-        paint();
-      });
-    });
-    body.querySelectorAll<HTMLButtonElement>('[data-fps]').forEach((btn) => {
-      btn.addEventListener('click', () => {
-        const f = Number(btn.dataset.fps);
-        if (!(FPS_BY_RES[prefs.res] ?? []).includes(f)) {
-          toast('浏览器投屏最高 1080p60，更高走 OBS 推流', '', 2600);
-          return;
-        }
-        prefs.fps = f;
-        setAutoBitrate(prefs, prefs.res, f);
-        savePrefs(prefs);
-        notifyPrefsChanged('screen');
-        paint();
-      });
-    });
-    // 拖任一侧都把另一侧推开（见 clampBitrateRange），免得滑块拖到一半突然「拖不动」
-    const brMin = body.querySelector<HTMLInputElement>('#br-min')!;
-    const brMax = body.querySelector<HTMLInputElement>('#br-max')!;
-    const dragBitrate = (anchor: 'min' | 'max') => {
-      const r = clampBitrateRange(parseFloat(brMin.value), parseFloat(brMax.value), anchor);
-      if (r.min !== prefs.bitrateMin || r.max !== prefs.bitrateMax) bitrateRangeDirty = true;
-      prefs.bitrateMin = r.min;
-      prefs.bitrateMax = r.max;
-      prefs.bitrateAuto = false;
-      savePrefs(prefs);
-      notifyPrefsChanged('screen');
-      if (anchor === 'min') brMax.value = String(r.max);
-      else brMin.value = String(r.min);
-      body.querySelector('#br-label')!.textContent = brLabel(prefs);
-    };
-    brMin.addEventListener('input', () => dragBitrate('min'));
-    brMax.addEventListener('input', () => dragBitrate('max'));
-    body.querySelector('#go-stream')!.addEventListener('click', goStream);
-  };
-  paint();
-  if (inShell() && !shellCaps)
-    void capabilities().then((caps) => {
-      shellCaps = caps;
-      if (body.isConnected) paint();
-    });
+  body.innerHTML = `
+    <div class="pane-col pane-narrow">
+      <div class="sq-mount"></div>
+      <div class="hint-card">
+        ${icon('volume', 15, 'var(--text-2)')}
+        <div>投屏带不带声音由浏览器自己的选择框决定：Chrome 只有共享「标签页」时才有那个勾选框，整屏与单个窗口没有。</div>
+      </div>
+    </div>`;
+  renderScreenQuality(body.querySelector<HTMLElement>('.sq-mount')!, {
+    goStream,
+    onBitrateRangeDirty: () => {
+      bitrateRangeDirty = true;
+    },
+  });
 }
 
 // ---- 推流 ----

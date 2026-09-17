@@ -300,7 +300,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
   const [obsConn, setObsConn] = createSignal<ObsConn | null>(null);
   const [obsVer, setObsVer] = createSignal<ObsVersion | null>(null);
   const [obsStatus, setObsStatus] = createSignal<ObsStreamStatus | null>(null);
-  const [obsPick, setObsPick] = createSignal(false); // 浏览器里点「投屏」弹的那个面板
+  const [screenPick, setScreenPick] = createSignal(false); // 点「投屏」弹的面板：画质 + 开始投屏（配过 OBS 联动的另有一节）
   const obsLive = createMemo(() => obsStatus()?.outputActive === true);
   // 「投屏中」= 本端在发布 或 本机 OBS 正推到本频道；两者都是各自的权威来源
   const screening = createMemo(() => screenOn() || obsLive());
@@ -1504,9 +1504,11 @@ export async function renderRoom(root: HTMLElement, channel: string) {
     // OBS 在推流时，「投屏」这个按钮管的就是那条流——再点一次即停
     if (obsLive()) return stopObsScreen();
     if (nativeScreen()) return toggleNativeScreen();
-    // 配过 OBS 联动就先问一句走哪条：浏览器共享仍是原来那条路，OBS 只是多一个选择
-    if (!screenOn() && obsConn()?.alive) {
-      setObsPick(true);
+    // 开始之前先弹面板：画质在那里调，点「开始投屏」才走浏览器的选源框；
+    // 投屏中再点按钮是「停」，不弹面板。
+    if (!screenOn()) {
+      if (!stageEngine() || !stageUp) return toast(stageHint(), '', 3000); // 舞台没起来就别摆一个点了没用的面板
+      setScreenPick(true);
       return;
     }
     await startBrowserScreen();
@@ -1542,7 +1544,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
     setObsConn(null);
     setObsVer(null);
     setObsStatus(null);
-    setObsPick(false);
+    setScreenPick(false);
   };
   let obsDialing = false; // 只防同时发两次握手，连接态本身仍只看 obsConn
   async function dialObs() {
@@ -3441,19 +3443,24 @@ export async function renderRoom(root: HTMLElement, channel: string) {
             onClose={() => setSourcePick(null)}
           />
         </Show>
-        <Show when={obsPick() && obsConn() && obsVer()}>
+        <Show when={screenPick()}>
           <ObsScreenPanel
-            conn={obsConn()!}
-            obsVersion={obsVer()!.obsVersion}
-            platform={obsVer()!.platform}
+            conn={obsConn()}
+            obsVersion={obsVer()?.obsVersion}
+            platform={obsVer()?.platform}
             onBrowser={() => {
-              setObsPick(false);
+              // 必须同步走到 getDisplayMedia：中间夹一次网络请求用户手势就失效了
+              setScreenPick(false);
               void startBrowserScreen();
+            }}
+            onMoreSettings={() => {
+              setScreenPick(false);
+              openSettings('screen', settingsCtx);
             }}
             start={startObsToChannel}
             onReady={obsCaptureReady}
-            onStarted={() => setObsPick(false)}
-            onClose={() => setObsPick(false)}
+            onStarted={() => setScreenPick(false)}
+            onClose={() => setScreenPick(false)}
           />
         </Show>
         <Show when={ingestOpen()}>
