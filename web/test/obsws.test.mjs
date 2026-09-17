@@ -654,7 +654,11 @@ test('选中即开播：指到目标 → 适配画布 → 写 WHIP 配置 → �
   assert.equal(note, '');
   await startObsStream(conn, 'https://h.example.com/providers/lkembed/w/7', 'tok');
   // 目标落进源 → 按画布适配场景项 → 开播前再适配一次 → 写 WHIP 配置 → 开播
-  assert.deepEqual(orderOf(obs).slice(-9), [
+  assert.deepEqual(orderOf(obs).slice(-11), [
+    // 写设置前先问一次属性，逼 OBS 重建 SCK 的可共享内容列表（否则源可能不出帧）
+    'GetInputPropertiesListPropertyItems',
+    // macOS 的源要绑一块显示器，UUID 从 display_capture 的默认值借
+    'GetInputDefaultSettings',
     'SetInputSettings',
     'GetVideoSettings',
     'GetSceneItemId',
@@ -703,7 +707,11 @@ test('选中即开播：指到目标 → 适配画布 → 写 WHIP 配置 → �
   // 投什么已经定了，再把 OBS 拉到前台只会挡住人
   assert.deepEqual(sentOf(obs, 'OpenInputPropertiesDialog'), []);
   // 清单是上一步（listObsWindows）拉的，这一步不再枚举
-  assert.deepEqual(sentOf(obs, 'GetInputPropertiesListPropertyItems'), []);
+  // 只问 window（整数列表，安全）；application/display_uuid 的字符串列表带空指针占位项，会崩 OBS
+  assert.deepEqual(
+    sentOf(obs, 'GetInputPropertiesListPropertyItems').map((d) => d.propertyName),
+    ['window'],
+  );
   conn.close();
   await obs.close();
 });

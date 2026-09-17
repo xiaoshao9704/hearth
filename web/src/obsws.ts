@@ -572,6 +572,19 @@ export function obsAudioSpec(platform: ObsPlatform, target: ObsTarget): ObsInput
  * 建好源（不弹属性窗口）并把选中的目标写进去；Windows 的声音源跟画面指同一个目标。
  * 返回给用户看的补充说明（空串 = 没什么要交代的）。
  */
+/**
+ * 让 OBS 重建一次 ScreenCaptureKit 的可共享内容列表：那份列表是异步取回的，采集初始化只认它，
+ * 而它只在 obs_source_properties() 被调时重建。壳里选应用走的是原生接口、不经 OBS 的属性回调，
+ * 不补这一下可能写完设置源仍不出帧。只问 window（整数列表，安全），结果不要；失败不挡住选源。
+ */
+async function touchObsProperties(c: ObsConn): Promise<void> {
+  try {
+    await c.request('GetInputPropertiesListPropertyItems', { inputName: OBS_VIDEO_INPUT, propertyName: 'window' });
+  } catch {
+    /* 拿不到就算了，写设置照走 */
+  }
+}
+
 export async function obsCaptureToTarget(
   c: ObsConn,
   platform: ObsPlatform,
@@ -579,6 +592,7 @@ export async function obsCaptureToTarget(
   target: ObsTarget,
 ): Promise<string> {
   const { note } = await setupObsCapture(c, platform, mode, false);
+  if (platform === 'macos') await touchObsProperties(c);
   await c.request('SetInputSettings', {
     inputName: OBS_VIDEO_INPUT,
     inputSettings: obsVideoSpec(platform, mode, target, await macDisplayUuid(c, platform)).inputSettings,
