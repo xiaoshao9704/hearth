@@ -22,6 +22,7 @@ import type {
 import { RnnoisePipeline } from '../audio';
 import { RES_DIMS, loadPrefs } from '../prefs';
 import type { RoomPrefs, ScreenCodec, ScreenContent } from '../prefs';
+import { installScreenBitrateFloor } from './sdp-floor';
 import { DATA_TOPIC_FILE, DATA_TOPIC_TEXT } from './types';
 import type { AVEngine, EPart, EngineCallbacks, LineStats, TrackSource, VideoStats } from './types';
 
@@ -56,6 +57,9 @@ interface IceTransportSnapshot {
 
 // 连上之后快照的刷新间隔：读数面板与 60 秒诊断都取这份快照，不另开 getStats 轮询
 const LINE_PROBE_MS = 5000;
+
+// 投屏码率下限补丁：必须在 LiveKit 建连接之前装上，见 sdp-floor.ts
+installScreenBitrateFloor();
 
 export class LiveKitEngine implements AVEngine {
   // 凭证是短时效入场券，断线后必须回房间层重新签发并重做入场判定。禁用 SDK 内部
