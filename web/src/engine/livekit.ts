@@ -822,18 +822,18 @@ export class LiveKitEngine implements AVEngine {
       systemAudio: 'include', // 让浏览器把系统声音摆进可选源；不支持的浏览器忽略
       selfBrowserSurface: 'exclude', // 别把 hearth 自己这个标签页列为候选（选中就成了镜中镜）
       preferCurrentTab: false,
+      // 音频约束一律传：要不要带声音交给浏览器自己的选择框（Chrome 只有共享标签页时
+      // 才给勾选框），拿到的流里没有音轨就只发画面，不算失败。
       // 系统声音是音乐/游戏音效，不是人声：回声消除/降噪/自动增益会把它嚼烂，
       // 声道数也和麦克风相反——麦克风降到单声道避免单耳，这里要保住左右声场。
       // restrictOwnAudio 把本页面自己播放的声音（也就是别人的语音）剔出采集，避免回音
-      audio: p.screenAudio
-        ? {
-            echoCancellation: false,
-            noiseSuppression: false,
-            autoGainControl: false,
-            channelCount: 2,
-            ...(supported?.restrictOwnAudio ? { restrictOwnAudio: true } : {}),
-          }
-        : false,
+      audio: {
+        echoCancellation: false,
+        noiseSuppression: false,
+        autoGainControl: false,
+        channelCount: 2,
+        ...(supported?.restrictOwnAudio ? { restrictOwnAudio: true } : {}),
+      },
     };
     const encoding = { maxBitrate: Math.round(p.bitrateMax * 1e6), maxFramerate: p.fps };
     let publish: TrackPublishOptions;

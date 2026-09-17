@@ -3425,7 +3425,6 @@ export async function renderRoom(root: HTMLElement, channel: string) {
             sources={sourcePick()!}
             appAudio={bridgeCaps()?.app_audio === true}
             encoder={nativeEncoderLabel()}
-            screenAudio={loadPrefs().screenAudio}
             obs={
               obsConn() && obsVer()
                 ? {

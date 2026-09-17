@@ -59,3 +59,10 @@ test('存档里的非法下限被收进区间，缺字段回落默认', () => {
   assert.equal(p.bitrateMax, def.bitrateMax);
   assert.equal(p.bitrateMin, def.bitrateMin);
 });
+
+test('系统声音交还浏览器后：旧存档里的 screenAudio 只是被忽略', () => {
+  assert.equal('screenAudio' in defaultPrefs(), false);
+  const p = withStored({ screenAudio: false, bitrateMax: 6 }, loadPrefs);
+  assert.equal('screenAudio' in p, false);
+  assert.equal(p.bitrateMax, 6); // 其余字段照常读出来
+});

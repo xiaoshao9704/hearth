@@ -1069,20 +1069,9 @@ function renderScreen(body: HTMLElement, goStream: () => void) {
           <span class="mono" style="font-size:11.5px;color:var(--text-3);width:96px;text-align:right">${prefs.res} · ${prefs.fps}fps 建议 ${lim.min}–${lim.max}</span>
         </div>
         <div class="mono" style="padding-left:66px;font-size:10.5px;color:var(--text-3);margin-top:-8px">上限 = 网络好时最多发多少${prefs.bitrateAuto ? '（当前为自动推荐值）' : ''}；下限 = 网络差时最少也要发多少，低于它宁可丢包也不再降。下限设太高，真拥堵时画面就不是变糊而是花屏，一般留在上限的四成左右。投屏时关闭设置后会重开一次投屏，画面会断一下</div>
-        <button class="hit switch-row" id="screen-audio-row" style="width:100%;text-align:left">
-          <div style="flex-grow:1">
-            <div class="s-title">共享系统声音</div>
-            <div class="s-desc">把电脑里正在播放的声音随画面一起发出去</div>
-          </div>
-          <div class="switch ${prefs.screenAudio ? 'on' : ''}" id="screen-audio-switch"><div class="knob"></div></div>
-        </button>
-        <div class="hint-card">
-          ${icon('info', 15, 'var(--text-2)')}
-          <div>改这项要下次开始投屏才生效：带不带声音在选窗口时就定死了，中途改只能停下重选。另外这受浏览器限制——macOS 上的 Chrome 只有共享「标签页」才带声音，整屏和单个窗口都没有；Safari 不支持。</div>
-        </div>
         <div class="hint-card">
           ${icon('volume', 15, 'var(--text-2)')}
-          <div>只想带某一个页面的声音（放视频、听音乐）：在浏览器的选择窗口里选「标签页」，勾上那一栏的共享声音。若某个平台仍有回音——听到自己这边传出去的语音绕回来——把「语音与视频」里的扬声器切到与系统默认不同的输出设备，采集到的系统声音里就不再有别人的语音。</div>
+          <div>投屏带不带声音由浏览器自己的选择框决定：Chrome 只有共享「标签页」时才有那个勾选框，整屏与单个窗口没有。</div>
         </div>
         <div class="hint-card">
           ${icon('cube', 15, 'var(--text-2)')}
@@ -1162,12 +1151,6 @@ function renderScreen(body: HTMLElement, goStream: () => void) {
     };
     brMin.addEventListener('input', () => dragBitrate('min'));
     brMax.addEventListener('input', () => dragBitrate('max'));
-    const screenAudioSwitch = body.querySelector<HTMLDivElement>('#screen-audio-switch')!;
-    body.querySelector('#screen-audio-row')!.addEventListener('click', () => {
-      prefs.screenAudio = !prefs.screenAudio;
-      screenAudioSwitch.classList.toggle('on', prefs.screenAudio);
-      savePrefs(prefs); // 不发 prefs 事件：采集参数没法热改，下次投屏才读得到
-    });
     body.querySelector('#go-stream')!.addEventListener('click', goStream);
   };
   paint();

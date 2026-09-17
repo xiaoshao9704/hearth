@@ -73,7 +73,6 @@ export interface RoomPrefs {
   screenCodec: ScreenCodec; // 投屏编码：h264/h265 单层 / vp9·av1 走 SVC 分层
   screenCodecAuto: boolean; // true = 按本机能力自动选（硬编优先）；用户手选后置 false
   screenContent: ScreenContent; // text = 保清晰度丢帧（文字/界面）；game = 保帧率缩分辨率（游戏/视频）
-  screenAudio: boolean; // 投屏是否连带系统声音；改了要下次开始投屏才生效（采集参数在选窗口时定死）
   denoise: DenoiseMode; // 三选一：RNNoise / 浏览器自带 / 不降噪
   echoCancellation: boolean;
   autoGainControl: boolean;
@@ -111,7 +110,6 @@ export function defaultPrefs(): RoomPrefs {
     screenCodec: 'vp9',
     screenCodecAuto: true,
     screenContent: 'game', // 默认保帧率：实测高熵画面下「保清晰度」会把帧率压到个位数，游戏/视频场景是主用途
-    screenAudio: true,
     denoise: 'rnnoise',
     echoCancellation: true,
     autoGainControl: true,
@@ -176,7 +174,6 @@ export function loadPrefs(): RoomPrefs {
       screenCodec: p.screenCodec === 'h264' || p.screenCodec === 'h265' || p.screenCodec === 'av1' ? p.screenCodec : 'vp9',
       screenCodecAuto: p.screenCodecAuto !== false,
       screenContent: p.screenContent === 'text' || p.screenContent === 'game' ? p.screenContent : def.screenContent,
-      screenAudio: p.screenAudio !== false,
       denoise,
       echoCancellation: p.echoCancellation !== false,
       autoGainControl: p.autoGainControl !== false,

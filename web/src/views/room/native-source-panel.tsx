@@ -21,7 +21,6 @@ export const NativeSourcePanel = (p: {
   sources: NativeSource[];
   appAudio: boolean;
   encoder: string; // 这次投屏会用的编码器，空串表示壳没有原生能力
-  screenAudio: boolean;
   obs?: ObsShareOption | null;
   onConfirm: (source: NativeSource, audio: boolean) => void;
   onClose: () => void;
@@ -30,7 +29,7 @@ export const NativeSourcePanel = (p: {
   const windows = createMemo(() => p.sources.filter((s) => s.kind === 'window'));
   const [selected, setSelected] = createSignal<NativeSource | null>(null);
   const [previews, setPreviews] = createSignal<Record<string, string | null>>({});
-  const [audio, setAudio] = createSignal(p.screenAudio);
+  const [audio, setAudio] = createSignal(true); // 能带声音就默认带；这一栏本身就是开关
   let disposed = false;
   // 预览按需取：壳里每张缩略图都是一条真的采集管线，几十个源全预取要等几十秒。
   // 列表先画出来，只给视口内、悬停、选中的源排队，优先级 0 选中 > 1 悬停 > 2 视口内。
