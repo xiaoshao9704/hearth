@@ -1,11 +1,12 @@
 // 「通过 OBS 投屏」的共享件：OBS 联动的本机凭证存取，以及在 OBS 里建采集源的分区。
 // 分区同时挂在两处——桌面壳的原生选源面板里多一节，浏览器里点「投屏」弹的面板里多一节；
 // 两处都只是多一个选择，浏览器 getDisplayMedia 与原生 SCK 那两条原路径一行不动。
-import { createSignal, For, Show } from 'solid-js';
+import { createMemo, createSignal, For, Show } from 'solid-js';
 import { capabilities, inShell, listObsTargets } from '../../bridge';
 import type { IngestTokenInfo, SiteInfo } from '../../api';
 import {
   connectObs,
+  listObsWindows,
   obsCaptureToTarget,
   OBS_AUDIO_INPUT,
   OBS_WHIP_MIN_MAJOR,
@@ -15,6 +16,7 @@ import {
   obsPlatform,
   openObsInputProperties,
   setupObsCapture,
+  splitObsWindowLabel,
   type ObsConn,
   type ObsPlatform,
   type ObsTarget,
@@ -78,12 +80,13 @@ export function obsCaptureBlocker(platform: ObsPlatform, obsVersion: string): st
 }
 
 /**
- * 建源分区，两条路：
- * - 桌面壳里（壳能列本机应用/窗口、外层又给了 start）：列出清单，选中即建源 + 写目标 + 开播，
- *   像投屏一样一步到位，OBS 不跳到前台。
- * - 浏览器里：只建好「Hearth 投屏」场景与画面（Windows 另加声音）源、切成当前场景，
- *   再弹 OBS 自己的源属性窗口让用户在 OBS 里挑要投的应用——网页自己枚举那条路不能走
- *   （obs-websocket 5.7.3 的属性清单请求会让 OBS 段错误）。这一步不开播。
+ * 建源分区。选源三条路，优先级从高到低；最后一条始终摆着，前两条都不可用时它就是唯一入口：
+ * 1) 桌面壳给的清单（capabilities().obs_targets + listObsTargets）：应用级目标，进面板就有，
+ *    选中即建源 + 写目标 + 开播，OBS 不跳到前台，体验最好；
+ * 2) 问 OBS 要窗口清单（listObsWindows）：只有 macOS 走得通（别的平台枚举属性清单不安全，
+ *    理由见 obsws.ts），而且枚举要打扰 OBS，所以不自动拉，点「列出窗口」才拉；
+ * 3) 「在 OBS 里选采集源」：只建好「Hearth 投屏」场景与画面（Windows 另加声音）源、切成当前场景，
+ *    再弹 OBS 自己的源属性窗口让用户在 OBS 里挑。这一步不开播，用户选完回来手动点开播。
  */
 export const ObsCaptureSection = (p: {
   conn: ObsConn;
@@ -91,11 +94,11 @@ export const ObsCaptureSection = (p: {
   platform: string;
   /** 外层正忙（例如「OBS 联动」面板在写配置）时连带禁用，自身的进行中状态在内部管 */
   busy?: boolean;
-  /** 写 WHIP 配置并开播；给了才有壳内「选中即开播」那条路 */
+  /** 写 WHIP 配置并开播；给了才有「从清单里选中即开播」那两条路 */
   start?: () => Promise<void>;
   /** 建完源（属性窗口已弹或已给出替代说明）时通知外层，用来补一句提示 */
   onReady?: () => void;
-  /** 壳内那条路真的开播了：外层据此收掉选源面板 */
+  /** 选中即开播那条路真的开播了：外层据此收掉选源面板 */
   onStarted?: () => void;
 }) => {
   const platform = () => obsPlatform(p.platform);
@@ -105,17 +108,23 @@ export const ObsCaptureSection = (p: {
   const [note, setNote] = createSignal('');
   const [err, setErr] = createSignal('');
   const [loading, setLoading] = createSignal(false);
-  // null = 不走壳内清单那条路（浏览器里，或壳太老没有这条命令）
+  // null = 壳这条路走不通（浏览器里，或壳太老没有这条命令）
   const [targets, setTargets] = createSignal<ObsTarget[] | null>(null);
+  // 壳的能力检测还没出结果：这期间先不摆「列出窗口」，免得壳里闪一下又被壳的清单顶掉
+  const [probing, setProbing] = createSignal(false);
+  // null = 还没列过；空数组是「列过了但什么都没有」，那是另一回事（多半是授权失效），要单独提示
+  const [windows, setWindows] = createSignal<ObsTarget[] | null>(null);
   const [query, setQuery] = createSignal('');
 
   if (p.start) {
+    setProbing(inShell());
     void capabilities()
       .then((caps) => (caps.obs_targets ? listObsTargets() : null))
       .then((list) => list && setTargets(list))
       .catch(() => {
-        /* 壳报不出清单就退回弹 OBS 属性窗口那条路，不打扰用户 */
-      });
+        /* 壳报不出清单就退到后两条路，不打扰用户 */
+      })
+      .finally(() => setProbing(false));
   }
 
   const macTip = (e: unknown) =>
@@ -141,7 +150,7 @@ export const ObsCaptureSection = (p: {
       .finally(() => setLoading(false));
   };
 
-  // 壳内那条路：选中的目标直接写进源，接着就开播——这会儿投的是什么已经确定了
+  // 从清单里选：目标直接写进源，接着就开播——这会儿投的是什么已经确定了
   const pick = (t: ObsTarget) => {
     if (blocked() || loading() || !p.start) return;
     setLoading(true);
@@ -156,10 +165,48 @@ export const ObsCaptureSection = (p: {
       .finally(() => setLoading(false));
   };
 
-  const shown = () => {
+  // 壳的清单排在前面：它是应用级的，比窗口好选。壳给不出来（浏览器里）才问 OBS 要窗口。
+  const canListWindows = () => !!p.start && platform() === 'macos' && !targets() && !probing();
+  const listWindows = () => {
+    if (blocked() || loading()) return;
+    setLoading(true);
+    setErr('');
+    void listObsWindows(p.conn, platform())
+      .then(setWindows)
+      .catch((e: unknown) => setErr(macTip(e)))
+      .finally(() => setLoading(false));
+  };
+
+  const list = () => targets() ?? windows();
+
+  /**
+   * 按应用名分组：macOS 的窗口条目名是「[应用名] 窗口标题」，同一应用开了多个窗口要一眼可辨。
+   * 认不出前缀的条目（壳给的应用级目标就是这样）app 为空串，归进无组标题那一组、原样列出，不丢。
+   * 搜索匹配完整 label——应用名与窗口标题都在里面，一次匹配两样。
+   */
+  const groups = createMemo(() => {
     const q = query().trim().toLowerCase();
-    const list = targets() ?? [];
-    return q ? list.filter((t) => t.label.toLowerCase().includes(q)) : list;
+    const out: Array<{ app: string; items: Array<{ t: ObsTarget; title: string }> }> = [];
+    const at = new Map<string, number>();
+    for (const t of list() ?? []) {
+      if (q && !t.label.toLowerCase().includes(q)) continue;
+      const { app, title } = splitObsWindowLabel(t.label);
+      let i = at.get(app);
+      if (i === undefined) {
+        i = out.length;
+        at.set(app, i);
+        out.push({ app, items: [] });
+      }
+      out[i].items.push({ t, title });
+    }
+    return out;
+  });
+
+  const emptyTip = () => {
+    if (query().trim()) return '没有匹配的应用或窗口。';
+    if (windows() && !targets())
+      return 'OBS 现在只看得到自己的窗口，多半是屏幕录制授权失效了，去系统设置里重新授权后重启 OBS 再试。';
+    return '没有可选的应用或窗口。';
   };
 
   // Windows 的声音是另一个源，抓哪个应用同样在 OBS 里选，按钮只负责把那个窗口弹出来；
@@ -216,72 +263,99 @@ export const ObsCaptureSection = (p: {
           </div>
         </Show>
 
-        <Show
-          when={targets()}
-          fallback={
-            <>
+        <Show when={list() || canListWindows()}>
+          <div class="obs-cap-way">
+            <Show when={canListWindows()}>
               <div class="obs-cap-foot">
                 <button
                   type="button"
                   class="hit btn btn-sm"
-                  classList={{ 'btn-primary': !ready(), loading: loading() }}
+                  classList={{ 'btn-primary': !windows(), loading: loading() }}
                   disabled={loading() || p.busy}
-                  onClick={setup}
+                  onClick={listWindows}
                 >
-                  {el(icon('screen', 13, 'currentColor', 1.8))} {ready() ? '重新建采集源' : '在 OBS 里建采集源'}
+                  {el(icon('screen', 13, 'currentColor', 1.8))} {windows() ? '重新列出窗口' : '列出 OBS 看得到的窗口'}
                 </button>
-                <Show when={ready() && hasAudioInput()}>
-                  <button type="button" class="hit btn btn-sm" disabled={loading() || p.busy} onClick={openAudio}>
-                    选声音来源
-                  </button>
+                <Show when={!windows()}>
+                  <span class="ig-tip obs-cap-modetip">列出来点一个就开播，不用切到 OBS。</span>
                 </Show>
               </div>
-              <Show
-                when={ready()}
-                fallback={
-                  <div class="ig-tip">
-                    会在 OBS 里建一个固定的「Hearth 投屏」场景（
-                    {hasAudioInput() ? '画面 + 声音两个源' : '一个画面源，画面与所属应用声音一起采集'}
-                    ）并切过去，然后弹出 OBS 自己的源属性窗口让你选要投的应用；你原有的场景与源不受影响。
-                  </div>
-                }
-              >
-                <div class="ig-tip">{OBS_SETUP_HINT}</div>
-              </Show>
-            </>
-          }
-        >
-          <div class="field obs-cap-search">
-            <input
-              value={query()}
-              placeholder="搜索应用或窗口"
-              autocomplete="off"
-              spellcheck={false}
-              aria-label="搜索要投的应用或窗口"
-              onInput={(ev) => setQuery(ev.currentTarget.value)}
-            />
-          </div>
-          <div class="obs-cap-list">
-            <For each={shown()} fallback={<div class="ig-tip">没有匹配的应用或窗口。</div>}>
-              {(t) => (
-                <button
-                  type="button"
-                  class="hit obs-cap-item"
-                  disabled={loading() || p.busy}
-                  onClick={() => pick(t)}
-                >
-                  <span class="obs-cap-item-name">{t.label}</span>
-                  <span class="obs-cap-item-kind">{t.kind === 'app' ? '应用' : '窗口'}</span>
-                </button>
-              )}
-            </For>
-          </div>
-          <div class="ig-tip">
-            选中就在 OBS 里建好「Hearth 投屏」场景、指到它并开始推流
-            {hasAudioInput() ? '（画面与该程序的声音一起）' : '（画面与所属应用声音一起采集）'}
-            ；你原有的场景与源不受影响。
+            </Show>
+            <Show when={list()}>
+              <div class="field obs-cap-search">
+                <input
+                  value={query()}
+                  placeholder="搜索应用或窗口"
+                  autocomplete="off"
+                  spellcheck={false}
+                  aria-label="搜索要投的应用或窗口"
+                  onInput={(ev) => setQuery(ev.currentTarget.value)}
+                />
+              </div>
+              <div class="obs-cap-list">
+                <For each={groups()} fallback={<div class="ig-tip">{emptyTip()}</div>}>
+                  {(g) => (
+                    <>
+                      <Show when={g.app}>
+                        <div class="obs-cap-group">{g.app}</div>
+                      </Show>
+                      <For each={g.items}>
+                        {(it) => (
+                          <button
+                            type="button"
+                            class="hit obs-cap-item"
+                            classList={{ 'obs-cap-item-sub': !!g.app }}
+                            disabled={loading() || p.busy}
+                            onClick={() => pick(it.t)}
+                          >
+                            <span class="obs-cap-item-name">{it.title}</span>
+                            <span class="obs-cap-item-kind">{it.t.kind === 'app' ? '应用' : '窗口'}</span>
+                          </button>
+                        )}
+                      </For>
+                    </>
+                  )}
+                </For>
+              </div>
+              <div class="ig-tip">
+                选中就在 OBS 里建好「Hearth 投屏」场景、指到它并开始推流；你原有的场景与源不受影响。
+                {hasAudioInput() ? '声音取自所选程序。' : '投出去的声音是该窗口所属应用的声音，不是单个窗口的。'}
+              </div>
+            </Show>
           </div>
         </Show>
+
+        <div class="obs-cap-way">
+          <div class="obs-cap-foot">
+            <button
+              type="button"
+              class="hit btn btn-sm"
+              classList={{ 'btn-primary': !ready() && !list(), loading: loading() }}
+              disabled={loading() || p.busy}
+              onClick={setup}
+            >
+              {el(icon('screen', 13, 'currentColor', 1.8))} {ready() ? '重新建采集源' : '在 OBS 里选采集源'}
+            </button>
+            <Show when={ready() && hasAudioInput()}>
+              <button type="button" class="hit btn btn-sm" disabled={loading() || p.busy} onClick={openAudio}>
+                选声音来源
+              </button>
+            </Show>
+          </div>
+          <Show
+            when={ready()}
+            fallback={
+              <div class="ig-tip">
+                想自己在 OBS 里挑就走这条：会建一个固定的「Hearth 投屏」场景（
+                {hasAudioInput() ? '画面 + 声音两个源' : '一个画面源，画面与所属应用声音一起采集'}
+                ）并切过去，然后弹出 OBS 自己的源属性窗口让你选要投的画面；你原有的场景与源不受影响。
+              </div>
+            }
+          >
+            <div class="ig-tip">{OBS_SETUP_HINT}</div>
+          </Show>
+        </div>
+
         <Show when={note()}>
           <div class="ig-tip">{note()}</div>
         </Show>

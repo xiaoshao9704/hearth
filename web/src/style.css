@@ -1382,7 +1382,9 @@ body.theater-on { overscroll-behavior: none; }
 .obs-cap-modetip { flex-basis: 100%; }
 .obs-cap-foot { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .obs-cap-browser { align-self: flex-start; }
-/* 壳内选源：壳自己列出本机应用/窗口，点一项就直接开播 */
+/* 两条并列入口（从清单里选 / 到 OBS 里自己选）各自成块 */
+.obs-cap-way { display: flex; flex-direction: column; gap: 6px; }
+/* 清单选源：壳列本机应用/窗口，或 OBS 列它看得到的窗口，点一项就直接开播 */
 .obs-cap-search { height: 34px; background: var(--bg-2); }
 .obs-cap-search input { font-size: 12.5px; }
 .obs-cap-list { display: flex; flex-direction: column; gap: 4px; max-height: 34vh; overflow-y: auto; }
@@ -1397,6 +1399,12 @@ body.theater-on { overscroll-behavior: none; }
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .obs-cap-item-kind { flex-shrink: 0; font-size: 11px; color: var(--text-3); }
+/* 按应用分组：组标题是应用名，组内的窗口条目缩进一级 */
+.obs-cap-group {
+  padding: 6px 9px 2px; font-size: 11px; font-weight: 600; color: var(--text-2);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.obs-cap-item-sub { padding-left: 20px; }
 
 @media (max-width: 560px) {
   .ingest-scrim { padding: 56px 12px 12px; }
