@@ -54,6 +54,8 @@ func (a *API) site(w http.ResponseWriter, r *http.Request) {
 		"policy":     a.regPolicy(r),
 		"tls_source": a.dynVal(r.Context(), "tls_cert_source"),
 		"http_port":  port,
+		// 观看诊断是站点级总开关（cfg_watch_diag），客户端只听这一份、不再各自记本地开关
+		"watch_diag": a.dynVal(r.Context(), "watch_diag") == "on",
 	})
 }
 

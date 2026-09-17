@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 
 	"hearth/server/internal/store"
@@ -71,5 +72,51 @@ func TestPortWantsLkembedStage(t *testing.T) {
 	}
 	if found, _ := findStage(); found {
 		t.Fatal("voice/stage 都切走 lkembed 后 PortWants 不应再包含 hearth stage")
+	}
+}
+
+// TestWatchDiagKey 观看诊断是站点级总开关：默认关、只收 off/on、生效值经 /api/site 下发。
+func TestWatchDiagKey(t *testing.T) {
+	maskProviderEnv(t)
+	t.Setenv("WATCH_DIAG", "") // 部署侧设了 env 就锁成只读，测试从未设的前提出发
+	a := testAPI(t)
+	ctx := context.Background()
+	token := adminToken(t, a)
+	r := a.Router()
+
+	siteWatchDiag := func() any {
+		rec := doReq(t, r, "GET", "/api/site", "", nil)
+		if rec.Code != 200 {
+			t.Fatalf("/api/site 应 200，实际 %d", rec.Code)
+		}
+		var got map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+			t.Fatalf("解析响应失败: %v", err)
+		}
+		return got["watch_diag"]
+	}
+
+	if v := a.dynVal(ctx, "watch_diag"); v != "off" {
+		t.Fatalf("默认应为 off，实际 %q", v)
+	}
+	if v := siteWatchDiag(); v != false {
+		t.Fatalf("默认时 /api/site 的 watch_diag 应为 false，实际 %v", v)
+	}
+
+	// 枚举校验：非 off/on 一律拒收
+	rec := doReq(t, r, "POST", "/api/admin/config", token, map[string]any{"values": map[string]string{"watch_diag": "yes"}})
+	if rec.Code != 400 {
+		t.Fatalf("非枚举值应 400，实际 %d: %s", rec.Code, rec.Body.String())
+	}
+
+	rec = doReq(t, r, "POST", "/api/admin/config", token, map[string]any{"values": map[string]string{"watch_diag": "on"}})
+	if rec.Code != 204 {
+		t.Fatalf("写入 on 应 204，实际 %d: %s", rec.Code, rec.Body.String())
+	}
+	if v, err := a.st.GetSetting(ctx, "cfg_watch_diag"); err != nil || v != "on" {
+		t.Fatalf("应落库到 cfg_watch_diag=on，实际 %q err=%v", v, err)
+	}
+	if v := siteWatchDiag(); v != true {
+		t.Fatalf("开启后 /api/site 的 watch_diag 应为 true，实际 %v", v)
 	}
 }

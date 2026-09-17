@@ -80,6 +80,15 @@ var adminKeys = []rtc.ConfigKey{
 		Label: "访客默认寿命 (秒)",
 		Hint: "注册邀请勾了「允许先以访客进入」时，产出访客的存活时长；" +
 			"频道访客邀请自带寿命（生成链接时选），不看这个值。过期的访客账号每小时清理一次"},
+	{Name: "watch_diag", Env: "WATCH_DIAG", Group: "admin", Default: "off",
+		Options: []string{"off", "on"},
+		Label:   "观看诊断",
+		Hint: "on：所有在线客户端每 5 秒采一次观看读数（解码帧率、冻结次数、丢包、抖动），" +
+			"出现冻结或丢包时上报到服务器日志（watch_stats 事件），平稳时每 30 秒一条基线；" +
+			"off：客户端一次都不采。用于排查投屏卡顿，排查完请关掉——开着会持续往日志里写。" +
+			"上报只有统计数字，不含画面、声音与聊天内容，也不记 IP 与位置。" +
+			"客户端下次进房或刷新生效",
+	},
 	{Name: "guest_claim", Group: "admin", Default: "off",
 		Options: []string{"off", "on"},
 		Label:   "访客转正",
