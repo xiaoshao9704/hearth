@@ -27,7 +27,7 @@ function fmt(s: LineStats | null): string {
   return bits.join(' · ');
 }
 
-export const ConnPanel = (p: { rows: () => ConnRow[]; anchor: HTMLElement | null; onClose: () => void }) => {
+export const ConnPanel = (p: { rows: () => ConnRow[]; watch?: () => string; anchor: HTMLElement | null; onClose: () => void }) => {
   const [tick, setTick] = createSignal(0);
   const timer = window.setInterval(() => setTick((t) => t + 1), 5000);
   onCleanup(() => window.clearInterval(timer));
@@ -70,6 +70,13 @@ export const ConnPanel = (p: { rows: () => ConnRow[]; anchor: HTMLElement | null
       <Show when={rows().length === 0}>
         <div class="cp-row">
           <span class="cp-val">尚未连接</span>
+        </div>
+      </Show>
+      {/* 观看诊断开着时多这一行：你这边看别人投屏的冻结/关键帧/丢包累计（进房以来） */}
+      <Show when={p.watch?.()}>
+        <div class="cp-row">
+          <span class="cp-line">观看侧</span>
+          <span class="cp-val mono">{p.watch?.()}</span>
         </div>
       </Show>
       <div class="cp-note">RTT 是你到服务器的往返；抖动与丢包按你实际收到的包统计。</div>

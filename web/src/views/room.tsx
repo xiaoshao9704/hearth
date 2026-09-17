@@ -22,12 +22,14 @@ import type { MentionQuery, MentionUser } from '../chat/mentions';
 import { encodeDelete, encodeMessage, encodeReaction, parseEnvelope } from '../chat/protocol';
 import { createEngine } from '../engine';
 import { DATA_TOPIC_FILE, DATA_TOPIC_TEXT } from '../engine/types';
-import type { AVEngine, EPart, EngineCallbacks, TrackSource, VideoStats } from '../engine/types';
+import type { AVEngine, EPart, EngineCallbacks, TrackSource, VideoStats, WatchCounters } from '../engine/types';
 import { wireLongPress } from '../longpress';
 import { clearLeaveGuard, setLeaveGuard } from '../nav';
 import { obsPlatform, startObsStream } from '../obsws';
 import type { ObsConn, ObsStreamStatus, ObsVersion } from '../obsws';
 import { encoderIsHw, loadPrefs, prefsBus, RES_DIMS, savePrefs } from '../prefs';
+import { addWatch, diffWatch, emptyWatchTotals, shouldReportWatch, watchDiagOn, watchLevel } from '../watchdiag';
+import type { WatchTotals } from '../watchdiag';
 import { notifyJoin, notifyMessage } from '../notify';
 import { renderShell } from '../shell';
 import { isStaleChunkError, reloadForStale, staleReloadUsed } from '../stale';
@@ -374,6 +376,16 @@ export async function renderRoom(root: HTMLElement, channel: string) {
   // 端到端延迟测量：同一时刻只测一路，结果面板贴在被测卡片上（key 决定是哪张）
   const [latency, setLatency] = createSignal<LatencyState | null>(null);
   let connAnchor: HTMLElement | null = null; // 面板的定位锚（点开那一下的 chip 元素）
+
+  // 观看诊断开关（localStorage，设置页改完经 prefsBus 通知）与进房以来的累计读数；
+  // 关着时 totals 为 null，面板那一行连同采集一起消失
+  const [watchDiag, setWatchDiag] = createSignal(watchDiagOn());
+  const [watchTotals, setWatchTotals] = createSignal<WatchTotals | null>(null);
+  const watchLine = (): string => {
+    const t = watchTotals();
+    if (!watchDiag() || !t) return '';
+    return `冻结 ${t.freezes} 次 · ${(t.freeze_ms / 1000).toFixed(1)} s · 关键帧 ${t.keyframes} · 丢包 ${t.lost}`;
+  };
 
   // 面板行：合并形态两种角色同一条连接，只出一行
   const connRows = (): ConnRow[] => {
@@ -2134,6 +2146,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
   // ---- 设置页偏好热应用 ----
   const onPrefs = async (ev: Event) => {
     const what = (ev as CustomEvent).detail as string;
+    if (what === 'watchdiag') setWatchDiag(watchDiagOn());
     if (what === 'volume' || what === 'speaker') applyAudioPrefs();
     if (what === 'mirror') {
       const id = stageEngine()?.localIdentity() ?? '';
@@ -2791,7 +2804,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
             </span>
           </span>
           <Show when={connOpen()}>
-            <ConnPanel rows={connRows} anchor={connAnchor} onClose={() => setConnOpen(false)} />
+            <ConnPanel rows={connRows} watch={watchLine} anchor={connAnchor} onClose={() => setConnOpen(false)} />
           </Show>
           <div class="spacer"></div>
           <Show when={guestLeft()}>
@@ -3514,6 +3527,45 @@ export async function renderRoom(root: HTMLElement, channel: string) {
     void lineDiag();
     lineDiagTimer = window.setInterval(() => void lineDiag(), 60000);
   }, 10000);
+
+  // ---- 观看诊断（默认关，开关在设置的「投屏画质」）----
+  // 观众侧秒级采样：60 秒一条的 line_stats 落不进几秒的冻结。开关关着时这里一个定时器都不建，
+  // 也就一次 getStats 都不多调；开着时也只在房间里真有别人的投屏轨时才读。
+  const watchState = new Map<string, { prev: WatchCounters; reportedAt: number }>();
+  const watchTick = async () => {
+    const eng = stageEngine();
+    if (!eng?.connected()) return;
+    const targets = videoEntries().filter((e) => e.source === 'screen' && !e.isLocal);
+    for (const key of [...watchState.keys()]) if (!targets.some((e) => e.key === key)) watchState.delete(key);
+    for (const entry of targets) {
+      const cur = await eng.remoteWatchCounters(entry.identity, 'screen');
+      if (!cur) continue;
+      const prevState = watchState.get(entry.key);
+      const sample = prevState ? diffWatch(prevState.prev, cur) : null;
+      let reportedAt = prevState?.reportedAt ?? 0;
+      if (sample) {
+        setWatchTotals((t) => addWatch(t ?? emptyWatchTotals(), sample));
+        const now = Date.now();
+        if (shouldReportWatch(sample, now - reportedAt)) {
+          reportedAt = now;
+          // me = 本机设备（identity 的设备标签），from = 被看的那路投屏；两者都只含 uid
+          diag(watchLevel(sample), 'watch_stats', 'stage', {
+            detail: JSON.stringify({ me: eng.localIdentity(), from: entry.identity, ...sample }).slice(0, 2000),
+          });
+        }
+      }
+      watchState.set(entry.key, { prev: cur, reportedAt });
+    }
+  };
+  createEffect(() => {
+    if (!watchDiag()) {
+      watchState.clear();
+      setWatchTotals(null);
+      return;
+    }
+    const timer = window.setInterval(() => void watchTick(), 5000);
+    onCleanup(() => window.clearInterval(timer));
+  });
 
   // ---- 首次连接与清理 ----
   // 清理监听必须先于首次连接注册：连接期间用户离开时，清理块要能置 leaving 并释放已建好的部分
