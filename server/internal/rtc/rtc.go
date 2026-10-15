@@ -17,6 +17,10 @@ import (
 // ErrNoParticipant 目标用户在指定房间内没有参与者（服务端静音等操作的前置条件不满足）。
 var ErrNoParticipant = errors.New("目标用户不在房间")
 
+// DefaultClientSTUN 面向浏览器的默认 STUN 列表（client_stun_servers 配置键的 Default）。
+// 全局策略，不属于任一内核实现；并列两个地域，浏览器并行探测。
+const DefaultClientSTUN = "stun.miwifi.com:3478,stun.l.google.com:19302"
+
 // Identity 组装内核参与者 identity：`u{user_id}` 或 `u{user_id}-{设备标签}`。
 // 主体用 user_id 而非用户名是硬约束：用户名可改、改后旧名即释放、且字符集含 `-`，
 // 拿它做判定键会在改名后让归属错位，也会让互为前缀的两个用户名彼此误伤

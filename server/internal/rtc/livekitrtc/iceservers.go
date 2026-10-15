@@ -8,12 +8,9 @@ import (
 	"strings"
 
 	"github.com/livekit/protocol/livekit"
-)
 
-// DefaultClientSTUN 默认并列两个不同地域的 STUN：浏览器并行探测、谁先回用谁，
-// 选错也不影响连通性（客户端永远是主动方，服务端从收到的包按 peer-reflexive 学到对端地址）。
-// 接入层 client_stun_servers 配置键的 Default 与此同值。
-const DefaultClientSTUN = "stun.miwifi.com:3478,stun.l.google.com:19302"
+	"hearth/server/internal/rtc"
+)
 
 // clientICEServers 上游给的列表 → 下发给浏览器的列表。
 // 只剔除纯 STUN 项（LiveKit 未配 stun/turn 时会回落到内置默认表，那是我们不想要的）；
@@ -45,7 +42,7 @@ func hasTURNURL(urls []string) bool {
 func clientSTUNURLs(cfg string) []string {
 	cfg = strings.TrimSpace(cfg)
 	if cfg == "" {
-		cfg = DefaultClientSTUN
+		cfg = rtc.DefaultClientSTUN
 	}
 	if strings.EqualFold(cfg, "none") {
 		return nil

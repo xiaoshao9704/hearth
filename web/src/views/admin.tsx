@@ -392,7 +392,7 @@ function ConfigTab(props: { onDirty: (groups: string[]) => void }) {
   const [items, setItems] = createSignal<ConfigItem[]>([]);
   const [instances, setInstances] = createSignal<ProviderInstance[]>([]);
   const [types, setTypes] = createSignal<ProviderType[]>([]);
-  const [aliasPattern, setAliasPattern] = createSignal('^[a-z0-9][a-z0-9-]{0,31}$');
+  const [aliasPattern, setAliasPattern] = createSignal(''); // 以接口 alias_pattern 为准，未下发则不可提交
   const [policy, setPolicy] = createSignal('');
   const [defaultRole, setDefaultRole] = createSignal(''); // 注册产出默认档（user/power）
   const [policyBusy, setPolicyBusy] = createSignal(''); // 正在切换的策略/默认档标识
@@ -541,9 +541,10 @@ function ConfigTab(props: { onDirty: (groups: string[]) => void }) {
   };
   const aliasValid = () => {
     const v = pAlias().trim();
-    if (!v) return false;
+    const pat = aliasPattern();
+    if (!v || !pat) return false;
     try {
-      return new RegExp(aliasPattern()).test(v);
+      return new RegExp(pat).test(v);
     } catch {
       return false;
     }

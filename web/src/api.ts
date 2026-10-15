@@ -1040,7 +1040,8 @@ export async function adminListProviders(): Promise<{
   return {
     instances: data.instances ?? [],
     types: data.types ?? [],
-    alias_pattern: data.alias_pattern ?? '^[a-z0-9][a-z0-9-]{0,31}$',
+    // 不在客户端写死正则：接口没下发时留给页面按空串拒绝提交
+    alias_pattern: data.alias_pattern ?? '',
   };
 }
 
