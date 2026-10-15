@@ -679,7 +679,9 @@ func (a *API) joinToken(w http.ResponseWriter, r *http.Request) {
 	if stageP != nil && !combined {
 		sc, serr := stageP.JoinCredentials(r.Context(), c.Name, meta, adm.CanPublish)
 		if serr != nil {
+			// 仍 200 发语音票（语音可用），但带 stage_error 让客户端区分「没配舞台」与「签发失败」
 			log.Printf("舞台线签发失败（语音照常）: %v", serr)
+			resp["stage_error"] = "签发令牌失败"
 		} else {
 			resp["stage"] = a.fillCred(r, sc, stageAlias)
 		}

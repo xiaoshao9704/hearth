@@ -1,6 +1,6 @@
 // 信令 WebSocket 桥：/providers/{alias}/rtc 的 Upgrade 请求不走 httputil.ReverseProxy
-// （它 hijack 后只做双向 io.Copy，看不见帧），改用手写桥逐帧转发，以便改写 Join/Reconnect
-// 里下发给浏览器的 ICE 服务器（见 iceservers.go）。/rtc/validate 等普通 HTTP 仍走反代。
+// （它 hijack 后只做双向 io.Copy，看不见帧），改用手写桥逐帧转发，以便实现包按需改写
+// 下游帧（rtc.SignalRewriter，如 livekitrtc 改 ICE 服务器）。/rtc/validate 等普通 HTTP 仍走反代。
 package api
 
 import (
@@ -15,8 +15,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/livekit/protocol/livekit"
-	"google.golang.org/protobuf/proto"
 	"nhooyr.io/websocket"
 )
 
@@ -40,8 +38,8 @@ func isWebSocketUpgrade(r *http.Request) bool {
 	return false
 }
 
-// bridgeSignal 客户端 ⇄ 上游的逐帧转发。
-func (a *API) bridgeSignal(w http.ResponseWriter, r *http.Request, upstream, stripPrefix string) {
+// bridgeSignal 客户端 ⇄ 上游的逐帧转发。rewrite 非 nil 时对上游→客户端的 binary 帧调用。
+func (a *API) bridgeSignal(w http.ResponseWriter, r *http.Request, upstream, stripPrefix string, rewrite func([]byte) []byte) {
 	if upstream == "" {
 		writeErr(w, http.StatusServiceUnavailable, "上游未配置")
 		return
@@ -52,7 +50,6 @@ func (a *API) bridgeSignal(w http.ResponseWriter, r *http.Request, upstream, str
 		writeErr(w, http.StatusBadGateway, "上游地址无效")
 		return
 	}
-	stunCfg := a.dynVal(r.Context(), "client_stun_servers")
 
 	// 桥的生命周期不能挂 r.Context()：websocket.Accept hijack 后 net/http 会取消它
 	ctx, cancel := context.WithCancel(context.WithoutCancel(r.Context()))
@@ -97,7 +94,7 @@ func (a *API) bridgeSignal(w http.ResponseWriter, r *http.Request, upstream, str
 	go func() { defer func() { done <- struct{}{} }(); pumpSignal(ctx, cli, up, nil) }()
 	go func() {
 		defer func() { done <- struct{}{} }()
-		pumpSignal(ctx, up, cli, func(b []byte) []byte { return rewriteSignalFrame(b, stunCfg) })
+		pumpSignal(ctx, up, cli, rewrite)
 	}()
 
 	// 任一方向结束时已把关闭码写给对端，另一方向随之读到关闭帧退出；
@@ -147,30 +144,6 @@ func truncateCloseReason(s string) string {
 		return s
 	}
 	return strings.ToValidUTF8(s[:123], "")
-}
-
-// rewriteSignalFrame 上游 → 客户端的 binary 帧：只在 Join/Reconnect 上改 IceServers。
-// 解析失败或其它消息一律原样返回——信令绝不因解析问题断连。
-func rewriteSignalFrame(data []byte, stunCfg string) []byte {
-	var msg livekit.SignalResponse
-	if err := proto.Unmarshal(data, &msg); err != nil {
-		return data
-	}
-	switch {
-	case msg.GetJoin() != nil:
-		j := msg.GetJoin()
-		j.IceServers = clientICEServers(j.GetIceServers(), stunCfg)
-	case msg.GetReconnect() != nil:
-		rc := msg.GetReconnect()
-		rc.IceServers = clientICEServers(rc.GetIceServers(), stunCfg)
-	default:
-		return data
-	}
-	out, err := proto.Marshal(&msg)
-	if err != nil {
-		return data
-	}
-	return out
 }
 
 // signalUpstreamURL 组上游 WebSocket 地址；路径与 query 的处理与 newReverseProxy 的

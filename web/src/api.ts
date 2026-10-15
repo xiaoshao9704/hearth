@@ -288,10 +288,12 @@ export interface EngineCred {
 export type DataLine = 'auto' | 'voice' | 'stage';
 
 // 双线进房凭证：语音线必有；舞台线（投屏/摄像头）可缺席；
-// combined = 两线同一内核，前端用一条连接承担两种角色
+// combined = 两线同一内核，前端用一条连接承担两种角色。
+// stage_error 有值 = 配了独立舞台但签发失败（与缺席的「没配舞台」区分开）
 export interface JoinCredentials {
   voice: EngineCred;
   stage?: EngineCred | null;
+  stage_error?: string;
   combined: boolean;
   data_line?: DataLine;
 }
@@ -999,12 +1001,14 @@ export async function adminAudit(q: AuditQuery = {}): Promise<{ entries: AuditEn
 
 // ---- 服务实例（内核注册表）----
 
-// 注册表单的字段模式（rtc.ConfigKey 形状）；当前三类可注册实例的字段均为自由文本
+// 注册表单的字段模式（rtc.ConfigKey 形状）；optional/pattern 由服务端下发，页面不复刻校验规则
 export interface ProviderField {
   name: string;
   label: string;
   hint: string;
   secret: boolean;
+  optional?: boolean;
+  pattern?: string;
 }
 
 export interface ProviderInstance {
@@ -1023,9 +1027,21 @@ export interface ProviderType {
   fields: ProviderField[];
 }
 
-export async function adminListProviders(): Promise<{ instances: ProviderInstance[]; types: ProviderType[] }> {
-  const data = await req<{ instances: ProviderInstance[] | null; types: ProviderType[] | null }>('/api/admin/providers');
-  return { instances: data.instances ?? [], types: data.types ?? [] };
+export async function adminListProviders(): Promise<{
+  instances: ProviderInstance[];
+  types: ProviderType[];
+  alias_pattern: string;
+}> {
+  const data = await req<{
+    instances: ProviderInstance[] | null;
+    types: ProviderType[] | null;
+    alias_pattern?: string;
+  }>('/api/admin/providers');
+  return {
+    instances: data.instances ?? [],
+    types: data.types ?? [],
+    alias_pattern: data.alias_pattern ?? '^[a-z0-9][a-z0-9-]{0,31}$',
+  };
 }
 
 export function adminCreateProvider(body: { type: string; alias: string; params: Record<string, string> }): Promise<void> {

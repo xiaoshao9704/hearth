@@ -387,14 +387,12 @@ const POLICIES = [
   { id: 'invite', label: '邀请制', desc: '管理员发链接，有效期内可自助注册' },
   { id: 'open', label: '开放注册', desc: '任何人都能注册——公网上不建议' },
 ];
-// 与服务端 aliasRe（server/internal/api/providers.go）保持一致
-const ALIAS_RE = /^[a-z0-9][a-z0-9-]{0,31}$/;
-
 function ConfigTab(props: { onDirty: (groups: string[]) => void }) {
   const [ov, setOv] = createSignal<AdminOverview>();
   const [items, setItems] = createSignal<ConfigItem[]>([]);
   const [instances, setInstances] = createSignal<ProviderInstance[]>([]);
   const [types, setTypes] = createSignal<ProviderType[]>([]);
+  const [aliasPattern, setAliasPattern] = createSignal('^[a-z0-9][a-z0-9-]{0,31}$');
   const [policy, setPolicy] = createSignal('');
   const [defaultRole, setDefaultRole] = createSignal(''); // 注册产出默认档（user/power）
   const [policyBusy, setPolicyBusy] = createSignal(''); // 正在切换的策略/默认档标识
@@ -417,6 +415,7 @@ function ConfigTab(props: { onDirty: (groups: string[]) => void }) {
       setItems(its);
       setInstances(provs.instances);
       setTypes(provs.types);
+      setAliasPattern(provs.alias_pattern);
       setPType(provs.types[0]?.type ?? '');
       setPolicy(pol.policy);
       setDefaultRole(pol.default_role);
@@ -450,6 +449,7 @@ function ConfigTab(props: { onDirty: (groups: string[]) => void }) {
     const provs = await adminListProviders();
     setInstances(provs.instances);
     setTypes(provs.types);
+    setAliasPattern(provs.alias_pattern);
     setItems(await adminGetConfig());
   };
 
@@ -523,18 +523,34 @@ function ConfigTab(props: { onDirty: (groups: string[]) => void }) {
     }
   };
 
-  // 非 Secret 字段必填（livekit 的 livekit_url 例外，服务端 checkProviderParams 同一豁免）；
-  // Secret 字段创建时必填，编辑时留空 = 保持不变
+  // 必填 / 格式一律按接口下发的字段模式（optional / pattern），不在页面复刻类型特例
   const fieldMissing = (f: ProviderField) => {
     const v = (pValues()[f.name] ?? '').trim();
     if (f.secret) return pMode() === 'create' && v === '';
-    if (pType() === 'livekit' && f.name === 'livekit_url') return false;
+    if (f.optional) return false;
     return v === '';
   };
-  const aliasValid = () => ALIAS_RE.test(pAlias().trim());
+  const fieldBadPattern = (f: ProviderField) => {
+    const v = (pValues()[f.name] ?? '').trim();
+    if (!v || !f.pattern) return false;
+    try {
+      return !new RegExp(f.pattern).test(v);
+    } catch {
+      return true;
+    }
+  };
+  const aliasValid = () => {
+    const v = pAlias().trim();
+    if (!v) return false;
+    try {
+      return new RegExp(aliasPattern()).test(v);
+    } catch {
+      return false;
+    }
+  };
   const canSubmit = createMemo(() => {
     if (pMode() === 'create' && !aliasValid()) return false;
-    return fieldsOf(pType()).every((f) => !fieldMissing(f));
+    return fieldsOf(pType()).every((f) => !fieldMissing(f) && !fieldBadPattern(f));
   });
 
   const submitProvider = async () => {
@@ -611,7 +627,7 @@ function ConfigTab(props: { onDirty: (groups: string[]) => void }) {
   const fieldInput = (f: ProviderField) => {
     const placeholder = () =>
       f.secret && pMode() === 'edit' && editing()?.params_set[f.name] ? '已设置（留空保持不变）' : f.hint;
-    const bad = () => fieldMissing(f);
+    const bad = () => fieldMissing(f) || fieldBadPattern(f);
     return (
       <div>
         <div style="display:flex;align-items:baseline;gap:8px;margin-bottom:6px">

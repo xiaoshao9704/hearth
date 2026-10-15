@@ -17,6 +17,7 @@ import (
 
 	"hearth/server/internal/portmap"
 	"hearth/server/internal/rtc"
+	"hearth/server/internal/rtc/livekitrtc"
 )
 
 // 内核选择器：值是注册表里的实例 alias（见 providers.go），合法性由 adminSetConfig 的
@@ -40,9 +41,9 @@ var portmapKeys = []rtc.ConfigKey{
 }
 
 // clientICEKeys 面向浏览器的 ICE 策略：是 hearth 的全局策略而非某个实例的参数，
-// 由信令反代逐连接读取后改写下发（见 signalbridge.go / iceservers.go）。
+// 由信令反代逐连接读取后交给实现改写下发（rtc.SignalRewriter）。
 var clientICEKeys = []rtc.ConfigKey{
-	{Name: "client_stun_servers", Env: "CLIENT_STUN_SERVERS", Group: "network", Default: defaultClientSTUN,
+	{Name: "client_stun_servers", Env: "CLIENT_STUN_SERVERS", Group: "network", Default: livekitrtc.DefaultClientSTUN,
 		Label: "浏览器 STUN 服务器",
 		Hint: "逗号分隔的 host:port，由信令反代改写后下发给浏览器，对所有内核实例生效、保存即生效。" +
 			"浏览器并行探测、谁先回用谁，所以按地域并列几个即可；none = 不下发任何 STUN" +

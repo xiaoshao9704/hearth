@@ -51,14 +51,16 @@ type ConfigFunc func(ctx context.Context, name string) string
 
 // ConfigKey 实现声明自己的配置键：接入层据此渲染管理后台表单与判定环境锁定。
 type ConfigKey struct {
-	Name    string   `json:"name"` // settings 键名（cfg_ 前缀存储），实现自定命名空间
-	Env     string   `json:"env"`  // 对应环境变量（设置了则锁定为只读）
-	Label   string   `json:"label"`
-	Hint    string   `json:"hint"`
-	Secret  bool     `json:"secret"`
-	Group   string   `json:"group"`             // 管理后台分组
-	Options []string `json:"options,omitempty"` // 枚举可选值（管理后台渲染选择框）；空 = 自由文本
-	Default string   `json:"-"`                 // 环境与数据库都未设置时的兜底值，由实现声明
+	Name     string   `json:"name"` // settings 键名（cfg_ 前缀存储），实现自定命名空间
+	Env      string   `json:"env"`  // 对应环境变量（设置了则锁定为只读）
+	Label    string   `json:"label"`
+	Hint     string   `json:"hint"`
+	Secret   bool     `json:"secret"`
+	Optional bool     `json:"optional,omitempty"` // 非 Secret 时允许空（如 livekit_url 走同源代理）
+	Pattern  string   `json:"pattern,omitempty"`  // 非空时管理端用此正则校验取值
+	Group    string   `json:"group"`             // 管理后台分组
+	Options  []string `json:"options,omitempty"` // 枚举可选值（管理后台渲染选择框）；空 = 自由文本
+	Default  string   `json:"-"`                 // 环境与数据库都未设置时的兜底值，由实现声明
 }
 
 // Credentials 进房凭证。Engine 告诉前端用哪个客户端引擎与内核对话
@@ -102,6 +104,14 @@ type Provider interface {
 	MuteUserAudio(ctx context.Context, room string, userID int64, muted bool) error
 	// SignalProxyUpstream 同源信令代理的上游地址；空 = 该内核不需要信令代理。
 	SignalProxyUpstream(ctx context.Context) string
+}
+
+// SignalRewriter 可选能力：对上游下发的信令 binary 帧做内核特定改写
+//（如改 ICE 服务器列表）。接入层在 SignalProxyUpstream 非空时走手写桥，
+// 若实现本接口则对下游帧调用 RewriteDownstream；否则原样透传。
+// 报文格式知识留在实现包，接入层不解析具体信令。
+type SignalRewriter interface {
+	RewriteDownstream(data []byte, clientSTUN string) []byte
 }
 
 // StageProvider 舞台内核：投屏/摄像头等视频能力，**包含全部语音能力**（内嵌 Provider）。

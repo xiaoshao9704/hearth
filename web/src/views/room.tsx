@@ -9,28 +9,22 @@ import { createEffect, createMemo, createSignal, on, onCleanup, untrack, For, Sh
 import { render } from 'solid-js/web';
 import { closeAccountMenu, openAccountMenu } from '../account-menu';
 import { startAfkWatch } from '../afk';
-import { ApiError, deviceId, fetchJoinCredentials, getCastTicket, getIngestToken, getUser, guestTimeLeft, isGuest, kickUser, listChannels, muteUser, reportClientLog, siteInfoCached } from '../api';
+import { ApiError, deviceId, fetchJoinCredentials, getCastTicket, getUser, guestTimeLeft, isGuest, kickUser, listChannels, muteUser, siteInfoCached } from '../api';
 import type { ChannelRole, DataLine, EngineCred } from '../api';
 import { playCue } from '../audio';
 import { capabilities, encoderDisplayName, listSources, onPublishState, startPublish, stopPublish, updatePublish } from '../bridge';
 import type { BridgeCaps, NativeSource } from '../bridge';
-import { deleteMessage, fetchMessages, postMessage, setReaction } from '../chat';
 import type { ChatMessage } from '../chat';
-import { compressImage } from '../chat/compress';
-import { applyMention, matchMentions, mentionQuery, mentionedUids, mentionsUser, splitMentions } from '../chat/mentions';
-import type { MentionQuery, MentionUser } from '../chat/mentions';
-import { encodeDelete, encodeMessage, encodeReaction, parseEnvelope } from '../chat/protocol';
+import { splitMentions } from '../chat/mentions';
+import type { MentionQuery } from '../chat/mentions';
 import { createEngine } from '../engine';
-import { DATA_TOPIC_FILE, DATA_TOPIC_TEXT } from '../engine/types';
-import type { AVEngine, EPart, EngineCallbacks, TrackSource, VideoStats, WatchCounters } from '../engine/types';
+import type { AVEngine, EPart, EngineCallbacks, TrackSource, VideoStats } from '../engine/types';
 import { wireLongPress } from '../longpress';
 import { clearLeaveGuard, setLeaveGuard } from '../nav';
-import { obsPlatform, startObsStream } from '../obsws';
 import type { ObsConn, ObsStreamStatus, ObsVersion } from '../obsws';
 import { encoderIsHw, loadPrefs, prefsBus, RES_DIMS, savePrefs, setScreenRepublish } from '../prefs';
-import { addWatch, diffWatch, emptyWatchTotals, shouldReportWatch, watchLevel } from '../watchdiag';
 import type { WatchTotals } from '../watchdiag';
-import { notifyJoin, notifyMessage } from '../notify';
+import { notifyJoin } from '../notify';
 import { renderShell } from '../shell';
 import { isStaleChunkError, reloadForStale, staleReloadUsed } from '../stale';
 import { avatarHtml, confirmDialog, el, esc, fmtClock, icon, licon, menuButtonHtml, micIcon, slashIcon, toast, wireMenuButton } from '../ui';
@@ -43,21 +37,18 @@ import type { LatencyState } from './room/latency-result';
 import { IngestBadge } from './room/ingest-badge';
 import { IngestPanel } from './room/ingest-panel';
 import { NativeSourcePanel } from './room/native-source-panel';
-import {
-  connectStoredObs,
-  OBS_READY_EVENT,
-  OBS_SETUP_HINT,
-  obsCaptureBlocker,
-  ObsScreenPanel,
-  whipServer,
-} from './room/obs-capture';
+import { ObsScreenPanel } from './room/obs-capture';
 import { createUnreadMarker } from './room/unread-divider';
 import { showMsgMenu } from './room/msg-menu';
-import { mergeReaction, ReactionBar } from './room/reactions';
+import { ReactionBar } from './room/reactions';
 import { ReplyComposer, ReplyQuote } from './room/reply';
 import { openSettings } from './settings';
 import { ChatFirstBar, syncPanelWithChatFirst } from './room/chat-first';
+import { createChatCtrl } from './room/chat-ctrl';
+import type { ChatCtrl } from './room/chat-ctrl';
+import { createRoomDiag, startLineDiag, wireWatchDiag } from './room/diag';
 import { FloatingRoster, mountPipRoster } from './room/floating-roster';
+import { createObsSession } from './room/obs-session';
 import { createPipCtl } from './room/pip';
 import { createTheaterCtl, elementFullscreenSupported, ViewModeControl } from './room/theater';
 
@@ -159,8 +150,7 @@ const LIMIT_TEXT: Record<string, string> = { cpu: 'CPU', bandwidth: '带宽', ot
 // 内联预览的图片 MIME 白名单：白名单外一律当文件走 a[download]，不进 <img>
 const IMAGE_MIME = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
 
-// 客户端上限：与服务端 chat_file_max_mb 的默认值一致，先拦一道少一次白跑的往返；
-// 真正的权威仍是服务端（按实际配置校验，超限 413）
+// 与 chat-ctrl / 服务端 chat_file_max_mb 默认一致，仅作 UI 文案
 const FILE_MAX_MB = 25;
 
 function fmtSize(n: number): string {
@@ -210,23 +200,8 @@ export async function renderRoom(root: HTMLElement, channel: string) {
   const prefs = loadPrefs();
   const canScreenShare = typeof navigator.mediaDevices?.getDisplayMedia === 'function';
 
-  const diagBytes = new Uint8Array(8);
-  if (globalThis.crypto?.getRandomValues) globalThis.crypto.getRandomValues(diagBytes);
-  else for (let i = 0; i < diagBytes.length; i++) diagBytes[i] = Math.floor(Math.random() * 256);
-  const diagSession = Array.from(diagBytes, (b) => b.toString(16).padStart(2, '0')).join('');
-  const diag = (
-    level: 'info' | 'warn' | 'error',
-    event: string,
-    role?: Role,
-    fields: Omit<Parameters<typeof reportClientLog>[0], 'level' | 'event' | 'session' | 'channel' | 'role'> = {},
-  ) => reportClientLog({ level, event, session: diagSession, channel, role, ...fields });
-  const endpointOf = (raw: string): string => {
-    try {
-      return new URL(raw, location.href).host;
-    } catch {
-      return '';
-    }
-  };
+  const { diag, endpointOf } = createRoomDiag(channel);
+  let chatCtrl!: ChatCtrl;
 
   const shell = renderShell(root, { activeChannel: channel });
   shell.setConn(false, '正在协商…');
@@ -246,6 +221,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
   let stageLine: Line | null = null; // null = 无舞台线；combined 时与 voiceLine 同引擎
   let combined = false;
   let stageUp = false;
+  let stageIssue = ''; // 最近一次进房凭证上的 stage_error（与「未配置」区分）
   let leaving = false;
   let bounced = false;
   let seq = 0; // 卡片到达顺序计数
@@ -1035,7 +1011,9 @@ export async function renderRoom(root: HTMLElement, channel: string) {
     if (combined) {
       stageLine = voiceLine;
       stageUp = !!voiceLine.engine?.connected();
+      stageIssue = '';
     } else if (creds.stage) {
+      stageIssue = '';
       if (!stageLine || stageLine === voiceLine) {
         stageLine = { role: 'stage', engine: null, engineName: '', attempts: 0, timer: 0, inflight: false };
       }
@@ -1046,6 +1024,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
     } else {
       stageLine = null;
       stageUp = false;
+      stageIssue = creds.stage_error ?? '';
     }
     updateStageButtons();
     shell.setConn(!!voiceLine.engine?.connected(), connBoxMeta());
@@ -1303,12 +1282,12 @@ export async function renderRoom(root: HTMLElement, channel: string) {
         }
       },
       // 数据通道：只有数据线那条会真收到（另一条没人往里发），重复到达也会被 id 去重挡掉
-      onText: (_topic, text) => onChatBroadcast(text),
+      onText: (_topic, text) => chatCtrl.onChatBroadcast(text),
       onFile: (_topic, info, bytes) => {
         const id = Number(info.attrs.message_id ?? '');
         if (!Number.isInteger(id) || id <= 0) return;
         const mime = info.mime || 'application/octet-stream';
-        putFileState(id, { status: 'ready', progress: 1, url: URL.createObjectURL(new Blob([bytes], { type: mime })) });
+        chatCtrl.putFileState(id, { status: 'ready', progress: 1, url: URL.createObjectURL(new Blob([bytes], { type: mime })) });
       },
       onLocalTrackEnded: (kind) => {
         if (kind === 'mic' && micOn()) {
@@ -1364,7 +1343,9 @@ export async function renderRoom(root: HTMLElement, channel: string) {
 
   function updateStageButtons() {
     setStageOk(!!stageEngine() && stageUp);
-    setStageHint(stageLine ? '舞台线重连中' : '本服未启用舞台线（投屏/摄像头）');
+    if (stageLine) setStageHint('舞台线重连中');
+    else if (stageIssue) setStageHint('舞台线暂时不可用（签发失败）');
+    else setStageHint('本服未启用舞台线（投屏/摄像头）');
   }
 
   async function toggleMic() {
@@ -1534,85 +1515,21 @@ export async function renderRoom(root: HTMLElement, channel: string) {
     refreshMeta();
   }
 
-  // ---- 通过 OBS 投屏 ----
-  // 配过 OBS 联动的设备在进房时悄悄连一条，只为「投屏」能列出 OBS 的窗口；
-  // 连不上就当没配过，按钮行为与从前完全一致。
-  let obsPoll: ReturnType<typeof setInterval> | undefined;
-  const dropObs = () => {
-    clearInterval(obsPoll);
-    obsPoll = undefined;
-    setObsConn(null);
-    setObsVer(null);
-    setObsStatus(null);
-    setScreenPick(false);
-  };
-  let obsDialing = false; // 只防同时发两次握手，连接态本身仍只看 obsConn
-  async function dialObs() {
-    if (obsDialing || obsConn()?.alive || leaving) return;
-    obsDialing = true;
-    try {
-      const c = await connectStoredObs();
-      if (!c) return;
-      if (leaving || obsConn()?.alive) return c.close();
-      const ver = await c.request('GetVersion');
-      if (obsCaptureBlocker(obsPlatform(ver.platform), ver.obsVersion)) return c.close();
-      c.onLost = dropObs;
-      setObsVer(ver);
-      setObsConn(c);
-      const poll = async () => {
-        if (!c.alive) return;
-        try {
-          setObsStatus(await c.request('GetStreamStatus'));
-        } catch {
-          /* 轮询失败不打扰：真断了走 onLost */
-        }
-      };
-      await poll();
-      obsPoll = setInterval(() => void poll(), 2000);
-    } catch {
-      /* OBS 没开或密码变了：静默降级，不弹提示打扰只想用浏览器投屏的人 */
-    } finally {
-      obsDialing = false;
-    }
-  }
-  void dialObs();
-  // 设置里刚把 OBS 联动配通：不用退出重进也能拿到「通过 OBS 投屏」
-  const onObsReady = () => void dialObs();
-  window.addEventListener(OBS_READY_EVENT, onObsReady);
-  // 源建好了：目标由用户在 OBS 弹出的属性窗口里选，选完回「OBS 推流」面板点开播。
-  // 这一步不写直播服务设置、不 StartStream——这会儿画面里投的还不知道是什么。
-  function obsCaptureReady() {
-    toast(OBS_SETUP_HINT, '', 7000);
-  }
-
-  // 壳内「选中即开播」：目标已经写进 OBS 的源，这里只把本频道的 WHIP 地址与令牌配上去并开播。
-  // 地址与令牌按需现拉（面板可能在频道刚就绪时就打开了），不在房间页常备一份。
-  async function startObsToChannel() {
-    const c = obsConn();
-    if (!c?.alive) throw new Error('OBS 连接已断开，请重新配置 OBS 联动');
-    const id = channelId();
-    if (!id) throw new Error('频道还没就绪，稍等一下再试');
-    const [info, site] = await Promise.all([getIngestToken(), siteInfoCached().catch(() => null)]);
-    const server = whipServer(info, site, id);
-    if (!server || !info.token) throw new Error('推流地址还没拿到，稍等一下再试');
-    await startObsStream(c, server, info.token);
-    setObsStatus(await c.request('GetStreamStatus'));
-    toast('OBS 已开始推流', 'ok');
-    refreshMeta();
-  }
-
-  async function stopObsScreen() {
-    const c = obsConn();
-    if (!c?.alive) return;
-    try {
-      await c.request('StopStream');
-      setObsStatus(await c.request('GetStreamStatus'));
-      toast('已让 OBS 停止投屏', 'ok', 1600);
-    } catch (err) {
-      toast(`停止投屏失败：${errText(err)}`, 'bad');
-    }
-    refreshMeta();
-  }
+  // ---- 通过 OBS 投屏（逻辑在 views/room/obs-session.ts）----
+  const obsSession = createObsSession({
+    leaving: () => leaving,
+    channelId,
+    obsConn,
+    setObsConn,
+    setObsVer,
+    setObsStatus,
+    setScreenPick,
+    onRefreshMeta: refreshMeta,
+  });
+  void obsSession.dial();
+  const obsCaptureReady = () => obsSession.captureReady();
+  const startObsToChannel = () => obsSession.startToChannel();
+  const stopObsScreen = () => obsSession.stopScreen();
 
   // 原生投屏：选源 → 取本设备的投屏票 → 交给壳去推 WHIP。发布不经浏览器的
   // PeerConnection，所以这里不碰 stageEngine；能不能推最终由服务端的 admitIngest 判。
@@ -1751,405 +1668,59 @@ export async function renderRoom(root: HTMLElement, channel: string) {
   navigator.mediaDevices?.addEventListener?.('devicechange', onDeviceChange);
   void onDeviceChange();
 
-  // ---- 面板与聊天 ----
-
-  function switchPanel(p: 'members' | 'chat' | '') {
-    setPanel(p);
-    if (p === 'chat') {
-      setUnread(0);
-      // 面板刚从 hidden 变可见，等 DOM 更新后再滚底
-      queueMicrotask(() => {
-        chatLogEl.scrollTop = chatLogEl.scrollHeight;
-        // 触屏聚焦会弹出键盘把面板顶掉一半，只在有指针悬停的设备上抢焦点
-        if (!window.matchMedia('(hover: none)').matches) chatInputEl.focus();
-      });
-      unreadMark.reveal(); // 排在滚底之后：有未读就改滚到第一条未读
-    }
-  }
-
-  // 距底多少 px 以内算「在底部」：留出阈值，避免次像素/小数滚动误差把用户判成已上翻
-  const NEAR_BOTTOM_PX = 48;
-  const onChatScroll = () => {
-    const d = chatLogEl.scrollHeight - chatLogEl.scrollTop - chatLogEl.clientHeight;
-    const at = d <= NEAR_BOTTOM_PX;
-    setAtBottom(at);
-    if (at) setNewBelow(false); // 自己滚到底，新消息提示消失
-    if (at) unreadMark.atBottom();
-  };
-  function jumpToLatest() {
-    chatLogEl.scrollTo({ top: chatLogEl.scrollHeight, behavior: 'smooth' });
-  }
-
-  // ---- 文件卡片的字节状态 ----
-
-  function putFileState(id: number, st: FileState) {
-    setFileStates((prev) => {
-      const m = new Map(prev);
-      const old = m.get(id);
-      if (old?.url && old.url !== st.url) URL.revokeObjectURL(old.url);
-      m.set(id, st);
-      return m;
-    });
-  }
-
-  function patchFileState(id: number, patch: Partial<FileState>) {
-    setFileStates((prev) => {
-      const cur = prev.get(id);
-      if (!cur) return prev;
-      const m = new Map(prev);
-      m.set(id, { ...cur, ...patch });
-      return m;
-    });
-  }
-
-  // 历史里的文件卡片：字节是发送那一刻扇出的，本次会话没收到就补不回来
-  function markExpired(list: ChatMessage[]) {
-    for (const m of list) {
-      if (m.kind === 'file' && !fileStates().has(m.id)) {
-        putFileState(m.id, { status: 'expired', progress: 0, url: '' });
-      }
-    }
-  }
-
-  // ---- 聊天消息（落库为权威，数据线只是实时扇出）----
-
-  // 追加一条消息，按 id 去重（数据线广播与 REST 补齐会重叠）；
-  // live=true 表示这是实时到达的一条（而非进房/重连时的历史补齐），只有这种才可能响提示音
-  function appendMessage(m: ChatMessage, live = false) {
-    let added = false;
-    setMsgs((list) => {
-      if (list.some((x) => x.id === m.id)) return list;
-      added = true;
-      return [...list, m].sort((a, b) => a.id - b.id);
-    });
-    if (!added) return;
-    // 别人发的文件：卡片先到，字节随后经数据通道到
-    if (m.kind === 'file' && !fileStates().has(m.id)) {
-      putFileState(m.id, { status: 'receiving', progress: 0, url: '' });
-    }
-    if (m.uid === myUid) {
-      // 自己发的不计未读；刚发完消息的人要看的是自己这条，直接落底
-      queueMicrotask(() => {
-        chatLogEl.scrollTop = chatLogEl.scrollHeight;
-      });
-      return;
-    }
-    // 面板关着或页面在后台都计未读（title 前缀与按钮角标共用这一个计数）
-    const hidden = panel() !== 'chat' || document.visibilityState !== 'visible';
-    if (hidden) setUnread((u) => u + 1);
-    if (hidden) unreadMark.note(m.id);
-    // 静音这个频道 = 不响不弹（未读计数照算，视觉上还看得见）：@ 与回复也不例外
-    if (muted()) return;
-    // 被 @ 与被回复同一档：都是"有人点名找我"，比普通消息重要，
-    // 不受聊天提示音的节流与"面板开着就不响"限制
-    const mentioned = live && m.kind === 'text' && (mentionsUser(m.content, mentionUsers(), myUid) || replyToMe(m));
-    if (mentioned) onMention(m);
-    else if (live && hidden) playChatCue();
-    // 提示音与系统通知各一次：被 @ 与否都只发一条通知，档次由 mentioned 决定
-    if (live) notifyMessage(m, mentioned, channel, () => switchPanel('chat'));
-  }
-
-  // 回复我的消息视同被 @：被引的那条在手上的列表里找，找不到（历史还没补齐）按不是
-  function replyToMe(m: ChatMessage): boolean {
-    if (!m.reply_to) return false;
-    return msgs().find((x) => x.id === m.reply_to)?.uid === myUid;
-  }
-
-  // 被 @ 的统一入口：只管提示音；系统通知在 appendMessage 里按同一个判定发，两者各一次
-  function onMention(_m: ChatMessage) {
-    if (loadPrefs().mentionCue) playCue('mention');
-  }
-
-  // @补全与高亮的名字来源：名册（在房的人）。不在名册里的人 @ 不出高亮——
-  // 提示不到的人不该显示成提示到了（判定按 uid，见 chat/mentions.ts）
-  const mentionUsers = createMemo<MentionUser[]>(() =>
-    roster()
-      .filter((p) => p.uid > 0 && !p.ingest)
-      .map((p) => ({ uid: p.uid, username: p.username })),
-  );
-
-  // 引用态指向的那条消息（撤回后摘要跟着变成"已撤回"，因为这里每次都从 msgs() 现取）
-  const replyTarget = createMemo(() => {
-    const id = replyToId();
-    return id ? msgs().find((m) => m.id === id) : undefined;
+  // ---- 面板与聊天（控制逻辑在 views/room/chat-ctrl.ts）----
+  chatCtrl = createChatCtrl({
+    channel,
+    myUid,
+    els: () => ({ log: chatLogEl, input: chatInputEl, file: chatFileEl }),
+    unreadMark,
+    panel,
+    setPanel,
+    muted,
+    msgs,
+    setMsgs,
+    setUnread,
+    setAtBottom,
+    setNewBelow,
+    setHistoryLoaded,
+    setChatReady,
+    setChatDrag,
+    replyToId,
+    setReplyToId,
+    mentionQ,
+    setMentionQ,
+    mentionIdx,
+    setMentionIdx,
+    fileStates,
+    setFileStates,
+    rosterMentionUsers: () =>
+      roster()
+        .filter((p) => p.uid > 0 && !p.ingest)
+        .map((p) => ({ uid: p.uid, username: p.username })),
+    liveDataEngine,
+    altEngine,
+    isSelfGagged,
+    leaving: () => leaving,
   });
-  const mentionHits = createMemo(() => {
-    const q = mentionQ();
-    return q ? matchMentions(mentionUsers(), q.query) : [];
-  });
-
-  // 输入/点击后重算"光标前是不是正在打提及"；候选变了就把高亮拉回第一项
-  function syncMentionQuery() {
-    const q = mentionQuery(chatInputEl.value, chatInputEl.selectionStart ?? chatInputEl.value.length);
-    setMentionQ(q);
-    setMentionIdx(0);
-  }
-
-  function pickMention(username: string) {
-    const q = mentionQ();
-    if (!q) return;
-    const next = applyMention(chatInputEl.value, q, username);
-    chatInputEl.value = next.value;
-    chatInputEl.setSelectionRange(next.caret, next.caret);
-    setChatReady(next.value.trim().length > 0);
-    setMentionQ(null);
-    chatInputEl.focus();
-  }
-
-  // 补全打开时接管上下键/回车/Tab/Esc；返回 true = 本次按键已被补全消费，不再走发送逻辑
-  function onMentionKeyDown(ev: KeyboardEvent): boolean {
-    const hits = mentionHits();
-    if (!hits.length) return false;
-    if (ev.key === 'Escape') {
-      ev.preventDefault();
-      setMentionQ(null);
-      return true;
-    }
-    if (ev.key === 'ArrowDown' || ev.key === 'ArrowUp') {
-      ev.preventDefault();
-      setMentionIdx((i) => (i + (ev.key === 'ArrowDown' ? 1 : hits.length - 1)) % hits.length);
-      return true;
-    }
-    if (ev.key === 'Enter' || ev.key === 'Tab') {
-      ev.preventDefault();
-      pickMention(hits[Math.min(mentionIdx(), hits.length - 1)].username);
-      return true;
-    }
-    return false;
-  }
-
-  // 聊天提示音节流 1.5 秒：一段时间内连来多条消息只响一次
-  let lastChatCueAt = 0;
-  function playChatCue() {
-    if (!loadPrefs().chatCue) return;
-    const now = Date.now();
-    if (now - lastChatCueAt < 1500) return;
-    lastChatCueAt = now;
-    playCue('message');
-  }
-
-  // 数据线到的是一个信封（新消息/撤回/反应），旧版页面发的裸 Message 由 parseEnvelope 兼容；
-  // 解析失败就丢，重连时 after= 会补齐（权威始终在库里）
-  function onChatBroadcast(text: string) {
-    const env = parseEnvelope(text);
-    if (!env) return;
-    if (env.t === 'message') {
-      appendMessage(env.m, true);
-      return;
-    }
-    if (env.t === 'delete') {
-      patchMessage(env.id, { deleted: true, content: '', file: undefined, reactions: [] });
-      return;
-    }
-    patchMessage(env.id, (m) => ({ reactions: mergeReaction(m.reactions, env.emoji, env.uid, env.on) }));
-  }
-
-  // 本地改一条已在列表里的消息（撤回/反应的实时到达）；不在列表里就忽略——
-  // 那条消息本来就没显示出来，下次拉历史会带着最终状态一起来
-  function patchMessage(id: number, patch: Partial<ChatMessage> | ((m: ChatMessage) => Partial<ChatMessage>)) {
-    setMsgs((list) => {
-      const i = list.findIndex((x) => x.id === id);
-      if (i < 0) return list;
-      const next = [...list];
-      next[i] = { ...list[i], ...(typeof patch === 'function' ? patch(list[i]) : patch) };
-      return next;
-    });
-  }
-
-  // 数据线不在（未连上/正在重连）时只落库不广播：接收方靠 after= 补齐，发送不阻塞。
-  // 发送失败换另一条已连上的线再试一次（远端实例太老、不支持 Data Streams 时靠这个兜底），
-  // 只试这一次；禁言是服务端的确定拒绝，换线一样被拒，不试。两次都失败就静默——
-  // 权威在库里，对端重连时 after= 会补上
-  function broadcast(text: string) {
-    const eng = liveDataEngine();
-    if (!eng) return;
-    void eng.sendText(DATA_TOPIC_TEXT, text).catch(() => {
-      if (isSelfGagged()) return;
-      const alt = altEngine(eng);
-      if (!alt) return;
-      void alt.sendText(DATA_TOPIC_TEXT, text).catch(() => {});
-    });
-  }
-
-  // ---- 撤回 / 反应 / 引用（服务端落库为准，成功后广播让对端立刻看到）----
-
-  async function removeMessage(m: ChatMessage) {
-    const ok = await confirmDialog({
-      title: m.uid === myUid ? '撤回这条消息？' : `删除 ${m.username} 的这条消息？`,
-      body: '消息内容会从服务器上清掉，聊天里只留一条"已撤回"的占位。',
-      danger: true,
-      confirmText: m.uid === myUid ? '撤回' : '删除',
-    });
-    if (!ok) return;
-    try {
-      await deleteMessage(channel, m.id);
-    } catch (err) {
-      toast((err as Error).message, 'bad');
-      return;
-    }
-    patchMessage(m.id, { deleted: true, content: '', file: undefined, reactions: [] });
-    if (replyToId() === m.id) setReplyToId(null);
-    broadcast(encodeDelete(m.id, myUid));
-  }
-
-  async function toggleReaction(m: ChatMessage, emoji: string, on: boolean) {
-    // 先本地生效再落库：反应是高频轻动作，等一个往返才变色会显得迟钝；失败时回滚
-    patchMessage(m.id, (cur) => ({ reactions: mergeReaction(cur.reactions, emoji, myUid, on) }));
-    try {
-      const res = await setReaction(channel, m.id, emoji, on);
-      patchMessage(m.id, { reactions: res.reactions });
-    } catch (err) {
-      patchMessage(m.id, (cur) => ({ reactions: mergeReaction(cur.reactions, emoji, myUid, !on) }));
-      toast((err as Error).message, 'bad');
-      return;
-    }
-    broadcast(encodeReaction(m.id, emoji, myUid, on));
-  }
-
-  // 跳到被引用的原消息：滚过去并闪一下（找不到说明它不在已加载的历史里，按钮本来就不会渲染）
-  function jumpToMessage(id: number) {
-    const node = chatLogEl.querySelector<HTMLElement>(`[data-msg-id="${id}"]`);
-    if (!node) return;
-    node.scrollIntoView({ block: 'center', behavior: 'smooth' });
-    node.classList.add('flash');
-    setTimeout(() => node.classList.remove('flash'), 1200);
-  }
-
-  // 进房首次取最近 50 条；重连时按最大已知 id 补断线期间漏掉的
-  let syncing = false;
-  async function syncMessages(first: boolean) {
-    if (syncing || leaving) return;
-    syncing = true;
-    try {
-      const after = first ? 0 : msgs().reduce((max, m) => (m.id > max ? m.id : max), 0);
-      const list = await fetchMessages(channel, after);
-      if (leaving) return;
-      // 必须先标过期再入列：appendMessage 会把没见过的文件卡片当成「字节在路上」，
-      // 而从库里补来的这批，字节早在发送那一刻就扇出完了
-      markExpired(list);
-      if (first) {
-        setMsgs(list);
-        setHistoryLoaded(true);
-        setUnread(0);
-      } else {
-        list.forEach((m) => appendMessage(m));
-      }
-    } catch {
-      // 取历史失败不阻断进房：下次重连或发消息时自然补齐
-    } finally {
-      syncing = false;
-    }
-  }
-
-  let sendingText = false;
-  async function sendChat(ev: Event) {
-    ev.preventDefault();
-    const content = chatInputEl.value.trim();
-    if (!content || sendingText) return;
-    sendingText = true;
-    const quoted = replyToId();
-    chatInputEl.value = '';
-    setChatReady(false);
-    setMentionQ(null);
-    setReplyToId(null);
-    try {
-      // mentions 是给服务端的线索（离线推送的目标）：它会逐个校验，不认的丢掉
-      const mentions = mentionedUids(content, mentionUsers());
-      const m = await postMessage(channel, quoted ? { content, reply_to: quoted, mentions } : { content, mentions });
-      appendMessage(m);
-      broadcast(encodeMessage(m));
-    } catch (err) {
-      // 落库失败才是真失败（禁言 403、超长 400、被引消息没了 400）：
-      // 把内容与引用态都还回去，让用户能原样重发
-      chatInputEl.value = content;
-      setChatReady(true);
-      if (quoted) setReplyToId(quoted);
-      toast((err as Error).message, 'bad');
-    } finally {
-      sendingText = false;
-    }
-  }
-
-  // ---- 发文件/图片 ----
-
-  async function sendFiles(raws: File[]) {
-    for (const raw of raws) {
-      const f = await compressImage(raw); // 图片过大先本地压缩，其它类型原样返回
-      if (f.size > FILE_MAX_MB * 1024 * 1024) {
-        toast(`「${f.name}」超过 ${FILE_MAX_MB} MB，发不出去`, 'bad');
-        continue;
-      }
-      await sendOneFile(f);
-    }
-  }
-
-  async function sendOneFile(file: File) {
-    const meta = { name: file.name, mime: file.type || 'application/octet-stream', size: file.size };
-    let m: ChatMessage;
-    try {
-      m = await postMessage(channel, { kind: 'file', file: meta });
-    } catch (err) {
-      toast((err as Error).message, 'bad');
-      return;
-    }
-    // 自己的卡片直接用手上的 File 预览/下载，不等字节绕一圈回来
-    putFileState(m.id, { status: 'sending', progress: 0, url: URL.createObjectURL(file) });
-    appendMessage(m);
-    broadcast(encodeMessage(m));
-    const eng = liveDataEngine();
-    if (!eng) {
-      // 卡片已落库但字节没人收得到：如实告知，别假装发出去了
-      patchFileState(m.id, { status: 'ready', progress: 1 });
-      toast('数据线未连接，对方只会看到一张过期卡片', 'bad');
-      return;
-    }
-    const sendOn = (on: AVEngine) =>
-      on.sendFile(file, DATA_TOPIC_FILE, { message_id: String(m.id) }, (p) => patchFileState(m.id, { progress: p }));
-    try {
-      await sendOn(eng);
-      patchFileState(m.id, { status: 'ready', progress: 1 });
-      return;
-    } catch (err) {
-      // 与文本同一套回落：换另一条已连上的线重发一次；禁言不换线，字节也不试第三次
-      const alt = isSelfGagged() ? null : altEngine(eng);
-      if (alt) {
-        try {
-          patchFileState(m.id, { progress: 0 });
-          await sendOn(alt);
-          patchFileState(m.id, { status: 'ready', progress: 1 });
-          return;
-        } catch {
-          // 落到下面统一标失败（报第一条线的原因，两条线的失败通常同源）
-        }
-      }
-      patchFileState(m.id, { status: 'failed' });
-      toast(`「${file.name}」发送失败：${(err as Error)?.message ?? ''}`, 'bad');
-    }
-  }
-
-  const pickFiles = () => {
-    const list = [...(chatFileEl.files ?? [])];
-    chatFileEl.value = ''; // 同一个文件连发两次也要触发 change
-    if (list.length) void sendFiles(list);
-  };
-
-  const onChatPaste = (ev: ClipboardEvent) => {
-    // 走 items 而非 files：部分浏览器粘贴截图时 clipboardData.files 为空，items 才拿得到 kind === 'file' 的项
-    const items = ev.clipboardData?.items;
-    const list = items
-      ? [...items].filter((it) => it.kind === 'file').map((it) => it.getAsFile()).filter((f): f is File => !!f)
-      : [...(ev.clipboardData?.files ?? [])];
-    if (!list.length) return; // 没有文件项：不拦截，文本正常粘进输入框
-    ev.preventDefault(); // 截图粘贴：不要同时把文件名塞进输入框
-    void sendFiles(list);
-  };
-
-  const onChatDrop = (ev: DragEvent) => {
-    ev.preventDefault();
-    setChatDrag(false);
-    const list = [...(ev.dataTransfer?.files ?? [])];
-    if (list.length) void sendFiles(list);
-  };
+  const {
+    switchPanel,
+    onChatScroll,
+    jumpToLatest,
+    removeMessage,
+    toggleReaction,
+    jumpToMessage,
+    syncMessages,
+    sendChat,
+    pickFiles,
+    onChatPaste,
+    onChatDrop,
+    syncMentionQuery,
+    pickMention,
+    onMentionKeyDown,
+    mentionUsers,
+    mentionHits,
+    replyTarget,
+  } = chatCtrl;
 
   // ---- 设置页偏好热应用 ----
   const onPrefs = async (ev: Event) => {
@@ -3529,70 +3100,20 @@ export async function renderRoom(root: HTMLElement, channel: string) {
   const onChannelsChanged = () => syncChannelInfo();
   window.addEventListener('hearth:channels', onChannelsChanged);
 
-  // ---- 线路读数诊断（60 秒一条）----
-  // 页面隐藏或语音线不在 up 时跳过：后台标签页的读数没有诊断价值，断线期间也不该刷日志
-  let lineDiagTimer = 0;
-  const lineDiag = async () => {
-    if (document.hidden || voiceState().phase !== 'up') return;
-    const rows: [Role, AVEngine | null][] = combined
-      ? [['voice', voiceLine.engine]]
-      : [
-          ['voice', voiceLine.engine],
-          ['stage', stageLine?.engine ?? null],
-        ];
-    for (const [role, eng] of rows) {
-      if (!eng?.connected()) continue;
-      const line = eng.lineStats();
-      // 本地投屏的发侧读数（编码耗时/受限原因）只在承担舞台角色的那条线上有
-      const video = combined || role === 'stage' ? await eng.screenStats() : null;
-      if (!line && !video) continue;
-      // 服务端 detail 上限 2000 字符：一条线的读数加一路投屏远小于此，slice 只是兜底
-      diag('info', 'line_stats', role, { detail: JSON.stringify({ line, video }).slice(0, 2000) });
-    }
-  };
-  // 第一次等 10 秒（让 ICE 与快照稳定），之后每 60 秒一次
-  const lineDiagStart = window.setTimeout(() => {
-    void lineDiag();
-    lineDiagTimer = window.setInterval(() => void lineDiag(), 60000);
-  }, 10000);
-
-  // ---- 观看诊断（默认关，开关在管理后台的 watch_diag）----
-  // 观众侧秒级采样：60 秒一条的 line_stats 落不进几秒的冻结。开关关着时这里一个定时器都不建，
-  // 也就一次 getStats 都不多调；开着时也只在房间里真有别人的投屏轨时才读。
-  const watchState = new Map<string, { prev: WatchCounters; reportedAt: number }>();
-  const watchTick = async () => {
-    const eng = stageEngine();
-    if (!eng?.connected()) return;
-    const targets = videoEntries().filter((e) => e.source === 'screen' && !e.isLocal);
-    for (const key of [...watchState.keys()]) if (!targets.some((e) => e.key === key)) watchState.delete(key);
-    for (const entry of targets) {
-      const cur = await eng.remoteWatchCounters(entry.identity, 'screen');
-      if (!cur) continue;
-      const prevState = watchState.get(entry.key);
-      const sample = prevState ? diffWatch(prevState.prev, cur) : null;
-      let reportedAt = prevState?.reportedAt ?? 0;
-      if (sample) {
-        setWatchTotals((t) => addWatch(t ?? emptyWatchTotals(), sample));
-        const now = Date.now();
-        if (shouldReportWatch(sample, now - reportedAt)) {
-          reportedAt = now;
-          // me = 本机设备（identity 的设备标签），from = 被看的那路投屏；两者都只含 uid
-          diag(watchLevel(sample), 'watch_stats', 'stage', {
-            detail: JSON.stringify({ me: eng.localIdentity(), from: entry.identity, ...sample }).slice(0, 2000),
-          });
-        }
-      }
-      watchState.set(entry.key, { prev: cur, reportedAt });
-    }
-  };
-  createEffect(() => {
-    if (!watchDiag()) {
-      watchState.clear();
-      setWatchTotals(null);
-      return;
-    }
-    const timer = window.setInterval(() => void watchTick(), 5000);
-    onCleanup(() => window.clearInterval(timer));
+  // ---- 线路 / 观看诊断（views/room/diag.ts）----
+  const disposeLineDiag = startLineDiag({
+    diag,
+    voicePhase: () => voiceState().phase,
+    combined: () => combined,
+    voiceEngine: () => voiceLine.engine,
+    stageEngine: () => stageLine?.engine ?? null,
+  });
+  wireWatchDiag({
+    diag,
+    enabled: watchDiag,
+    stageEngine,
+    screenEntries: () => videoEntries(),
+    setWatchTotals,
   });
 
   // ---- 首次连接与清理 ----
@@ -3627,9 +3148,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
       // 原生发布在壳的进程里，不随页面卸载停：离房必须显式收回
       if (nativeScreen() && screenOn()) void stopPublish().catch(() => {});
       // OBS 那条推流是 OBS 自己的进程在推，离房不替用户停；这里只收回本页的连接与轮询
-      window.removeEventListener(OBS_READY_EVENT, onObsReady);
-      clearInterval(obsPoll);
-      obsConn()?.close();
+      obsSession.dispose();
       unlistenPublish?.();
       closeChannelMenu(); // 两个浮层都挂在 body 上，房间视图卸载不会带走它们
       closeAccountMenu();
@@ -3642,8 +3161,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
       clearInterval(vuTimer);
       tileTimers.forEach((t) => clearInterval(t));
       tileTimers.clear();
-      clearTimeout(lineDiagStart);
-      clearInterval(lineDiagTimer);
+      disposeLineDiag();
       void vuCtx?.close();
       clearTimeout(voiceLine.timer);
       if (stageLine && stageLine !== voiceLine) clearTimeout(stageLine.timer);

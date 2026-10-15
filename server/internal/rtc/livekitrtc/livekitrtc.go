@@ -43,7 +43,7 @@ func ConfigKeys() []rtc.ConfigKey {
 			Label: "API Key", Hint: "与 livekit.yaml 的 keys 一致"},
 		{Name: "livekit_api_secret", Env: "LIVEKIT_API_SECRET", Group: "livekit", Secret: true,
 			Label: "API Secret", Hint: "签发进房令牌用"},
-		{Name: "livekit_url", Env: "LIVEKIT_URL", Group: "livekit",
+		{Name: "livekit_url", Env: "LIVEKIT_URL", Group: "livekit", Optional: true,
 			Label: "浏览器可见地址", Hint: "留空 = 同源信令代理（推荐）"},
 	}
 }
