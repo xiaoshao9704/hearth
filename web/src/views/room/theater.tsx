@@ -12,6 +12,7 @@
 // 控制栏里这三件事（剧场/全屏/画中画）对用户是一个「观看模式」选择器，见文件末尾
 // 的 ViewModeControl：四态互斥，状态由这些 ctl 派生。
 import { createSignal, For, onCleanup, onMount, Show } from 'solid-js';
+import type { Accessor, Setter } from 'solid-js';
 import { Portal } from 'solid-js/web';
 import { inShell } from '../../bridge';
 import { loadPrefs, savePrefs } from '../../prefs';
@@ -19,6 +20,8 @@ import { el, icon } from '../../ui';
 import type { PipCtl } from './pip';
 
 const IDLE_MS = 3000;
+const HUD_HOLD_MS = 600; // 抬手后音量 HUD 再停留这么久
+const SWIPE_TOL = 8; // px：垂直位移超过它才算上下滑，之前不拦事件
 
 export interface TheaterOpts {
   hasStage: () => boolean; // 有画面可看才允许进剧场
@@ -26,6 +29,10 @@ export interface TheaterOpts {
   onDiag?: (event: string, detail: Record<string, unknown>) => void;
   // 没有元素级全屏时的兜底：对焦点画面的 video 请求原生（系统播放器）全屏，成功返回 true
   nativeFullscreen?: () => boolean;
+  // 舞台区上下滑调主音量（房间页传入：改 prefs 后跑 applyAudioPrefs，HUD 信号仍在房间页）
+  onVolume: () => void;
+  hud: Accessor<{ fading?: boolean } | null>;
+  setHud: Setter<{ fading?: boolean } | null>;
 }
 
 // iPhone 上 Safari 与 Chrome 都没有元素级 Fullscreen API（requestFullscreen 不是函数、
@@ -44,6 +51,10 @@ export interface TheaterCtl {
   exit: () => void;
   toggleFullscreen: () => void;
   toggleAutoHide: () => void;
+  // 舞台区上下滑调主音量；只在剧场生效。返回清理函数，给 Solid ref + onCleanup 用
+  wireVolumeSwipe: (elm: HTMLElement) => () => void;
+  // 手势抬手会合成 click：卡片 click（置顶）用它吞掉那一次
+  swipeJustEnded: () => boolean;
   dispose: () => void;
 }
 
@@ -54,6 +65,8 @@ export function createTheaterCtl(opts: TheaterOpts): TheaterCtl {
   const [autoHide, setAutoHide] = createSignal(loadPrefs().theaterAutoHide);
   let idleTimer = 0;
   let fsFromTheater = false; // 这次全屏是剧场发起的：退出全屏时才连带退出剧场
+  let swipeEndedAt = 0;
+  const swipeJustEnded = () => Date.now() - swipeEndedAt < 300;
 
   function wake() {
     clearTimeout(idleTimer);
@@ -164,6 +177,80 @@ export function createTheaterCtl(opts: TheaterOpts): TheaterCtl {
   document.addEventListener('wheel', onActivity, { passive: true });
   document.addEventListener('fullscreenchange', onFullscreenChange);
 
+  // 只在剧场生效。touchmove 必须手动注册且 passive:false：Solid 的事件委托挂到
+  // document 上，而 document 级 touchmove 默认 passive，preventDefault 会失效并报警告。
+  function wireVolumeSwipe(elm: HTMLElement): () => void {
+    let tracking = false;
+    let active = false;
+    let moved = false;
+    let sx = 0;
+    let sy = 0;
+    let baseVol = 100;
+    let hudTimer = 0;
+
+    const onStart = (ev: TouchEvent) => {
+      tracking = false;
+      active = false;
+      moved = false;
+      if (!on() || ev.touches.length !== 1) return; // 双指留给缩放
+      const t = ev.touches[0];
+      sx = t.clientX;
+      sy = t.clientY;
+      baseVol = loadPrefs().volume;
+      tracking = true;
+    };
+
+    const onMove = (ev: TouchEvent) => {
+      if (!tracking) return;
+      if (ev.touches.length > 1) {
+        tracking = false;
+        active = false;
+        opts.setHud(null);
+        return;
+      }
+      const t = ev.touches[0];
+      const dx = t.clientX - sx;
+      const dy = t.clientY - sy;
+      if (Math.abs(dx) > SWIPE_TOL || Math.abs(dy) > SWIPE_TOL) moved = true;
+      if (!active) {
+        if (Math.abs(dy) < SWIPE_TOL || Math.abs(dy) <= Math.abs(dx)) return;
+        active = true;
+      }
+      ev.preventDefault();
+      const ratio = -dy / Math.max(1, window.innerHeight / 2);
+      const p = loadPrefs();
+      p.volume = Math.max(0, Math.min(100, Math.round(baseVol + ratio * 100)));
+      savePrefs(p);
+      opts.onVolume();
+      opts.setHud({});
+      clearTimeout(hudTimer);
+    };
+
+    const onEnd = (ev: TouchEvent) => {
+      const isTap = ev.type === 'touchend' && tracking && !active && !moved;
+      if (active || isTap) swipeEndedAt = Date.now();
+      if (isTap) toggleChrome();
+      tracking = false;
+      active = false;
+      if (!opts.hud()) return;
+      opts.setHud((h) => (h ? { ...h, fading: true } : null));
+      clearTimeout(hudTimer);
+      hudTimer = window.setTimeout(() => opts.setHud(null), HUD_HOLD_MS);
+    };
+
+    elm.addEventListener('touchstart', onStart, { passive: true });
+    elm.addEventListener('touchmove', onMove, { passive: false });
+    elm.addEventListener('touchend', onEnd);
+    elm.addEventListener('touchcancel', onEnd);
+    return () => {
+      clearTimeout(hudTimer);
+      elm.removeEventListener('touchstart', onStart);
+      elm.removeEventListener('touchmove', onMove);
+      elm.removeEventListener('touchend', onEnd);
+      elm.removeEventListener('touchcancel', onEnd);
+    };
+  }
+
   return {
     on,
     fullscreen,
@@ -174,6 +261,8 @@ export function createTheaterCtl(opts: TheaterOpts): TheaterCtl {
     exit,
     toggleFullscreen,
     toggleAutoHide,
+    wireVolumeSwipe,
+    swipeJustEnded,
     dispose() {
       clearTimeout(idleTimer);
       document.removeEventListener('pointermove', onActivity);

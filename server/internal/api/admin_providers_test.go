@@ -73,13 +73,16 @@ type providerViewT struct {
 }
 
 type providerListResp struct {
-	Instances []providerViewT `json:"instances"`
-	Types     []struct {
+	Instances    []providerViewT `json:"instances"`
+	AliasPattern string          `json:"alias_pattern"`
+	Types        []struct {
 		Type   string `json:"type"`
 		Label  string `json:"label"`
 		Fields []struct {
-			Name   string `json:"name"`
-			Secret bool   `json:"secret"`
+			Name     string `json:"name"`
+			Secret   bool   `json:"secret"`
+			Optional bool   `json:"optional"`
+			Pattern  string `json:"pattern"`
 		} `json:"fields"`
 	} `json:"types"`
 }
@@ -128,9 +131,21 @@ func TestAdminProvidersList(t *testing.T) {
 	if len(resp.Types) != 1 {
 		t.Fatalf("可注册类型应只剩 livekit 一个: %+v", resp.Types)
 	}
+	if resp.AliasPattern != aliasRe.String() {
+		t.Fatalf("列表应下发 alias_pattern=%q，实际 %q", aliasRe.String(), resp.AliasPattern)
+	}
 	for _, typ := range resp.Types {
 		if typ.Label == "" || len(typ.Fields) == 0 {
 			t.Fatalf("类型模式应带 label 与字段: %+v", typ)
+		}
+		var urlOptional bool
+		for _, f := range typ.Fields {
+			if f.Name == "livekit_url" {
+				urlOptional = f.Optional
+			}
+		}
+		if typ.Type == TypeLivekit && !urlOptional {
+			t.Fatalf("livekit_url 应标记 optional: %+v", typ.Fields)
 		}
 	}
 

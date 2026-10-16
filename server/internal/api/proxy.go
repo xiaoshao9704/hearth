@@ -44,20 +44,29 @@ func (a *API) serveProvider(w http.ResponseWriter, r *http.Request) {
 		r.URL.Path = sub // WHIP 逻辑与上游都按 /w 形状工作，剥到 /w 后原样复用
 		a.serveWHIP(w, r, inst)
 	case sub == "/rtc" || strings.HasPrefix(sub, "/rtc/"):
-		// livekit 类型实例的信令代理：Voice/Stage 槽位是同一个 Provider 对象
+		// 信令代理：只看 Provider.SignalProxyUpstream 是否非空，不按实例类型名裁决
 		p := inst.Voice
 		if p == nil {
 			p = inst.Stage
 		}
-		if p == nil || (inst.Type != TypeLivekit && inst.Type != TypeLivekitEmbedded) {
+		if p == nil {
 			writeErr(w, http.StatusNotFound, "该实例无信令代理")
 			return
 		}
-		// WebSocket 握手走手写桥（要逐帧改写下发给浏览器的 ICE 服务器，见 signalbridge.go）；
-		// /rtc/validate 等普通 HTTP 仍走 ReverseProxy
 		up := p.SignalProxyUpstream(r.Context())
+		if up == "" {
+			writeErr(w, http.StatusNotFound, "该实例无信令代理")
+			return
+		}
+		// WebSocket 握手走手写桥（实现可经 rtc.SignalRewriter 改写下游帧）；
+		// /rtc/validate 等普通 HTTP 仍走 ReverseProxy
 		if isWebSocketUpgrade(r) {
-			a.bridgeSignal(w, r, up, "/providers/"+alias)
+			var rewrite func([]byte) []byte
+			if sr, ok := p.(rtc.SignalRewriter); ok {
+				stunCfg := a.dynVal(r.Context(), "client_stun_servers")
+				rewrite = func(b []byte) []byte { return sr.RewriteDownstream(b, stunCfg) }
+			}
+			a.bridgeSignal(w, r, up, "/providers/"+alias, rewrite)
 			return
 		}
 		a.proxyTo(w, r, up, "/providers/"+alias)

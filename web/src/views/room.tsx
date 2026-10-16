@@ -9,30 +9,22 @@ import { createEffect, createMemo, createSignal, on, onCleanup, untrack, For, Sh
 import { render } from 'solid-js/web';
 import { closeAccountMenu, openAccountMenu } from '../account-menu';
 import { startAfkWatch } from '../afk';
-import { ApiError, deviceId, fetchJoinCredentials, getCastTicket, getIngestToken, getUser, guestTimeLeft, isGuest, kickUser, listChannels, muteUser, reportClientLog, siteInfoCached } from '../api';
-import type { ChannelRole, DataLine, EngineCred } from '../api';
+import { deviceId, getCastTicket, getUser, guestTimeLeft, isGuest, kickUser, listChannels, muteUser, siteInfoCached } from '../api';
+import type { ChannelRole, DataLine } from '../api';
 import { playCue } from '../audio';
 import { capabilities, encoderDisplayName, listSources, onPublishState, startPublish, stopPublish, updatePublish } from '../bridge';
 import type { BridgeCaps, NativeSource } from '../bridge';
-import { deleteMessage, fetchMessages, postMessage, setReaction } from '../chat';
 import type { ChatMessage } from '../chat';
-import { compressImage } from '../chat/compress';
-import { applyMention, matchMentions, mentionQuery, mentionedUids, mentionsUser, splitMentions } from '../chat/mentions';
-import type { MentionQuery, MentionUser } from '../chat/mentions';
-import { encodeDelete, encodeMessage, encodeReaction, parseEnvelope } from '../chat/protocol';
-import { createEngine } from '../engine';
-import { DATA_TOPIC_FILE, DATA_TOPIC_TEXT } from '../engine/types';
-import type { AVEngine, EPart, EngineCallbacks, TrackSource, VideoStats, WatchCounters } from '../engine/types';
+import { splitMentions } from '../chat/mentions';
+import type { MentionQuery } from '../chat/mentions';
+import type { AVEngine, EPart, EngineCallbacks, TrackSource, VideoStats } from '../engine/types';
 import { wireLongPress } from '../longpress';
 import { clearLeaveGuard, setLeaveGuard } from '../nav';
-import { obsPlatform, startObsStream } from '../obsws';
 import type { ObsConn, ObsStreamStatus, ObsVersion } from '../obsws';
 import { encoderIsHw, loadPrefs, prefsBus, RES_DIMS, savePrefs, setScreenRepublish } from '../prefs';
-import { addWatch, diffWatch, emptyWatchTotals, shouldReportWatch, watchLevel } from '../watchdiag';
 import type { WatchTotals } from '../watchdiag';
-import { notifyJoin, notifyMessage } from '../notify';
+import { notifyJoin } from '../notify';
 import { renderShell } from '../shell';
-import { isStaleChunkError, reloadForStale, staleReloadUsed } from '../stale';
 import { avatarHtml, confirmDialog, el, esc, fmtClock, icon, licon, menuButtonHtml, micIcon, slashIcon, toast, wireMenuButton } from '../ui';
 import { CameraFlipButton } from './room/camera-flip';
 import { closeChannelMenu, openChannelMenu } from './room/channel-menu';
@@ -43,34 +35,22 @@ import type { LatencyState } from './room/latency-result';
 import { IngestBadge } from './room/ingest-badge';
 import { IngestPanel } from './room/ingest-panel';
 import { NativeSourcePanel } from './room/native-source-panel';
-import {
-  connectStoredObs,
-  OBS_READY_EVENT,
-  OBS_SETUP_HINT,
-  obsCaptureBlocker,
-  ObsScreenPanel,
-  whipServer,
-} from './room/obs-capture';
+import { ObsScreenPanel } from './room/obs-capture';
 import { createUnreadMarker } from './room/unread-divider';
 import { showMsgMenu } from './room/msg-menu';
-import { mergeReaction, ReactionBar } from './room/reactions';
+import { ReactionBar } from './room/reactions';
 import { ReplyComposer, ReplyQuote } from './room/reply';
 import { openSettings } from './settings';
 import { ChatFirstBar, syncPanelWithChatFirst } from './room/chat-first';
+import { createChatCtrl } from './room/chat-ctrl';
+import type { ChatCtrl } from './room/chat-ctrl';
+import { createRoomConnect } from './room/connect';
+import type { ConnectBag, Role, RoomConnect, VoiceState } from './room/connect';
+import { createRoomDiag, startLineDiag, wireWatchDiag } from './room/diag';
 import { FloatingRoster, mountPipRoster } from './room/floating-roster';
+import { createObsSession } from './room/obs-session';
 import { createPipCtl } from './room/pip';
 import { createTheaterCtl, elementFullscreenSupported, ViewModeControl } from './room/theater';
-
-type Role = 'voice' | 'stage';
-
-interface Line {
-  role: Role;
-  engine: AVEngine | null;
-  engineName: string;
-  attempts: number;
-  timer: number;
-  inflight: boolean;
-}
 
 interface NativePublishConfig {
   res: string;
@@ -115,9 +95,6 @@ interface RoomEvent {
   text: string;
 }
 
-// 语音线连接阶段（顶栏 chip 与外壳连接框的唯一来源）；retry 带上第几次，避免再开一个信号
-type VoiceState = { phase: 'connecting' | 'up' | 'retry'; attempt: number };
-
 // iOS 私有的视频原生全屏（标准 Fullscreen API 缺席时的唯一出路），未进 lib.dom
 interface NativeFsVideo extends HTMLVideoElement {
   webkitEnterFullscreen?: () => void;
@@ -159,8 +136,7 @@ const LIMIT_TEXT: Record<string, string> = { cpu: 'CPU', bandwidth: '带宽', ot
 // 内联预览的图片 MIME 白名单：白名单外一律当文件走 a[download]，不进 <img>
 const IMAGE_MIME = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
 
-// 客户端上限：与服务端 chat_file_max_mb 的默认值一致，先拦一道少一次白跑的往返；
-// 真正的权威仍是服务端（按实际配置校验，超限 413）
+// 与 chat-ctrl / 服务端 chat_file_max_mb 默认一致，仅作 UI 文案
 const FILE_MAX_MB = 25;
 
 function fmtSize(n: number): string {
@@ -173,9 +149,6 @@ function fmtSize(n: number): string {
 function touchOnly(): boolean {
   return window.matchMedia('(hover: none)').matches;
 }
-
-const HUD_HOLD_MS = 600; // 抬手后 HUD 再停留这么久
-const SWIPE_TOL = 8; // px：垂直位移超过它才算上下滑，之前不拦事件
 
 // ---- 每设备本地音量持久化（0~100，按 identity）----
 const VOLS_KEY = 'hearth_room_volumes';
@@ -210,23 +183,8 @@ export async function renderRoom(root: HTMLElement, channel: string) {
   const prefs = loadPrefs();
   const canScreenShare = typeof navigator.mediaDevices?.getDisplayMedia === 'function';
 
-  const diagBytes = new Uint8Array(8);
-  if (globalThis.crypto?.getRandomValues) globalThis.crypto.getRandomValues(diagBytes);
-  else for (let i = 0; i < diagBytes.length; i++) diagBytes[i] = Math.floor(Math.random() * 256);
-  const diagSession = Array.from(diagBytes, (b) => b.toString(16).padStart(2, '0')).join('');
-  const diag = (
-    level: 'info' | 'warn' | 'error',
-    event: string,
-    role?: Role,
-    fields: Omit<Parameters<typeof reportClientLog>[0], 'level' | 'event' | 'session' | 'channel' | 'role'> = {},
-  ) => reportClientLog({ level, event, session: diagSession, channel, role, ...fields });
-  const endpointOf = (raw: string): string => {
-    try {
-      return new URL(raw, location.href).host;
-    } catch {
-      return '';
-    }
-  };
+  const { diag, endpointOf } = createRoomDiag(channel);
+  let chatCtrl!: ChatCtrl;
 
   const shell = renderShell(root, { activeChannel: channel });
   shell.setConn(false, '正在协商…');
@@ -241,13 +199,19 @@ export async function renderRoom(root: HTMLElement, channel: string) {
   const onUserChanged = () => setMe(getUser());
   window.addEventListener('hearth:user', onUserChanged);
 
-  // ---- 连接层状态（非响应式）----
-  const voiceLine: Line = { role: 'voice', engine: null, engineName: '', attempts: 0, timer: 0, inflight: false };
-  let stageLine: Line | null = null; // null = 无舞台线；combined 时与 voiceLine 同引擎
-  let combined = false;
-  let stageUp = false;
-  let leaving = false;
-  let bounced = false;
+  // ---- 连接层状态（非响应式；与 connect.ts 共享同一 bag）----
+  const bag: ConnectBag = {
+    voice: { role: 'voice', engine: null, engineName: '', attempts: 0, timer: 0, inflight: false },
+    stage: null,
+    combined: false,
+    stageUp: false,
+    stageIssue: '',
+    leaving: false,
+    bounced: false,
+    appliedSpeakerId: '',
+    cueBaseline: true,
+  };
+  let conn!: RoomConnect;
   let seq = 0; // 卡片到达顺序计数
   // 只登记「哪些 identity 有音频元素」：音量与输出设备都由引擎内部的增益链执行，
   // 页面不再碰元素的 muted/volume/setSinkId
@@ -262,17 +226,17 @@ export async function renderRoom(root: HTMLElement, channel: string) {
   const speakingByRole: Record<Role, Set<string>> = { voice: new Set(), stage: new Set() };
   const tileTimers = new Set<number>(); // 投屏徽章的实测轮询定时器，离房时兜底清掉
 
-  const stageEngine = () => (combined ? voiceLine.engine : stageLine?.engine) ?? null;
+  const stageEngine = () => (bag.combined ? bag.voice.engine : bag.stage?.engine) ?? null;
   // 服务端 chat_data_line 的下发值（随进房凭证到，两条线的凭证带的是同一个值）
   const [dataLine, setDataLine] = createSignal<DataLine>('auto');
   // 数据线：聊天文本与文件字节都走这一条。voice = 强制语音线；stage/auto = 舞台线在就
   // 用它（拆分形态下把扇出带宽放在舞台侧，成员本来也都连着），没有舞台线（纯语音部署，
   // 或强制 stage 但本服没配舞台）回落语音线，行为一致
-  const dataEngine = () => (dataLine() === 'voice' ? voiceLine.engine : (stageEngine() ?? voiceLine.engine));
+  const dataEngine = () => (dataLine() === 'voice' ? bag.voice.engine : (stageEngine() ?? bag.voice.engine));
   // 数据线发送失败时可换的另一条线：必须已连上，且真是另一个引擎（合并形态下两条线
   // 同一个引擎，没有第二条可试）
   function altEngine(used: AVEngine | null): AVEngine | null {
-    const alt = used === voiceLine.engine ? stageEngine() : voiceLine.engine;
+    const alt = used === bag.voice.engine ? stageEngine() : bag.voice.engine;
     if (!alt || alt === used || !alt.connected()) return null;
     return alt;
   }
@@ -311,14 +275,14 @@ export async function renderRoom(root: HTMLElement, channel: string) {
   // 壳那边已经把管线收了，这里只负责复位按钮与提示。
   let unlistenPublish: (() => void) | null = null;
   void onPublishState((s) => {
-    if (leaving) return;
+    if (bag.leaving) return;
     if (!s.error) return;
     setScreenOn(false);
     setSourcePick(null);
     refreshMeta();
     toast(`投屏已停止：${s.error}`, 'bad', 6000);
   }).then((un) => {
-    if (leaving) un();
+    if (bag.leaving) un();
     else unlistenPublish = un;
   });
   const [deafened, setDeafened] = createSignal(false);
@@ -396,10 +360,10 @@ export async function renderRoom(root: HTMLElement, channel: string) {
   // 面板行：合并形态两种角色同一条连接，只出一行
   const connRows = (): ConnRow[] => {
     const rows: ConnRow[] = [];
-    if (voiceLine.engine) {
-      rows.push({ label: combined ? '语音 · 舞台' : '语音线', stats: () => voiceLine.engine?.lineStats() ?? null });
+    if (bag.voice.engine) {
+      rows.push({ label: bag.combined ? '语音 · 舞台' : '语音线', stats: () => bag.voice.engine?.lineStats() ?? null });
     }
-    if (!combined && stageLine) rows.push({ label: '舞台线', stats: () => stageLine?.engine?.lineStats() ?? null });
+    if (!bag.combined && bag.stage) rows.push({ label: '舞台线', stats: () => bag.stage?.engine?.lineStats() ?? null });
     return rows;
   };
 
@@ -414,11 +378,11 @@ export async function renderRoom(root: HTMLElement, channel: string) {
 
   // 双线参与者合并：语音线是名册权威（micOn），舞台线补充 sharing/推流标记
   function parts(): EPart[] {
-    const base = voiceLine.engine?.participants() ?? [];
-    if (combined || !stageLine?.engine) return base;
+    const base = bag.voice.engine?.participants() ?? [];
+    if (bag.combined || !bag.stage?.engine) return base;
     const map = new Map<string, EPart>();
     base.forEach((p) => map.set(p.identity, { ...p }));
-    for (const s of stageLine.engine.participants()) {
+    for (const s of bag.stage.engine.participants()) {
       const ex = map.get(s.identity);
       if (ex) {
         ex.sharing = ex.sharing || s.sharing;
@@ -483,27 +447,26 @@ export async function renderRoom(root: HTMLElement, channel: string) {
   };
 
   // 上次已切到的输出设备 id：纯防抖状态，不是真相源（真相源是 prefs.speakerId）
-  let appliedSpeakerId = '';
 
   function applyAudioPrefs() {
     const p = loadPrefs();
     const master = deafened() ? 0 : gainOf(p.volume);
     // combined 形态两条线是同一个引擎（Set 去重）；拆分形态各自只认自己有的参与者
-    const engines = new Set([voiceLine.engine, stageEngine()]);
+    const engines = new Set([bag.voice.engine, stageEngine()]);
     audioEls.forEach((_set, identity) => {
       const v = master * gainOf(volumePctFor(identity));
       engines.forEach((eng) => eng?.setVolume(identity, v));
     });
     // 拖滑条会反复进这里：输出设备没变就别重复切（异步调用，有成本）
-    if (p.speakerId && p.speakerId !== appliedSpeakerId) {
-      appliedSpeakerId = p.speakerId;
+    if (p.speakerId && p.speakerId !== bag.appliedSpeakerId) {
+      bag.appliedSpeakerId = p.speakerId;
       engines.forEach((eng) => void eng?.setAudioOutput(p.speakerId));
     }
   }
 
   // 语音连着时清掉舞台区状态文案（旧版 syncAudioTiles 尾部的行为）
   function maybeClearStatus() {
-    if (voiceLine.engine?.connected()) setStatusText('');
+    if (bag.voice.engine?.connected()) setStatusText('');
   }
 
   // 名册重取：引擎回调统一走这里写信号，成员面板/音频块/徽标全部派生
@@ -520,8 +483,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
 
   // ---- 进出房间提示（名册差分，引擎中立）----
 
-  // 重连成功前的第一份名册只做基线：断线期间名册会整份重来，逐条比会刷屏
-  let cueBaseline = true;
+  // 重连成功前的第一份名册只做基线：断线期间名册会整份重来，逐条比会刷屏（bag.cueBaseline 在 bag）
   let cueSeq = 0;
 
   function pushRoomEvent(text: string) {
@@ -681,90 +643,6 @@ export async function renderRoom(root: HTMLElement, channel: string) {
   const onFsKey = (ev: KeyboardEvent) => {
     if (ev.key === 'Escape' && fsKey() && !document.fullscreenElement) exitFs();
   };
-
-  // ---- 剧场里舞台区的上下滑手势（整块区域调主音量）----
-  // 手势结束会合成一次 click，而焦点卡片的 click 是置顶：照 longpress 的做法记时间戳吞掉
-  let swipeEndedAt = 0;
-  const swipeJustEnded = () => Date.now() - swipeEndedAt < 300;
-
-  // 只在剧场生效（普通网格与聊天面板里没有这个手势）。
-  // touchmove 必须手动注册且 passive:false：Solid 的事件委托挂到 document 上，
-  // 而 document 级 touchmove 默认 passive，preventDefault 会失效并报警告。
-  function wireStageSwipe(elm: HTMLElement): () => void {
-    let tracking = false; // 单指按下、方向还没判定
-    let active = false; // 已判定为上下滑，进入调节态
-    let moved = false; // 按下后有过任意方向的位移，用来把「点按」和「滑动」分开
-    let sx = 0;
-    let sy = 0;
-    let baseVol = 100;
-    let hudTimer = 0;
-
-    const onStart = (ev: TouchEvent) => {
-      tracking = false;
-      active = false;
-      moved = false;
-      if (!theaterCtl.on() || ev.touches.length !== 1) return; // 双指留给缩放
-      const t = ev.touches[0];
-      sx = t.clientX;
-      sy = t.clientY;
-      baseVol = loadPrefs().volume;
-      tracking = true;
-    };
-
-    const onMove = (ev: TouchEvent) => {
-      if (!tracking) return;
-      if (ev.touches.length > 1) {
-        tracking = false;
-        active = false;
-        setHud(null);
-        return;
-      }
-      const t = ev.touches[0];
-      const dx = t.clientX - sx;
-      const dy = t.clientY - sy;
-      if (Math.abs(dx) > SWIPE_TOL || Math.abs(dy) > SWIPE_TOL) moved = true; // 横滑也算 moved，只是不调音量
-      if (!active) {
-        // 判定前不 preventDefault，否则会吃掉正常点击与横向手势
-        if (Math.abs(dy) < SWIPE_TOL || Math.abs(dy) <= Math.abs(dx)) return;
-        active = true;
-      }
-      ev.preventDefault();
-      // 半屏高度 = 全程变化量，从按下时的值开始累加（不每次从头算）
-      const ratio = -dy / Math.max(1, window.innerHeight / 2);
-      const p = loadPrefs();
-      p.volume = Math.max(0, Math.min(100, Math.round(baseVol + ratio * 100)));
-      savePrefs(p);
-      applyAudioPrefs();
-      setHud({});
-      clearTimeout(hudTimer);
-    };
-
-    const onEnd = (ev: TouchEvent) => {
-      // 没有位移的单指点按：切换剧场顶栏/控制栏显隐（栏隐藏时它们 pointer-events:none，
-      // 点在原栏位置的触摸本就会落到舞台区，走这条逻辑符合预期）
-      const isTap = ev.type === 'touchend' && tracking && !active && !moved;
-      if (active || isTap) swipeEndedAt = Date.now(); // 吞掉抬手合成的 click，避免顺带触发焦点卡片 togglePin
-      if (isTap) theaterCtl.toggleChrome();
-      tracking = false;
-      active = false;
-      if (!hud()) return;
-      setHud((h) => (h ? { ...h, fading: true } : null));
-      clearTimeout(hudTimer);
-      hudTimer = window.setTimeout(() => setHud(null), HUD_HOLD_MS);
-    };
-
-    elm.addEventListener('touchstart', onStart, { passive: true });
-    elm.addEventListener('touchmove', onMove, { passive: false });
-    elm.addEventListener('touchend', onEnd);
-    elm.addEventListener('touchcancel', onEnd);
-    return () => {
-      clearTimeout(hudTimer);
-      elm.removeEventListener('touchstart', onStart);
-      elm.removeEventListener('touchmove', onMove);
-      elm.removeEventListener('touchend', onEnd);
-      elm.removeEventListener('touchcancel', onEnd);
-    };
-  }
 
   // ---- 用户操作菜单（聊天卡片、成员行与视频卡片右键共用；挂 body，保持命令式）----
   // 管理操作（禁言/踢出）= 频道 owner 或 moderator（与后端 requireModerator 一致；系统 admin 的隐含 owner 已由 my_role 下发）
@@ -969,213 +847,8 @@ export async function renderRoom(root: HTMLElement, channel: string) {
     });
   }
 
-  // ---- 断线自动重连（按线独立）----
+  // ---- 断线自动重连：createRoomConnect 在 clearLeavePrompt 之后装配 ----
 
-  function bounce(msg: string) {
-    if (bounced) return;
-    bounced = true;
-    clearLeavePrompt(); // 被动出场：接下来跳大厅是既定结果，别再拦一道
-    setStatusText(msg);
-    toast(msg, 'bad');
-    setTimeout(() => {
-      location.hash = '#/lobby';
-    }, 1500);
-  }
-
-  function lineFor(role: Role): Line | null {
-    return role === 'voice' ? voiceLine : combined ? voiceLine : stageLine;
-  }
-
-  function connBoxMeta(): string {
-    // 图标 chip：窄屏放不下时按 chip 整体折行，不在值中间断
-    const chip = (ic: string, label: string) =>
-      `<span class="conn-chip">${icon(ic, 11, 'var(--text-2)', 1.7)}<span>${esc(label)}</span></span>`;
-    let h = chip('volume', voiceLine.engineName || '—');
-    if (stageLine && !combined) h += chip('screen', stageUp ? stageLine.engineName : '重连中');
-    return h;
-  }
-
-  function scheduleRejoin(role: Role, delay?: number) {
-    if (leaving || bounced) return;
-    const line = lineFor(role);
-    if (!line) return;
-    clearTimeout(line.timer);
-    const wait = delay ?? Math.min(30000, 2000 * 2 ** Math.min(line.attempts, 4)) * (0.7 + Math.random() * 0.6);
-    if (role === 'voice' || combined) {
-      setStatusText(line.attempts === 0 ? '连接断开，正在重连…' : `连接断开，正在重连…（第 ${line.attempts + 1} 次）`);
-      setVoiceState({ phase: 'retry', attempt: line.attempts + 1 });
-    }
-    line.timer = window.setTimeout(() => void connectLines(false, role), wait);
-  }
-
-  // 进房 / 按线重连：拿一次凭证，把指定线（或全部）接上
-  async function connectLines(first: boolean, only?: Role) {
-    if (leaving || bounced) return;
-    let creds;
-    const started = performance.now();
-    diag('info', 'credentials_start', only, { attempt: lineFor(only ?? 'voice')?.attempts ?? 0 });
-    try {
-      creds = await fetchJoinCredentials(channel, channelId() || undefined);
-    } catch (err) {
-      diag('error', 'credentials_failed', only, { elapsed_ms: performance.now() - started, error: err });
-      handleCredsError(err, first);
-      return;
-    }
-    diag('info', 'credentials_ok', only, {
-      elapsed_ms: performance.now() - started,
-      state: creds.combined ? 'combined' : creds.stage ? 'split' : 'voice-only',
-    });
-    if (leaving || bounced) return;
-    combined = creds.combined;
-    setDataLine(creds.data_line ?? 'auto');
-    if (!only || only === 'voice') {
-      await connectLine(voiceLine, creds.voice, first, 'voice');
-      if (leaving) return;
-    }
-    if (combined) {
-      stageLine = voiceLine;
-      stageUp = !!voiceLine.engine?.connected();
-    } else if (creds.stage) {
-      if (!stageLine || stageLine === voiceLine) {
-        stageLine = { role: 'stage', engine: null, engineName: '', attempts: 0, timer: 0, inflight: false };
-      }
-      if (!only || only === 'stage') {
-        await connectLine(stageLine, creds.stage, first, 'stage');
-        if (leaving) return;
-      }
-    } else {
-      stageLine = null;
-      stageUp = false;
-    }
-    updateStageButtons();
-    shell.setConn(!!voiceLine.engine?.connected(), connBoxMeta());
-  }
-
-  // 按状态码分支：403/404 是服务端的确定拒绝（封禁、邀请制、频道没了），重试没有意义；
-  // 网络失败（status=0）与 5xx 都退避重连。401 已由 api.ts 清会话跳登录
-  function handleCredsError(err: unknown, first: boolean) {
-    const msg = (err as Error).message ?? '';
-    if (first) setStatusText(`连接失败：${msg}`);
-    if (err instanceof ApiError) {
-      if (err.status === 401) {
-        bounced = true;
-        return;
-      }
-      if (err.status === 403 || err.status === 404) {
-        bounce(msg);
-        return;
-      }
-    }
-    scheduleRejoin('voice');
-  }
-
-  async function connectLine(line: Line, cred: EngineCred, first: boolean, role: Role) {
-    if (line.inflight || line.engine?.connected()) return;
-    line.inflight = true;
-    if (!first) line.attempts++;
-    const attempt = line.attempts;
-    const started = performance.now();
-    const details = { engine: cred.engine, endpoint: endpointOf(cred.url), attempt };
-    diag('info', 'connect_start', role, details);
-    try {
-      if (!line.engine || cred.engine !== line.engineName) {
-        line.engine?.dispose();
-        line.engine = await createEngine(cred.engine, makeCallbacks(role));
-        line.engineName = cred.engine;
-        appliedSpeakerId = ''; // 新引擎 = 新 Room，输出设备要重新切一次
-        // 建引擎期间用户可能已经离开房间：清理块跑过了就没人再释放这个半成品
-        if (leaving) {
-          line.engine.dispose();
-          line.engine = null;
-          return;
-        }
-      }
-      await line.engine.connect(cred.url, cred.token);
-      if (leaving) {
-        line.engine.dispose();
-        line.engine = null;
-        return;
-      }
-      line.attempts = 0;
-      diag('info', 'connect_ok', role, { ...details, elapsed_ms: performance.now() - started });
-      if (!first) void syncMessages(false); // 断线重进：广播漏的从库里补
-      if (role === 'voice') {
-        setStatusText('');
-        cueBaseline = true; // 重连成功后的第一份名册只重置基线，不当成一屋子人刚进来
-        setVoiceState({ phase: 'up', attempt: 0 });
-        if (!first) toast('语音已重新连接', 'ok', 1800);
-        checkSelfGag(); // 持久禁言：重进房时权限初始就是 canPublish=false
-        if (micOn()) {
-          try {
-            await line.engine.setMic(true);
-          } catch (err) {
-            setMicOn(false);
-            if (first) toast(captureErrorMsg('麦克风', err), 'bad');
-          }
-        }
-      }
-      if (role === 'stage' || combined) {
-        stageUp = true;
-        if (cameraOn()) {
-          try {
-            await (role === 'stage' ? line.engine : voiceLine.engine)!.setCamera(true);
-          } catch {
-            setCameraOn(false);
-          }
-        }
-        // 原生发布跑在壳里，与舞台线的连接无关，重连不该把它的状态抹掉
-        if (screenOn() && !nativeScreen()) {
-          setScreenOn(false);
-          toast('重连后投屏需要重新发起', '', 4000);
-        }
-      }
-      refreshRoster();
-      refreshMeta();
-    } catch (err) {
-      diag('error', 'connect_failed', role, { ...details, elapsed_ms: performance.now() - started, error: err });
-      // 发版后旧页面动态导入的引擎 chunk 已经不在服务端了：重连拿不回 404 的文件，只有刷新能恢复。
-      // 刷新一次会话只做一次，再遇到就改口头提示——否则导入失败另有原因时会刷个没完。
-      if (isStaleChunkError(err)) {
-        const stale = '页面版本已过期，请刷新页面';
-        if (!staleReloadUsed()) {
-          clearLeavePrompt(); // 这一次刷新是我们自己发起的，别再拦一道「离开当前房间」
-          if (reloadForStale()) return;
-        }
-        setStatusText(stale);
-        toast(stale, 'bad', 8000);
-        return;
-      }
-      if (role === 'voice') {
-        handleCredsError(err, first);
-      } else {
-        stageUp = false;
-        if (first) toast(`舞台线连接失败（投屏/摄像头暂不可用）：${(err as Error).message}`, 'bad', 4000);
-        scheduleRejoin('stage');
-      }
-    } finally {
-      line.inflight = false;
-      updateStageButtons();
-    }
-  }
-
-  // 回前台 / 网络恢复：跳过退避立即重连
-  const retryNow = () => {
-    if (leaving || bounced) return;
-    (['voice', 'stage'] as Role[]).forEach((role) => {
-      const line = lineFor(role);
-      if (role === 'stage' && (combined || !line)) return;
-      // 引擎还没建起来（首次连接就失败）也要能重试，否则「立即重试」按钮点了没反应
-      if (line && !line.engine?.connected()) {
-        clearTimeout(line.timer);
-        line.attempts = 0;
-        if (role === 'voice') {
-          setStatusText('正在重新进入语音…');
-          setVoiceState({ phase: 'connecting', attempt: 0 });
-        }
-        void connectLines(false, role);
-      }
-    });
-  };
   // 图标角标：只在支持的平台有效果（未安装的桌面浏览器多数没有），失败不影响任何逻辑
   function setAppBadge(n: number) {
     const nav = navigator as Navigator & {
@@ -1231,6 +904,34 @@ export async function renderRoom(root: HTMLElement, channel: string) {
   window.addEventListener('error', onWindowError);
   window.addEventListener('unhandledrejection', onUnhandledRejection);
 
+  conn = createRoomConnect({
+    channel,
+    channelId,
+    bag,
+    diag,
+    endpointOf,
+    setStatusText,
+    setVoiceState,
+    setDataLine,
+    micOn,
+    setMicOn,
+    cameraOn,
+    setCameraOn,
+    screenOn,
+    setScreenOn,
+    nativeScreen: () => nativeScreen(),
+    setConn: (up, meta) => shell.setConn(up, meta),
+    clearLeavePrompt,
+    updateStageButtons,
+    refreshRoster,
+    refreshMeta,
+    checkSelfGag,
+    captureErrorMsg,
+    callbacksFor: (role) => makeCallbacks(role),
+    syncMessages: (first) => void chatCtrl.syncMessages(first),
+  });
+  const { connectLines, scheduleRejoin, bounce, retryNow, connBoxMeta } = conn;
+
   // ---- 引擎回调（按线）：只写信号 / 增删条目，不碰 DOM ----
   function makeCallbacks(role: Role): EngineCallbacks {
     return {
@@ -1267,16 +968,16 @@ export async function renderRoom(root: HTMLElement, channel: string) {
       },
       onReconnecting: () => {
         diag('warn', 'sdk_reconnecting', role);
-        if (role === 'voice' || combined) {
+        if (role === 'voice' || bag.combined) {
           setStatusText('连接不稳定，正在恢复…');
           setVoiceState((s) => ({ phase: 'retry', attempt: s.attempt }));
         }
       },
       onReconnected: () => {
         diag('info', 'sdk_reconnected', role);
-        if (role === 'voice' || combined) {
+        if (role === 'voice' || bag.combined) {
           setStatusText('');
-          cueBaseline = true; // 引擎自愈也会重发整份名册
+          bag.cueBaseline = true; // 引擎自愈也会重发整份名册
           setVoiceState({ phase: 'up', attempt: 0 });
         }
         refreshRoster();
@@ -1287,33 +988,33 @@ export async function renderRoom(root: HTMLElement, channel: string) {
       onDiagnostic: (event, state, detail) => diag('info', `sdk_${event}`, role, { state, detail }),
       onEnded: (reason) => {
         diag(reason === 'lost' ? 'warn' : 'info', 'sdk_ended', role, { reason });
-        if (leaving) return;
+        if (bag.leaving) return;
         if (reason === 'kicked') return bounce('你已被移出该频道');
         if (reason === 'room-deleted') return bounce('频道已删除');
         if (reason === 'duplicate') return bounce('该设备在其他页面进入了房间');
         // lost
-        if (role === 'voice' || combined) {
+        if (role === 'voice' || bag.combined) {
           scheduleRejoin('voice', 0);
         } else {
-          stageUp = false;
+          bag.stageUp = false;
           if (!nativeScreen()) setScreenOn(false);
           updateStageButtons();
-          shell.setConn(!!voiceLine.engine?.connected(), connBoxMeta());
+          shell.setConn(!!bag.voice.engine?.connected(), connBoxMeta());
           scheduleRejoin('stage', 0);
         }
       },
       // 数据通道：只有数据线那条会真收到（另一条没人往里发），重复到达也会被 id 去重挡掉
-      onText: (_topic, text) => onChatBroadcast(text),
+      onText: (_topic, text) => chatCtrl.onChatBroadcast(text),
       onFile: (_topic, info, bytes) => {
         const id = Number(info.attrs.message_id ?? '');
         if (!Number.isInteger(id) || id <= 0) return;
         const mime = info.mime || 'application/octet-stream';
-        putFileState(id, { status: 'ready', progress: 1, url: URL.createObjectURL(new Blob([bytes], { type: mime })) });
+        chatCtrl.putFileState(id, { status: 'ready', progress: 1, url: URL.createObjectURL(new Blob([bytes], { type: mime })) });
       },
       onLocalTrackEnded: (kind) => {
         if (kind === 'mic' && micOn()) {
           setMicOn(false);
-          void voiceLine.engine?.setMic(false).catch(() => {});
+          void bag.voice.engine?.setMic(false).catch(() => {});
           toast('麦克风设备断开了（iPhone 连续互通断开会这样），已自动闭麦', 'bad');
         }
         if (kind === 'camera' && cameraOn()) {
@@ -1345,7 +1046,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
   // 自己被禁言（服务端收走发布权限 canPublish=false；持久禁言重进房时权限初始即为 false）。
   // 这个影子变量只用于「状态跳变时弹一次 toast」，按钮的禁言态从 roster() 派生，不看它
   let gagToasted = false;
-  const isSelfGagged = () => voiceLine.engine?.participants().some((p) => p.isLocal && !p.canPublish) === true;
+  const isSelfGagged = () => bag.voice.engine?.participants().some((p) => p.isLocal && !p.canPublish) === true;
 
   function checkSelfGag() {
     const g = isSelfGagged();
@@ -1363,19 +1064,21 @@ export async function renderRoom(root: HTMLElement, channel: string) {
   // ---- 控制按钮动作 ----
 
   function updateStageButtons() {
-    setStageOk(!!stageEngine() && stageUp);
-    setStageHint(stageLine ? '舞台线重连中' : '本服未启用舞台线（投屏/摄像头）');
+    setStageOk(!!stageEngine() && bag.stageUp);
+    if (bag.stage) setStageHint('舞台线重连中');
+    else if (bag.stageIssue) setStageHint('舞台线暂时不可用（签发失败）');
+    else setStageHint('本服未启用舞台线（投屏/摄像头）');
   }
 
   async function toggleMic() {
-    if (!voiceLine.engine) return;
+    if (!bag.voice.engine) return;
     if (!micOn() && isSelfGagged()) {
       toast('你已被禁言，无法开麦', 'bad');
       return;
     }
     setMicOn((m) => !m);
     try {
-      await voiceLine.engine.setMic(micOn());
+      await bag.voice.engine.setMic(micOn());
     } catch (err) {
       if (micOn()) toast(captureErrorMsg('麦克风', err), 'bad');
       setMicOn((m) => !m);
@@ -1401,6 +1104,9 @@ export async function renderRoom(root: HTMLElement, channel: string) {
     // iPhone 没有元素级全屏，只有 video 元素的原生全屏（系统播放器）能收掉地址栏：
     // 焦点画面与画中画取同一块 video，没有画面时让 theater 去走「浏览器拒绝」提示
     nativeFullscreen: () => enterNativeFullscreen(screenVideo()),
+    onVolume: applyAudioPrefs,
+    hud,
+    setHud,
   });
   const pipCtl = createPipCtl({
     getVideo: screenVideo,
@@ -1468,7 +1174,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
   // 自动播放被拦截：横幅点击是用户手势，两条线的引擎一起解锁（引擎内部负责 resume 增益链）
   async function resumeAllAudio() {
     setAudioBlocked(false);
-    for (const eng of new Set([voiceLine.engine, stageEngine()])) {
+    for (const eng of new Set([bag.voice.engine, stageEngine()])) {
       if (eng) await eng.resumeAudio().catch(() => {});
     }
   }
@@ -1484,7 +1190,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
 
   async function toggleCamera() {
     const eng = stageEngine();
-    if (!eng || !stageUp) {
+    if (!eng || !bag.stageUp) {
       toast(stageHint(), '', 3000);
       return;
     }
@@ -1507,7 +1213,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
     // 开始之前先弹面板：画质在那里调，点「开始投屏」才走浏览器的选源框；
     // 投屏中再点按钮是「停」，不弹面板。
     if (!screenOn()) {
-      if (!stageEngine() || !stageUp) return toast(stageHint(), '', 3000); // 舞台没起来就别摆一个点了没用的面板
+      if (!stageEngine() || !bag.stageUp) return toast(stageHint(), '', 3000); // 舞台没起来就别摆一个点了没用的面板
       setScreenPick(true);
       return;
     }
@@ -1517,7 +1223,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
   // 浏览器投屏原路径：getDisplayMedia 由引擎自己弹系统选择器
   async function startBrowserScreen() {
     const eng = stageEngine();
-    if (!eng || !stageUp) {
+    if (!eng || !bag.stageUp) {
       toast(stageHint(), '', 3000);
       return;
     }
@@ -1534,85 +1240,21 @@ export async function renderRoom(root: HTMLElement, channel: string) {
     refreshMeta();
   }
 
-  // ---- 通过 OBS 投屏 ----
-  // 配过 OBS 联动的设备在进房时悄悄连一条，只为「投屏」能列出 OBS 的窗口；
-  // 连不上就当没配过，按钮行为与从前完全一致。
-  let obsPoll: ReturnType<typeof setInterval> | undefined;
-  const dropObs = () => {
-    clearInterval(obsPoll);
-    obsPoll = undefined;
-    setObsConn(null);
-    setObsVer(null);
-    setObsStatus(null);
-    setScreenPick(false);
-  };
-  let obsDialing = false; // 只防同时发两次握手，连接态本身仍只看 obsConn
-  async function dialObs() {
-    if (obsDialing || obsConn()?.alive || leaving) return;
-    obsDialing = true;
-    try {
-      const c = await connectStoredObs();
-      if (!c) return;
-      if (leaving || obsConn()?.alive) return c.close();
-      const ver = await c.request('GetVersion');
-      if (obsCaptureBlocker(obsPlatform(ver.platform), ver.obsVersion)) return c.close();
-      c.onLost = dropObs;
-      setObsVer(ver);
-      setObsConn(c);
-      const poll = async () => {
-        if (!c.alive) return;
-        try {
-          setObsStatus(await c.request('GetStreamStatus'));
-        } catch {
-          /* 轮询失败不打扰：真断了走 onLost */
-        }
-      };
-      await poll();
-      obsPoll = setInterval(() => void poll(), 2000);
-    } catch {
-      /* OBS 没开或密码变了：静默降级，不弹提示打扰只想用浏览器投屏的人 */
-    } finally {
-      obsDialing = false;
-    }
-  }
-  void dialObs();
-  // 设置里刚把 OBS 联动配通：不用退出重进也能拿到「通过 OBS 投屏」
-  const onObsReady = () => void dialObs();
-  window.addEventListener(OBS_READY_EVENT, onObsReady);
-  // 源建好了：目标由用户在 OBS 弹出的属性窗口里选，选完回「OBS 推流」面板点开播。
-  // 这一步不写直播服务设置、不 StartStream——这会儿画面里投的还不知道是什么。
-  function obsCaptureReady() {
-    toast(OBS_SETUP_HINT, '', 7000);
-  }
-
-  // 壳内「选中即开播」：目标已经写进 OBS 的源，这里只把本频道的 WHIP 地址与令牌配上去并开播。
-  // 地址与令牌按需现拉（面板可能在频道刚就绪时就打开了），不在房间页常备一份。
-  async function startObsToChannel() {
-    const c = obsConn();
-    if (!c?.alive) throw new Error('OBS 连接已断开，请重新配置 OBS 联动');
-    const id = channelId();
-    if (!id) throw new Error('频道还没就绪，稍等一下再试');
-    const [info, site] = await Promise.all([getIngestToken(), siteInfoCached().catch(() => null)]);
-    const server = whipServer(info, site, id);
-    if (!server || !info.token) throw new Error('推流地址还没拿到，稍等一下再试');
-    await startObsStream(c, server, info.token);
-    setObsStatus(await c.request('GetStreamStatus'));
-    toast('OBS 已开始推流', 'ok');
-    refreshMeta();
-  }
-
-  async function stopObsScreen() {
-    const c = obsConn();
-    if (!c?.alive) return;
-    try {
-      await c.request('StopStream');
-      setObsStatus(await c.request('GetStreamStatus'));
-      toast('已让 OBS 停止投屏', 'ok', 1600);
-    } catch (err) {
-      toast(`停止投屏失败：${errText(err)}`, 'bad');
-    }
-    refreshMeta();
-  }
+  // ---- 通过 OBS 投屏（逻辑在 views/room/obs-session.ts）----
+  const obsSession = createObsSession({
+    leaving: () => bag.leaving,
+    channelId,
+    obsConn,
+    setObsConn,
+    setObsVer,
+    setObsStatus,
+    setScreenPick,
+    onRefreshMeta: refreshMeta,
+  });
+  void obsSession.dial();
+  const obsCaptureReady = () => obsSession.captureReady();
+  const startObsToChannel = () => obsSession.startToChannel();
+  const stopObsScreen = () => obsSession.stopScreen();
 
   // 原生投屏：选源 → 取本设备的投屏票 → 交给壳去推 WHIP。发布不经浏览器的
   // PeerConnection，所以这里不碰 stageEngine；能不能推最终由服务端的 admitIngest 判。
@@ -1670,7 +1312,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
       const p = loadPrefs();
       const dims = RES_DIMS[p.res] ?? RES_DIMS['1080p'];
       const codec = nativePublishCodec(p.screenCodec);
-      if (leaving) return;
+      if (bag.leaving) return;
       const started = await startPublish({
         endpoint: `${info.base}${id}`,
         token: info.ticket,
@@ -1683,7 +1325,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
         fps: p.fps,
         audio,
       });
-      if (leaving) {
+      if (bag.leaving) {
         await stopPublish().catch(() => {});
         return;
       }
@@ -1694,7 +1336,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
       refreshMeta();
     } catch (err) {
       setScreenOn(false);
-      if (!leaving) toast(`投屏失败：${errText(err)}`, 'bad', 6000);
+      if (!bag.leaving) toast(`投屏失败：${errText(err)}`, 'bad', 6000);
     }
   }
 
@@ -1704,7 +1346,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
   let vuSrc: MediaStreamAudioSourceNode | null = null;
   let vuTrack: MediaStreamTrack | null = null;
   const vuTimer = window.setInterval(() => {
-    const track = micOn() ? (voiceLine.engine?.localMicTrack() ?? null) : null;
+    const track = micOn() ? (bag.voice.engine?.localMicTrack() ?? null) : null;
     if (track !== vuTrack) {
       vuSrc?.disconnect();
       vuSrc = null;
@@ -1751,405 +1393,59 @@ export async function renderRoom(root: HTMLElement, channel: string) {
   navigator.mediaDevices?.addEventListener?.('devicechange', onDeviceChange);
   void onDeviceChange();
 
-  // ---- 面板与聊天 ----
-
-  function switchPanel(p: 'members' | 'chat' | '') {
-    setPanel(p);
-    if (p === 'chat') {
-      setUnread(0);
-      // 面板刚从 hidden 变可见，等 DOM 更新后再滚底
-      queueMicrotask(() => {
-        chatLogEl.scrollTop = chatLogEl.scrollHeight;
-        // 触屏聚焦会弹出键盘把面板顶掉一半，只在有指针悬停的设备上抢焦点
-        if (!window.matchMedia('(hover: none)').matches) chatInputEl.focus();
-      });
-      unreadMark.reveal(); // 排在滚底之后：有未读就改滚到第一条未读
-    }
-  }
-
-  // 距底多少 px 以内算「在底部」：留出阈值，避免次像素/小数滚动误差把用户判成已上翻
-  const NEAR_BOTTOM_PX = 48;
-  const onChatScroll = () => {
-    const d = chatLogEl.scrollHeight - chatLogEl.scrollTop - chatLogEl.clientHeight;
-    const at = d <= NEAR_BOTTOM_PX;
-    setAtBottom(at);
-    if (at) setNewBelow(false); // 自己滚到底，新消息提示消失
-    if (at) unreadMark.atBottom();
-  };
-  function jumpToLatest() {
-    chatLogEl.scrollTo({ top: chatLogEl.scrollHeight, behavior: 'smooth' });
-  }
-
-  // ---- 文件卡片的字节状态 ----
-
-  function putFileState(id: number, st: FileState) {
-    setFileStates((prev) => {
-      const m = new Map(prev);
-      const old = m.get(id);
-      if (old?.url && old.url !== st.url) URL.revokeObjectURL(old.url);
-      m.set(id, st);
-      return m;
-    });
-  }
-
-  function patchFileState(id: number, patch: Partial<FileState>) {
-    setFileStates((prev) => {
-      const cur = prev.get(id);
-      if (!cur) return prev;
-      const m = new Map(prev);
-      m.set(id, { ...cur, ...patch });
-      return m;
-    });
-  }
-
-  // 历史里的文件卡片：字节是发送那一刻扇出的，本次会话没收到就补不回来
-  function markExpired(list: ChatMessage[]) {
-    for (const m of list) {
-      if (m.kind === 'file' && !fileStates().has(m.id)) {
-        putFileState(m.id, { status: 'expired', progress: 0, url: '' });
-      }
-    }
-  }
-
-  // ---- 聊天消息（落库为权威，数据线只是实时扇出）----
-
-  // 追加一条消息，按 id 去重（数据线广播与 REST 补齐会重叠）；
-  // live=true 表示这是实时到达的一条（而非进房/重连时的历史补齐），只有这种才可能响提示音
-  function appendMessage(m: ChatMessage, live = false) {
-    let added = false;
-    setMsgs((list) => {
-      if (list.some((x) => x.id === m.id)) return list;
-      added = true;
-      return [...list, m].sort((a, b) => a.id - b.id);
-    });
-    if (!added) return;
-    // 别人发的文件：卡片先到，字节随后经数据通道到
-    if (m.kind === 'file' && !fileStates().has(m.id)) {
-      putFileState(m.id, { status: 'receiving', progress: 0, url: '' });
-    }
-    if (m.uid === myUid) {
-      // 自己发的不计未读；刚发完消息的人要看的是自己这条，直接落底
-      queueMicrotask(() => {
-        chatLogEl.scrollTop = chatLogEl.scrollHeight;
-      });
-      return;
-    }
-    // 面板关着或页面在后台都计未读（title 前缀与按钮角标共用这一个计数）
-    const hidden = panel() !== 'chat' || document.visibilityState !== 'visible';
-    if (hidden) setUnread((u) => u + 1);
-    if (hidden) unreadMark.note(m.id);
-    // 静音这个频道 = 不响不弹（未读计数照算，视觉上还看得见）：@ 与回复也不例外
-    if (muted()) return;
-    // 被 @ 与被回复同一档：都是"有人点名找我"，比普通消息重要，
-    // 不受聊天提示音的节流与"面板开着就不响"限制
-    const mentioned = live && m.kind === 'text' && (mentionsUser(m.content, mentionUsers(), myUid) || replyToMe(m));
-    if (mentioned) onMention(m);
-    else if (live && hidden) playChatCue();
-    // 提示音与系统通知各一次：被 @ 与否都只发一条通知，档次由 mentioned 决定
-    if (live) notifyMessage(m, mentioned, channel, () => switchPanel('chat'));
-  }
-
-  // 回复我的消息视同被 @：被引的那条在手上的列表里找，找不到（历史还没补齐）按不是
-  function replyToMe(m: ChatMessage): boolean {
-    if (!m.reply_to) return false;
-    return msgs().find((x) => x.id === m.reply_to)?.uid === myUid;
-  }
-
-  // 被 @ 的统一入口：只管提示音；系统通知在 appendMessage 里按同一个判定发，两者各一次
-  function onMention(_m: ChatMessage) {
-    if (loadPrefs().mentionCue) playCue('mention');
-  }
-
-  // @补全与高亮的名字来源：名册（在房的人）。不在名册里的人 @ 不出高亮——
-  // 提示不到的人不该显示成提示到了（判定按 uid，见 chat/mentions.ts）
-  const mentionUsers = createMemo<MentionUser[]>(() =>
-    roster()
-      .filter((p) => p.uid > 0 && !p.ingest)
-      .map((p) => ({ uid: p.uid, username: p.username })),
-  );
-
-  // 引用态指向的那条消息（撤回后摘要跟着变成"已撤回"，因为这里每次都从 msgs() 现取）
-  const replyTarget = createMemo(() => {
-    const id = replyToId();
-    return id ? msgs().find((m) => m.id === id) : undefined;
+  // ---- 面板与聊天（控制逻辑在 views/room/chat-ctrl.ts）----
+  chatCtrl = createChatCtrl({
+    channel,
+    myUid,
+    els: () => ({ log: chatLogEl, input: chatInputEl, file: chatFileEl }),
+    unreadMark,
+    panel,
+    setPanel,
+    muted,
+    msgs,
+    setMsgs,
+    setUnread,
+    setAtBottom,
+    setNewBelow,
+    setHistoryLoaded,
+    setChatReady,
+    setChatDrag,
+    replyToId,
+    setReplyToId,
+    mentionQ,
+    setMentionQ,
+    mentionIdx,
+    setMentionIdx,
+    fileStates,
+    setFileStates,
+    rosterMentionUsers: () =>
+      roster()
+        .filter((p) => p.uid > 0 && !p.ingest)
+        .map((p) => ({ uid: p.uid, username: p.username })),
+    liveDataEngine,
+    altEngine,
+    isSelfGagged,
+    leaving: () => bag.leaving,
   });
-  const mentionHits = createMemo(() => {
-    const q = mentionQ();
-    return q ? matchMentions(mentionUsers(), q.query) : [];
-  });
-
-  // 输入/点击后重算"光标前是不是正在打提及"；候选变了就把高亮拉回第一项
-  function syncMentionQuery() {
-    const q = mentionQuery(chatInputEl.value, chatInputEl.selectionStart ?? chatInputEl.value.length);
-    setMentionQ(q);
-    setMentionIdx(0);
-  }
-
-  function pickMention(username: string) {
-    const q = mentionQ();
-    if (!q) return;
-    const next = applyMention(chatInputEl.value, q, username);
-    chatInputEl.value = next.value;
-    chatInputEl.setSelectionRange(next.caret, next.caret);
-    setChatReady(next.value.trim().length > 0);
-    setMentionQ(null);
-    chatInputEl.focus();
-  }
-
-  // 补全打开时接管上下键/回车/Tab/Esc；返回 true = 本次按键已被补全消费，不再走发送逻辑
-  function onMentionKeyDown(ev: KeyboardEvent): boolean {
-    const hits = mentionHits();
-    if (!hits.length) return false;
-    if (ev.key === 'Escape') {
-      ev.preventDefault();
-      setMentionQ(null);
-      return true;
-    }
-    if (ev.key === 'ArrowDown' || ev.key === 'ArrowUp') {
-      ev.preventDefault();
-      setMentionIdx((i) => (i + (ev.key === 'ArrowDown' ? 1 : hits.length - 1)) % hits.length);
-      return true;
-    }
-    if (ev.key === 'Enter' || ev.key === 'Tab') {
-      ev.preventDefault();
-      pickMention(hits[Math.min(mentionIdx(), hits.length - 1)].username);
-      return true;
-    }
-    return false;
-  }
-
-  // 聊天提示音节流 1.5 秒：一段时间内连来多条消息只响一次
-  let lastChatCueAt = 0;
-  function playChatCue() {
-    if (!loadPrefs().chatCue) return;
-    const now = Date.now();
-    if (now - lastChatCueAt < 1500) return;
-    lastChatCueAt = now;
-    playCue('message');
-  }
-
-  // 数据线到的是一个信封（新消息/撤回/反应），旧版页面发的裸 Message 由 parseEnvelope 兼容；
-  // 解析失败就丢，重连时 after= 会补齐（权威始终在库里）
-  function onChatBroadcast(text: string) {
-    const env = parseEnvelope(text);
-    if (!env) return;
-    if (env.t === 'message') {
-      appendMessage(env.m, true);
-      return;
-    }
-    if (env.t === 'delete') {
-      patchMessage(env.id, { deleted: true, content: '', file: undefined, reactions: [] });
-      return;
-    }
-    patchMessage(env.id, (m) => ({ reactions: mergeReaction(m.reactions, env.emoji, env.uid, env.on) }));
-  }
-
-  // 本地改一条已在列表里的消息（撤回/反应的实时到达）；不在列表里就忽略——
-  // 那条消息本来就没显示出来，下次拉历史会带着最终状态一起来
-  function patchMessage(id: number, patch: Partial<ChatMessage> | ((m: ChatMessage) => Partial<ChatMessage>)) {
-    setMsgs((list) => {
-      const i = list.findIndex((x) => x.id === id);
-      if (i < 0) return list;
-      const next = [...list];
-      next[i] = { ...list[i], ...(typeof patch === 'function' ? patch(list[i]) : patch) };
-      return next;
-    });
-  }
-
-  // 数据线不在（未连上/正在重连）时只落库不广播：接收方靠 after= 补齐，发送不阻塞。
-  // 发送失败换另一条已连上的线再试一次（远端实例太老、不支持 Data Streams 时靠这个兜底），
-  // 只试这一次；禁言是服务端的确定拒绝，换线一样被拒，不试。两次都失败就静默——
-  // 权威在库里，对端重连时 after= 会补上
-  function broadcast(text: string) {
-    const eng = liveDataEngine();
-    if (!eng) return;
-    void eng.sendText(DATA_TOPIC_TEXT, text).catch(() => {
-      if (isSelfGagged()) return;
-      const alt = altEngine(eng);
-      if (!alt) return;
-      void alt.sendText(DATA_TOPIC_TEXT, text).catch(() => {});
-    });
-  }
-
-  // ---- 撤回 / 反应 / 引用（服务端落库为准，成功后广播让对端立刻看到）----
-
-  async function removeMessage(m: ChatMessage) {
-    const ok = await confirmDialog({
-      title: m.uid === myUid ? '撤回这条消息？' : `删除 ${m.username} 的这条消息？`,
-      body: '消息内容会从服务器上清掉，聊天里只留一条"已撤回"的占位。',
-      danger: true,
-      confirmText: m.uid === myUid ? '撤回' : '删除',
-    });
-    if (!ok) return;
-    try {
-      await deleteMessage(channel, m.id);
-    } catch (err) {
-      toast((err as Error).message, 'bad');
-      return;
-    }
-    patchMessage(m.id, { deleted: true, content: '', file: undefined, reactions: [] });
-    if (replyToId() === m.id) setReplyToId(null);
-    broadcast(encodeDelete(m.id, myUid));
-  }
-
-  async function toggleReaction(m: ChatMessage, emoji: string, on: boolean) {
-    // 先本地生效再落库：反应是高频轻动作，等一个往返才变色会显得迟钝；失败时回滚
-    patchMessage(m.id, (cur) => ({ reactions: mergeReaction(cur.reactions, emoji, myUid, on) }));
-    try {
-      const res = await setReaction(channel, m.id, emoji, on);
-      patchMessage(m.id, { reactions: res.reactions });
-    } catch (err) {
-      patchMessage(m.id, (cur) => ({ reactions: mergeReaction(cur.reactions, emoji, myUid, !on) }));
-      toast((err as Error).message, 'bad');
-      return;
-    }
-    broadcast(encodeReaction(m.id, emoji, myUid, on));
-  }
-
-  // 跳到被引用的原消息：滚过去并闪一下（找不到说明它不在已加载的历史里，按钮本来就不会渲染）
-  function jumpToMessage(id: number) {
-    const node = chatLogEl.querySelector<HTMLElement>(`[data-msg-id="${id}"]`);
-    if (!node) return;
-    node.scrollIntoView({ block: 'center', behavior: 'smooth' });
-    node.classList.add('flash');
-    setTimeout(() => node.classList.remove('flash'), 1200);
-  }
-
-  // 进房首次取最近 50 条；重连时按最大已知 id 补断线期间漏掉的
-  let syncing = false;
-  async function syncMessages(first: boolean) {
-    if (syncing || leaving) return;
-    syncing = true;
-    try {
-      const after = first ? 0 : msgs().reduce((max, m) => (m.id > max ? m.id : max), 0);
-      const list = await fetchMessages(channel, after);
-      if (leaving) return;
-      // 必须先标过期再入列：appendMessage 会把没见过的文件卡片当成「字节在路上」，
-      // 而从库里补来的这批，字节早在发送那一刻就扇出完了
-      markExpired(list);
-      if (first) {
-        setMsgs(list);
-        setHistoryLoaded(true);
-        setUnread(0);
-      } else {
-        list.forEach((m) => appendMessage(m));
-      }
-    } catch {
-      // 取历史失败不阻断进房：下次重连或发消息时自然补齐
-    } finally {
-      syncing = false;
-    }
-  }
-
-  let sendingText = false;
-  async function sendChat(ev: Event) {
-    ev.preventDefault();
-    const content = chatInputEl.value.trim();
-    if (!content || sendingText) return;
-    sendingText = true;
-    const quoted = replyToId();
-    chatInputEl.value = '';
-    setChatReady(false);
-    setMentionQ(null);
-    setReplyToId(null);
-    try {
-      // mentions 是给服务端的线索（离线推送的目标）：它会逐个校验，不认的丢掉
-      const mentions = mentionedUids(content, mentionUsers());
-      const m = await postMessage(channel, quoted ? { content, reply_to: quoted, mentions } : { content, mentions });
-      appendMessage(m);
-      broadcast(encodeMessage(m));
-    } catch (err) {
-      // 落库失败才是真失败（禁言 403、超长 400、被引消息没了 400）：
-      // 把内容与引用态都还回去，让用户能原样重发
-      chatInputEl.value = content;
-      setChatReady(true);
-      if (quoted) setReplyToId(quoted);
-      toast((err as Error).message, 'bad');
-    } finally {
-      sendingText = false;
-    }
-  }
-
-  // ---- 发文件/图片 ----
-
-  async function sendFiles(raws: File[]) {
-    for (const raw of raws) {
-      const f = await compressImage(raw); // 图片过大先本地压缩，其它类型原样返回
-      if (f.size > FILE_MAX_MB * 1024 * 1024) {
-        toast(`「${f.name}」超过 ${FILE_MAX_MB} MB，发不出去`, 'bad');
-        continue;
-      }
-      await sendOneFile(f);
-    }
-  }
-
-  async function sendOneFile(file: File) {
-    const meta = { name: file.name, mime: file.type || 'application/octet-stream', size: file.size };
-    let m: ChatMessage;
-    try {
-      m = await postMessage(channel, { kind: 'file', file: meta });
-    } catch (err) {
-      toast((err as Error).message, 'bad');
-      return;
-    }
-    // 自己的卡片直接用手上的 File 预览/下载，不等字节绕一圈回来
-    putFileState(m.id, { status: 'sending', progress: 0, url: URL.createObjectURL(file) });
-    appendMessage(m);
-    broadcast(encodeMessage(m));
-    const eng = liveDataEngine();
-    if (!eng) {
-      // 卡片已落库但字节没人收得到：如实告知，别假装发出去了
-      patchFileState(m.id, { status: 'ready', progress: 1 });
-      toast('数据线未连接，对方只会看到一张过期卡片', 'bad');
-      return;
-    }
-    const sendOn = (on: AVEngine) =>
-      on.sendFile(file, DATA_TOPIC_FILE, { message_id: String(m.id) }, (p) => patchFileState(m.id, { progress: p }));
-    try {
-      await sendOn(eng);
-      patchFileState(m.id, { status: 'ready', progress: 1 });
-      return;
-    } catch (err) {
-      // 与文本同一套回落：换另一条已连上的线重发一次；禁言不换线，字节也不试第三次
-      const alt = isSelfGagged() ? null : altEngine(eng);
-      if (alt) {
-        try {
-          patchFileState(m.id, { progress: 0 });
-          await sendOn(alt);
-          patchFileState(m.id, { status: 'ready', progress: 1 });
-          return;
-        } catch {
-          // 落到下面统一标失败（报第一条线的原因，两条线的失败通常同源）
-        }
-      }
-      patchFileState(m.id, { status: 'failed' });
-      toast(`「${file.name}」发送失败：${(err as Error)?.message ?? ''}`, 'bad');
-    }
-  }
-
-  const pickFiles = () => {
-    const list = [...(chatFileEl.files ?? [])];
-    chatFileEl.value = ''; // 同一个文件连发两次也要触发 change
-    if (list.length) void sendFiles(list);
-  };
-
-  const onChatPaste = (ev: ClipboardEvent) => {
-    // 走 items 而非 files：部分浏览器粘贴截图时 clipboardData.files 为空，items 才拿得到 kind === 'file' 的项
-    const items = ev.clipboardData?.items;
-    const list = items
-      ? [...items].filter((it) => it.kind === 'file').map((it) => it.getAsFile()).filter((f): f is File => !!f)
-      : [...(ev.clipboardData?.files ?? [])];
-    if (!list.length) return; // 没有文件项：不拦截，文本正常粘进输入框
-    ev.preventDefault(); // 截图粘贴：不要同时把文件名塞进输入框
-    void sendFiles(list);
-  };
-
-  const onChatDrop = (ev: DragEvent) => {
-    ev.preventDefault();
-    setChatDrag(false);
-    const list = [...(ev.dataTransfer?.files ?? [])];
-    if (list.length) void sendFiles(list);
-  };
+  const {
+    switchPanel,
+    onChatScroll,
+    jumpToLatest,
+    removeMessage,
+    toggleReaction,
+    jumpToMessage,
+    syncMessages,
+    sendChat,
+    pickFiles,
+    onChatPaste,
+    onChatDrop,
+    syncMentionQuery,
+    pickMention,
+    onMentionKeyDown,
+    mentionUsers,
+    mentionHits,
+    replyTarget,
+  } = chatCtrl;
 
   // ---- 设置页偏好热应用 ----
   const onPrefs = async (ev: Event) => {
@@ -2160,9 +1456,9 @@ export async function renderRoom(root: HTMLElement, channel: string) {
       const entry = videoEntries().find((e) => e.key === `${id}:camera`);
       if (entry) entry.video.style.transform = loadPrefs().mirror ? 'scaleX(-1)' : '';
     }
-    if ((what === 'mic-device' || what === 'audio-chain') && micOn() && voiceLine.engine) {
+    if ((what === 'mic-device' || what === 'audio-chain') && micOn() && bag.voice.engine) {
       try {
-        await voiceLine.engine.restartMic();
+        await bag.voice.engine.restartMic();
       } catch (err) {
         setMicOn(false);
         toast(`麦克风重启失败，已闭麦：${(err as Error)?.message ?? ''}`, 'bad');
@@ -2198,23 +1494,23 @@ export async function renderRoom(root: HTMLElement, channel: string) {
     window.clearTimeout(screenApplyTimer);
     screenApplyTimer = window.setTimeout(() => {
       screenApplyChain = screenApplyChain.then(async () => {
-        if (leaving || !screenOn()) return;
+        if (bag.leaving || !screenOn()) return;
         try {
           if (nativeScreen()) {
             const p = loadPrefs();
             const dims = RES_DIMS[p.res] ?? RES_DIMS['1080p'];
             await updatePublish({ width: dims.width, height: dims.height, fps: p.fps, bitrate_kbps: Math.round(p.bitrateMax * 1000) });
             if (nativePublishConfig) nativePublishConfig = { ...nativePublishConfig, res: p.res, fps: p.fps, bitrate: p.bitrateMax };
-            if (!leaving) toast('投屏画质已更新', '', 3000);
+            if (!bag.leaving) toast('投屏画质已更新', '', 3000);
           } else {
             const eng = stageEngine();
             if (!eng) return;
             if (await eng.applyScreenPrefs()) toast('投屏编码已切换，观众端会短暂重连', '', 3000);
           }
         } catch (err) {
-          if (!leaving) toast(`投屏画质应用失败：${err instanceof Error ? err.message : String(err)}`, 'bad');
+          if (!bag.leaving) toast(`投屏画质应用失败：${err instanceof Error ? err.message : String(err)}`, 'bad');
         }
-        if (!leaving) refreshMeta();
+        if (!bag.leaving) refreshMeta();
       });
     }, 200);
   }
@@ -2224,13 +1520,13 @@ export async function renderRoom(root: HTMLElement, channel: string) {
   // 最多被打断一次。原生壳投屏不在此列，它的码率由壳的编码器热改，走 applyScreenPrefsSoon。
   function republishScreenNow() {
     screenApplyChain = screenApplyChain.then(async () => {
-      if (leaving || !screenOn()) return;
+      if (bag.leaving || !screenOn()) return;
       try {
         if (await stageEngine()?.republishScreen()) toast('投屏已按新画质重开，观众端会短暂重连', '', 3000);
       } catch (err) {
-        if (!leaving) toast(`重开投屏失败：${err instanceof Error ? err.message : String(err)}`, 'bad');
+        if (!bag.leaving) toast(`重开投屏失败：${err instanceof Error ? err.message : String(err)}`, 'bad');
       }
-      if (!leaving) refreshMeta();
+      if (!bag.leaving) refreshMeta();
     });
   }
   createEffect(() => setScreenRepublish(screenOn() && !nativeScreen() ? republishScreenNow : null));
@@ -2283,7 +1579,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
         data-tile-key={e.key}
         onClick={(ev) => {
           if (isFs()) return; // 全屏里点击不切置顶
-          if (swipeJustEnded()) return; // 上下滑手势抬手合成的那次 click
+          if (theaterCtl.swipeJustEnded()) return; // 上下滑手势抬手合成的那次 click
           if ((ev.target as HTMLElement).closest('.tile-actions')) return;
           togglePin(e.key);
         }}
@@ -2432,7 +1728,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
         }}
         data-identity={p.e.identity}
         onClick={() => {
-          if (swipeJustEnded()) return; // 上下滑手势抬手合成的那次 click
+          if (theaterCtl.swipeJustEnded()) return; // 上下滑手势抬手合成的那次 click
           togglePin(p.e.key);
         }}
       >
@@ -2631,15 +1927,15 @@ export async function renderRoom(root: HTMLElement, channel: string) {
     });
 
     // 名册差分 → 进出提示。基线快照就是上一次的 roster()，不另存副本；
-    // 首次进房/重连成功后的第一份只重置基线（cueBaseline），断线期间不比较
+    // 首次进房/重连成功后的第一份只重置基线（bag.cueBaseline），断线期间不比较
     createEffect(
       on(roster, (cur, prev) => {
         if (!prev) return; // 首次运行没有可比的上一份，不消耗基线标志
-        if (cueBaseline) {
-          cueBaseline = false;
+        if (bag.cueBaseline) {
+          bag.cueBaseline = false;
           return;
         }
-        if (!voiceLine.engine?.connected()) return;
+        if (!bag.voice.engine?.connected()) return;
         diffRoster(prev, cur);
       }),
     );
@@ -2907,7 +2203,7 @@ export async function renderRoom(root: HTMLElement, channel: string) {
             />
           </Show>
           <div class="room-main" style="flex-grow:1;display:flex;flex-direction:column;min-width:0;min-height:0">
-            <div class="stage-area" ref={(elm) => onCleanup(wireStageSwipe(elm))}>
+            <div class="stage-area" ref={(elm) => onCleanup(theaterCtl.wireVolumeSwipe(elm))}>
               <div class="stage-status">
                 {statusText()}
                 <Show when={voiceState().phase === 'retry'}>
@@ -3529,76 +2825,26 @@ export async function renderRoom(root: HTMLElement, channel: string) {
   const onChannelsChanged = () => syncChannelInfo();
   window.addEventListener('hearth:channels', onChannelsChanged);
 
-  // ---- 线路读数诊断（60 秒一条）----
-  // 页面隐藏或语音线不在 up 时跳过：后台标签页的读数没有诊断价值，断线期间也不该刷日志
-  let lineDiagTimer = 0;
-  const lineDiag = async () => {
-    if (document.hidden || voiceState().phase !== 'up') return;
-    const rows: [Role, AVEngine | null][] = combined
-      ? [['voice', voiceLine.engine]]
-      : [
-          ['voice', voiceLine.engine],
-          ['stage', stageLine?.engine ?? null],
-        ];
-    for (const [role, eng] of rows) {
-      if (!eng?.connected()) continue;
-      const line = eng.lineStats();
-      // 本地投屏的发侧读数（编码耗时/受限原因）只在承担舞台角色的那条线上有
-      const video = combined || role === 'stage' ? await eng.screenStats() : null;
-      if (!line && !video) continue;
-      // 服务端 detail 上限 2000 字符：一条线的读数加一路投屏远小于此，slice 只是兜底
-      diag('info', 'line_stats', role, { detail: JSON.stringify({ line, video }).slice(0, 2000) });
-    }
-  };
-  // 第一次等 10 秒（让 ICE 与快照稳定），之后每 60 秒一次
-  const lineDiagStart = window.setTimeout(() => {
-    void lineDiag();
-    lineDiagTimer = window.setInterval(() => void lineDiag(), 60000);
-  }, 10000);
-
-  // ---- 观看诊断（默认关，开关在管理后台的 watch_diag）----
-  // 观众侧秒级采样：60 秒一条的 line_stats 落不进几秒的冻结。开关关着时这里一个定时器都不建，
-  // 也就一次 getStats 都不多调；开着时也只在房间里真有别人的投屏轨时才读。
-  const watchState = new Map<string, { prev: WatchCounters; reportedAt: number }>();
-  const watchTick = async () => {
-    const eng = stageEngine();
-    if (!eng?.connected()) return;
-    const targets = videoEntries().filter((e) => e.source === 'screen' && !e.isLocal);
-    for (const key of [...watchState.keys()]) if (!targets.some((e) => e.key === key)) watchState.delete(key);
-    for (const entry of targets) {
-      const cur = await eng.remoteWatchCounters(entry.identity, 'screen');
-      if (!cur) continue;
-      const prevState = watchState.get(entry.key);
-      const sample = prevState ? diffWatch(prevState.prev, cur) : null;
-      let reportedAt = prevState?.reportedAt ?? 0;
-      if (sample) {
-        setWatchTotals((t) => addWatch(t ?? emptyWatchTotals(), sample));
-        const now = Date.now();
-        if (shouldReportWatch(sample, now - reportedAt)) {
-          reportedAt = now;
-          // me = 本机设备（identity 的设备标签），from = 被看的那路投屏；两者都只含 uid
-          diag(watchLevel(sample), 'watch_stats', 'stage', {
-            detail: JSON.stringify({ me: eng.localIdentity(), from: entry.identity, ...sample }).slice(0, 2000),
-          });
-        }
-      }
-      watchState.set(entry.key, { prev: cur, reportedAt });
-    }
-  };
-  createEffect(() => {
-    if (!watchDiag()) {
-      watchState.clear();
-      setWatchTotals(null);
-      return;
-    }
-    const timer = window.setInterval(() => void watchTick(), 5000);
-    onCleanup(() => window.clearInterval(timer));
+  // ---- 线路 / 观看诊断（views/room/diag.ts）----
+  const disposeLineDiag = startLineDiag({
+    diag,
+    voicePhase: () => voiceState().phase,
+    combined: () => bag.combined,
+    voiceEngine: () => bag.voice.engine,
+    stageEngine: () => bag.stage?.engine ?? null,
+  });
+  wireWatchDiag({
+    diag,
+    enabled: watchDiag,
+    stageEngine,
+    screenEntries: () => videoEntries(),
+    setWatchTotals,
   });
 
   // ---- 首次连接与清理 ----
-  // 清理监听必须先于首次连接注册：连接期间用户离开时，清理块要能置 leaving 并释放已建好的部分
+  // 清理监听必须先于首次连接注册：连接期间用户离开时，清理块要能置 bag.leaving 并释放已建好的部分
   // 离开判定 → 广播成参与者属性（语音线是名册权威）；引擎不在/服务端不收都不影响本机显示
-  const afkWatch = startAfkWatch((on) => void voiceLine.engine?.setAttribute('afk', on ? '1' : '').catch(() => {}));
+  const afkWatch = startAfkWatch((on) => void bag.voice.engine?.setAttribute('afk', on ? '1' : '').catch(() => {}));
   const myHash = location.hash;
   const onHashChange = () => {
     if (location.hash !== myHash) {
@@ -3623,13 +2869,11 @@ export async function renderRoom(root: HTMLElement, channel: string) {
       if (document.title.endsWith(roomTitle)) document.title = roomTitle;
       setAppBadge(0);
       diag('info', 'room_close');
-      leaving = true;
+      bag.leaving = true;
       // 原生发布在壳的进程里，不随页面卸载停：离房必须显式收回
       if (nativeScreen() && screenOn()) void stopPublish().catch(() => {});
       // OBS 那条推流是 OBS 自己的进程在推，离房不替用户停；这里只收回本页的连接与轮询
-      window.removeEventListener(OBS_READY_EVENT, onObsReady);
-      clearInterval(obsPoll);
-      obsConn()?.close();
+      obsSession.dispose();
       unlistenPublish?.();
       closeChannelMenu(); // 两个浮层都挂在 body 上，房间视图卸载不会带走它们
       closeAccountMenu();
@@ -3642,16 +2886,15 @@ export async function renderRoom(root: HTMLElement, channel: string) {
       clearInterval(vuTimer);
       tileTimers.forEach((t) => clearInterval(t));
       tileTimers.clear();
-      clearTimeout(lineDiagStart);
-      clearInterval(lineDiagTimer);
+      disposeLineDiag();
       void vuCtx?.close();
-      clearTimeout(voiceLine.timer);
-      if (stageLine && stageLine !== voiceLine) clearTimeout(stageLine.timer);
+      clearTimeout(bag.voice.timer);
+      if (bag.stage && bag.stage !== bag.voice) clearTimeout(bag.stage.timer);
       fileStates().forEach((st) => {
         if (st.url) URL.revokeObjectURL(st.url);
       });
-      voiceLine.engine?.dispose();
-      if (stageLine && stageLine !== voiceLine) stageLine.engine?.dispose();
+      bag.voice.engine?.dispose();
+      if (bag.stage && bag.stage !== bag.voice) bag.stage.engine?.dispose();
       dispose();
       shell.destroy();
       unwireMenu();

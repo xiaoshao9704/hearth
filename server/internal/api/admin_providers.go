@@ -5,6 +5,7 @@ package api
 import (
 	"errors"
 	"net/http"
+	"regexp"
 	"strings"
 
 	"hearth/server/internal/rtc"
@@ -62,13 +63,16 @@ func (a *API) adminListProviders(w http.ResponseWriter, r *http.Request) {
 			"type": t.Type, "label": t.Label, "fields": a.providerTypeFields(t.Type),
 		})
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"instances": instances, "types": types})
+	// alias_pattern 与字段上的 optional/pattern 一并下发，管理端只按接口模式校验、不复刻规则
+	writeJSON(w, http.StatusOK, map[string]any{
+		"instances": instances, "types": types, "alias_pattern": aliasRe.String(),
+	})
 }
 
 // checkProviderParams 按字段模式校验并归一化 params：只保留声明字段、值去空白。
-// 非 Secret 字段必填非空（livekit 的 livekit_url 可选，空串即清除）；
+// 非 Secret 字段：Optional 允许空（空串即清除），否则必填；有 Pattern 时校验格式。
 // Secret 字段：POST（old 为 nil）必填，PUT 空串 = 保留旧值。
-func checkProviderParams(typ string, fields []rtc.ConfigKey, in, old map[string]string) (map[string]string, string) {
+func checkProviderParams(fields []rtc.ConfigKey, in, old map[string]string) (map[string]string, string) {
 	out := map[string]string{}
 	for _, f := range fields {
 		v := strings.TrimSpace(in[f.Name])
@@ -79,14 +83,26 @@ func checkProviderParams(typ string, fields []rtc.ConfigKey, in, old map[string]
 			if v == "" {
 				return nil, f.Label + " 必填"
 			}
-		} else if v == "" && !(typ == TypeLivekit && f.Name == "livekit_url") {
+		} else if v == "" && !f.Optional {
 			return nil, f.Label + " 必填"
+		}
+		if v != "" && f.Pattern != "" && !matchPattern(f.Pattern, v) {
+			return nil, f.Label + " 格式不符"
 		}
 		if v != "" {
 			out[f.Name] = v
 		}
 	}
 	return out, ""
+}
+
+// matchPattern 用字段模式里的正则校验取值（编译失败视为不匹配，避免静默放行）。
+func matchPattern(pattern, v string) bool {
+	re, err := regexp.Compile(pattern)
+	if err != nil {
+		return false
+	}
+	return re.MatchString(v)
 }
 
 func (a *API) adminCreateProvider(w http.ResponseWriter, r *http.Request) {
@@ -112,7 +128,7 @@ func (a *API) adminCreateProvider(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusConflict, "alias 已被占用（含内建与 env 锁定实例）")
 		return
 	}
-	params, msg := checkProviderParams(req.Type, fields, req.Params, nil)
+	params, msg := checkProviderParams(fields, req.Params, nil)
 	if msg != "" {
 		writeErr(w, http.StatusBadRequest, msg)
 		return
@@ -158,7 +174,7 @@ func (a *API) adminUpdateProvider(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "内部错误")
 		return
 	}
-	params, msg := checkProviderParams(inst.Type, a.providerTypeFields(inst.Type), req.Params, old.Params)
+	params, msg := checkProviderParams(a.providerTypeFields(inst.Type), req.Params, old.Params)
 	if msg != "" {
 		writeErr(w, http.StatusBadRequest, msg)
 		return

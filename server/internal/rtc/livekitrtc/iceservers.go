@@ -1,18 +1,16 @@
-// 下发给浏览器的 ICE 服务器列表改写规则（在信令反代层生效，见 signalbridge.go）。
+// 下发给浏览器的 ICE 服务器列表改写（信令 Join/Reconnect 帧，见 signal.go）。
 // 为什么在 hearth 改而不是给 livekit 打补丁：补丁只对 fork 实例生效，注册制里接入官方
-// LiveKit 实例时它照样下发内置的境外默认 STUN；而浏览器信令一律经 /providers/{alias}/rtc
-// 进来，改在这里对所有实例类型一视同仁，且改配置即生效不必重启。
-package api
+// LiveKit 实例时它照样下发内置的境外默认 STUN；浏览器信令一律经 /providers/{alias}/rtc
+// 进来，改在实现包里对所有 livekit 实例一视同仁，且改配置即生效不必重启。
+package livekitrtc
 
 import (
 	"strings"
 
 	"github.com/livekit/protocol/livekit"
-)
 
-// defaultClientSTUN 默认并列两个不同地域的 STUN：浏览器并行探测、谁先回用谁，
-// 选错也不影响连通性（客户端永远是主动方，服务端从收到的包按 peer-reflexive 学到对端地址）。
-const defaultClientSTUN = "stun.miwifi.com:3478,stun.l.google.com:19302"
+	"hearth/server/internal/rtc"
+)
 
 // clientICEServers 上游给的列表 → 下发给浏览器的列表。
 // 只剔除纯 STUN 项（LiveKit 未配 stun/turn 时会回落到内置默认表，那是我们不想要的）；
@@ -44,7 +42,7 @@ func hasTURNURL(urls []string) bool {
 func clientSTUNURLs(cfg string) []string {
 	cfg = strings.TrimSpace(cfg)
 	if cfg == "" {
-		cfg = defaultClientSTUN
+		cfg = rtc.DefaultClientSTUN
 	}
 	if strings.EqualFold(cfg, "none") {
 		return nil
