@@ -24,9 +24,9 @@ import {
 } from '../api';
 import type { ChannelRole, Invite, RoomParticipant, UserRef } from '../api';
 import { clearMessages } from '../chat';
-import { avatarHtml, confirmDialog, copyText, el, esc, icon, menuButtonHtml, timeAgo, toast, wireMenuButton } from '../ui';
+import { avatarHtml, confirmDialog, copyText, el, icon, menuButtonHtml, timeAgo, toast, wireMenuButton } from '../ui';
 import type { ConfirmOpts } from '../ui';
-import { inviteState } from './settings-panes';
+import { inviteState } from './settings/index';
 
 type Tab = 'members' | 'bans' | 'allow' | 'guests' | 'mods' | 'chat' | 'transfer';
 
@@ -132,55 +132,17 @@ export function ChannelManage(p: { channel: string }) {
   const modCandidates = createMemo(() => mergedCandidates(true));
   const transferCandidates = createMemo(() => mergedCandidates(false));
 
-  // 转让确认：要手输一遍频道名才点得动确认（ui.ts 的 confirmDialog 没有输入框，这里复刻同一套 dialog 样式）
-  function confirmTransfer(target: UserRef): Promise<boolean> {
-    const prev = document.activeElement as HTMLElement | null;
-    const dlg = document.createElement('dialog');
-    dlg.className = 'dialog';
-    dlg.innerHTML = `<div class="dialog-box">
-  <div class="dialog-title">把「${esc(p.channel)}」转让给 ${esc(target.username)}？</div>
-  <div class="dialog-body">转让后你是频道管理员，对方成为频道主。输入频道名 <b>${esc(p.channel)}</b> 确认。</div>
-  <div class="field" style="margin:4px 0 14px"><input data-act="name" placeholder="${esc(p.channel)}" autocomplete="off" /></div>
-  <div class="dialog-actions">
-    <button type="button" class="btn" data-act="cancel">取消</button>
-    <button type="button" class="btn btn-danger-solid" data-act="ok" disabled>转让</button>
-  </div>
-</div>`;
-    const input = dlg.querySelector<HTMLInputElement>('[data-act="name"]')!;
-    const okBtn = dlg.querySelector<HTMLButtonElement>('[data-act="ok"]')!;
-    input.addEventListener('input', () => {
-      okBtn.disabled = input.value.trim() !== p.channel;
-    });
-    return new Promise<boolean>((resolve) => {
-      let settled = false;
-      const settle = (ok: boolean) => {
-        if (settled) return;
-        settled = true;
-        dlg.close();
-        dlg.remove();
-        if (prev?.isConnected) prev.focus?.();
-        resolve(ok);
-      };
-      dlg.addEventListener('cancel', (e) => {
-        e.preventDefault();
-        settle(false);
-      });
-      dlg.addEventListener('click', (e) => {
-        if (e.target === dlg) settle(false);
-      });
-      dlg.querySelector('[data-act="cancel"]')!.addEventListener('click', () => settle(false));
-      okBtn.addEventListener('click', () => {
-        if (!okBtn.disabled) settle(true);
-      });
-      document.body.appendChild(dlg);
-      dlg.showModal();
-      input.focus();
-    });
-  }
-
   const doTransfer = async (target: UserRef) => {
     if (busy()) return;
-    if (!(await confirmTransfer(target))) return;
+    const ok = await confirmDialog({
+      title: `把「${p.channel}」转让给 ${target.username}？`,
+      body: `转让后你是频道管理员，对方成为频道主。输入频道名确认。`,
+      danger: true,
+      confirmText: '转让',
+      confirmInput: p.channel,
+      inputPlaceholder: p.channel,
+    });
+    if (!ok) return;
     setBusy(`transfer-${target.id}`);
     try {
       const r = await transferChannel(p.channel, target.id);

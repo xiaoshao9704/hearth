@@ -1,9 +1,10 @@
 // 管理后台「审计」tab：管制动作的流水，按频道/操作者/动作筛选，游标往更早翻页。
 // 只读视图——审计是事实记录，界面上不提供删除（清理只由 audit_retention_days 定时做）。
 import { createSignal, For, Show } from 'solid-js';
-import { adminAudit, listChannels } from '../api';
-import type { AuditEntry, Channel } from '../api';
-import { el, icon, timeAgo, toast } from '../ui';
+import { adminAudit, listChannels } from '../../api';
+import type { AuditEntry, Channel } from '../../api';
+import { el, icon, timeAgo, toast } from '../../ui';
+import { Placeholder } from './shared';
 
 const PAGE = 50;
 
@@ -161,15 +162,6 @@ export function AuditTab() {
           {busy() ? '加载中…' : '加载更早的记录'}
         </button>
       </Show>
-    </Show>
-  );
-}
-
-// 与 admin.tsx 的同名占位一致（那个是模块私有的，这里各留一份，避免为它改动 admin.tsx）
-function Placeholder(props: { err: string }) {
-  return (
-    <Show when={props.err} fallback={<div class="muted">加载中…</div>}>
-      <div class="error-text">{props.err}</div>
     </Show>
   );
 }

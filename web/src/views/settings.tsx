@@ -1,5 +1,5 @@
 // 设置浮层骨架（Solid）：三个维度 —— 个人（跟账号/本机走）/ 频道（房主与频道管理员的成员与准入）/ 服务器（管理后台，只跳转）。
-// 浮层挂在 body 上，房间内打开不断开通话。个人 pane 的内容仍是命令式渲染（settings-panes.ts），
+// 浮层挂在 body 上，房间内打开不断开通话。个人 pane 的内容仍是命令式渲染（settings/），
 // 这里只管导航、上下文与生命周期；频道分区直接复用 manage.tsx 的组件。
 import { createEffect, createResource, createSignal, onCleanup, For, Show } from 'solid-js';
 import { render } from 'solid-js/web';
@@ -7,8 +7,8 @@ import { canInvite, getUser, isGuest, listChannels } from '../api';
 import { inShell } from '../bridge';
 import { el, icon } from '../ui';
 import { ChannelManage } from './manage';
-import { flushScreenBitrateRange, PERSONAL_PANES, renderPane } from './settings-panes';
-import type { PersonalPane } from './settings-panes';
+import { flushScreenBitrateRange, PERSONAL_PANES, renderPane } from './settings/index';
+import type { PersonalPane } from './settings/index';
 
 export type Pane = PersonalPane | 'channel';
 

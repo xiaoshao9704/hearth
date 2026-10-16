@@ -165,7 +165,7 @@ export function toast(msg: string, tone: 'ok' | 'bad' | '' = '', ms = 3200, onCl
     toastWrap.setAttribute('aria-live', 'polite');
     document.body.appendChild(toastWrap);
   }
-  const key = `${tone} ${msg}`;
+  const key = `${tone}${msg}`;
   const same = toasts.find((t) => t.key === key);
   if (same) {
     clearTimeout(same.timer);
@@ -196,6 +196,9 @@ export interface ConfirmOpts {
   confirmText?: string;
   cancelText?: string;
   danger?: boolean;
+  /** 非空时要求用户输入与此完全一致才可确认（如转让频道名） */
+  confirmInput?: string;
+  inputPlaceholder?: string;
 }
 
 // 同一时刻只允许一个：新的开出来时旧的按「取消」收尾
@@ -206,9 +209,11 @@ export function confirmDialog(opts: ConfirmOpts): Promise<boolean> {
   const prev = document.activeElement as HTMLElement | null;
   const dlg = document.createElement('dialog');
   dlg.className = 'dialog';
+  const needInput = !!opts.confirmInput;
   dlg.innerHTML = `<div class="dialog-box">
   <div class="dialog-title"></div>
   ${opts.body ? '<div class="dialog-body"></div>' : ''}
+  ${needInput ? '<div class="field" style="margin:4px 0 14px"><input data-act="confirm-input" autocomplete="off" /></div>' : ''}
   <div class="dialog-actions">
     <button type="button" class="btn" data-act="cancel"></button>
     <button type="button" class="btn ${opts.danger ? 'btn-danger-solid' : 'btn-primary'}" data-act="ok"></button>
@@ -218,6 +223,14 @@ export function confirmDialog(opts: ConfirmOpts): Promise<boolean> {
   if (opts.body) dlg.querySelector('.dialog-body')!.textContent = opts.body;
   const cancelBtn = dlg.querySelector<HTMLButtonElement>('[data-act="cancel"]')!;
   const okBtn = dlg.querySelector<HTMLButtonElement>('[data-act="ok"]')!;
+  const input = needInput ? dlg.querySelector<HTMLInputElement>('[data-act="confirm-input"]')! : null;
+  if (input) {
+    input.placeholder = opts.inputPlaceholder ?? opts.confirmInput!;
+    okBtn.disabled = true;
+    input.addEventListener('input', () => {
+      okBtn.disabled = input.value.trim() !== opts.confirmInput;
+    });
+  }
   cancelBtn.textContent = opts.cancelText ?? '取消';
   okBtn.textContent = opts.confirmText ?? '确认';
 
@@ -242,10 +255,17 @@ export function confirmDialog(opts: ConfirmOpts): Promise<boolean> {
       if (e.target === dlg) settle(false); // 点遮罩（dialog 本体）= 取消
     });
     cancelBtn.addEventListener('click', () => settle(false));
-    okBtn.addEventListener('click', () => settle(true));
+    okBtn.addEventListener('click', () => { if (!okBtn.disabled) settle(true); });
+    input?.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Enter' && !okBtn.disabled) {
+        ev.preventDefault();
+        settle(true);
+      }
+    });
     document.body.appendChild(dlg);
     dlg.showModal();
-    cancelBtn.focus(); // 默认焦点给取消：误触回车不会执行破坏性操作
+    // 有校验输入时先聚焦输入框；否则焦点给取消，误触回车不会执行破坏性操作
+    (input ?? cancelBtn).focus();
   });
 }
 

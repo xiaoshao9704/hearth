@@ -10,33 +10,18 @@ import {
   RoomEvent,
   Track,
 } from 'livekit-client';
-import type {
-  AudioCaptureOptions,
-  LocalVideoTrack,
-  RemoteAudioTrack,
-  ScreenShareCaptureOptions,
-  TrackPublishOptions,
-  VideoCaptureOptions,
-  VideoCodec,
-} from 'livekit-client';
+import type { LocalVideoTrack, RemoteAudioTrack, VideoCaptureOptions } from 'livekit-client';
 import { RnnoisePipeline } from '../audio';
 import { RES_DIMS, loadPrefs } from '../prefs';
-import type { RoomPrefs, ScreenCodec, ScreenContent } from '../prefs';
+import type { ScreenCodec } from '../prefs';
+import { micCaptureOptions, micPublishOptions, tryPublishRnnoiseMic } from './mic-pipeline';
+import { buildScreenOptions, contentHintFor, degradationFor } from './screen-opts';
 import { installScreenBitrateFloor, setScreenBitrateFloorKbps } from './sdp-floor';
 import { DATA_TOPIC_FILE, DATA_TOPIC_TEXT } from './types';
 import type { AVEngine, EPart, EngineCallbacks, LineStats, TrackSource, VideoStats, WatchCounters } from './types';
 
 const toSource = (s: Track.Source): TrackSource | null =>
   s === Track.Source.Camera ? 'camera' : s === Track.Source.ScreenShare ? 'screen' : null;
-
-// 带宽不够时编码器往哪边让：文字要看清（丢帧保分辨率），游戏要动起来（缩分辨率保帧率）。
-// 真正决定降级方向的是 sender 的 degradationPreference，contentHint 只是给编码器的提示
-const degradationFor = (c: ScreenContent): RTCDegradationPreference => (c === 'game' ? 'maintain-framerate' : 'maintain-resolution');
-
-// SVC 投屏的 contentHint 只能是 motion：Chrome 走投屏专用路径时 L1T3 限到 5fps，
-// SDK 发布时会强制改成 motion 绕开，这里跟着它，免得热改把画面按回 5fps
-const contentHintFor = (p: RoomPrefs): 'detail' | 'motion' =>
-  p.screenContent === 'game' || p.screenCodec === 'vp9' || p.screenCodec === 'av1' ? 'motion' : 'detail';
 
 // 一条 candidate-pair 的格式化快照（endpoint 已按 `protocol/candidateType addr:port` 拼好）
 interface IcePairSnapshot {
@@ -646,22 +631,6 @@ export class LiveKitEngine implements AVEngine {
 
   // ---- 麦克风：RNNoise 管线 / 浏览器内置处理 ----
 
-  private micCaptureOptions(): AudioCaptureOptions {
-    const p = loadPrefs();
-    const music = p.musicMode;
-    return {
-      deviceId: p.micDeviceId ? { ideal: p.micDeviceId } : undefined,
-      channelCount: { ideal: 1 }, // 语音单声道：立体声麦克风若只有一路有声，发布出去就成了单耳
-      echoCancellation: music ? false : p.echoCancellation,
-      noiseSuppression: music ? false : p.denoise === 'browser',
-      autoGainControl: music ? false : p.autoGainControl,
-    };
-  }
-
-  private micPublishOptions(): TrackPublishOptions {
-    return { audioPreset: { maxBitrate: loadPrefs().voiceBitrate } };
-  }
-
   private watchEnded(kind: 'mic' | 'camera' | 'screen', track: MediaStreamTrack | undefined) {
     track?.addEventListener('ended', () => this.cbs.onLocalTrackEnded(kind), { once: true });
   }
@@ -674,24 +643,17 @@ export class LiveKitEngine implements AVEngine {
     }
     const p = loadPrefs();
     if (p.denoise === 'rnnoise' && !p.musicMode && !this.rnnoiseBroken) {
-      const raw = await navigator.mediaDevices.getUserMedia({ audio: this.micCaptureOptions() });
-      try {
-        const processed = await this.rnnoise.start(raw);
-        await this.room.localParticipant.publishTrack(processed, {
-          ...this.micPublishOptions(),
-          source: Track.Source.Microphone,
-        });
+      const raw = await navigator.mediaDevices.getUserMedia({ audio: micCaptureOptions() });
+      const ok = await tryPublishRnnoiseMic(raw, this.rnnoise, (track, opts) =>
+        this.room.localParticipant.publishTrack(track, opts),
+      );
+      if (ok) {
         this.watchEnded('mic', raw.getAudioTracks()[0]);
         return;
-      } catch (err) {
-        // RNNoise 管线不可用（wasm/worklet）：置灰回退浏览器路径
-        console.warn('RNNoise 不可用，回退浏览器内置处理:', err);
-        this.rnnoiseBroken = true;
-        raw.getTracks().forEach((t) => t.stop());
-        await this.rnnoise.stop();
       }
+      this.rnnoiseBroken = true;
     }
-    await this.room.localParticipant.setMicrophoneEnabled(true, this.micCaptureOptions(), this.micPublishOptions());
+    await this.room.localParticipant.setMicrophoneEnabled(true, micCaptureOptions(), micPublishOptions());
     this.watchEnded('mic', this.room.localParticipant.getTrackPublication(Track.Source.Microphone)?.track?.mediaStreamTrack);
   }
 
@@ -758,7 +720,7 @@ export class LiveKitEngine implements AVEngine {
 
   async setScreen(on: boolean) {
     const p = loadPrefs();
-    const { capture, publish } = this.screenOptions(p);
+    const { capture, publish } = buildScreenOptions(p);
     // 下限写进会话描述，只在这次协商定死：发布之前设一次，停止投屏时清掉
     setScreenBitrateFloorKbps(on ? p.bitrateMin * 1000 : 0);
     await this.room.localParticipant.setScreenShareEnabled(on, on ? capture : undefined, on ? publish : undefined);
@@ -775,7 +737,7 @@ export class LiveKitEngine implements AVEngine {
     const track = this.screenTrack();
     if (!track) return false;
     const p = loadPrefs();
-    const { publish } = this.screenOptions(p);
+    const { publish } = buildScreenOptions(p);
     setScreenBitrateFloorKbps(p.bitrateMin * 1000);
     // stopOnUnpublish=false 留住采集轨，不用重选窗口
     await this.room.localParticipant.unpublishTrack(track, false);
@@ -808,69 +770,6 @@ export class LiveKitEngine implements AVEngine {
       await sender.setParameters(params);
     }
     return false;
-  }
-
-  private screenOptions(p: RoomPrefs): { capture: ScreenShareCaptureOptions; publish: TrackPublishOptions } {
-    const d = RES_DIMS[p.res];
-    // restrictOwnAudio 还没普及：浏览器不认的约束一律不传，免得整个 getDisplayMedia 直接 TypeError
-    const supported = navigator.mediaDevices?.getSupportedConstraints?.() as
-      | (MediaTrackSupportedConstraints & { restrictOwnAudio?: boolean })
-      | undefined;
-    const capture: ScreenShareCaptureOptions = {
-      resolution: { width: d.width, height: d.height, frameRate: p.fps },
-      contentHint: contentHintFor(p),
-      systemAudio: 'include', // 让浏览器把系统声音摆进可选源；不支持的浏览器忽略
-      selfBrowserSurface: 'exclude', // 别把 hearth 自己这个标签页列为候选（选中就成了镜中镜）
-      preferCurrentTab: false,
-      // 音频约束一律传：要不要带声音交给浏览器自己的选择框（Chrome 只有共享标签页时
-      // 才给勾选框），拿到的流里没有音轨就只发画面，不算失败。
-      // 系统声音是音乐/游戏音效，不是人声：回声消除/降噪/自动增益会把它嚼烂，
-      // 声道数也和麦克风相反——麦克风降到单声道避免单耳，这里要保住左右声场。
-      // restrictOwnAudio 把本页面自己播放的声音（也就是别人的语音）剔出采集，避免回音
-      audio: {
-        echoCancellation: false,
-        noiseSuppression: false,
-        autoGainControl: false,
-        channelCount: 2,
-        ...(supported?.restrictOwnAudio ? { restrictOwnAudio: true } : {}),
-      },
-    };
-    const encoding = { maxBitrate: Math.round(p.bitrateMax * 1e6), maxFramerate: p.fps };
-    let publish: TrackPublishOptions;
-    if (p.screenCodec === 'h264') {
-      // 单层：H.264 无 SVC；simulcast 双编码会把软编 CPU 拖垮，维持单层
-      publish = { videoCodec: 'h264', screenShareEncoding: encoding, screenShareSimulcastLayers: [] };
-    } else if (p.screenCodec === 'h265') {
-      // HEVC 单层（SDK 的 SVC 只认 vp9/av1）：发送端平台硬编、观众端硬解，
-      // 同码率观感约为 H.264 的 1.5 倍；不支持 h265 的订阅端触发 h264 备份编码
-      publish = {
-        videoCodec: 'h265' as VideoCodec,
-        screenShareEncoding: encoding,
-        screenShareSimulcastLayers: [],
-        backupCodec: { codec: 'h264' },
-      };
-    } else {
-      // SVC：单编码器产分层码流，SFU 按观众带宽逐层转发；
-      // 不支持该编码的订阅端会触发 h264 备份编码（按需才多一路编码）
-      publish = {
-        videoCodec: p.screenCodec as VideoCodec,
-        scalabilityMode: 'L2T2_KEY',
-        screenShareEncoding: encoding,
-        backupCodec: { codec: 'h264' },
-      };
-    }
-    // 这次发布连带的投屏音轨（有就发）：128k 立体声，关 DTX 免得静音段断流吞掉音乐尾音，
-    // 关 RED 免得为冗余多占上行。只作用于本次投屏发布，麦克风走 micPublishOptions
-    return {
-      capture,
-      publish: {
-        ...publish,
-        degradationPreference: degradationFor(p.screenContent),
-        audioPreset: { maxBitrate: 128_000 },
-        dtx: false,
-        red: false,
-      },
-    };
   }
 
   dispose() {

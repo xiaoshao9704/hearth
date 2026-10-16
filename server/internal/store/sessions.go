@@ -7,7 +7,9 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
+	"errors"
 	"time"
 )
 
@@ -21,10 +23,52 @@ type Session struct {
 	Current   bool       `json:"current"` // 是否发起本次请求的这条会话（接口层填充）
 }
 
+const sessionTTL = 7 * 24 * time.Hour // 会话有效期 7 天
+
 // SessionID token 的对外指纹。取 sha256 前 16 字节：碰撞概率可忽略，且不可逆推 token。
 func SessionID(token string) string {
 	sum := sha256.Sum256([]byte(token))
 	return hex.EncodeToString(sum[:16])
+}
+
+func (s *Store) CreateSession(ctx context.Context, userID int64) (string, error) {
+	buf := make([]byte, 32)
+	if _, err := rand.Read(buf); err != nil {
+		return "", err
+	}
+	token := hex.EncodeToString(buf)
+	_, err := s.bun.NewRaw(
+		"INSERT INTO sessions (token, user_id, expires_at) VALUES (?, ?, ?)",
+		token, userID, time.Now().Add(sessionTTL)).Exec(ctx)
+	return token, err
+}
+
+// UserByToken 校验会话 token，过期、不存在或账号已停用返回 ErrNotFound。
+// 第二个返回值是该会话绑定的设备 ID（空 = 不绑定），设备一致性由 api.auth 判定。
+func (s *Store) UserByToken(ctx context.Context, token string) (*User, string, error) {
+	var u User
+	var role, deviceID string
+	var expiresAt *time.Time
+	err := s.bun.NewRaw(`
+SELECT u.id, u.username, u.role, u.expires_at, COALESCE(s.device_id, '')
+FROM sessions s JOIN users u ON u.id = s.user_id
+WHERE s.token = ? AND s.expires_at > ? AND u.disabled = 0`, token, time.Now()).
+		Scan(ctx, &u.ID, &u.Username, &role, &expiresAt, &deviceID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, "", ErrNotFound
+	}
+	scanUserParts(&u, role, expiresAt)
+	return &u, deviceID, err
+}
+
+// DeleteSession 下线一条会话。推送订阅绑在会话上（session_id 是它的指纹）：
+// 会话没了就不该再往那台设备推，所以两者一起删——退出登录与远程下线走的都是这里。
+func (s *Store) DeleteSession(ctx context.Context, token string) error {
+	if err := s.DeletePushSubscriptionsBySession(ctx, SessionID(token)); err != nil {
+		return err
+	}
+	_, err := s.bun.NewRaw("DELETE FROM sessions WHERE token = ?", token).Exec(ctx)
+	return err
 }
 
 // CreateSessionWithUA 签发会话并记下登录时的 UA 与时间（会话列表要展示这三项）。
